@@ -185,47 +185,71 @@ function createProviderWithFakeAppServer(appServer: FakeCodexAppServer): CodexAp
 }
 
 describe("native turn diff", () => {
-  test.each(["completed", "failed", "interrupted"])(
-    "retains only the latest diff on a %s turn without creating a tool call",
-    (status) => {
-      const session = createSession();
+  test.each([
+    { status: "completed", eventType: "turn_completed" },
+    { status: "failed", eventType: "turn_failed" },
+    { status: "interrupted", eventType: "turn_canceled" },
+  ] as const)(
+    "retains only the latest diff on a $status turn without creating a tool call",
+    async ({ status, eventType }) => {
+      const appServer = createFakeCodexAppServer();
+      const session = new CodexAppServerAgentSession(
+        createConfig({ cwd: "/workspace/project" }),
+        null,
+        createTestLogger(),
+        async () => appServer.child,
+      );
       const events: AgentStreamEvent[] = [];
-      session.subscribe((event) => events.push(event));
-      const notifications = asInternals(session);
-      notifications.handleNotification("turn/started", {
-        threadId: "test-thread",
-        turn: { id: "provider-turn-1", status: "inProgress" },
+      let terminal = deferred<TurnTerminalEvent>();
+      const unsubscribe = session.subscribe((event) => {
+        events.push(event);
+        const isTerminal =
+          event.type === "turn_completed" ||
+          event.type === "turn_failed" ||
+          event.type === "turn_canceled";
+        if (isTerminal) terminal.resolve(event);
       });
-      notifications.handleNotification("turn/diff/updated", {
-        threadId: "test-thread",
-        turnId: "provider-turn-1",
-        diff: "first diff",
-      });
-      notifications.handleNotification("turn/diff/updated", {
-        threadId: "test-thread",
-        turnId: "provider-turn-1",
-        diff: "final diff",
-      });
-      notifications.handleNotification("turn/diff/updated", {
-        threadId: "test-thread",
-        turnId: "older-turn",
-        diff: "stale diff",
-      });
-      notifications.handleNotification("turn/completed", {
-        threadId: "test-thread",
-        turn: { id: "provider-turn-1", status },
-      });
-      expect(events.filter((event) => event.type === "timeline")).toEqual([]);
-      expect(events.at(-1)).toMatchObject({ nativeDiff: "final diff" });
-      notifications.handleNotification("turn/started", {
-        threadId: "test-thread",
-        turn: { id: "provider-turn-2", status: "inProgress" },
-      });
-      notifications.handleNotification("turn/completed", {
-        threadId: "test-thread",
-        turn: { id: "provider-turn-2", status: "completed" },
-      });
-      expect(events.at(-1)).toMatchObject({ nativeDiff: null });
+      try {
+        await session.startTurn("edit a file");
+        appServer.startsTurn({ threadId: "thread-1", turnId: "provider-turn-1" });
+        appServer.updatesDiff({
+          threadId: "thread-1",
+          turnId: "provider-turn-1",
+          diff: "first diff",
+        });
+        appServer.updatesDiff({
+          threadId: "thread-1",
+          turnId: "provider-turn-1",
+          diff: "final diff",
+        });
+        appServer.updatesDiff({
+          threadId: "thread-1",
+          turnId: "older-turn",
+          diff: "stale diff",
+        });
+        appServer.completeTurn({ status });
+        await expect(terminal.promise).resolves.toMatchObject({
+          type: eventType,
+          nativeDiff: "final diff",
+        });
+
+        terminal = deferred<TurnTerminalEvent>();
+        await session.startTurn("make no changes");
+        appServer.startsTurn({ threadId: "thread-1", turnId: "provider-turn-2" });
+        appServer.completeTurn();
+        await expect(terminal.promise).resolves.toMatchObject({
+          type: "turn_completed",
+          nativeDiff: null,
+        });
+        const extraTimelineEvents = events.filter(
+          (event) => event.type === "timeline" && event.item.type !== "user_message",
+        );
+        expect(extraTimelineEvents).toEqual([]);
+        appServer.assertNoErrors();
+      } finally {
+        unsubscribe();
+        await session.close();
+      }
     },
   );
 });
