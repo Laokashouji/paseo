@@ -722,8 +722,8 @@ export class HostRuntimeController {
     await this.runProbeCycleNow();
   }
 
-  ensureConnected(): void {
-    this.activeClient?.ensureConnected();
+  ensureConnected(options?: { verify?: boolean }): void {
+    this.activeClient?.ensureConnected(options);
   }
 
   markAgentDirectorySyncLoading(): void {
@@ -1273,24 +1273,13 @@ export class HostRuntimeController {
         /* Preserve the compatibility/connection error. */
       }
     };
-    const requireAppHost = () => {
-      if (client.getLastServerInfoMessage()?.features?.ownedSubscriptions !== true)
-        throw new Error("Update the host to use this version of Paseo.");
-    };
     try {
       if (!existingClient) await client.connect();
       if (!this.isCurrentSwitchRequest(requestVersion) || this.activeClient !== client) return;
-      requireAppHost();
       this.unsubscribeClientHandlers =
         this.deps.mountClientHandlers?.({ client, host: this.host, connection }) ?? null;
       this.unsubscribeClientStatus = client.subscribeConnectionStatus((state) => {
         if (!this.isCurrentSwitchRequest(requestVersion) || this.activeClient !== client) return;
-        try {
-          if (state.status === "connected") requireAppHost();
-        } catch (error) {
-          void failConnection(error);
-          return;
-        }
         this.applyConnectionEvent({ type: "client_state", state, lastError: client.lastError });
         this.updateSnapshot({
           ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
@@ -2331,9 +2320,9 @@ export class HostRuntimeStore {
     return earliestServerId;
   }
 
-  ensureConnectedAll(): void {
+  ensureConnectedAll(options?: { verify?: boolean }): void {
     for (const controller of this.controllers.values()) {
-      controller.ensureConnected();
+      controller.ensureConnected(options);
     }
   }
 
@@ -2345,7 +2334,7 @@ export class HostRuntimeStore {
       return;
     }
 
-    this.ensureConnectedAll();
+    this.ensureConnectedAll({ verify: true });
   }
 
   runProbeCycleNow(serverId?: string): Promise<void> {
