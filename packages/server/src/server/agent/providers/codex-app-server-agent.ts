@@ -3289,7 +3289,7 @@ interface CodexPendingPermissionHandler {
   resolve: (value: unknown) => void;
   kind: "command" | "file" | "question" | "mcp_elicitation" | "plan";
   questions?: CodexQuestionPrompt[];
-  planText?: string;
+  plan?: { text: string; turnId: string | undefined };
 }
 
 interface ConsumedRootCompaction {
@@ -3375,7 +3375,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   // `thread/compacted` and a completed `contextCompaction` item.
   private unpairedCompactionNotificationCompletions = 0;
   private unpairedCompactionItemCompletions = 0;
-  private connected = false;
+  private connectionState: "disconnected" | "history-ready" | "connected" = "disconnected";
   private connectionPromise: Promise<void> | null = null;
   private closed = false;
   private collaborationModes: Array<{
@@ -3448,7 +3448,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (this.closed) {
       throw this.createClosedError();
     }
-    if (this.connected) return;
+    if (this.connectionState !== "disconnected") return;
     if (this.connectionPromise) {
       await this.connectionPromise;
       if (this.closed) {
@@ -3472,6 +3472,11 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private async establishConnection(): Promise<void> {
+    if (this.initialResumePurpose === "history") {
+      await this.readArchivedHistory();
+      this.connectionState = "history-ready";
+      return;
+    }
     const child = await this.spawnAppServer();
     const client = new CodexAppServerClient(child, this.logger, () => this.traceContext());
     if (this.closed) {
@@ -3494,16 +3499,14 @@ export class CodexAppServerAgentSession implements AgentSession {
       await this.loadSkills();
 
       if (this.currentThreadId) {
-        await this.ensureThreadLoaded({
-          allowArchivedHistory: this.initialResumePurpose === "history",
-        });
-        await this.loadPersistedHistory();
+        await this.ensureThreadLoaded();
+        await this.loadPersistedHistory(this.client);
       }
 
       if (this.closed) {
         throw this.createClosedError();
       }
-      this.connected = true;
+      this.connectionState = "connected";
     } catch (error) {
       try {
         if (this.client === client) {
@@ -3554,7 +3557,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private handleUnexpectedTermination(error: Error): void {
-    this.connected = false;
+    this.connectionState = "disconnected";
     const hasActiveRootTurn = this.activeForegroundTurnId !== null || this.currentTurnId !== null;
     this.clearPendingPermissions({ preservePlanApprovals: !hasActiveRootTurn });
     if (hasActiveRootTurn) {
@@ -3746,7 +3749,20 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.pendingPermissionHandlers.set(requestId, {
       resolve: () => undefined,
       kind: "plan",
-      planText,
+      plan: { text: planText, turnId: this.activeForegroundTurnId ?? undefined },
+    });
+    // Reserve the proposal's place before a later prompt can resolve it.
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: {
+        type: "tool_call",
+        callId: requestId,
+        name: "plan_approval",
+        status: "running",
+        error: null,
+        detail: { type: "plan", text: planText },
+      },
     });
     this.emitEvent({ type: "permission_requested", provider: CODEX_PROVIDER, request });
   }
@@ -3786,9 +3802,20 @@ export class CodexAppServerAgentSession implements AgentSession {
     );
   }
 
-  private async loadPersistedHistory(): Promise<void> {
-    if (!this.client || !this.currentThreadId) return;
-    const client = this.client;
+  private async readArchivedHistory(): Promise<void> {
+    const child = await this.spawnAppServer();
+    const client = new CodexAppServerClient(child, this.logger, () => this.traceContext());
+    try {
+      await client.request("initialize", buildCodexAppServerInitializeParams());
+      client.notify("initialized", {});
+      await this.loadPersistedHistory(client);
+    } finally {
+      await client.dispose();
+    }
+  }
+
+  private async loadPersistedHistory(client: CodexAppServerClientLike | null): Promise<void> {
+    if (!client || !this.currentThreadId) return;
     const threadId = this.currentThreadId;
 
     const history = await loadCodexThreadHistoryTimeline({
@@ -3869,9 +3896,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
-  private async ensureThreadLoaded(
-    options: { allowArchivedHistory?: boolean } = {},
-  ): Promise<void> {
+  private async ensureThreadLoaded(): Promise<void> {
     if (!this.client || !this.currentThreadId) return;
     const params: Record<string, unknown> = { threadId: this.currentThreadId };
     const developerInstructions = composeSystemPromptParts(
@@ -3896,16 +3921,6 @@ export class CodexAppServerAgentSession implements AgentSession {
     } catch (error) {
       const threadId = this.currentThreadId;
       const message = error instanceof Error ? error.message : String(error);
-      if (
-        options.allowArchivedHistory === true &&
-        isArchivedCodexThreadResumeError(error, threadId)
-      ) {
-        this.logger.info(
-          { threadId },
-          "Loading archived Codex thread history without resuming the native session",
-        );
-        return;
-      }
       if (isArchivedCodexThreadResumeError(error, threadId)) {
         try {
           await this.client.request("thread/unarchive", { threadId });
@@ -3979,7 +3994,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return expandCodexCustomPrompt(parsed.body, args);
     }
 
-    if (!this.connected) {
+    if (this.connectionState === "disconnected") {
       await this.connect();
     } else {
       await this.loadSkills();
@@ -4401,7 +4416,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async getRuntimeInfo(): Promise<AgentRuntimeInfo> {
     if (this.cachedRuntimeInfo) return { ...this.cachedRuntimeInfo };
-    if (!this.connected) {
+    if (this.connectionState === "disconnected") {
       await this.connect();
     }
     if (!this.currentThreadId) {
@@ -4619,7 +4634,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     let followUpPrompt: string | undefined;
     if (response.behavior === "allow") {
       followUpPrompt = this.preparePlanImplementation({
-        planText: pending.planText ?? pendingRequest?.metadata?.planText,
+        planText: pending.plan?.text ?? pendingRequest?.metadata?.planText,
       });
     }
 
@@ -4651,29 +4666,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private resolvePlanPermission(requestId: string, resolution: AgentPermissionResponse): void {
-    if (resolution.behavior === "deny") {
-      // Every route into a denial lands here — the response handler, a new
-      // prompt, and an accepted steer — so the transcript record belongs here
-      // rather than in handlePlanPermissionResponse.
-      const planText =
-        this.pendingPermissionHandlers.get(requestId)?.planText ??
-        this.pendingPermissions.get(requestId)?.metadata?.planText;
-      if (typeof planText === "string") {
-        this.emitEvent({
-          type: "timeline",
-          provider: CODEX_PROVIDER,
-          item: {
-            type: "tool_call",
-            callId: requestId,
-            name: "plan_approval",
-            status: "completed",
-            error: null,
-            detail: { type: "plan", text: planText },
-            metadata: { approved: false },
-          },
-        });
-      }
-    }
+    this.recordPlanOutcome(requestId, resolution.behavior === "allow" ? "approved" : "rejected");
     this.pendingPermissionHandlers.delete(requestId);
     this.pendingPermissions.delete(requestId);
     this.resolvedPermissionRequests.add(requestId);
@@ -4683,6 +4676,29 @@ export class CodexAppServerAgentSession implements AgentSession {
       requestId,
       resolution,
     });
+  }
+
+  private recordPlanOutcome(
+    requestId: string,
+    outcome: "approved" | "rejected" | "canceled",
+  ): void {
+    const plan = this.pendingPermissionHandlers.get(requestId)?.plan;
+    if (plan) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        turnId: plan.turnId,
+        item: {
+          type: "tool_call",
+          callId: requestId,
+          name: "plan_approval",
+          status: outcome === "canceled" ? "canceled" : "completed",
+          error: null,
+          detail: { type: "plan", text: plan.text },
+          metadata: outcome === "canceled" ? {} : { approved: outcome === "approved" },
+        },
+      });
+    }
   }
 
   private emitDeniedToolCallTimelineEvent(params: {
@@ -4774,7 +4790,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.cachedRuntimeInfo = null;
         this.persistedHistory = [];
         this.historyPending = false;
-        await this.loadPersistedHistory();
+        await this.loadPersistedHistory(this.client);
         this.reconcileAsyncQuestionsAfterRewind();
       },
     });
@@ -4853,6 +4869,9 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (options?.preservePlanApprovals && pending.kind === "plan") {
         continue;
       }
+      if (pending.kind === "plan") {
+        this.recordPlanOutcome(requestId, "canceled");
+      }
       pending.resolve({ decision: "cancel" });
       this.pendingPermissionHandlers.delete(requestId);
       this.pendingPermissions.delete(requestId);
@@ -4863,7 +4882,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private async disposeClient(): Promise<void> {
     const client = this.client;
-    this.connected = false;
+    this.connectionState = "disconnected";
     this.currentTurnId = null;
     if (client) {
       await client.dispose();
@@ -4873,7 +4892,7 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async listCommands(): Promise<AgentSlashCommand[]> {
     const prompts = await listCodexCustomPrompts();
-    if (!this.connected) {
+    if (this.connectionState === "disconnected") {
       await this.connect();
     } else {
       await this.loadSkills();
@@ -5182,7 +5201,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private notifySubscribers(event: AgentStreamEvent): void {
-    const turnId = this.activeForegroundTurnId;
+    const turnId = getAgentStreamEventTurnId(event) ?? this.activeForegroundTurnId;
     const tagged = turnId ? { ...event, turnId } : event;
     this.logger.trace(
       {

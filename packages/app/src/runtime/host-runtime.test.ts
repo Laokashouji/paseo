@@ -36,6 +36,7 @@ class FakeDaemonClient {
   private latencyMeasurementsRequested: Array<{ timeoutMs?: number }> = [];
   public connectCalls = 0;
   public ensureConnectedCalls = 0;
+  public connectionVerifications = 0;
   public reconnectEnabledChanges: boolean[] = [];
   public fetchAgentsCalls: FetchAgentsOptions[] = [];
   public fetchAgentsResponses: Array<
@@ -120,8 +121,9 @@ class FakeDaemonClient {
     });
   }
 
-  ensureConnected(): void {
+  ensureConnected(options?: { verify?: boolean }): void {
     this.ensureConnectedCalls += 1;
+    if (options?.verify) this.connectionVerifications += 1;
     if (this.state.status !== "connected") {
       this.setConnectionState({ status: "connected" });
     }
@@ -570,7 +572,7 @@ class BrowserClientLifecycle {
 }
 
 describe("HostRuntimeController", () => {
-  it("gates an old host before publishing the app client or mounting observations", async () => {
+  it("publishes an old host and mounts observations through the client interface", async () => {
     const host = makeHost();
     const client = new FakeDaemonClient();
     client.ownedSubscriptions = false;
@@ -595,12 +597,12 @@ describe("HostRuntimeController", () => {
     const stop = controller.subscribe(() => publishedClients.push(controller.getSnapshot().client));
     await controller.activateConnection({ connectionId: host.connections[0]!.id });
     expect(controller.getSnapshot()).toMatchObject({
-      connectionStatus: "error",
-      client: null,
-      lastError: "Update the host to use this version of Paseo.",
+      connectionStatus: "online",
+      client,
+      lastError: null,
     });
-    expect(mounts).toBe(0);
-    expect(publishedClients.every((value) => value === null)).toBe(true);
+    expect(mounts).toBe(1);
+    expect(publishedClients).toContain(client);
     expect(client.fetchAgentsCalls).toEqual([]);
     stop();
     await controller.stop();
@@ -1631,6 +1633,8 @@ describe("HostRuntimeStore", () => {
       expect(clientA.reconnectEnabledChanges.at(-1)).toBe(true);
       expect(clientB.reconnectEnabledChanges.at(-1)).toBe(true);
       expect(clientA.ensureConnectedCalls).toBe(1);
+      expect(clientA.connectionVerifications).toBe(1);
+      expect(clientB.connectionVerifications).toBe(1);
       expect(clientB.ensureConnectedCalls).toBe(1);
       expect(store.getSnapshot(hostA.serverId)?.connectionStatus).toBe("online");
       expect(store.getSnapshot(hostB.serverId)?.connectionStatus).toBe("online");
