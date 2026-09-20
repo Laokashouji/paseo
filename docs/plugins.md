@@ -471,7 +471,7 @@ Register a declarative attachment source backed by a plugin RPC. Paseo owns the 
 search picker, drafts, selected pill, and submission. The plugin returns complete text snapshots;
 credentials and vendor API calls stay in the daemon handler.
 For optional selection notifications and their delivery semantics, see the
-[attachment source author contract](../public-docs/plugins/v0.8/reference.md#add-a-composer-attachment-source).
+[attachment source author contract](../public-docs/plugins/reference.md#add-a-composer-attachment-source).
 
 ```ts
 // index.server.ts
