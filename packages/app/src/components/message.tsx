@@ -1,3 +1,5 @@
+import type { AgentMessage } from "@getpaseo/protocol/agent-message";
+import { ASSISTANT_IMAGE_DEFAULT_ASPECT_RATIO } from "@/utils/assistant-image-metadata";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { TaskListRow } from "@/components/task-list-row";
 import {
@@ -69,10 +71,11 @@ import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
 import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
 import { splitMarkdownBlocks } from "@/utils/split-markdown-blocks";
-import { StreamingWords, useWordStream } from "@/word-stream";
+import { useRevealedText } from "@/hooks/use-revealed-text";
 import { colorMarkdownLinkChildren } from "@/components/markdown/link-children";
 import { createAssistantMarkdownParser } from "@/utils/assistant-markdown-parser";
 import { formatDuration, formatMessageTimestamp } from "@/utils/time";
+import { getTurnDurationLabel } from "./assistant-turn-footer-label";
 import { writeMarkdownToRichClipboard } from "@/utils/rich-clipboard";
 import { getDefaultMarkdownClipboardEnvironment } from "@/utils/rich-clipboard-default-environment";
 import { setAssistantMarkdownBlockHeight } from "@/utils/assistant-message-height-estimate";
@@ -107,6 +110,7 @@ import { AssistantForkMenu, type AssistantForkTarget } from "@/components/assist
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import {
   markdownCopyDataSet,
+  markdownCopyImageDataSet,
   markdownCopyOrderedListDataSet,
   markdownCopyTableCellDataSet,
   type MarkdownCopyInlineTag,
@@ -627,6 +631,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
   durationMs,
   onFork,
 }: AssistantTurnFooterProps) {
+  const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const [pressedReveal, setPressedReveal] = useState(false);
   const revealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -642,10 +647,8 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
 
   const durationLabel = useMemo(
     () =>
-      durationMs !== undefined && durationMs !== null
-        ? `Worked for ${formatDuration(durationMs)}`
-        : "",
-    [durationMs],
+      durationMs !== undefined && durationMs !== null ? getTurnDurationLabel(durationMs, t) : "",
+    [durationMs, t],
   );
   const timestampLabel = useMemo(
     () => (completedAt ? formatMessageTimestamp(completedAt) : ""),
@@ -814,8 +817,6 @@ export const assistantMessageStylesheet = StyleSheet.create((theme) => ({
   },
 }));
 
-const ASSISTANT_IMAGE_MIN_HEIGHT = 160;
-
 function AssistantMarkdownImage({
   source,
   occurrenceKey,
@@ -860,11 +861,9 @@ function AssistantMarkdownImage({
     [containerStyle],
   );
   const imageSizeStyle = useMemo<ViewStyle>(() => {
-    if (aspectRatio) {
-      return { aspectRatio };
-    }
-    return { height: ASSISTANT_IMAGE_MIN_HEIGHT };
-  }, [aspectRatio]);
+    if (image.status === "failed") return { height: 160 };
+    return { aspectRatio: aspectRatio ?? ASSISTANT_IMAGE_DEFAULT_ASPECT_RATIO };
+  }, [aspectRatio, image.status]);
   const surfaceStyle = useMemo<StyleProp<ViewStyle>>(
     () => [assistantMessageStylesheet.imageSurface, imageSizeStyle],
     [imageSizeStyle],
@@ -882,15 +881,16 @@ function AssistantMarkdownImage({
     () => [
       assistantMessageStylesheet.imageFrame,
       containerStyle,
-      { height: ASSISTANT_IMAGE_MIN_HEIGHT },
+      imageSizeStyle,
       assistantMessageStylesheet.imageState,
     ],
-    [containerStyle],
+    [containerStyle, imageSizeStyle],
   );
+  const copyDataSet = useMemo(() => markdownCopyImageDataSet(source, alt), [source, alt]);
 
   if (image.status === "failed") {
     return (
-      <View style={stateFrameStyle}>
+      <View style={stateFrameStyle} dataSet={copyDataSet}>
         <Text style={assistantMessageStylesheet.imageErrorText}>{image.message}</Text>
       </View>
     );
@@ -898,14 +898,14 @@ function AssistantMarkdownImage({
 
   if (!binding) {
     return (
-      <View style={stateFrameStyle}>
+      <View style={stateFrameStyle} dataSet={copyDataSet}>
         <ThemedLoadingSpinner size="small" uniProps={foregroundMutedColorMapping} />
       </View>
     );
   }
 
   return (
-    <View style={frameStyle}>
+    <View style={frameStyle} dataSet={copyDataSet}>
       <Pressable
         accessibilityLabel={t("composer.attachments.openImage")}
         accessibilityRole="button"
@@ -1391,7 +1391,6 @@ function AssistantMessageBlockContainer({
 
 interface MemoizedMarkdownBlockProps {
   text: string;
-  sourceOffset: number;
   rules: RenderRules;
   parser: MarkdownIt;
   onLinkPress: (url: string) => boolean;
@@ -1399,7 +1398,6 @@ interface MemoizedMarkdownBlockProps {
 
 const MemoizedMarkdownBlock = React.memo(function MemoizedMarkdownBlock({
   text,
-  sourceOffset,
   rules,
   parser,
   onLinkPress,
@@ -1407,7 +1405,6 @@ const MemoizedMarkdownBlock = React.memo(function MemoizedMarkdownBlock({
   return (
     <MarkdownRenderer
       text={text}
-      sourceOffset={sourceOffset}
       enableHtmlish={false}
       rules={rules}
       markdownit={parser}
@@ -1517,10 +1514,8 @@ export const AssistantMessage = memo(function AssistantMessage({
       renderFullContent ? { text: message, capped: false } : capAssistantMessageForRender(message),
     [message, renderFullContent],
   );
-  // Paint a paced prefix while the turn is streaming so text arrives at a steady
-  // rate instead of in whatever lumps the daemon's coalescing window produced.
-  const stream = useWordStream(renderedMessage.text, phase);
-  const revealedMessage = renderFullContent ? renderedMessage.text : stream.text;
+  const revealedText = useRevealedText(renderedMessage.text, phase);
+  const revealedMessage = renderFullContent ? renderedMessage.text : revealedText;
   const fullMessageByteLength = useMemo(
     () => (renderedMessage.capped && phase === "complete" ? getUtf8ByteLength(message) : null),
     [message, phase, renderedMessage.capped],
@@ -1964,14 +1959,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   }, [client, fileLinkActions, markdownParser, occurrenceKey, phase, serverId, workspaceRoot]);
 
   const blocks = useMemo(() => splitMarkdownBlocks(revealedMessage), [revealedMessage]);
-  const keyedBlocks = useMemo(() => {
-    let cursor = 0;
-    return blocks.map((block) => {
-      const sourceOffset = revealedMessage.indexOf(block, cursor);
-      cursor = sourceOffset + block.length;
-      return { key: `block:${sourceOffset}`, block, sourceOffset };
-    });
-  }, [blocks, revealedMessage]);
+  const keyedBlocks = useMemo(
+    () => blocks.map((block, index) => ({ key: `block:${index}`, block })),
+    [blocks],
+  );
 
   const assistantContainerStyle = useMemo(
     () => [
@@ -1996,37 +1987,34 @@ export const AssistantMessage = memo(function AssistantMessage({
   );
 
   return (
-    <StreamingWords stream={stream}>
-      <View testID="assistant-message" dataSet={revealDataSet} style={assistantContainerStyle}>
-        {keyedBlocks.map(({ key, block, sourceOffset }, index) => (
-          <AssistantMessageBlockContainer
-            key={key}
-            block={block}
-            marginBottom={index < keyedBlocks.length - 1 ? 12 : 0}
-          >
-            <MemoizedMarkdownBlock
-              text={block}
-              sourceOffset={sourceOffset}
-              rules={markdownRules}
-              parser={
-                phase === "streaming" && index === keyedBlocks.length - 1
-                  ? streamingMarkdownParser
-                  : markdownParser
-              }
-              onLinkPress={handleMarkdownLinkPress}
-            />
-          </AssistantMessageBlockContainer>
-        ))}
-        {fullMessageByteLength !== null ? (
-          <Text
-            testID="assistant-message-capped-notice"
-            style={assistantMessageStylesheet.cappedNotice}
-          >
-            {t("agentStream.messageCapped", { bytes: fullMessageByteLength })}
-          </Text>
-        ) : null}
-      </View>
-    </StreamingWords>
+    <View testID="assistant-message" dataSet={revealDataSet} style={assistantContainerStyle}>
+      {keyedBlocks.map(({ key, block }, index) => (
+        <AssistantMessageBlockContainer
+          key={key}
+          block={block}
+          marginBottom={index < keyedBlocks.length - 1 ? 12 : 0}
+        >
+          <MemoizedMarkdownBlock
+            text={block}
+            rules={markdownRules}
+            parser={
+              phase === "streaming" && index === keyedBlocks.length - 1
+                ? streamingMarkdownParser
+                : markdownParser
+            }
+            onLinkPress={handleMarkdownLinkPress}
+          />
+        </AssistantMessageBlockContainer>
+      ))}
+      {fullMessageByteLength !== null ? (
+        <Text
+          testID="assistant-message-capped-notice"
+          style={assistantMessageStylesheet.cappedNotice}
+        >
+          {t("agentStream.messageCapped", { bytes: fullMessageByteLength })}
+        </Text>
+      ) : null}
+    </View>
   );
 });
 
@@ -3035,6 +3023,7 @@ function areExpandableBadgePropsEqual(previous: ExpandableBadgeProps, next: Expa
 }
 
 interface ToolCallProps {
+  agentMessage?: AgentMessage;
   toolName: string;
   args?: unknown;
   result?: unknown;
@@ -3054,6 +3043,7 @@ interface ToolCallProps {
 }
 
 export const ToolCall = memo(function ToolCall({
+  agentMessage,
   toolName,
   args,
   result,
@@ -3094,6 +3084,7 @@ export const ToolCall = memo(function ToolCall({
   const presentation = useMemo(
     () =>
       buildToolCallPresentation({
+        agentMessage,
         toolName,
         status,
         error: error ?? null,
@@ -3102,7 +3093,7 @@ export const ToolCall = memo(function ToolCall({
         cwd,
         resolveIcon: resolveToolCallIcon,
       }),
-    [toolName, status, error, effectiveDetail, metadata, cwd],
+    [toolName, status, error, effectiveDetail, metadata, cwd, agentMessage],
   );
   const handleOpenFile = useMemo(() => {
     const openFilePath = presentation.openFilePath;
@@ -3118,7 +3109,7 @@ export const ToolCall = memo(function ToolCall({
         toolName,
         displayName: presentation.displayName,
         summary: presentation.summary,
-        detail: effectiveDetail,
+        detail: presentation.detail,
         errorText: presentation.errorText,
         icon: presentation.icon,
         showLoadingSkeleton: presentation.isLoadingDetails,
@@ -3130,12 +3121,12 @@ export const ToolCall = memo(function ToolCall({
     shouldRenderInline,
     openToolCall,
     toolName,
+    presentation.detail,
     presentation.displayName,
     presentation.summary,
     presentation.errorText,
     presentation.icon,
     presentation.isLoadingDetails,
-    effectiveDetail,
   ]);
 
   useEffect(() => {
@@ -3171,7 +3162,7 @@ export const ToolCall = memo(function ToolCall({
     return (
       <ToolCallDetailsContent
         toolName={toolName}
-        detail={effectiveDetail}
+        detail={presentation.detail}
         errorText={presentation.errorText}
         maxHeight={maxDetailHeight}
         showLoadingSkeleton={presentation.isLoadingDetails}
@@ -3180,7 +3171,7 @@ export const ToolCall = memo(function ToolCall({
   }, [
     shouldRenderInline,
     toolName,
-    effectiveDetail,
+    presentation.detail,
     presentation.errorText,
     presentation.isLoadingDetails,
     maxDetailHeight,
