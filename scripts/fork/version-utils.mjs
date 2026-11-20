@@ -8,18 +8,28 @@ const UPSTREAM_VERSION_RE =
 const STABLE_SEMVER_RE = /^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/;
 const FORK_TAG_RE = /^fork-v(?<version>\d+\.\d+\.\d+)$/;
 
-// Fork patch encoding: 10000 + upstreamPatch * 100 + forkRev (forkRev in 1..99).
-// Examples:
-//   upstream 0.16.2, rev 1 -> 0.16.10201
-//   upstream 0.17.0-beta.1, rev 1 -> 0.17.10001
-//   upstream 0.17.0, rev 2 -> 0.17.10002
-//   upstream 0.17.1, rev 1 -> 0.17.10101
-// Strictly monotonic across fork rebuilds and upstream releases, valid stable SemVer
-// (compatible with electron-updater's default "latest" channel and plugin checks),
-// and visually distinct from upstream patch numbers.
-export const FORK_PATCH_BASE = 10_000;
-export const FORK_PATCH_STRIDE = 100;
-export const MAX_FORK_REV = 99;
+// Fork patch range: 501..999 (499 releases per upstream major.minor).
+// Staying <= 999 is required by packages/app/native-release-version.js
+// (which encodes Android versionCode / iOS buildNumber with minor <= 999 and patch <= 999),
+// while remaining strictly higher than upstream patches, strictly monotonic across
+// rebuilds and upstream patch bumps, and valid stable SemVer for electron-updater.
+export const FORK_PATCH_BASE = 500;
+export const MAX_FORK_MINOR = 999;
+export const MAX_FORK_PATCH = 999;
+
+function assertNativeCompatibleSemver(version, label) {
+  const match = version.match(STABLE_SEMVER_RE);
+  if (!match?.groups) {
+    throw new Error(`Invalid ${label} "${version}". Expected stable semver X.Y.Z without prerelease.`);
+  }
+  const minor = Number.parseInt(match.groups.minor, 10);
+  const patch = Number.parseInt(match.groups.patch, 10);
+  if (minor > MAX_FORK_MINOR || patch > MAX_FORK_PATCH) {
+    throw new Error(
+      `Invalid ${label} "${version}". Minor and patch must be <= ${MAX_FORK_PATCH} for Expo native-release-version compatibility.`,
+    );
+  }
+}
 
 export function parseUpstreamVersion(rawVersion) {
   const trimmed = String(rawVersion ?? "").trim();
@@ -50,9 +60,10 @@ export function parseForkTag(rawTag) {
   const match = trimmed.match(FORK_TAG_RE);
   if (!match?.groups?.version) {
     throw new Error(
-      `Unsupported fork tag "${rawTag}". Expected "fork-vX.Y.Z" (e.g. fork-v0.17.10001).`,
+      `Unsupported fork tag "${rawTag}". Expected "fork-vX.Y.Z" (e.g. fork-v0.17.501).`,
     );
   }
+  assertNativeCompatibleSemver(match.groups.version, "fork tag version");
   return {
     sourceTag: trimmed,
     releaseTag: trimmed,
@@ -60,19 +71,6 @@ export function parseForkTag(rawTag) {
     releaseType: "release",
     releaseChannel: "latest",
   };
-}
-
-export function decodeForkPatch(patch) {
-  if (!Number.isInteger(patch) || patch < FORK_PATCH_BASE + 1) {
-    return null;
-  }
-  const offset = patch - FORK_PATCH_BASE;
-  const upstreamPatch = Math.floor(offset / FORK_PATCH_STRIDE);
-  const forkRev = offset % FORK_PATCH_STRIDE;
-  if (forkRev < 1 || forkRev > MAX_FORK_REV) {
-    return null;
-  }
-  return { upstreamPatch, forkRev };
 }
 
 export function computeNextForkVersion({
@@ -84,11 +82,7 @@ export function computeNextForkVersion({
 
   if (explicitVersion) {
     const trimmed = explicitVersion.trim().replace(/^v/, "");
-    if (!STABLE_SEMVER_RE.test(trimmed)) {
-      throw new Error(
-        `Invalid explicit fork version "${explicitVersion}". Expected stable semver X.Y.Z without prerelease.`,
-      );
-    }
+    assertNativeCompatibleSemver(trimmed, "explicit fork version");
     return {
       version: trimmed,
       tag: `fork-v${trimmed}`,
@@ -97,46 +91,43 @@ export function computeNextForkVersion({
     };
   }
 
-  let maxRev = 0;
+  let maxPatch = Math.max(FORK_PATCH_BASE, upstream.patch);
   for (const rawTag of existingTags) {
-    let parsed;
-    try {
-      parsed = parseForkTag(rawTag);
-    } catch {
+    const cleaned = String(rawTag ?? "")
+      .trim()
+      .replace(/^refs\/tags\//, "");
+    const match = cleaned.match(FORK_TAG_RE);
+    if (!match?.groups?.version) {
       continue;
     }
-    const parts = parsed.version.split(".").map((segment) => Number.parseInt(segment, 10));
+    const parts = match.groups.version.split(".").map((segment) => Number.parseInt(segment, 10));
     if (parts[0] !== upstream.major || parts[1] !== upstream.minor) {
       continue;
     }
-    const decoded = decodeForkPatch(parts[2]);
-    if (decoded && decoded.upstreamPatch === upstream.patch && decoded.forkRev > maxRev) {
-      maxRev = decoded.forkRev;
+    if (parts[2] > maxPatch && parts[2] <= MAX_FORK_PATCH) {
+      maxPatch = parts[2];
     }
   }
 
-  const nextRev = maxRev + 1;
-  if (nextRev > MAX_FORK_REV) {
+  const nextPatch = maxPatch + 1;
+  if (nextPatch > MAX_FORK_PATCH) {
     throw new Error(
-      `Fork revision overflow for upstream ${upstream.baseVersion}: max ${MAX_FORK_REV} revisions per upstream patch.`,
+      `Fork patch overflow for upstream ${upstream.major}.${upstream.minor}.x: exceeded max patch ${MAX_FORK_PATCH}.`,
     );
   }
 
-  const forkPatch = FORK_PATCH_BASE + upstream.patch * FORK_PATCH_STRIDE + nextRev;
-  const version = `${upstream.major}.${upstream.minor}.${forkPatch}`;
+  const version = `${upstream.major}.${upstream.minor}.${nextPatch}`;
   return {
     version,
     tag: `fork-v${version}`,
     upstreamBase: upstream.baseVersion,
-    forkRev: nextRev,
+    forkRev: nextPatch - FORK_PATCH_BASE,
   };
 }
 
 export function applyWorkspaceVersion(repoRoot, version) {
   const trimmed = String(version ?? "").trim();
-  if (!STABLE_SEMVER_RE.test(trimmed)) {
-    throw new Error(`Invalid version "${version}". Expected stable semver X.Y.Z.`);
-  }
+  assertNativeCompatibleSemver(trimmed, "version");
 
   const rootPkgPath = path.join(repoRoot, "package.json");
   const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, "utf8"));

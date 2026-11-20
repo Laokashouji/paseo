@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Fork release tag (e.g. fork-v0.17.10001)"
+        description: "Fork release tag (e.g. fork-v0.17.501)"
         required: true
         type: string
       checkout_ref:

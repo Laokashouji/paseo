@@ -14,15 +14,15 @@ describe("assembleMacManifest", () => {
       fs.writeFileSync(
         arm64Path,
         [
-          "version: 0.17.10001",
+          "version: 0.17.501",
           "files:",
-          "  - url: Paseo-0.17.10001-arm64.zip",
+          "  - url: Paseo-0.17.501-arm64.zip",
           "    sha512: aaa111==",
           "    size: 12345678",
-          "  - url: Paseo-0.17.10001-arm64.dmg",
+          "  - url: Paseo-0.17.501-arm64.dmg",
           "    sha512: bbb222==",
           "    size: 23456789",
-          "path: Paseo-0.17.10001-arm64.zip",
+          "path: Paseo-0.17.501-arm64.zip",
           "sha512: aaa111==",
           "releaseDate: '2026-11-20T00:00:00.000Z'",
           "",
@@ -34,10 +34,10 @@ describe("assembleMacManifest", () => {
         outputPath: outPath,
         releaseDate: "2026-11-20T08:30:00.000Z",
         rolloutHours: 0,
-        expectedVersion: "0.17.10001",
+        expectedVersion: "0.17.501",
       });
 
-      assert.match(output, /version: 0\.17\.10001/);
+      assert.match(output, /version: 0\.17\.501/);
       assert.match(output, new RegExp(`minimumSystemVersion: ${MACOS_MINIMUM_DARWIN_VERSION}`));
       assert.match(output, /rolloutHours: 0/);
       assert.match(output, /releaseDate: ['"]?2026-11-20T08:30:00\.000Z['"]?/);
@@ -56,12 +56,12 @@ describe("assembleMacManifest", () => {
       fs.writeFileSync(
         arm64Path,
         [
-          "version: 0.17.10001",
+          "version: 0.17.501",
           "files:",
-          "  - url: Paseo-0.17.10001-arm64.zip",
+          "  - url: Paseo-0.17.501-arm64.zip",
           "    sha512: aaa111==",
           "    size: 100",
-          "path: Paseo-0.17.10001-arm64.zip",
+          "path: Paseo-0.17.501-arm64.zip",
           "sha512: aaa111==",
           "",
         ].join("\n"),
@@ -69,15 +69,15 @@ describe("assembleMacManifest", () => {
       fs.writeFileSync(
         x64Path,
         [
-          "version: 0.17.10001",
+          "version: 0.17.501",
           "files:",
-          "  - url: Paseo-0.17.10001-arm64.zip",
+          "  - url: Paseo-0.17.501-arm64.zip",
           "    sha512: aaa111==",
           "    size: 100",
-          "  - url: Paseo-0.17.10001-x64.zip",
+          "  - url: Paseo-0.17.501-x64.zip",
           "    sha512: ccc333==",
           "    size: 200",
-          "path: Paseo-0.17.10001-x64.zip",
+          "path: Paseo-0.17.501-x64.zip",
           "sha512: ccc333==",
           "",
         ].join("\n"),
@@ -88,13 +88,13 @@ describe("assembleMacManifest", () => {
         outputPath: outPath,
         releaseDate: "2026-11-20T09:00:00.000Z",
         rolloutHours: 0,
-        expectedVersion: "0.17.10001",
+        expectedVersion: "0.17.501",
       });
 
-      const armMatches = output.match(/Paseo-0\.17\.10001-arm64\.zip/g) ?? [];
+      const armMatches = output.match(/Paseo-0\.17\.501-arm64\.zip/g) ?? [];
       // Appears once in files[] and once in top-level path
       assert.equal(armMatches.length, 2);
-      assert.match(output, /Paseo-0\.17\.10001-x64\.zip/);
+      assert.match(output, /Paseo-0\.17\.501-x64\.zip/);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -107,12 +107,12 @@ describe("assembleMacManifest", () => {
       fs.writeFileSync(
         arm64Path,
         [
-          "version: 0.17.10001",
+          "version: 0.17.501",
           "files:",
-          "  - url: Paseo-0.17.10001-arm64.zip",
+          "  - url: Paseo-0.17.501-arm64.zip",
           "    sha512: aaa111==",
           "    size: 100",
-          "path: Paseo-0.17.10001-arm64.zip",
+          "path: Paseo-0.17.501-arm64.zip",
           "sha512: aaa111==",
           "",
         ].join("\n"),
@@ -124,9 +124,9 @@ describe("assembleMacManifest", () => {
             inputPaths: [arm64Path],
             outputPath: path.join(tmp, "out.yml"),
             releaseDate: "2026-11-20T09:00:00.000Z",
-            expectedVersion: "0.17.10002",
+            expectedVersion: "0.17.502",
           }),
-        /version=0\.17\.10001, expected 0\.17\.10002/,
+        /version=0\.17\.501, expected 0\.17\.502/,
       );
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });

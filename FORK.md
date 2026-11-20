@@ -20,10 +20,11 @@ main@upstream (trunk)
 ```
 
 - `origin/main` 保持为干净的上游镜像，不提交个人改动；所有 fork 发布均通过 `fork` 分支与 `fork-v*` 标签触发。
-- **版本号编码**：采用 `X.Y.(10000 + Z*100 + N)`（例如上游 `0.17.0-beta.1` 第 1 次发布为 `0.17.10001`，上游 `0.16.2` 第 1 次发布为 `0.16.10201`）：
+- **版本号编码**：采用 `X.Y.(501..999)`（每个上游 `X.Y` 小版本内从 `501` 起单调递增，例如上游 `0.17.0-beta.1` 第 1 次发布为 `0.17.501`，第 2 次为 `0.17.502`）：
+  - 满足上游 `packages/app/native-release-version.js` 对 `minor <= 999 && patch <= 999` 的限制，确保 monorepo 所有包（含 Expo web bundle、Desktop、内置 Daemon）使用完全一致的版本号；
   - 属于合法的稳定 SemVer（无 prerelease 后缀），直接兼容 Paseo Desktop 默认 `stable` (`latest`) 自动更新通道与插件版本校验；
   - 跨 fork 重建与跨上游小/中/大版本更新严格单调递增；
-  - Git 标签使用 `fork-v0.17.10001`（不以 `v` 开头），避免误触发上游 `v*` 工作流，且已验证兼容 `electron-updater@6.8.3` 的 `GitHubProvider`。
+  - Git 标签使用 `fork-v0.17.501`（不以 `v` 开头），避免误触发上游 `v*` 工作流，且已验证兼容 `electron-updater@6.8.3` 的 `GitHubProvider`。
 
 ## 2. 一次性初始化（Apple Developer 签名与公证）
 
