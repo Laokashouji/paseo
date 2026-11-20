@@ -389,7 +389,7 @@ jobs:
 
   publish-release:
     needs: [prepare, build-macos]
-    if: env.SHOULD_PUBLISH == 'true'
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
