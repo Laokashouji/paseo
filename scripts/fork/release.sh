@@ -136,12 +136,33 @@ jj log -r "trunk()..$BOOKMARK" --limit 30
 
 if [[ "$SKIP_SECRET_CHECK" != "true" ]] && command -v gh >/dev/null 2>&1; then
   SECRETS="$(gh secret list --repo "$GH_REPO" 2>/dev/null | awk '{print $1}' || true)"
+  has_secret() {
+    printf '%s\n' "$SECRETS" | grep -Fxq "$1"
+  }
+
   MISSING=()
-  for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-    if ! printf '%s\n' "$SECRETS" | grep -Fxq "$key"; then
-      MISSING+=("$key")
+  has_secret APPLE_CERTIFICATE || MISSING+=(APPLE_CERTIFICATE)
+  has_secret APPLE_CERTIFICATE_PASSWORD || MISSING+=(APPLE_CERTIFICATE_PASSWORD)
+
+  NOTARIZE_MODE=""
+  if has_secret APPLE_API_KEY && has_secret APPLE_API_KEY_ID && has_secret APPLE_API_ISSUER; then
+    NOTARIZE_MODE="App Store Connect API Key"
+  elif has_secret APPLE_ID && has_secret APPLE_PASSWORD && has_secret APPLE_TEAM_ID; then
+    NOTARIZE_MODE="Apple ID"
+  else
+    if has_secret APPLE_API_KEY || has_secret APPLE_API_KEY_ID || has_secret APPLE_API_ISSUER; then
+      has_secret APPLE_API_KEY || MISSING+=(APPLE_API_KEY)
+      has_secret APPLE_API_KEY_ID || MISSING+=(APPLE_API_KEY_ID)
+      has_secret APPLE_API_ISSUER || MISSING+=(APPLE_API_ISSUER)
+    elif has_secret APPLE_ID || has_secret APPLE_PASSWORD; then
+      has_secret APPLE_ID || MISSING+=(APPLE_ID)
+      has_secret APPLE_PASSWORD || MISSING+=(APPLE_PASSWORD)
+      has_secret APPLE_TEAM_ID || MISSING+=(APPLE_TEAM_ID)
+    else
+      MISSING+=("notarization credentials (APPLE_API_KEY+APPLE_API_KEY_ID+APPLE_API_ISSUER or APPLE_ID+APPLE_PASSWORD+APPLE_TEAM_ID)")
     fi
-  done
+  fi
+
   if (( ${#MISSING[@]} > 0 )); then
     echo ""
     echo "WARNING: Missing GitHub Secrets on $GH_REPO: ${MISSING[*]}"
@@ -152,7 +173,7 @@ if [[ "$SKIP_SECRET_CHECK" != "true" ]] && command -v gh >/dev/null 2>&1; then
     fi
   else
     echo ""
-    echo "Apple signing secrets verified on $GH_REPO (all 5 present)."
+    echo "Apple signing secrets verified on $GH_REPO (notarization: $NOTARIZE_MODE)."
   fi
 fi
 

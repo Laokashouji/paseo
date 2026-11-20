@@ -94,6 +94,9 @@ jobs:
         env:
           CHECK_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           CHECK_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CHECK_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          CHECK_APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          CHECK_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           CHECK_APPLE_ID: ${{ secrets.APPLE_ID }}
           CHECK_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           CHECK_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -102,12 +105,40 @@ jobs:
           missing=()
           [[ -n "$CHECK_APPLE_CERTIFICATE" ]] || missing+=(APPLE_CERTIFICATE)
           [[ -n "$CHECK_APPLE_CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
-          [[ -n "$CHECK_APPLE_ID" ]] || missing+=(APPLE_ID)
-          [[ -n "$CHECK_APPLE_PASSWORD" ]] || missing+=(APPLE_PASSWORD)
-          [[ -n "$CHECK_APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
+
+          has_api_key=false
+          if [[ -n "$CHECK_APPLE_API_KEY" && -n "$CHECK_APPLE_API_KEY_ID" && -n "$CHECK_APPLE_API_ISSUER" ]]; then
+            has_api_key=true
+          fi
+
+          has_apple_id=false
+          if [[ -n "$CHECK_APPLE_ID" && -n "$CHECK_APPLE_PASSWORD" && -n "$CHECK_APPLE_TEAM_ID" ]]; then
+            has_apple_id=true
+          fi
+
+          if [[ "$has_api_key" != "true" && "$has_apple_id" != "true" ]]; then
+            if [[ -n "$CHECK_APPLE_API_KEY" || -n "$CHECK_APPLE_API_KEY_ID" || -n "$CHECK_APPLE_API_ISSUER" ]]; then
+              [[ -n "$CHECK_APPLE_API_KEY" ]] || missing+=(APPLE_API_KEY)
+              [[ -n "$CHECK_APPLE_API_KEY_ID" ]] || missing+=(APPLE_API_KEY_ID)
+              [[ -n "$CHECK_APPLE_API_ISSUER" ]] || missing+=(APPLE_API_ISSUER)
+            elif [[ -n "$CHECK_APPLE_ID" || -n "$CHECK_APPLE_PASSWORD" ]]; then
+              [[ -n "$CHECK_APPLE_ID" ]] || missing+=(APPLE_ID)
+              [[ -n "$CHECK_APPLE_PASSWORD" ]] || missing+=(APPLE_PASSWORD)
+              [[ -n "$CHECK_APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
+            else
+              missing+=("notarization credentials (APPLE_API_KEY+APPLE_API_KEY_ID+APPLE_API_ISSUER or APPLE_ID+APPLE_PASSWORD+APPLE_TEAM_ID)")
+            fi
+          fi
+
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Missing required GitHub Secrets for macOS signing/notarization: ${missing[*]}. Run ./scripts/fork/setup-apple-secrets.sh to configure them."
             exit 1
+          fi
+
+          if [[ "$has_api_key" == "true" ]]; then
+            echo "Apple signing secrets verified (notarization mode: App Store Connect API Key)."
+          else
+            echo "Apple signing secrets verified (notarization mode: Apple ID)."
           fi
 
       - name: Build macOS runner matrix
@@ -199,6 +230,9 @@ jobs:
           EP_GH_IGNORE_TIME: true
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -209,7 +243,8 @@ jobs:
           set -euo pipefail
           export PASEO_REAL_XCRUN="$(command -v xcrun)"
           stapler_bin="$(mktemp -d)"
-          trap 'rm -rf "$stapler_bin"' EXIT
+          notary_key_dir="$(mktemp -d)"
+          trap 'rm -rf "$stapler_bin" "$notary_key_dir"' EXIT
           cat > "$stapler_bin/xcrun" <<'STAPLER'
           #!/bin/bash
           if [[ "${1:-}" != stapler || "${2:-}" != staple ]]; then
@@ -247,9 +282,27 @@ jobs:
           build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
 
           if [[ "$SHOULD_SIGN" != "true" ]]; then
-            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_CONTENT APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
             export CSC_IDENTITY_AUTO_DISCOVERY=false
             build_args+=("-c.mac.notarize=false")
+          elif [[ -n "${APPLE_API_KEY_CONTENT:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+            notary_key_path="${notary_key_dir}/AuthKey.p8"
+            node - "$notary_key_path" <<'NODE'
+          const fs = require("node:fs");
+          const outPath = process.argv[2];
+          const raw = (process.env.APPLE_API_KEY_CONTENT || "").trim();
+          const content = raw.includes("BEGIN PRIVATE KEY")
+            ? `${raw}\n`
+            : Buffer.from(raw.replace(/\s+/g, ""), "base64").toString("utf8");
+          if (!content.includes("BEGIN PRIVATE KEY")) {
+            throw new Error("APPLE_API_KEY secret does not decode to a valid PEM .p8 private key");
+          }
+          fs.writeFileSync(outPath, content, { mode: 0o600 });
+          NODE
+            export APPLE_API_KEY="$notary_key_path"
+            unset APPLE_API_KEY_CONTENT APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+          else
+            unset APPLE_API_KEY_CONTENT APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
           fi
 
           npm run build:desktop "${build_args[@]}"

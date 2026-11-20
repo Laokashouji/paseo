@@ -27,28 +27,35 @@ main@upstream (trunk)
 
 ## 2. 一次性初始化（Apple Developer 签名与公证）
 
-### 步骤 A：在 Mac 上准备 Developer ID 证书与密码
+### 步骤 A：在 Mac 上准备 Developer ID 证书与公证凭据
 
-1. 登录 [developer.apple.com/account](https://developer.apple.com/account) 记下 10 位 **Team ID**。
-2. 在 Certificates 中创建或下载 **Developer ID Application** 证书，双击导入 Mac 的「钥匙串访问（Keychain Access）」。
-3. 在钥匙串访问的「我的证书」里选中 `Developer ID Application: ...`（确认展开后包含私钥），右键「导出」为 `.p12` 文件并设置导出密码。
-4. 登录 [account.apple.com](https://account.apple.com) -> 登录与安全 -> App 专用密码，生成一个专用于公证的 **App-Specific Password**（不是主账号密码）。
+1. **Developer ID Application 代码签名证书**（必须由 Account Holder 在 [developer.apple.com/account](https://developer.apple.com/account) 创建）：
+   - 创建或下载 **Developer ID Application** 证书，配对对应私钥打包为 `.p12`（或在钥匙串访问的「我的证书」中右键导出为 `.p12` 并设置导出密码）。
+2. **公证凭据（二选一，推荐方式 1）**：
+   - **方式 1（App Store Connect API Key，推荐）**：在 App Store Connect → 用户和访问 → 集成 → App Store Connect API 生成密钥（`App Manager` / `Developer` / `Admin` 均可），保存 `.p8` 文件、Key ID 与 Issuer ID。
+   - **方式 2（Apple ID + App 专用密码）**：记录 10 位 Team ID，并在 [account.apple.com](https://account.apple.com) → 登录与安全 → App 专用密码生成专用密码。
 
-### 步骤 B：上传 5 个 GitHub Secrets
+### 步骤 B：上传 GitHub Secrets
 
 ```bash
-./scripts/fork/setup-apple-secrets.sh --p12 /path/to/DeveloperIDApplication.p12
+# 推荐：Developer ID .p12 + App Store Connect API Key (.p8)
+./scripts/fork/setup-apple-secrets.sh \
+  --p12 /path/to/DeveloperIDApplication.p12 \
+  --p8 /path/to/AuthKey_XXXXXXXXXX.p8 \
+  --key-id XXXXXXXXXX \
+  --issuer xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-或在 GitHub 网页端 `Settings -> Secrets and variables -> Actions` 手动添加以下 5 个 Secret（与上游同名）：
+或在 GitHub 网页端 `Settings -> Secrets and variables -> Actions` 手动添加以下 Secret：
 
-| Secret 名称 | 内容 |
-| --- | --- |
-| `APPLE_CERTIFICATE` | `.p12` 文件单行 base64（`base64 -i cert.p12 \| tr -d '\n'`） |
-| `APPLE_CERTIFICATE_PASSWORD` | 导出 `.p12` 时设置的密码 |
-| `APPLE_ID` | Apple Developer 账号邮箱 |
-| `APPLE_PASSWORD` | App 专用密码（App-Specific Password） |
-| `APPLE_TEAM_ID` | 10 位 Team ID |
+| 类别 | Secret 名称 | 内容 |
+| --- | --- | --- |
+| 签名（必填） | `APPLE_CERTIFICATE` | Developer ID Application `.p12` 单行 base64（`base64 -i cert.p12 \| tr -d '\n'`） |
+| 签名（必填） | `APPLE_CERTIFICATE_PASSWORD` | `.p12` 导出密码 |
+| 公证（方式 1，推荐） | `APPLE_API_KEY` | App Store Connect `.p8` 私钥（支持单行 base64 或原始 PEM） |
+| 公证（方式 1，推荐） | `APPLE_API_KEY_ID` | API Key ID（10 位字符） |
+| 公证（方式 1，推荐） | `APPLE_API_ISSUER` | API Issuer ID（UUID） |
+| 公证（方式 2，备选） | `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 邮箱、App 专用密码与 10 位 Team ID |
 
 检查配置状态：
 
