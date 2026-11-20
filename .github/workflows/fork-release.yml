@@ -1,0 +1,410 @@
+name: Fork Desktop Release
+
+on:
+  push:
+    tags:
+      - "fork-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Fork release tag (e.g. fork-v0.17.10001)"
+        required: true
+        type: string
+      checkout_ref:
+        description: "Optional branch/commit/tag to build (defaults to tag)"
+        required: false
+        default: ""
+        type: string
+      include_intel:
+        description: "Also build Intel x64 macOS binary (default: Apple Silicon arm64 only)"
+        required: false
+        default: false
+        type: boolean
+      sign:
+        description: "Sign & notarize with Apple Developer secrets (false = unsigned artifact-only dry run)"
+        required: false
+        default: true
+        type: boolean
+      run_smoke:
+        description: "Run packaged desktop smoke test during build"
+        required: false
+        default: true
+        type: boolean
+      rollout_hours:
+        description: "Rollout duration in hours (0 = instant auto-update)"
+        required: false
+        default: "0"
+        type: string
+
+concurrency:
+  group: fork-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.checkout_ref || inputs.tag) || github.ref_name }}
+  SHOULD_SIGN: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
+  SHOULD_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
+  INCLUDE_INTEL: ${{ github.event_name == 'workflow_dispatch' && inputs.include_intel }}
+  RUN_SMOKE: ${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}
+  ROLLOUT_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.rollout_hours || '0' }}
+  DESKTOP_PACKAGE_PATH: "packages/desktop"
+
+jobs:
+  prepare:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      fork_version: ${{ steps.meta.outputs.fork_version }}
+      release_type: ${{ steps.meta.outputs.release_type }}
+      release_channel: ${{ steps.meta.outputs.release_channel }}
+      resolved_sha: ${{ steps.meta.outputs.resolved_sha }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            package.json
+            scripts/fork
+            scripts/github-release.mjs
+            scripts/is-main-module.mjs
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Resolve fork release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/fork/version-utils.mjs emit-env --tag "$SOURCE_TAG" >> "$GITHUB_ENV"
+          node scripts/fork/version-utils.mjs emit-env --tag "$SOURCE_TAG" | while IFS='=' read -r key val; do
+            case "$key" in
+              RELEASE_TAG) echo "release_tag=$val" >> "$GITHUB_OUTPUT" ;;
+              FORK_VERSION) echo "fork_version=$val" >> "$GITHUB_OUTPUT" ;;
+              RELEASE_TYPE) echo "release_type=$val" >> "$GITHUB_OUTPUT" ;;
+              RELEASE_CHANNEL) echo "release_channel=$val" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+          echo "resolved_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Apple signing secrets before launching macOS runner
+        if: env.SHOULD_SIGN == 'true'
+        shell: bash
+        env:
+          CHECK_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CHECK_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CHECK_APPLE_ID: ${{ secrets.APPLE_ID }}
+          CHECK_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          CHECK_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$CHECK_APPLE_CERTIFICATE" ]] || missing+=(APPLE_CERTIFICATE)
+          [[ -n "$CHECK_APPLE_CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ -n "$CHECK_APPLE_ID" ]] || missing+=(APPLE_ID)
+          [[ -n "$CHECK_APPLE_PASSWORD" ]] || missing+=(APPLE_PASSWORD)
+          [[ -n "$CHECK_APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required GitHub Secrets for macOS signing/notarization: ${missing[*]}. Run ./scripts/fork/setup-apple-secrets.sh to configure them."
+            exit 1
+          fi
+
+      - name: Build macOS runner matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$INCLUDE_INTEL" == "true" ]]; then
+            echo 'matrix=[{"runner":"macos-latest","electron_arch":"arm64","node_heap_mb":4096},{"runner":"macos-26-intel","electron_arch":"x64","node_heap_mb":8192}]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix=[{"runner":"macos-latest","electron_arch":"arm64","node_heap_mb":4096}]' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or reuse draft GitHub release
+        if: env.SHOULD_PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" > /dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, reusing it."
+            exit 0
+          fi
+
+          upstream_pkg_version="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version)')"
+          commit_sha="$(git rev-parse --short HEAD)"
+          notes_file="$(mktemp)"
+          trap 'rm -f "$notes_file"' EXIT
+          cat > "$notes_file" <<EOF
+          Paseo Fork desktop build \`${FORK_VERSION}\`
+
+          - Upstream package base: \`${upstream_pkg_version}\`
+          - Built commit: \`${commit_sha}\`
+          - Auto-update repository: \`${{ github.repository }}\`
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --target "${{ steps.meta.outputs.resolved_sha }}" \
+            --title "Paseo $RELEASE_TAG" \
+            --notes-file "$notes_file" \
+            --draft
+
+  build-macos:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    permissions:
+      contents: write
+      packages: read
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      FORK_VERSION: ${{ needs.prepare.outputs.fork_version }}
+      RELEASE_TYPE: ${{ needs.prepare.outputs.release_type }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.resolved_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ephemerally apply fork version across workspaces
+        shell: bash
+        run: node scripts/fork/version-utils.mjs apply --version "$FORK_VERSION"
+
+      - name: Build macOS desktop package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_GH_IGNORE_TIME: true
+          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PASEO_DESKTOP_SMOKE: ${{ env.RUN_SMOKE == 'true' && '1' || '0' }}
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+          NODE_OPTIONS: --max-old-space-size=${{ matrix.node_heap_mb }}
+        run: |
+          set -euo pipefail
+          export PASEO_REAL_XCRUN="$(command -v xcrun)"
+          stapler_bin="$(mktemp -d)"
+          trap 'rm -rf "$stapler_bin"' EXIT
+          cat > "$stapler_bin/xcrun" <<'STAPLER'
+          #!/bin/bash
+          if [[ "${1:-}" != stapler || "${2:-}" != staple ]]; then
+            exec "$PASEO_REAL_XCRUN" "$@"
+          fi
+          output="$(mktemp)"
+          trap 'rm -f "$output"' EXIT
+          for attempt in 1 2 3 4; do
+            if "$PASEO_REAL_XCRUN" "$@" >"$output" 2>&1; then
+              cat "$output"
+              exit 0
+            else
+              status=$?
+            fi
+            cat "$output"
+            if [[ "$status" != 68 || "$attempt" == 4 ]] ||
+              ! grep -Fq 'NSURLErrorDomain Code=-1005' "$output"; then
+              exit "$status"
+            fi
+            echo "::warning::Apple staple connection lost; retrying the same signed app ($attempt/4)" >&2
+            sleep 30
+          done
+          STAPLER
+          chmod +x "$stapler_bin/xcrun"
+          export PATH="$stapler_bin:$PATH"
+
+          repo_owner="${GITHUB_REPOSITORY%%/*}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+
+          build_args=(-- --publish never --mac --"${{ matrix.electron_arch }}")
+          build_args+=("-c.publish.provider=github")
+          build_args+=("-c.publish.owner=$repo_owner")
+          build_args+=("-c.publish.repo=$repo_name")
+          build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
+          build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
+
+          if [[ "$SHOULD_SIGN" != "true" ]]; then
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            build_args+=("-c.mac.notarize=false")
+          fi
+
+          npm run build:desktop "${build_args[@]}"
+
+      - name: Verify fork auto-update config and bundle version
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find "${DESKTOP_PACKAGE_PATH}/release" -maxdepth 2 -name "Paseo.app" -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "::error::Could not locate packaged Paseo.app under ${DESKTOP_PACKAGE_PATH}/release"
+            exit 1
+          fi
+
+          update_yml="$app_path/Contents/Resources/app-update.yml"
+          if [[ ! -f "$update_yml" ]]; then
+            echo "::error::Missing $update_yml in packaged app"
+            exit 1
+          fi
+
+          echo "=== Packaged app-update.yml ==="
+          cat "$update_yml"
+
+          node - "$update_yml" "${GITHUB_REPOSITORY%%/*}" "${GITHUB_REPOSITORY#*/}" <<'NODE'
+          const fs = require("node:fs");
+          const { load } = require("js-yaml");
+          const [updateYmlPath, expectedOwner, expectedRepo] = process.argv.slice(2);
+          const cfg = load(fs.readFileSync(updateYmlPath, "utf8"));
+          if (cfg.provider !== "github") {
+            throw new Error(`Expected provider=github, got ${cfg.provider}`);
+          }
+          if (cfg.owner !== expectedOwner) {
+            throw new Error(`Expected owner=${expectedOwner}, got ${cfg.owner}`);
+          }
+          if (cfg.repo !== expectedRepo) {
+            throw new Error(`Expected repo=${expectedRepo}, got ${cfg.repo}`);
+          }
+          console.log(`Verified app-update.yml -> ${cfg.owner}/${cfg.repo} (channel=${cfg.channel})`);
+          NODE
+
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist")"
+          if [[ "$actual_version" != "$FORK_VERSION" ]]; then
+            echo "::error::CFBundleShortVersionString=$actual_version, expected $FORK_VERSION"
+            exit 1
+          fi
+
+      - name: Upload packaged smoke diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-desktop-smoke-macos-${{ matrix.electron_arch }}
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload macOS release assets to draft GitHub Release
+        if: env.SHOULD_PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="${DESKTOP_PACKAGE_PATH}/release"
+          release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG")"
+          node scripts/upload-release-assets.mjs "$release_lookup" "$release_dir" "${{ github.repository }}"
+
+      - name: Upload macOS manifest artifact
+        if: env.SHOULD_PUBLISH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-mac-manifest-${{ matrix.electron_arch }}
+          path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}-mac.yml
+          retention-days: 1
+
+      - name: Upload unsigned test artifacts
+        if: env.SHOULD_PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-unsigned-macos-${{ matrix.electron_arch }}
+          path: |
+            ${{ env.DESKTOP_PACKAGE_PATH }}/release/*.dmg
+            ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}-mac.yml
+          retention-days: 7
+
+  publish-release:
+    needs: [prepare, build-macos]
+    if: env.SHOULD_PUBLISH == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      FORK_VERSION: ${{ needs.prepare.outputs.fork_version }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/fork
+            scripts/github-release.mjs
+            scripts/is-main-module.mjs
+          ref: ${{ needs.prepare.outputs.resolved_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install lightweight js-yaml dependency
+        run: npm install --no-save --prefix "${{ runner.temp }}/yaml-tools" js-yaml@4
+
+      - name: Download macOS manifest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fork-mac-manifest-*
+          path: release-manifests
+
+      - name: Assemble latest-mac.yml and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_PATH: ${{ runner.temp }}/yaml-tools/node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_name="${RELEASE_CHANNEL}-mac.yml"
+          inputs=()
+          for arch in arm64 x64; do
+            candidate="release-manifests/fork-mac-manifest-${arch}/${manifest_name}"
+            if [[ -f "$candidate" ]]; then
+              inputs+=(--input "$candidate")
+            fi
+          done
+
+          if (( ${#inputs[@]} == 0 )); then
+            echo "::error::No macOS manifest artifacts found to assemble"
+            exit 1
+          fi
+
+          timestamp="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
+          out_path="release-manifests/final/${manifest_name}"
+          node scripts/fork/prepare-mac-manifest.mjs \
+            "${inputs[@]}" \
+            --output "$out_path" \
+            --release-date "$timestamp" \
+            --rollout-hours "$ROLLOUT_HOURS" \
+            --expected-version "$FORK_VERSION"
+
+          echo "=== Final ${manifest_name} ==="
+          cat "$out_path"
+
+          release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" --cleanup-duplicates)"
+          gh release upload "$release_lookup" "$out_path" --clobber --repo "${{ github.repository }}"
+          gh release edit "$release_lookup" \
+            --tag "$RELEASE_TAG" \
+            --draft=false \
+            --latest \
+            --repo "${{ github.repository }}"
