@@ -223,6 +223,10 @@ jobs:
         shell: bash
         run: node scripts/fork/version-utils.mjs apply --version "$FORK_VERSION"
 
+      - name: Ephemerally apply fork macOS desktop icon
+        shell: bash
+        run: ./scripts/fork/apply-icon.sh
+
       - name: Build macOS desktop package
         shell: bash
         env:
@@ -307,7 +311,7 @@ jobs:
 
           npm run build:desktop "${build_args[@]}"
 
-      - name: Verify fork auto-update config and bundle version
+      - name: Verify fork auto-update config, bundle version, and icon
         shell: bash
         run: |
           set -euo pipefail
@@ -348,6 +352,36 @@ jobs:
             echo "::error::CFBundleShortVersionString=$actual_version, expected $FORK_VERSION"
             exit 1
           fi
+
+          icon_file="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app_path/Contents/Info.plist")"
+          if [[ "$icon_file" != *.icns ]]; then
+            icon_file="${icon_file}.icns"
+          fi
+          bundled_icns="$app_path/Contents/Resources/${icon_file}"
+          bundled_png="$app_path/Contents/Resources/icon.png"
+
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+          git show "HEAD:${DESKTOP_PACKAGE_PATH}/assets/icon.icns" > "${verify_dir}/upstream.icns"
+          git show "HEAD:${DESKTOP_PACKAGE_PATH}/assets/icon.png" > "${verify_dir}/upstream.png"
+
+          if [[ ! -f "$bundled_icns" ]] || ! cmp -s "$bundled_icns" "${DESKTOP_PACKAGE_PATH}/assets/icon.icns"; then
+            echo "::error::Packaged $bundled_icns does not match generated fork icon.icns"
+            exit 1
+          fi
+          if cmp -s "$bundled_icns" "${verify_dir}/upstream.icns"; then
+            echo "::error::Packaged $bundled_icns still matches upstream black icon.icns"
+            exit 1
+          fi
+          if [[ ! -f "$bundled_png" ]] || ! cmp -s "$bundled_png" "${DESKTOP_PACKAGE_PATH}/assets/icon.png"; then
+            echo "::error::Packaged $bundled_png does not match generated fork icon.png"
+            exit 1
+          fi
+          if cmp -s "$bundled_png" "${verify_dir}/upstream.png"; then
+            echo "::error::Packaged $bundled_png still matches upstream black icon.png"
+            exit 1
+          fi
+          echo "Verified packaged fork icon (${icon_file} and icon.png)"
 
       - name: Upload packaged smoke diagnostics on failure
         if: failure()

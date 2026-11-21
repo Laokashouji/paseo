@@ -129,8 +129,9 @@ jj st                        # 确认冲突清空后继续
 gh run watch --repo Laokashouji/paseo
 ```
 
-- **首次切换安装（仅需一次）**：因为你的 Apple Developer Team ID 与官方不同，官方签名包无法直接热更新到你的 fork。首次请从 `https://github.com/Laokashouji/paseo/releases/latest` 下载 `Paseo-<version>-arm64.dmg`，拖入 `/Applications` 替换原有 `Paseo.app`。本地 `~/.paseo/` 与 `~/Library/Application Support/Paseo/` 数据完全保留。
-- **后续所有更新**：`Paseo.app` 内的 `app-update.yml` 已自动指向 `Laokashouji/paseo`，且 `rolloutHours` 为 `0`（即时生效）。每次发版完成后，MacBook / Mac mini 上的 Paseo Desktop 都会直接检测到新版本并在应用内一键自动更新。
+- **首次切换安装（仅需一次）**：因为你的 Apple Developer Team ID 与官方不同，官方签名包无法直接热更新到你的 fork。首次请从 `https://github.com/Laokashouji/paseo/releases/latest` 下载 `Paseo-<version>-arm64.dmg`；如果想保留官方 `/Applications/Paseo.app` 当备份，可先把 DMG 里的 `Paseo.app` 拖出来重命名为 `Paseo Fork.app` 再放进 `/Applications/`（不破坏签名与公证，且共用 `~/.paseo/` 与 `~/Library/Application Support/Paseo/`）。
+- **应用图标区分**：构建流水线会在打包前通过 `scripts/fork/apply-icon.sh` 临时将 `packages/desktop/assets/icon.icns` 与 `icon.png` 替换为仓库内置的蓝图蓝版 `icon-dev.png`（不改动上游跟踪文件），每次自动更新都会保持蓝色图标，便于与官方黑色图标区分。
+- **后续所有更新**：`Paseo.app` 内的 `app-update.yml` 已自动指向 `Laokashouji/paseo`，且 `rolloutHours` 为 `0`（即时生效）。每次发版完成后，MacBook / Mac mini 上的 Paseo Desktop 都会直接检测到新版本并在应用内一键自动更新（原地替换当前运行中的 `.app`，不会覆盖旁边的官方 `Paseo.app`）。
 
 ## 5. 更新 Linux DevBox CLI / Daemon
 
