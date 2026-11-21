@@ -58,6 +58,8 @@ export type {
 import type { PluginTimelineItem } from "@getpaseo/protocol/agent-types";
 import type {
   AgentBackgroundWorkItem,
+  AgentForkContextOptions,
+  AgentForkContextPayload,
   FetchAgentsEntry,
   FetchAgentsOptions,
   FetchAgentsPageInfo,
@@ -333,6 +335,8 @@ export interface PaseoAgentCommandsOptions {
 }
 
 export type PaseoAgentCommandsResult = ListCommandsResponse["payload"];
+export type PaseoAgentForkContextOptions = AgentForkContextOptions;
+export type PaseoAgentForkContextResult = AgentForkContextPayload;
 
 export type PaseoAgentUpdate = Extract<SessionOutboundMessage, { type: "agent_update" }>["payload"];
 
@@ -464,6 +468,8 @@ export interface PaseoAgentHandle {
    * rejecting.
    */
   commands(options?: PaseoAgentCommandsOptions): Promise<PaseoAgentCommandsResult>;
+  /** Builds a chat-history attachment for forking this agent's conversation context. */
+  buildForkContext(options?: PaseoAgentForkContextOptions): Promise<PaseoAgentForkContextResult>;
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
@@ -1185,6 +1191,7 @@ function createAgentHandleFactory(
         return result;
       },
       commands: (options) => daemonClient.listCommands({ agentId: id, ...options }),
+      buildForkContext: (options) => daemonClient.buildAgentForkContext(id, options),
       archive: async () => {
         const result = await daemonClient.archiveAgent(id);
         if (current) {

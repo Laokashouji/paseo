@@ -121,6 +121,16 @@ export interface PluginSidebarViewContribution<Text extends PluginText = string>
   Component: ComponentType<PluginSidebarViewProps>;
 }
 
+export interface PluginAgentCornerCardProps extends PluginNavigableHostProps {
+  workspaceId: string;
+  agentId: string;
+}
+
+export interface PluginAgentCornerCardContribution {
+  id: string;
+  Component: ComponentType<PluginAgentCornerCardProps>;
+}
+
 export interface PluginWorkspaceRowBadgeItemProps extends PluginHostProps {
   workspaceId: string;
 }
@@ -230,6 +240,8 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addSidebarHeaderItem(contribution: PluginSidebarItemContribution<PluginText>): PluginCleanup;
   addSidebarFooterItem(contribution: PluginSidebarItemContribution<PluginText>): PluginCleanup;
   addAgentPanel(contribution: PluginAgentPanelContribution<PluginText>): PluginCleanup;
+  /** Renders a corner overlay card inside each agent chat view on this host. */
+  addAgentCornerCard(contribution: PluginAgentCornerCardContribution): PluginCleanup;
   addWorkspaceRowBadgeItem(
     contribution: PluginWorkspaceRowBadgeItemContribution<PluginText>,
   ): PluginCleanup;

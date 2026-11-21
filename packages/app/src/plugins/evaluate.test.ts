@@ -627,6 +627,38 @@ describe("evaluatePluginClientBundle", () => {
     ).toThrow("Composer item flag is not a component");
   });
 
+  it("registers, removes, and re-registers agent corner cards", () => {
+    const plugin = evaluatePluginClientBundle(
+      "workbench",
+      bundle(`
+        function Card() { return null; }
+        const remove = plugin.addAgentCornerCard({ id: "card", Component: Card });
+        remove();
+        plugin.addAgentCornerCard({ id: "card", Component: Card });
+      `),
+    );
+    expect(plugin.agentCornerCards.map((item) => item.id)).toEqual(["card"]);
+  });
+
+  it("rejects duplicate and non-component agent corner cards", () => {
+    expect(() =>
+      evaluatePluginClientBundle(
+        "workbench",
+        bundle(`
+          function Card() { return null; }
+          plugin.addAgentCornerCard({ id: "card", Component: Card });
+          plugin.addAgentCornerCard({ id: "card", Component: Card });
+        `),
+      ),
+    ).toThrow("Duplicate agent corner card: card");
+    expect(() =>
+      evaluatePluginClientBundle(
+        "workbench",
+        bundle(`plugin.addAgentCornerCard({ id: "card", Component: "nope" })`),
+      ),
+    ).toThrow("Agent corner card card is not a component");
+  });
+
   it("runs the client entry with the full runtime context", () => {
     const plugin = evaluatePluginClientBundle(
       "review",

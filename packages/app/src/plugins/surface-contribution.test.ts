@@ -52,6 +52,7 @@ function installation(
     sidebarViews: [],
     sidebarItems: { header: [], footer: [] },
     workspaceRowBadgeItems: [],
+    agentCornerCards: [],
     legacySidebarItems: sidebarItems.map((item) => ({
       ...item,
       title: item.id,

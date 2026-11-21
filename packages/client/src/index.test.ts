@@ -1134,6 +1134,50 @@ test("agent handles list the session's own commands through the existing daemon 
   await client.close();
 });
 
+test("agent handles expose buildForkContext through agent.fork_context.request", async () => {
+  const { client, ws } = await connectClient();
+  const forkPromise = client.agents
+    .ref("agent_sdk")
+    .buildForkContext({ requestId: "fork-sdk-req" });
+
+  expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
+    type: "agent.fork_context.request",
+    agentId: "agent_sdk",
+    requestId: "fork-sdk-req",
+  });
+
+  ws.message(
+    sessionMessage({
+      type: "agent.fork_context.response",
+      payload: {
+        requestId: "fork-sdk-req",
+        agentId: "agent_sdk",
+        boundaryMessageId: null,
+        attachment: {
+          type: "text",
+          mimeType: "text/plain",
+          contextKind: "chat_history",
+          title: "Forked history",
+          text: "Earlier messages",
+        },
+        itemCount: 2,
+        error: null,
+      },
+    }),
+  );
+
+  await expect(forkPromise).resolves.toMatchObject({
+    agentId: "agent_sdk",
+    itemCount: 2,
+    attachment: {
+      type: "text",
+      contextKind: "chat_history",
+      text: "Earlier messages",
+    },
+  });
+  await client.close();
+});
+
 test("agent handles expose the observed snapshot through readonly properties", async () => {
   const { client, ws } = await connectClient();
   const agent = client.agents.ref("agent_sdk");

@@ -27,6 +27,7 @@ function installation(): InstalledPlugin {
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
     workspaceRowBadgeItems: [],
+    agentCornerCards: [],
     filePanels: [],
     composerItems: [],
     newWorkspaceItems: [],
