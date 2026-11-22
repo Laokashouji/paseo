@@ -9,6 +9,7 @@ interface ComposerHeightArgs {
   maxHeight: number;
   onRenderedLinesChange?: (lines: number) => void;
   presentationKey?: boolean;
+  intrinsic?: boolean;
 }
 
 const COPIED_STYLES = [
@@ -40,6 +41,7 @@ export function useComposerHeight({
   maxHeight,
   onRenderedLinesChange,
   presentationKey,
+  intrinsic = false,
 }: ComposerHeightArgs): ComposerHeightResult {
   const [height, setHeight] = useState(minHeight);
   const heightRef = useRef(minHeight);
@@ -82,7 +84,7 @@ export function useComposerHeight({
   );
 
   useEffect(() => {
-    if (typeof document === "undefined") return;
+    if (intrinsic || typeof document === "undefined") return;
     const mirror = document.createElement("textarea");
     mirror.setAttribute("aria-hidden", "true");
     mirror.setAttribute("tabindex", "-1");
@@ -108,13 +110,15 @@ export function useComposerHeight({
       mirror.remove();
       mirrorRef.current = null;
     };
-  }, [measure]);
+  }, [intrinsic, measure]);
 
   useLayoutEffect(() => {
+    if (intrinsic) return;
     measure(getText());
-  }, [maxHeight, minHeight, getText, measure, presentationKey]);
+  }, [intrinsic, maxHeight, minHeight, getText, measure, presentationKey]);
 
   useEffect(() => {
+    if (intrinsic) return;
     const source = textareaRef.current;
     if (!source || typeof ResizeObserver === "undefined") return;
     let previousWidth = source.clientWidth;
@@ -126,18 +130,30 @@ export function useComposerHeight({
     });
     observer.observe(source);
     return () => observer.disconnect();
-  }, [measure, textareaRef, presentationKey]);
+  }, [intrinsic, measure, textareaRef, presentationKey]);
 
   const onTextChange = useCallback(
     (_previousText: string, nextText: string) => measure(nextText),
     [measure],
   );
   const reset = useCallback(() => setBoundedHeight(minHeight), [minHeight, setBoundedHeight]);
-  const style = useMemo(() => ({ height, minHeight, maxHeight }), [height, maxHeight, minHeight]);
+  const intrinsicStyle = useMemo(() => ({ minHeight, maxHeight }), [maxHeight, minHeight]);
+  const measuredStyle = useMemo(
+    () => ({ height, minHeight, maxHeight }),
+    [height, maxHeight, minHeight],
+  );
+
+  if (intrinsic) {
+    return {
+      mode: "intrinsic",
+      style: intrinsicStyle,
+      scrollEnabled: true,
+    };
+  }
 
   return {
     mode: "measured",
-    style,
+    style: measuredStyle,
     scrollEnabled: height >= maxHeight,
     onTextChange,
     reset,

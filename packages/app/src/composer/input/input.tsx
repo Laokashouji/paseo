@@ -86,9 +86,10 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { useComposerKeyboardScope } from "@/composer/keyboard-scope";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useComposerHeight } from "./height";
+import { ComposerMarkdownInput } from "./markdown-editor";
 import { ComposerInputPresentation } from "./presentation";
 import { resolveComposerInputMode, type ComposerInputMode } from "@/composer/input-mode";
-import { pasteLinkedClipboardText } from "@/composer/pasted-text";
+import { pasteLinkedClipboardText, resolveLinkedClipboardMarkdown } from "@/composer/pasted-text";
 import type { NativePastedFile } from "@/composer/native-pasted-image";
 import {
   EditingTextInput,
@@ -519,6 +520,7 @@ function getTextInputNativeElement(current: ComposerTextInputHandle | null): HTM
 
 interface PasteEffectArgs {
   textarea: HTMLElement | null;
+  textInputRef: React.MutableRefObject<ComposerTextInputHandle | null>;
   isConnected: boolean;
   disabled: boolean;
   isDictating: boolean;
@@ -529,6 +531,7 @@ interface PasteEffectArgs {
 function usePasteEffect(args: PasteEffectArgs): void {
   const {
     textarea,
+    textInputRef,
     isConnected,
     disabled,
     isDictating,
@@ -547,12 +550,22 @@ function usePasteEffect(args: PasteEffectArgs): void {
 
       const imageFiles = collectImageFilesFromClipboardData(event.clipboardData);
       if (imageFiles.length === 0) {
-        if (pasteLinkedClipboardText(textarea, event.clipboardData)) event.preventDefault();
+        const handle = textInputRef.current;
+        if (handle?.insertText) {
+          const markdown = resolveLinkedClipboardMarkdown(event.clipboardData);
+          if (markdown !== null && handle.insertText(markdown)) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        } else if (pasteLinkedClipboardText(textarea, event.clipboardData)) {
+          event.preventDefault();
+        }
         return;
       }
       if (!isConnected || !onAddImages) return;
 
       event.preventDefault();
+      event.stopPropagation();
 
       void filesToImageAttachments(imageFiles)
         .then((pastedAttachments) => {
@@ -565,12 +578,20 @@ function usePasteEffect(args: PasteEffectArgs): void {
         });
     };
 
-    textarea.addEventListener("paste", handlePaste);
+    textarea.addEventListener("paste", handlePaste, true);
     return () => {
       disposed = true;
-      textarea.removeEventListener?.("paste", handlePaste);
+      textarea.removeEventListener?.("paste", handlePaste, true);
     };
-  }, [disabled, textarea, isConnected, isDictating, isRealtimeVoiceForCurrentAgent, onAddImages]);
+  }, [
+    disabled,
+    textarea,
+    textInputRef,
+    isConnected,
+    isDictating,
+    isRealtimeVoiceForCurrentAgent,
+    onAddImages,
+  ]);
 }
 
 function useAutoFocusOnWebEffect(
@@ -716,6 +737,9 @@ interface ComposerTextSurfaceProps {
   onPasteError: (message: string) => void;
   fullscreen: boolean;
   compact: boolean;
+  useMarkdownEditor: boolean;
+  minHeight: number;
+  maxHeight: number;
   onRenderedLinesChange: (lines: number) => void;
   focusHintVisible: boolean;
   focusInputKeys: ShortcutChord | null | undefined;
@@ -766,25 +790,47 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
           {`${measurementText}\u200b`}
         </Text>
       ) : null}
-      <ComposerTextInput
-        ref={props.textInputRef}
-        dataSet={COMPOSER_INPUT_DATASET}
-        initialValue={props.value}
-        onChangeText={handleTextChange}
-        placeholder={props.placeholder}
-        accessibilityLabel={props.accessibilityLabel}
-        onFocus={props.onFocus}
-        onBlur={props.onBlur}
-        style={props.textInputStyle}
-        multiline
-        scrollEnabled={props.scrollEnabled}
-        editable={props.editable}
-        onKeyPress={props.onKeyPress}
-        onSelectionChange={props.onSelectionChange}
-        onPasteImages={props.onPasteImages}
-        onPasteError={props.onPasteError}
-        autoFocus={props.autoFocus}
-      />
+      {props.useMarkdownEditor ? (
+        <ComposerMarkdownInput
+          ref={props.textInputRef}
+          dataSet={COMPOSER_INPUT_DATASET}
+          initialValue={props.value}
+          onChangeText={handleTextChange}
+          placeholder={props.placeholder}
+          accessibilityLabel={props.accessibilityLabel}
+          onFocus={props.onFocus}
+          onBlur={props.onBlur}
+          editable={props.editable}
+          onKeyPress={props.onKeyPress}
+          onSelectionChange={props.onSelectionChange}
+          fullscreen={props.fullscreen}
+          compact={props.compact}
+          minHeight={props.minHeight}
+          maxHeight={props.maxHeight}
+          onRenderedLinesChange={onRenderedLinesChange}
+          autoFocus={props.autoFocus}
+        />
+      ) : (
+        <ComposerTextInput
+          ref={props.textInputRef}
+          dataSet={COMPOSER_INPUT_DATASET}
+          initialValue={props.value}
+          onChangeText={handleTextChange}
+          placeholder={props.placeholder}
+          accessibilityLabel={props.accessibilityLabel}
+          onFocus={props.onFocus}
+          onBlur={props.onBlur}
+          style={props.textInputStyle}
+          multiline
+          scrollEnabled={props.scrollEnabled}
+          editable={props.editable}
+          onKeyPress={props.onKeyPress}
+          onSelectionChange={props.onSelectionChange}
+          onPasteImages={props.onPasteImages}
+          onPasteError={props.onPasteError}
+          autoFocus={props.autoFocus}
+        />
+      )}
       <FocusHint
         visible={props.focusHintVisible}
         focusInputKeys={props.focusInputKeys}
@@ -1130,6 +1176,11 @@ function getComposerInputSnapshot(
   fallbackText: string,
   fallbackSelection: ComposerInputSnapshot["selection"],
 ): ComposerInputSnapshot {
+  const handleSelection = current?.getSelection?.();
+  if (handleSelection) {
+    const text = current?.getText() ?? fallbackText;
+    return { text, selection: handleSelection };
+  }
   const textArea = getWebTextAreaImpl(current);
   const text = textArea?.value ?? current?.getText() ?? fallbackText;
   const start = textArea?.selectionStart ?? fallbackSelection.start;
@@ -1385,7 +1436,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     const assignTextInput = useCallback((input: ComposerTextInputHandle | null) => {
       textInputRef.current = input;
       if (!isWeb) return;
-      const element = getWebTextAreaImpl(input) as HTMLElement | null;
+      const element = getTextInputNativeElement(input);
       webTextareaRef.current = element;
       setWebTextArea(element);
     }, []);
@@ -1435,6 +1486,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       };
     }, [editingSession]);
     const getLiveText = useCallback(() => valueRef.current, []);
+    const useMarkdownEditor = isWeb && !mode.isMonospace;
     const composerHeight = useComposerHeight({
       getText: getLiveText,
       textareaRef: webTextareaRef,
@@ -1442,6 +1494,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       maxHeight: maxInputHeight,
       onRenderedLinesChange: setRenderedLines,
       presentationKey: isFullscreen,
+      intrinsic: useMarkdownEditor,
     });
     const { style: composerHeightStyle, scrollEnabled: isComposerScrollEnabled } = composerHeight;
     const measuredComposerHeight = composerHeight.mode === "measured" ? composerHeight : undefined;
@@ -1856,6 +1909,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
 
     usePasteEffect({
       textarea: webTextArea,
+      textInputRef,
       isConnected,
       disabled,
       isDictating,
@@ -2182,6 +2236,9 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             onPasteError={handlePasteError}
             fullscreen={isFullscreen}
             compact={isCompact}
+            useMarkdownEditor={useMarkdownEditor}
+            minHeight={MIN_INPUT_HEIGHT}
+            maxHeight={maxInputHeight}
             onRenderedLinesChange={setRenderedLines}
             focusHintVisible={!isFullscreen && isWeb && !isInputFocused && !hasLiveText}
             focusInputKeys={focusInputKeys}
@@ -2214,6 +2271,8 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         handlePasteError,
         isFullscreen,
         isCompact,
+        useMarkdownEditor,
+        maxInputHeight,
         isInputFocused,
         hasLiveText,
         value,

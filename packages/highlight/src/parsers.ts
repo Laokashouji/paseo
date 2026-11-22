@@ -11,7 +11,7 @@ import { parser as goParser } from "@lezer/go";
 import { parser as htmlParser } from "@lezer/html";
 import { parser as javaParser } from "@lezer/java";
 import { parser as pythonParser } from "@lezer/python";
-import { parser as markdownParser } from "@lezer/markdown";
+import { GFM, parseCode, parser as markdownParser } from "@lezer/markdown";
 import { parser as phpParser } from "@lezer/php";
 import { parser as rustParser } from "@lezer/rust";
 import { parser as xmlParser } from "@lezer/xml";
@@ -32,6 +32,42 @@ function language(parser: Parser): Language {
 
 const shellLanguage = StreamLanguage.define(shell);
 const dockerfileLanguage = StreamLanguage.define(dockerFile);
+
+const FENCE_LANGUAGE_ALIASES: Record<string, string> = {
+  javascript: "js",
+  typescript: "ts",
+  python: "py",
+  shell: "sh",
+  shellscript: "sh",
+  golang: "go",
+  rust: "rs",
+  csharp: "cs",
+  "c#": "cs",
+  "c++": "cpp",
+  "objective-c": "m",
+  objc: "m",
+  docker: "dockerfile",
+  terraform: "tf",
+  elixir: "ex",
+  markdown: "md",
+  jsonc: "json",
+  json5: "json",
+  htm: "html",
+};
+
+const gfmMarkdownParser = markdownParser.configure(GFM);
+
+function resolveFenceCodeParser(info: string): Parser | null {
+  const token = info.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+  if (!token) return null;
+  const key = FENCE_LANGUAGE_ALIASES[token] ?? token;
+  if (key === "md" || key === "mdx") return gfmMarkdownParser;
+  return languagesByExtension[key]?.parser ?? null;
+}
+
+const richMarkdownLanguage = language(
+  gfmMarkdownParser.configure(parseCode({ codeParser: resolveFenceCodeParser })),
+);
 
 const languagesByExtension: Record<string, Language> = {
   // JavaScript/TypeScript
@@ -102,8 +138,8 @@ const languagesByExtension: Record<string, Language> = {
   ex: language(elixirParser),
   exs: language(elixirParser),
   // Markdown
-  md: language(markdownParser),
-  mdx: language(markdownParser),
+  md: richMarkdownLanguage,
+  mdx: richMarkdownLanguage,
 };
 
 export function getLanguageForFile(filename: string): Language | null {

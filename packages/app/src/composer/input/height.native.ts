@@ -9,6 +9,7 @@ interface ComposerHeightArgs {
   maxHeight: number;
   onRenderedLinesChange?: (lines: number) => void;
   presentationKey?: boolean;
+  intrinsic?: boolean;
 }
 
 export function useComposerHeight({
