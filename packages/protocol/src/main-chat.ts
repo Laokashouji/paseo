@@ -8,7 +8,211 @@ export const MAIN_CHAT_TASK_ID_LABEL = "paseo.main-chat.task-id";
 export const MAIN_CHAT_TASK_MODE_LABEL = "paseo.main-chat.mode";
 export const MAIN_CHAT_TASK_GOAL_LABEL = "paseo.main-chat.goal";
 export const MAIN_CHAT_WORKSPACE_DIR_NAME = "main-chat";
-export const MAIN_CHAT_DEFAULT_TITLE = "主对话";
+export const MAIN_CHAT_DEFAULT_TITLE = "对话管理";
+
+export const MainChatStyleSchema = z.enum(["conservative", "proactive"]);
+export type MainChatStyle = z.infer<typeof MainChatStyleSchema>;
+
+export const MainChatBackgroundModelModeSchema = z.enum(["auto", "main", "custom"]);
+export type MainChatBackgroundModelMode = z.infer<typeof MainChatBackgroundModelModeSchema>;
+
+export const MainChatBackgroundModelConfigSchema = z.object({
+  mode: MainChatBackgroundModelModeSchema,
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  thinkingOptionId: z.string().nullable(),
+});
+export type MainChatBackgroundModelConfig = z.infer<typeof MainChatBackgroundModelConfigSchema>;
+
+export const MainChatIntervalsSchema = z.object({
+  patrolIntervalSec: z.number().int().min(15).max(3600),
+  triageSettleSec: z.number().int().min(5).max(300),
+  stalledThresholdMin: z.number().int().min(2).max(240),
+  noProgressThresholdMin: z.number().int().min(2).max(120),
+  needsYouEscalateMin: z.number().int().min(1).max(120),
+  wakeupCooldownMin: z.number().int().min(1).max(240),
+});
+export type MainChatIntervals = z.infer<typeof MainChatIntervalsSchema>;
+
+export const MainChatCapabilitiesSchema = z.object({
+  semanticTriageEnabled: z.boolean(),
+  proactiveWakeupEnabled: z.boolean(),
+  initialBriefingEnabled: z.boolean(),
+  autoContinueManualErrors: z.boolean(),
+  autoDelegateManualQuestions: z.boolean(),
+  autoNudgeManualStalled: z.boolean(),
+});
+export type MainChatCapabilities = z.infer<typeof MainChatCapabilitiesSchema>;
+
+export const MainChatSettingsSchema = z.object({
+  title: z.string().trim().min(1).max(40),
+  style: MainChatStyleSchema,
+  backgroundModel: MainChatBackgroundModelConfigSchema,
+  intervals: MainChatIntervalsSchema,
+  capabilities: MainChatCapabilitiesSchema,
+});
+export type MainChatSettings = z.infer<typeof MainChatSettingsSchema>;
+
+export const MainChatSettingsPatchSchema = z.object({
+  applyPreset: MainChatStyleSchema.optional(),
+  title: z.string().trim().min(1).max(40).optional(),
+  style: MainChatStyleSchema.optional(),
+  backgroundModel: MainChatBackgroundModelConfigSchema.partial().optional(),
+  intervals: MainChatIntervalsSchema.partial().optional(),
+  capabilities: MainChatCapabilitiesSchema.partial().optional(),
+});
+export type MainChatSettingsPatch = z.infer<typeof MainChatSettingsPatchSchema>;
+
+export const MainChatSessionPhaseSchema = z.enum([
+  "working",
+  "done",
+  "blocked_user",
+  "blocked_external",
+  "interrupted",
+  "stalled",
+  "no_progress",
+  "unsure",
+]);
+export type MainChatSessionPhase = z.infer<typeof MainChatSessionPhaseSchema>;
+
+export const MainChatSessionTriageSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string().nullable(),
+  title: z.string(),
+  managedByMainChat: z.boolean(),
+  phase: MainChatSessionPhaseSchema,
+  summary: z.string(),
+  waitReason: z.string().nullable(),
+  suggestedAction: z.string().nullable(),
+  triageSource: z.enum(["rule", "model"]),
+  updatedAt: z.string(),
+});
+export type MainChatSessionTriage = z.infer<typeof MainChatSessionTriageSchema>;
+
+export const MainChatPatrolResultSchema = z.object({
+  scannedSessions: z.number().int().nonnegative(),
+  signalsFound: z.number().int().nonnegative(),
+  wokeMainChat: z.boolean(),
+  summary: z.string(),
+  patrolledAt: z.string(),
+});
+export type MainChatPatrolResult = z.infer<typeof MainChatPatrolResultSchema>;
+
+export interface MainChatStylePreset {
+  style: MainChatStyle;
+  intervals: MainChatIntervals;
+  capabilities: MainChatCapabilities;
+  backgroundModel: MainChatBackgroundModelConfig;
+}
+
+export const MAIN_CHAT_STYLE_PRESETS: Record<MainChatStyle, MainChatStylePreset> = {
+  conservative: {
+    style: "conservative",
+    intervals: {
+      patrolIntervalSec: 60,
+      triageSettleSec: 20,
+      stalledThresholdMin: 15,
+      noProgressThresholdMin: 10,
+      needsYouEscalateMin: 5,
+      wakeupCooldownMin: 10,
+    },
+    capabilities: {
+      semanticTriageEnabled: true,
+      proactiveWakeupEnabled: true,
+      initialBriefingEnabled: true,
+      autoContinueManualErrors: true,
+      autoDelegateManualQuestions: false,
+      autoNudgeManualStalled: false,
+    },
+    backgroundModel: {
+      mode: "auto",
+      provider: null,
+      model: null,
+      thinkingOptionId: null,
+    },
+  },
+  proactive: {
+    style: "proactive",
+    intervals: {
+      patrolIntervalSec: 30,
+      triageSettleSec: 15,
+      stalledThresholdMin: 10,
+      noProgressThresholdMin: 6,
+      needsYouEscalateMin: 3,
+      wakeupCooldownMin: 3,
+    },
+    capabilities: {
+      semanticTriageEnabled: true,
+      proactiveWakeupEnabled: true,
+      initialBriefingEnabled: true,
+      autoContinueManualErrors: true,
+      autoDelegateManualQuestions: true,
+      autoNudgeManualStalled: true,
+    },
+    backgroundModel: {
+      mode: "auto",
+      provider: null,
+      model: null,
+      thinkingOptionId: null,
+    },
+  },
+};
+
+export function getMainChatStylePreset(style: MainChatStyle): MainChatStylePreset {
+  const preset = MAIN_CHAT_STYLE_PRESETS[style];
+  return {
+    style: preset.style,
+    intervals: { ...preset.intervals },
+    capabilities: { ...preset.capabilities },
+    backgroundModel: { ...preset.backgroundModel },
+  };
+}
+
+export function createDefaultMainChatSettings(
+  style: MainChatStyle = "conservative",
+): MainChatSettings {
+  const preset = getMainChatStylePreset(style);
+  return {
+    title: MAIN_CHAT_DEFAULT_TITLE,
+    style: preset.style,
+    backgroundModel: preset.backgroundModel,
+    intervals: preset.intervals,
+    capabilities: preset.capabilities,
+  };
+}
+
+export function mergeMainChatSettings(
+  current: MainChatSettings,
+  patch: MainChatSettingsPatch,
+): MainChatSettings {
+  const presetBase = patch.applyPreset ? getMainChatStylePreset(patch.applyPreset) : null;
+  const base: MainChatSettings = presetBase
+    ? {
+        title: current.title,
+        style: presetBase.style,
+        backgroundModel: { ...current.backgroundModel },
+        intervals: presetBase.intervals,
+        capabilities: presetBase.capabilities,
+      }
+    : current;
+  const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
+  return MainChatSettingsSchema.parse({
+    title: nextTitle,
+    style: patch.style ?? base.style,
+    backgroundModel: {
+      ...base.backgroundModel,
+      ...patch.backgroundModel,
+    },
+    intervals: {
+      ...base.intervals,
+      ...patch.intervals,
+    },
+    capabilities: {
+      ...base.capabilities,
+      ...patch.capabilities,
+    },
+  });
+}
 
 export const MainChatTaskModeSchema = z.enum(["readonly", "write"]);
 export type MainChatTaskMode = z.infer<typeof MainChatTaskModeSchema>;
@@ -142,6 +346,12 @@ export const MainChatMetricsSchema = z.object({
   reworkCount: z.number().int().nonnegative(),
   stalledNudges: z.number().int().nonnegative(),
   usageLimitRetries: z.number().int().nonnegative(),
+  patrolRuns: z.number().int().nonnegative().optional(),
+  triageRuleCount: z.number().int().nonnegative().optional(),
+  triageModelCount: z.number().int().nonnegative().optional(),
+  proactiveWakeups: z.number().int().nonnegative().optional(),
+  autoDelegatedQuestions: z.number().int().nonnegative().optional(),
+  noProgressNudges: z.number().int().nonnegative().optional(),
 });
 export type MainChatMetrics = z.infer<typeof MainChatMetricsSchema>;
 
@@ -151,6 +361,10 @@ export const MainChatOverviewSchema = z.object({
   autoStartRules: z.array(MainChatAutoStartRuleSchema),
   permissionRules: z.array(MainChatPermissionRuleSchema),
   metrics: MainChatMetricsSchema,
+  settings: MainChatSettingsSchema.optional(),
+  triages: z.array(MainChatSessionTriageSchema).optional(),
+  lastPatrolAt: z.string().nullable().optional(),
+  lastWakeupAt: z.string().nullable().optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -348,6 +562,72 @@ export const MainChatRemoveRuleResponseSchema = z.object({
 });
 export type MainChatRemoveRuleResponse = z.infer<typeof MainChatRemoveRuleResponseSchema>;
 
+export const MainChatGetSettingsRequestSchema = z.object({
+  type: z.literal("main_chat.get_settings.request"),
+  requestId: z.string(),
+});
+export type MainChatGetSettingsRequest = z.infer<typeof MainChatGetSettingsRequestSchema>;
+
+export const MainChatGetSettingsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  settings: MainChatSettingsSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatGetSettingsResponsePayload = z.infer<
+  typeof MainChatGetSettingsResponsePayloadSchema
+>;
+
+export const MainChatGetSettingsResponseSchema = z.object({
+  type: z.literal("main_chat.get_settings.response"),
+  payload: MainChatGetSettingsResponsePayloadSchema,
+});
+export type MainChatGetSettingsResponse = z.infer<typeof MainChatGetSettingsResponseSchema>;
+
+export const MainChatUpdateSettingsRequestSchema = z.object({
+  type: z.literal("main_chat.update_settings.request"),
+  requestId: z.string(),
+  patch: MainChatSettingsPatchSchema,
+});
+export type MainChatUpdateSettingsRequest = z.infer<typeof MainChatUpdateSettingsRequestSchema>;
+
+export const MainChatUpdateSettingsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  settings: MainChatSettingsSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatUpdateSettingsResponsePayload = z.infer<
+  typeof MainChatUpdateSettingsResponsePayloadSchema
+>;
+
+export const MainChatUpdateSettingsResponseSchema = z.object({
+  type: z.literal("main_chat.update_settings.response"),
+  payload: MainChatUpdateSettingsResponsePayloadSchema,
+});
+export type MainChatUpdateSettingsResponse = z.infer<typeof MainChatUpdateSettingsResponseSchema>;
+
+export const MainChatTriggerPatrolRequestSchema = z.object({
+  type: z.literal("main_chat.trigger_patrol.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+  forceWakeup: z.boolean().optional(),
+});
+export type MainChatTriggerPatrolRequest = z.infer<typeof MainChatTriggerPatrolRequestSchema>;
+
+export const MainChatTriggerPatrolResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  result: MainChatPatrolResultSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatTriggerPatrolResponsePayload = z.infer<
+  typeof MainChatTriggerPatrolResponsePayloadSchema
+>;
+
+export const MainChatTriggerPatrolResponseSchema = z.object({
+  type: z.literal("main_chat.trigger_patrol.response"),
+  payload: MainChatTriggerPatrolResponsePayloadSchema,
+});
+export type MainChatTriggerPatrolResponse = z.infer<typeof MainChatTriggerPatrolResponseSchema>;
+
 export interface MainChatTaskLabelsMeta {
   planId: string | null;
   taskId: string | null;
@@ -361,6 +641,19 @@ export function isMainChatLabels(labels: Record<string, unknown> | null | undefi
 
 export function isMainChatAgent(agent: AgentLabelSource | null | undefined): boolean {
   return Boolean(agent && isMainChatLabels(agent.labels));
+}
+
+/**
+ * Matches the dedicated main-chat workspace directory (`<paseoHome>/main-chat`),
+ * e.g. `/home/user/.paseo/main-chat` or `.dev/paseo-home/main-chat`.
+ */
+export function isMainChatWorkspaceDirectory(dirPath: string | null | undefined): boolean {
+  if (!dirPath) return false;
+  const normalized = dirPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalized.endsWith(`/${MAIN_CHAT_WORKSPACE_DIR_NAME}`)) return false;
+  const parent = normalized.slice(0, -(MAIN_CHAT_WORKSPACE_DIR_NAME.length + 1));
+  const parentBase = parent.slice(parent.lastIndexOf("/") + 1).toLowerCase();
+  return parentBase === ".paseo" || parentBase === "paseo-home" || parentBase.includes("paseo");
 }
 
 export function getMainChatTaskMetaFromLabels(

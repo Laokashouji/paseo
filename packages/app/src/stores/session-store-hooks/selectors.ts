@@ -5,8 +5,9 @@ import {
   type WorkspaceStructure,
   type WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
+import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
-import type { ProjectDescriptor, WorkspaceDescriptor } from "../session-store";
+import type { Agent, ProjectDescriptor, WorkspaceDescriptor } from "../session-store";
 
 export type { WorkspaceStructure, WorkspaceStructureProject } from "@/projects/workspace-structure";
 
@@ -18,6 +19,7 @@ export interface SessionsSnapshot {
       hasWorkspaceDirectorySnapshot?: boolean;
       workspaces: Map<string, WorkspaceDescriptor>;
       projects?: Map<string, ProjectDescriptor>;
+      agents?: Map<string, Agent>;
     }
   >;
 }
@@ -167,10 +169,24 @@ export function selectWorkspaceStructureProjects(
     if (!projects || projects.size === 0) {
       continue;
     }
+    const hiddenProjectIds = new Set<string>();
+    const visibleWorkspaces: WorkspaceDescriptor[] = [];
+    for (const workspace of workspaces?.values() ?? []) {
+      if (isMainChatDedicatedWorkspace(workspace, session.agents)) {
+        hiddenProjectIds.add(workspace.projectId);
+        continue;
+      }
+      visibleWorkspaces.push(workspace);
+    }
+    const visibleProjectIds = new Set(visibleWorkspaces.map((workspace) => workspace.projectId));
+    const visibleProjects = Array.from(projects.values()).filter(
+      (project) =>
+        !hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId),
+    );
     sessions.push({
       serverId,
-      workspaces: workspaces?.values() ?? [],
-      projects: projects.values(),
+      workspaces: visibleWorkspaces,
+      projects: visibleProjects,
     });
   }
 

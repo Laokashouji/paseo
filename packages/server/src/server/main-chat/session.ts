@@ -11,6 +11,9 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.answer_decision.request" }
   | { type: "main_chat.add_permission_rule.request" }
   | { type: "main_chat.remove_rule.request" }
+  | { type: "main_chat.get_settings.request" }
+  | { type: "main_chat.update_settings.request" }
+  | { type: "main_chat.trigger_patrol.request" }
 >;
 
 type SendFn = (response: SessionOutboundMessage) => void;
@@ -74,6 +77,24 @@ function sendUnconfiguredError(msg: MainChatSessionMessage, send: SendFn): void 
       send({
         type: "main_chat.remove_rule.response",
         payload: { requestId: msg.requestId, removed: false, error },
+      });
+      return;
+    case "main_chat.get_settings.request":
+      send({
+        type: "main_chat.get_settings.response",
+        payload: { requestId: msg.requestId, settings: null, error },
+      });
+      return;
+    case "main_chat.update_settings.request":
+      send({
+        type: "main_chat.update_settings.response",
+        payload: { requestId: msg.requestId, settings: null, error },
+      });
+      return;
+    case "main_chat.trigger_patrol.request":
+      send({
+        type: "main_chat.trigger_patrol.response",
+        payload: { requestId: msg.requestId, result: null, error },
       });
       return;
   }
@@ -253,6 +274,65 @@ async function handleGovernanceMessages(
   }
 }
 
+async function handleStewardConfigMessages(
+  service: MainChatService,
+  msg: Extract<
+    MainChatSessionMessage,
+    | { type: "main_chat.get_settings.request" }
+    | { type: "main_chat.update_settings.request" }
+    | { type: "main_chat.trigger_patrol.request" }
+  >,
+  send: SendFn,
+): Promise<void> {
+  if (msg.type === "main_chat.get_settings.request") {
+    try {
+      const settings = await service.getSettings();
+      send({
+        type: "main_chat.get_settings.response",
+        payload: { requestId: msg.requestId, settings, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.get_settings.response",
+        payload: { requestId: msg.requestId, settings: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.update_settings.request") {
+    try {
+      const settings = await service.updateSettings(msg.patch);
+      send({
+        type: "main_chat.update_settings.response",
+        payload: { requestId: msg.requestId, settings, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.update_settings.response",
+        payload: { requestId: msg.requestId, settings: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  try {
+    const result = await service.triggerPatrol({
+      mainAgentId: msg.mainAgentId,
+      forceWakeup: msg.forceWakeup ?? true,
+    });
+    send({
+      type: "main_chat.trigger_patrol.response",
+      payload: { requestId: msg.requestId, result, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.trigger_patrol.response",
+      payload: { requestId: msg.requestId, result: null, error: errorMessage(error) },
+    });
+  }
+}
+
 export async function handleMainChatSessionMessage(
   service: MainChatService | null,
   msg: MainChatSessionMessage,
@@ -275,6 +355,11 @@ export async function handleMainChatSessionMessage(
     case "main_chat.add_permission_rule.request":
     case "main_chat.remove_rule.request":
       await handleGovernanceMessages(service, msg, send);
+      return;
+    case "main_chat.get_settings.request":
+    case "main_chat.update_settings.request":
+    case "main_chat.trigger_patrol.request":
+      await handleStewardConfigMessages(service, msg, send);
       return;
   }
 }

@@ -2463,6 +2463,7 @@ export const es: TranslationResources = {
       chat: "Chat",
       appearance: "Apariencia",
       sidebar: "Barra lateral",
+      mainChat: en.settings.sections.mainChat,
       terminal: "Terminal",
       browser: "Navegador",
       editor: "Editor",

@@ -36,6 +36,7 @@ import { density, densityIconBox, densityIconProps } from "@/styles/density";
 import type { Theme } from "@/styles/theme";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { getSidebarRowBackdrop } from "@/components/sidebar/sidebar-row-backdrop";
+import { SidebarPinnedMainChatRow, useShouldShowPinnedMainChat } from "@/main-chat/pinned-row";
 import { type GestureType } from "react-native-gesture-handler";
 import { useSidebarWorkspaceRename } from "@/workspace-rename";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
@@ -2500,9 +2501,10 @@ function ProjectModeList({
       />
     );
 
+  const showPinnedMainChat = useShouldShowPinnedMainChat();
   const content = (
     <>
-      {pinnedChats.length > 0 ? (
+      {pinnedChats.length > 0 || showPinnedMainChat ? (
         <View style={styles.pinnedSection} testID="sidebar-pinned-section">
           <SidebarSectionHeader
             title={t("sidebar.pinned.title")}
@@ -2512,21 +2514,24 @@ function ProjectModeList({
           />
           {pinnedCollapsed ? null : (
             <>
+              <SidebarPinnedMainChatRow onBeforeNavigate={onWorkspacePress} />
               {leadingPinnedChat ? renderPinnedChatRow(leadingPinnedChat) : null}
-              <DraggableList
-                testID="sidebar-pinned-list"
-                data={visiblePinnedChats}
-                keyExtractor={workspaceKeyExtractor}
-                renderItem={renderPinnedChat}
-                onDragEnd={onPinnedWorkspaceReorder}
-                extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
-                scrollEnabled={false}
-                useDragHandle
-                nestable={platformIsNative}
-                simultaneousGestureRef={parentGestureRef}
-                gestureHostPresented={dragGestureHostActive}
-                containerStyle={styles.workspaceListContainer}
-              />
+              {visiblePinnedChats.length > 0 ? (
+                <DraggableList
+                  testID="sidebar-pinned-list"
+                  data={visiblePinnedChats}
+                  keyExtractor={workspaceKeyExtractor}
+                  renderItem={renderPinnedChat}
+                  onDragEnd={onPinnedWorkspaceReorder}
+                  extraData={activeWorkspaceSelectionKey(activeWorkspaceSelection)}
+                  scrollEnabled={false}
+                  useDragHandle
+                  nestable={platformIsNative}
+                  simultaneousGestureRef={parentGestureRef}
+                  gestureHostPresented={dragGestureHostActive}
+                  containerStyle={styles.workspaceListContainer}
+                />
+              ) : null}
               {canTogglePinnedChats ? (
                 <SidebarGroupToggleRow
                   expanded={pinnedChatsExpanded}

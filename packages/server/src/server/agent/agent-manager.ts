@@ -22,6 +22,7 @@ import {
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
+import type { MainChatSettings } from "@getpaseo/protocol/main-chat";
 import { appendMainChatSystemPrompt } from "../main-chat/prompts.js";
 import type { Logger } from "pino";
 import type { ToolPolicy } from "@getpaseo/protocol/agent-types";
@@ -875,6 +876,11 @@ export class AgentManager {
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
+  private mainChatSettingsReader: (() => MainChatSettings | null) | null = null;
+
+  setMainChatSettingsReader(reader: (() => MainChatSettings | null) | null): void {
+    this.mainChatSettingsReader = reader;
+  }
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
@@ -6488,7 +6494,11 @@ export class AgentManager {
         mcpServerOwners = transformed.mcpServerOwners;
       }
     }
-    appendSystemPrompt = appendMainChatSystemPrompt(opening, appendSystemPrompt);
+    appendSystemPrompt = appendMainChatSystemPrompt(
+      opening,
+      appendSystemPrompt,
+      this.mainChatSettingsReader?.(),
+    );
     const context: AgentLaunchContext = {
       agentId,
       ...pluginPromptContext(appendSystemPrompt),

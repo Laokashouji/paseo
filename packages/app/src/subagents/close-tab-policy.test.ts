@@ -14,6 +14,17 @@ describe("resolveCloseAgentTabPolicy", () => {
     });
   });
 
+  it("keeps main chat steward tab close layout-only", () => {
+    expect(
+      resolveCloseAgentTabPolicy({
+        parentAgentId: null,
+        labels: { "paseo.role": "main" },
+      }),
+    ).toEqual({
+      kind: "layout-only",
+    });
+  });
+
   it("preserves the existing archive fallback when the agent is missing", () => {
     expect(resolveCloseAgentTabPolicy(null)).toEqual({ kind: "archive-on-close" });
     expect(resolveCloseAgentTabPolicy(undefined)).toEqual({ kind: "archive-on-close" });

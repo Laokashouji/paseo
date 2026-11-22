@@ -2740,6 +2740,9 @@ export class Session {
       case "main_chat.answer_decision.request":
       case "main_chat.add_permission_rule.request":
       case "main_chat.remove_rule.request":
+      case "main_chat.get_settings.request":
+      case "main_chat.update_settings.request":
+      case "main_chat.trigger_patrol.request":
         return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
           this.emit(response),
         );
@@ -9194,11 +9197,14 @@ export class Session {
           await receipt.dispatched;
           return;
         }
+        const effectivePrompt = this.mainChatService
+          ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
+          : prompt;
         const result = await sendPromptToAgent({
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
           agentId,
-          prompt,
+          prompt: effectivePrompt,
           messageId: msg.messageId,
           activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
           sessionMode: msg.sessionMode,

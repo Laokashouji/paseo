@@ -1580,12 +1580,15 @@ export async function createPaseoDaemon(
     providerSnapshotManager,
     workspaceRegistry,
     createDirectoryWorkspace: createDirectoryWorkspaceExternal,
+    emitWorkspaceUpdates: emitWorkspaceUpdatesExternal,
+    readDaemonConfig: () => daemonConfigStore.get(),
     ensureWorkspaceForCreate: createAgentCommandDependencies.ensureWorkspaceForCreate,
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     finishSubscriptions: () => finishSubscriptions,
     terminalManager,
     logger,
   });
+  agentManager.setMainChatSettingsReader(() => mainChatService.getCurrentSettings());
 
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,

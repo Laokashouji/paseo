@@ -61,6 +61,11 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
     return Boolean(agent?.archivedAt);
   });
+  const isMainChatSteward = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    return agent?.labels?.["paseo.role"] === "main";
+  });
   const agentStatus = useSessionStore((state) => {
     const session = state.sessions[serverId];
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
@@ -262,7 +267,7 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
     void handlePress();
   }, [handlePress]);
 
-  if (isAgentArchived) {
+  if (isAgentArchived || isMainChatSteward) {
     return null;
   }
 

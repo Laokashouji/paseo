@@ -1,3 +1,21 @@
+import { z } from "zod";
+import type {
+  MainChatBackgroundModelConfig,
+  MainChatSessionPhase,
+} from "@getpaseo/protocol/main-chat";
+import type { AgentManager } from "../agent/agent-manager.js";
+import {
+  generateStructuredAgentResponseWithFallback,
+  type StructuredGenerationLogger,
+  type StructuredGenerationProvider,
+} from "../agent/agent-response-loop.js";
+import type { AgentProvider } from "../agent/agent-sdk-types.js";
+import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
+import {
+  resolveStructuredGenerationProviders,
+  type StructuredGenerationDaemonConfig,
+} from "../agent/structured-generation-providers.js";
+
 export type MainChatErrorClass = "transient" | "usage_limit" | "user";
 
 const USER_PATTERNS = [
@@ -79,4 +97,292 @@ export function parseUsageLimitResetDelayMs(
     return clampUsageLimitDelay(totalMs);
   }
   return clampUsageLimitDelay(fallbackMs);
+}
+
+// ============================================================================
+// No-progress loop classification & delegation anti-repeat helpers
+// ============================================================================
+
+const SUBSTANTIVE_TOOL_PATTERNS = [
+  /^(edit|write|notebookedit|apply_patch|patch|multi_edit|replace|create_file|delete_file)$/i,
+  /^task_(plan|start|rework|complete|ask_user)$/i,
+];
+
+const WAIT_OR_POLL_COMMAND_PATTERN =
+  /\b(sleep|wait|watch|tail\s+-f|git\s+status|gh\s+run\s+(watch|view|list)|kubectl\s+get|ps\s+aux|curl\s+-s)\b/i;
+
+const NO_PROGRESS_TOOL_PATTERNS = [
+  /^(schedulewakeup|monitor|sleep|wait|get_agent_activity|task_list)$/i,
+];
+
+export function isSubstantiveProgressToolCall(
+  toolName: string,
+  detailText?: string | null,
+): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  if (SUBSTANTIVE_TOOL_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  if (
+    (normalized === "bash" || normalized === "shell" || normalized === "terminal") &&
+    detailText
+  ) {
+    if (
+      /\b(git\s+(commit|push|merge|cherry-pick)|jj\s+(commit|describe|squash)|npm\s+run\s+(build|test)|vitest|pytest|cargo\s+test|go\s+test)\b/i.test(
+        detailText,
+      )
+    ) {
+      return !WAIT_OR_POLL_COMMAND_PATTERN.test(detailText);
+    }
+  }
+  return false;
+}
+
+export function isNoProgressToolCall(toolName: string, detailText?: string | null): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  if (NO_PROGRESS_TOOL_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  if (
+    (normalized === "bash" || normalized === "shell" || normalized === "terminal") &&
+    detailText
+  ) {
+    return WAIT_OR_POLL_COMMAND_PATTERN.test(detailText);
+  }
+  return false;
+}
+
+function normalizeQuestionText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
+
+function buildBigrams(text: string): Set<string> {
+  const set = new Set<string>();
+  if (text.length < 2) {
+    if (text.length === 1) set.add(text);
+    return set;
+  }
+  for (let i = 0; i < text.length - 1; i += 1) {
+    set.add(text.slice(i, i + 2));
+  }
+  return set;
+}
+
+/**
+ * Returns true if the candidate question matches a previously delegated question (exact after
+ * stripping spaces/punctuation, or bigram Dice similarity >= 0.8), preventing auto-answer loops.
+ */
+export function isSimilarDelegatedQuestion(
+  candidate: string,
+  previousQuestions: readonly string[],
+): boolean {
+  const normalizedCandidate = normalizeQuestionText(candidate);
+  if (!normalizedCandidate) return false;
+  const candidateBigrams = buildBigrams(normalizedCandidate);
+
+  for (const prev of previousQuestions) {
+    const normalizedPrev = normalizeQuestionText(prev);
+    if (!normalizedPrev) continue;
+    if (normalizedPrev === normalizedCandidate) return true;
+    const prevBigrams = buildBigrams(normalizedPrev);
+    let intersection = 0;
+    for (const bg of candidateBigrams) {
+      if (prevBigrams.has(bg)) intersection += 1;
+    }
+    const denominator = candidateBigrams.size + prevBigrams.size;
+    if (denominator > 0 && (2 * intersection) / denominator >= 0.8) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// Rule-first & Background-Model Semantic Triage
+// ============================================================================
+
+const RISKY_ACTION_PATTERN =
+  /\b(git\s+push|force\s+push|publish|deploy|release|delete|drop\s+table|rm\s+-rf)\b|推送|发布|上线|删除|合并\s*(PR|MR)|发飞书|对外发送/i;
+
+const EXPLICIT_QUESTION_PATTERN =
+  /([？?]\s*$|请确认|请拍板|请决定|你选哪个|选哪一个|是否需要|要不要|需要你确认|let me know|please confirm|which option|should i\b)/i;
+
+const EXTERNAL_WAIT_PATTERN =
+  /(等待\s*(CI|构建|部署|流水线|审批|回复|重置)|waiting for (ci|deploy|build|review|reset|quota))/i;
+
+const OPTIONAL_OFFER_TAIL_PATTERN =
+  /(如果你需要|需要的话|如需继续|顺便.*吗[？?]?$|要不要我顺手.*吗[？?]?$|if you(?:'d| would) like|let me know if you want)/i;
+
+export const SemanticTriageOptionSchema = z.object({
+  label: z.string().trim().min(1).max(60),
+  leadsTo: z.string().trim().min(1).max(120),
+});
+
+export const SemanticTriageOutputSchema = z.object({
+  phase: z.enum(["done", "blocked_user", "blocked_external", "unsure"]),
+  summary: z.string().trim().min(1).max(120),
+  waitReason: z.string().trim().min(1).max(160).nullable(),
+  needsUserDecision: z.boolean(),
+  isLowRiskTechnicalQuestion: z.boolean(),
+  riskyAction: z.boolean(),
+  suggestedReply: z.string().trim().min(1).max(400).nullable(),
+  options: z.array(SemanticTriageOptionSchema).max(4).optional(),
+});
+export type SemanticTriageOutput = z.infer<typeof SemanticTriageOutputSchema>;
+
+function compactFirstSentence(text: string, maxLen = 80): string {
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "本轮已结束";
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
+}
+
+/**
+ * Deterministic zero-token triage fallback used when semantic model triage is disabled or
+ * unavailable. Conservative by design: never fabricates questions or auto-delegates.
+ */
+export function heuristicTriageAssistantReply(replyText: string): {
+  phase: MainChatSessionPhase;
+  summary: string;
+  waitReason: string | null;
+  suggestedAction: string | null;
+  riskyAction: boolean;
+} {
+  const trimmed = replyText.trim();
+  if (!trimmed) {
+    return {
+      phase: "unsure",
+      summary: "本轮已停止，暂无可读文本输出",
+      waitReason: null,
+      suggestedAction: "打开会话查看最新输出",
+      riskyAction: false,
+    };
+  }
+  const tail = trimmed.slice(-360);
+  const riskyAction = RISKY_ACTION_PATTERN.test(tail);
+  if (EXTERNAL_WAIT_PATTERN.test(tail) && !EXPLICIT_QUESTION_PATTERN.test(tail)) {
+    return {
+      phase: "blocked_external",
+      summary: compactFirstSentence(trimmed),
+      waitReason: "等待外部流程/状态变化",
+      suggestedAction: "稍后复查等待前提是否满足",
+      riskyAction,
+    };
+  }
+  if (EXPLICIT_QUESTION_PATTERN.test(tail) && !OPTIONAL_OFFER_TAIL_PATTERN.test(tail)) {
+    return {
+      phase: "blocked_user",
+      summary: compactFirstSentence(trimmed),
+      waitReason: compactFirstSentence(tail, 90),
+      suggestedAction: riskyAction ? "涉及高风险动作，请确认后再执行" : "查看会话并确认下一步",
+      riskyAction,
+    };
+  }
+  return {
+    phase: "done",
+    summary: compactFirstSentence(trimmed),
+    waitReason: null,
+    suggestedAction: null,
+    riskyAction,
+  };
+}
+
+export async function resolveMainChatBackgroundProviders(input: {
+  backgroundModel: MainChatBackgroundModelConfig;
+  cwd: string;
+  providerSnapshotManager: Pick<ProviderSnapshotManager, "listProviders">;
+  daemonConfig?: StructuredGenerationDaemonConfig | null;
+  mainSelection?: {
+    provider?: AgentProvider | null;
+    model?: string | null;
+    thinkingOptionId?: string | null;
+  } | null;
+}): Promise<StructuredGenerationProvider[]> {
+  const { backgroundModel } = input;
+  if (backgroundModel.mode === "custom" && backgroundModel.provider?.trim()) {
+    return [
+      {
+        provider: backgroundModel.provider.trim() as AgentProvider,
+        ...(backgroundModel.model?.trim() ? { model: backgroundModel.model.trim() } : {}),
+        ...(backgroundModel.thinkingOptionId?.trim()
+          ? { thinkingOptionId: backgroundModel.thinkingOptionId.trim() }
+          : {}),
+      },
+    ];
+  }
+  if (backgroundModel.mode === "main" && input.mainSelection?.provider) {
+    return [
+      {
+        provider: input.mainSelection.provider,
+        ...(input.mainSelection.model ? { model: input.mainSelection.model } : {}),
+        ...(input.mainSelection.thinkingOptionId
+          ? { thinkingOptionId: input.mainSelection.thinkingOptionId }
+          : {}),
+      },
+    ];
+  }
+  return resolveStructuredGenerationProviders({
+    cwd: input.cwd,
+    providerSnapshotManager: input.providerSnapshotManager,
+    daemonConfig: input.daemonConfig,
+    currentSelection: input.mainSelection ?? undefined,
+  });
+}
+
+export interface RunSemanticTriageInput {
+  agentManager: AgentManager;
+  cwd: string;
+  sessionTitle: string;
+  projectName: string;
+  lastAssistantReply: string;
+  providers: readonly StructuredGenerationProvider[];
+  logger?: StructuredGenerationLogger;
+  generator?: typeof generateStructuredAgentResponseWithFallback;
+}
+
+export async function runMainChatSemanticTriage(
+  input: RunSemanticTriageInput,
+): Promise<SemanticTriageOutput | null> {
+  if (input.providers.length === 0) return null;
+  const trimmedReply = input.lastAssistantReply.trim();
+  if (!trimmedReply) return null;
+
+  const excerpt = trimmedReply.length > 3500 ? `...${trimmedReply.slice(-3500)}` : trimmedReply;
+
+  const prompt = [
+    "你是 Paseo 对话管家的后台分诊器。请只根据下面这个 Coding Agent 刚刚结束这一轮的最后回复，判断它的真实工作状态，返回严格 JSON，不要调用任何工具，也不要执行任何命令。",
+    "",
+    "判定标准：",
+    "- phase='done'：本轮工作已交付（修完、测完、调研出结论或回答完问题），无需用户再操作。末尾类似「需要的话我可以顺手…」的可选提议仍算 done。",
+    "- phase='blocked_user'：明确在等待用户做选择、确认、授权、登录或补充信息，尚未回答。",
+    "- phase='blocked_external'：在等待 CI、部署、外部回复、定时重置或其他 Agent 结果。",
+    "- phase='unsure'：半截停止或无法判断。",
+    "",
+    "安全红线（极重要）：",
+    "- 若涉及 git push、发布/上线、删除文件/数据、合并 PR/MR、对外发消息/飞书回复、或产品方向/方案拍板，必须设 riskyAction=true 且 isLowRiskTechnicalQuestion=false。",
+    "- 仅当问题属于纯技术实现细节/默认值选择/是否重跑测试等无外部副作用的内部问题时，才可设 isLowRiskTechnicalQuestion=true，并给出简洁的 suggestedReply。",
+    "",
+    `会话标题：${input.sessionTitle}`,
+    `所在目录：${input.projectName}`,
+    "最后回复：",
+    excerpt,
+  ].join("\n");
+
+  const run = input.generator ?? generateStructuredAgentResponseWithFallback;
+  return run({
+    manager: input.agentManager,
+    cwd: input.cwd,
+    prompt,
+    schema: SemanticTriageOutputSchema,
+    providers: input.providers,
+    persistSession: false,
+    maxRetries: 1,
+    schemaName: "MainChatSemanticTriage",
+    logger: input.logger,
+  });
 }

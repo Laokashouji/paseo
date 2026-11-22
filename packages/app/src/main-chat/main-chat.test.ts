@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAIN_CHAT_DEFAULT_TITLE,
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
   MAIN_CHAT_TASK_MODE_LABEL,
@@ -13,7 +14,13 @@ import { PARENT_AGENT_ID_LABEL, PARENT_SERVER_ID_LABEL } from "@getpaseo/protoco
 import type { TFunction } from "i18next";
 import { isGroupableToolCall } from "@/tool-calls/detail-level/grouping";
 import { collapseTurns } from "@/agent-stream/turn-collapse/model";
-import type { Agent, WorkspaceDescriptor, useSessionStore } from "@/stores/session-store";
+import type {
+  Agent,
+  ProjectDescriptor,
+  WorkspaceDescriptor,
+  useSessionStore,
+} from "@/stores/session-store";
+import { selectWorkspaceStructureProjects } from "@/stores/session-store-hooks/selectors";
 import type { StreamItem } from "@/types/stream";
 import { buildMainChatTaskMentionOptions } from "./autocomplete-tasks";
 import { removeTaskMentionToken, routeStoreKey, useMainChatRouteStore } from "./route-store";
@@ -89,15 +96,56 @@ describe("main-chat selectors & stream rules", () => {
     } as WorkspaceDescriptor;
 
     expect(isMainChatDedicatedWorkspace(mainWs, agents)).toBe(true);
+    expect(isMainChatDedicatedWorkspace(mainWs, undefined)).toBe(true);
     expect(isMainChatDedicatedWorkspace(repoWs, agents)).toBe(false);
+
+    // Also verify sidebar workspace structure selector filters out the dedicated main-chat workspace
+    const projects = new Map<string, ProjectDescriptor>([
+      [
+        "proj_main",
+        {
+          projectId: "proj_main",
+          projectKey: "dir:/home/u/.paseo/main-chat",
+          projectKind: "directory",
+          projectDisplayName: "main-chat",
+          projectCustomName: null,
+          projectRootPath: "/home/u/.paseo/main-chat",
+        } as unknown as ProjectDescriptor,
+      ],
+      [
+        "proj_repo",
+        {
+          projectId: "proj_repo",
+          projectKey: "git:/home/u/repo",
+          projectKind: "git",
+          projectDisplayName: "repo",
+          projectCustomName: null,
+          projectRootPath: "/home/u/repo",
+        } as unknown as ProjectDescriptor,
+      ],
+    ]);
+    const workspaces = new Map<string, WorkspaceDescriptor>([
+      ["ws_main", { ...mainWs, projectId: "proj_main", name: "对话管理" } as WorkspaceDescriptor],
+      ["ws_repo", { ...repoWs, projectId: "proj_repo", name: "repo" } as WorkspaceDescriptor],
+    ]);
+    const structured = selectWorkspaceStructureProjects(
+      {
+        sessions: {
+          srv_1: { workspaces, projects, agents },
+        },
+      },
+      ["srv_1"],
+    );
+    expect(structured).toHaveLength(1);
+    expect(structured[0]?.projectName).toBe("repo");
   });
 
-  it("aggregates sidebar counts, child permissions, and urgency-ordered task dock pills", () => {
+  it("aggregates full-fleet sidebar counts, child permissions, and managed + manual dock pills", () => {
     const mainAgent = makeAgent({
       id: "agent_main",
       serverId: "srv_1",
       workspaceId: "ws_main",
-      title: "主对话",
+      title: MAIN_CHAT_DEFAULT_TITLE,
       labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
     });
     const childWorking = makeAgent({
@@ -139,6 +187,21 @@ describe("main-chat selectors & stream rules", () => {
         [PARENT_SERVER_ID_LABEL]: "srv_1",
       },
     });
+    const manualRunning = makeAgent({
+      id: "manual_run",
+      serverId: "srv_1",
+      workspaceId: "ws_other",
+      title: "手动构建",
+      status: "running",
+      turn: { phase: "open", turnId: "t2", startedAt: new Date(), cancellationRequestId: null },
+    });
+    const manualQuiet = makeAgent({
+      id: "manual_done",
+      serverId: "srv_1",
+      workspaceId: "ws_other",
+      title: "历史空闲",
+      status: "idle",
+    });
 
     const pendingPermissions = new Map([
       [
@@ -159,12 +222,14 @@ describe("main-chat selectors & stream rules", () => {
       sessions: {
         srv_1: {
           client: {} as SessionStoreState["sessions"][string]["client"],
-          serverInfo: { features: { mainChat: true } },
+          serverInfo: { hostname: "devbox", features: { mainChat: true } },
           agents: new Map([
             [mainAgent.id, mainAgent],
             [childWorking.id, childWorking],
             [childNeedsYou.id, childNeedsYou],
             [childDone.id, childDone],
+            [manualRunning.id, manualRunning],
+            [manualQuiet.id, manualQuiet],
           ]),
           agentDetails: new Map(),
           pendingPermissions,
@@ -174,8 +239,14 @@ describe("main-chat selectors & stream rules", () => {
 
     const summary = selectMainChatSidebarSummary(state, "srv_1");
     expect(summary.existing?.agentId).toBe("agent_main");
+    expect(summary.displayTitle).toBe("对话管理");
+    expect(summary.hostLabel).toBe("devbox");
     expect(summary.needsYouCount).toBe(1);
-    expect(summary.runningCount).toBe(1);
+    expect(summary.runningCount).toBe(2);
+    expect(summary.totalActiveCount).toBe(5);
+
+    const renamedSummary = selectMainChatSidebarSummary(state, "srv_1", "我的管家");
+    expect(renamedSummary.displayTitle).toBe("我的管家");
 
     const mainPerms = selectMainChatPendingPermissions(state, "srv_1", "agent_main");
     expect(mainPerms).toHaveLength(1);
@@ -186,10 +257,18 @@ describe("main-chat selectors & stream rules", () => {
     expect(regularPerms).toHaveLength(0);
 
     const dockTasks = selectMainChatDockTasks(state, "srv_1", "agent_main");
-    expect(dockTasks.map((t) => t.agentId)).toEqual(["child_perm", "child_run", "child_done"]);
+    expect(dockTasks.map((t) => t.agentId)).toEqual([
+      "child_perm",
+      "child_run",
+      "child_done",
+      "manual_run",
+    ]);
+    expect(dockTasks[0]?.managedByMainChat).toBe(true);
+    expect(dockTasks[3]?.managedByMainChat).toBe(false);
     expect(dockTasks[0]?.bucket).toBe("needs_input");
     expect(dockTasks[1]?.bucket).toBe("running");
     expect(dockTasks[2]?.bucket).toBe("done");
+    expect(dockTasks[3]?.bucket).toBe("running");
   });
 
   it("keeps task_plan and task_complete ungrouped and visible across turn collapse", () => {
@@ -263,6 +342,7 @@ describe("main-chat selectors & stream rules", () => {
           workspaceId: "ws_1",
           title: "修复侧栏样式",
           mode: "write",
+          managedByMainChat: true,
           bucket: "running",
           pendingPermissionCount: 0,
           updatedAtMs: 100,
@@ -273,6 +353,7 @@ describe("main-chat selectors & stream rules", () => {
           workspaceId: "ws_1",
           title: "排查日志报错",
           mode: "readonly",
+          managedByMainChat: true,
           bucket: "needs_input",
           pendingPermissionCount: 1,
           updatedAtMs: 200,

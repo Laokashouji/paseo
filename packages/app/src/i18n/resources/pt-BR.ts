@@ -2449,6 +2449,7 @@ export const ptBR: TranslationResources = {
       chat: "Chat",
       appearance: "Aparência",
       sidebar: "Barra lateral",
+      mainChat: en.settings.sections.mainChat,
       terminal: "Terminal",
       browser: "Navegador",
       editor: "Editor",

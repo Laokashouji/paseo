@@ -29,6 +29,7 @@ import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1232,7 +1233,11 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
   const handleForkFromSideQuestion = useCallback(
     (turn: SideQuestionTurnEntry) => {
-      const currentAgent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
+      const currentAgent = resolveChatAgentFromSession(
+        useSessionStore.getState(),
+        serverId,
+        agentId,
+      );
       if (!currentAgent) return;
       useSideQuestionStore.getState().minimize(serverId, agentId);
       void sideQuestionForkAgent({
@@ -1764,6 +1769,11 @@ function ActiveAgentComposer({
         return;
       }
 
+      if (isMainChatAgent(agent)) {
+        toast.show(t("mainChat.cannotArchive"), { variant: "info" });
+        return;
+      }
+
       const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
       if (workspaceKey) {
         unpinWorkspaceAgent(workspaceKey, agentId);
@@ -1792,6 +1802,7 @@ function ActiveAgentComposer({
       serverId,
       t,
       tabId,
+      toast,
       unpinWorkspaceAgent,
       workspaceId,
     ],

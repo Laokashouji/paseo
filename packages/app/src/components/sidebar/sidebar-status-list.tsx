@@ -36,6 +36,7 @@ import {
 } from "lucide-react-native";
 import { useToast } from "@/contexts/toast-context";
 import { SidebarToastClearance } from "@/components/sidebar/sidebar-toast-region";
+import { SidebarPinnedMainChatRow, useShouldShowPinnedMainChat } from "@/main-chat/pinned-row";
 import { useSidebarWorkspaceRename } from "@/workspace-rename";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
 import { redirectIfArchivingActiveWorkspace } from "@/utils/sidebar-workspace-archive-redirect";
@@ -220,9 +221,10 @@ export function SidebarStatusWorkspaceList({
       }),
     [renderPinnedWorkspaceRow],
   );
+  const showPinnedMainChat = useShouldShowPinnedMainChat();
   const content = (
     <>
-      {pinnedWorkspaces.length > 0 ? (
+      {pinnedWorkspaces.length > 0 || showPinnedMainChat ? (
         <View style={styles.pinnedSection} testID="sidebar-pinned-section">
           <SidebarSectionHeader
             title={t("sidebar.pinned.title")}
@@ -232,19 +234,22 @@ export function SidebarStatusWorkspaceList({
           />
           {pinnedCollapsed ? null : (
             <>
+              <SidebarPinnedMainChatRow onBeforeNavigate={onWorkspacePress} />
               {leadingPinnedWorkspace ? renderPinnedWorkspaceRow(leadingPinnedWorkspace) : null}
-              <DraggableList
-                testID="sidebar-pinned-list"
-                data={visiblePinnedWorkspaces}
-                keyExtractor={statusWorkspaceKeyExtractor}
-                renderItem={renderPinnedWorkspace}
-                onDragEnd={onPinnedWorkspaceReorder}
-                scrollEnabled={false}
-                useDragHandle
-                nestable={platformIsNative}
-                simultaneousGestureRef={parentGestureRef}
-                gestureHostPresented={dragGestureHostActive}
-              />
+              {visiblePinnedWorkspaces.length > 0 ? (
+                <DraggableList
+                  testID="sidebar-pinned-list"
+                  data={visiblePinnedWorkspaces}
+                  keyExtractor={statusWorkspaceKeyExtractor}
+                  renderItem={renderPinnedWorkspace}
+                  onDragEnd={onPinnedWorkspaceReorder}
+                  scrollEnabled={false}
+                  useDragHandle
+                  nestable={platformIsNative}
+                  simultaneousGestureRef={parentGestureRef}
+                  gestureHostPresented={dragGestureHostActive}
+                />
+              ) : null}
               {canTogglePinnedWorkspaces ? (
                 <SidebarGroupToggleRow
                   expanded={pinnedWorkspacesExpanded}

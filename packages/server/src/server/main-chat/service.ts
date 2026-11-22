@@ -2,7 +2,6 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
 import {
-  MAIN_CHAT_DEFAULT_TITLE,
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
   MAIN_CHAT_TASK_GOAL_LABEL,
@@ -15,11 +14,14 @@ import {
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
   type MainChatOverview,
+  type MainChatPatrolResult,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
   type MainChatPlannedTask,
   type MainChatReworkRecord,
   type MainChatRuleKind,
+  type MainChatSettings,
+  type MainChatSettingsPatch,
   type MainChatTaskIsolation,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
@@ -32,8 +34,11 @@ import {
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { FinishSubscriptions } from "../agent/finish-subscriptions/index.js";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
+import { wrapMainChatContextBlock } from "../agent/agent-messages/index.js";
+import type { AgentPromptInput } from "../agent/agent-sdk-types.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
+import type { StructuredGenerationDaemonConfig } from "../agent/structured-generation-providers.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "../workspace-registry.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../worktree-session.js";
@@ -41,9 +46,14 @@ import { createAgentCommand, type EnsureWorkspaceForCreate } from "../agent/crea
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import { createPaseoWorktreeCommand } from "../worktree/commands.js";
 import { expandUserPath } from "../path-utils.js";
+import {
+  createMainChatContextSnapshotBuilder,
+  type FleetSnapshotSummary,
+} from "./context-snapshot.js";
 import { buildWorkerInitialPrompt } from "./prompts.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
 import { createMainChatSupervisor } from "./supervisor.js";
+import type { RunSemanticTriageInput, SemanticTriageOutput } from "./triage.js";
 
 const MAX_REWORK_ROUNDS = 2;
 
@@ -131,13 +141,17 @@ export interface MainChatServiceDependencies {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   providerSnapshotManager: ProviderSnapshotManager;
-  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "listActive">;
+  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "listActive"> &
+    Partial<Pick<WorkspaceRegistry, "update">>;
   createDirectoryWorkspace: (
     cwd: string,
     title?: string | null,
     projectId?: string,
     context?: { background?: boolean; callerWorkspaceId?: string },
   ) => Promise<PersistedWorkspaceRecord>;
+  emitWorkspaceUpdates?: (workspaceIds: Iterable<string>) => Promise<void>;
+  readDaemonConfig?: () => StructuredGenerationDaemonConfig | null;
+  semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
   ensureWorkspaceForCreate?: EnsureWorkspaceForCreate;
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   finishSubscriptions?: () => FinishSubscriptions;
@@ -147,12 +161,28 @@ export interface MainChatServiceDependencies {
   usageLimitRetryDelayMs?: number;
   stalledThresholdMs?: number;
   stalledCheckIntervalMs?: number;
+  triageSettleMs?: number;
+  noProgressThresholdMs?: number;
+  needsYouEscalateMs?: number;
+  wakeupCooldownMs?: number;
 }
 
 export interface MainChatService {
   start(): Promise<void>;
   stop(): void;
   ensureMainChat(input?: EnsureMainChatInput): Promise<EnsureMainChatResult>;
+  getSettings(): Promise<MainChatSettings>;
+  getCurrentSettings(): MainChatSettings;
+  updateSettings(patch: MainChatSettingsPatch): Promise<MainChatSettings>;
+  triggerPatrol(options?: {
+    mainAgentId?: string;
+    forceWakeup?: boolean;
+  }): Promise<MainChatPatrolResult>;
+  prepareUserPromptForMainChat(
+    agentId: string,
+    prompt: AgentPromptInput,
+  ): Promise<AgentPromptInput>;
+  listFleetSessions(mainAgentId?: string): Promise<FleetSnapshotSummary>;
   createPlan(mainAgentId: string, input: CreateMainChatPlanInput): Promise<MainChatPlanRecord>;
   startPlan(
     planId: string,
@@ -219,15 +249,28 @@ function trimList(values: readonly string[] | undefined): string[] {
 export function createMainChatService(deps: MainChatServiceDependencies): MainChatService {
   const logger = deps.logger.child({ module: "main-chat" });
   const store: MainChatStore = createMainChatStore(deps.paseoHome);
+  const contextSnapshots = createMainChatContextSnapshotBuilder({
+    agentManager: deps.agentManager,
+    agentStorage: deps.agentStorage,
+    store,
+  });
   const supervisor = createMainChatSupervisor({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     store,
+    contextSnapshots,
     logger,
+    providerSnapshotManager: deps.providerSnapshotManager,
+    readDaemonConfig: deps.readDaemonConfig,
+    semanticTriageRunner: deps.semanticTriageRunner,
     transientRetryDelayMs: deps.transientRetryDelayMs,
     usageLimitRetryDelayMs: deps.usageLimitRetryDelayMs,
     stalledThresholdMs: deps.stalledThresholdMs,
     stalledCheckIntervalMs: deps.stalledCheckIntervalMs,
+    triageSettleMs: deps.triageSettleMs,
+    noProgressThresholdMs: deps.noProgressThresholdMs,
+    needsYouEscalateMs: deps.needsYouEscalateMs,
+    wakeupCooldownMs: deps.wakeupCooldownMs,
   });
   let ensureInFlight: Promise<EnsureMainChatResult> | null = null;
   const planLocks = new Map<string, Promise<unknown>>();
@@ -255,7 +298,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       (workspace) => path.resolve(workspace.cwd) === resolvedHome,
     );
     if (matched) return matched;
-    return deps.createDirectoryWorkspace(homeDir, MAIN_CHAT_DEFAULT_TITLE, undefined, {
+    const defaultTitle = store.getSettings().title;
+    return deps.createDirectoryWorkspace(homeDir, defaultTitle, undefined, {
       background: false,
     });
   }
@@ -447,6 +491,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     if (existing) return existing;
 
     const workspace = await resolveMainChatWorkspace();
+    const currentSettings = store.getSettings();
+    const stewardTitle = currentSettings.title;
     const providerConfig = await resolveDefaultMainChatProviderConfig(workspace.cwd, input);
     const { snapshot } = await createAgentCommand(
       {
@@ -466,7 +512,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         config: {
           provider: providerConfig.provider,
           cwd: workspace.cwd,
-          title: MAIN_CHAT_DEFAULT_TITLE,
+          title: stewardTitle,
           ...(providerConfig.model ? { model: providerConfig.model } : {}),
           ...(providerConfig.modeId ? { modeId: providerConfig.modeId } : {}),
           ...(providerConfig.thinkingOptionId
@@ -478,10 +524,24 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         labels: {
           [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE,
         },
-        provisionalTitle: MAIN_CHAT_DEFAULT_TITLE,
+        provisionalTitle: stewardTitle,
         firstAgentContext: {},
       },
     );
+
+    if (currentSettings.capabilities.initialBriefingEnabled) {
+      void contextSnapshots
+        .collectFleet(snapshot.id)
+        .then((fleet) => {
+          if (fleet.totalActive > 0) {
+            return supervisor.dispatchInitialBriefing(snapshot.id);
+          }
+          return false;
+        })
+        .catch((error) => {
+          logger.warn({ err: error, agentId: snapshot.id }, "Initial briefing dispatch failed");
+        });
+    }
 
     return {
       agentId: snapshot.id,
@@ -699,6 +759,92 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         });
       }
       return ensureInFlight;
+    },
+
+    async getSettings() {
+      await store.load();
+      return store.getSettings();
+    },
+
+    getCurrentSettings() {
+      return store.getSettings();
+    },
+
+    async updateSettings(patch) {
+      await store.load();
+      const previous = store.getSettings();
+      const updated = await store.updateSettings(patch);
+      supervisor.refreshSchedule();
+
+      const existing = await findExistingMainChat();
+      if (!existing) return updated;
+
+      contextSnapshots.resetDelta(existing.agentId);
+      if (updated.title !== previous.title || patch.title !== undefined) {
+        try {
+          await deps.agentManager.updateAgentMetadata(existing.agentId, {
+            title: updated.title,
+          });
+        } catch (error) {
+          logger.warn(
+            { err: error, agentId: existing.agentId },
+            "Failed to sync steward title to agent metadata",
+          );
+        }
+        if (deps.workspaceRegistry.update) {
+          try {
+            const updatedWorkspace = await deps.workspaceRegistry.update(
+              existing.workspaceId,
+              (record) => ({
+                ...record,
+                title: updated.title,
+                updatedAt: new Date().toISOString(),
+              }),
+            );
+            if (updatedWorkspace && deps.emitWorkspaceUpdates) {
+              await deps.emitWorkspaceUpdates([existing.workspaceId]);
+            }
+          } catch (error) {
+            logger.warn(
+              { err: error, workspaceId: existing.workspaceId },
+              "Failed to sync steward title to workspace record",
+            );
+          }
+        }
+      }
+      return updated;
+    },
+
+    async triggerPatrol(options) {
+      await store.load();
+      const existing = await findExistingMainChat();
+      const mainAgentId = options?.mainAgentId ?? existing?.agentId ?? null;
+      return supervisor.runPatrol({
+        mainAgentId,
+        forceWakeup: options?.forceWakeup ?? true,
+        manualTrigger: true,
+      });
+    },
+
+    async prepareUserPromptForMainChat(agentId, prompt) {
+      const live = deps.agentManager.getAgent(agentId);
+      const stored = live ? null : await deps.agentStorage.get(agentId);
+      const labels = live?.labels ?? stored?.labels;
+      if (!isMainChatLabels(labels)) {
+        return prompt;
+      }
+      await store.load();
+      const snapshot = await contextSnapshots.buildTurnContext(agentId);
+      const prefix = `${wrapMainChatContextBlock(snapshot)}\n\n`;
+      if (typeof prompt === "string") {
+        return `${prefix}${prompt}`;
+      }
+      return [{ type: "text", text: prefix }, ...prompt];
+    },
+
+    async listFleetSessions(mainAgentId) {
+      await store.load();
+      return contextSnapshots.collectFleet(mainAgentId);
     },
 
     async createPlan(mainAgentId, input) {
@@ -983,6 +1129,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         autoStartRules: store.listTrustRules(),
         permissionRules: store.listPermissionRules(),
         metrics: store.getMetrics(),
+        settings: store.getSettings(),
+        triages: store.listTriages(),
+        lastPatrolAt: store.getLastPatrolAt(),
+        lastWakeupAt: store.getLastWakeupAt(),
       };
     },
 
