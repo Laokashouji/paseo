@@ -3,21 +3,19 @@ import { useTranslation } from "react-i18next";
 import { Text, View, type PressableStateCallbackType } from "react-native";
 import { Sparkles } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { toolbarSlot } from "@/components/ui/control-geometry";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ComposerTrackMark } from "@/composer/tracks";
 import { useHostFeature } from "@/runtime/host-features";
 import { useSessionStore } from "@/stores/session-store";
-import type { Theme } from "@/styles/theme";
+import { ICON_SIZE, ICON_STROKE_WIDTH, type Theme } from "@/styles/theme";
 import { buildSideQuestionThreadKey, useSideQuestionStore } from "./store";
 
 const ThemedSparkles = withUnistyles(Sparkles);
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-/**
- * Compact composer-toolbar trigger button that opens or toggles the ephemeral `/btw`
- * side-question panel directly from the bottom of the conversation.
- */
+/** Icon-only composer toolbar button that toggles the ephemeral `/btw` side-question card. */
 export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton({
   serverId,
   agentId,
@@ -48,8 +46,7 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
   const buttonStyle = useCallback(
     ({ pressed, hovered }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.button,
-      isOpen ? styles.buttonOpen : null,
-      hovered && !isOpen ? styles.buttonHover : null,
+      isOpen || hovered ? styles.buttonActive : null,
       pressed ? styles.buttonPressed : null,
     ],
     [isOpen],
@@ -59,29 +56,27 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
     ({ hovered }: PressableStateCallbackType & { hovered?: boolean }) => {
       const active = isOpen || Boolean(hovered);
       return (
-        <View style={styles.content}>
+        <View style={styles.iconContainer}>
+          <ThemedSparkles
+            size={ICON_SIZE.md}
+            strokeWidth={ICON_STROKE_WIDTH}
+            uniProps={active ? foregroundColorMapping : mutedColorMapping}
+          />
           {isPending ? (
-            <ComposerTrackMark bucket="running" />
-          ) : hasError ? (
-            <ComposerTrackMark bucket="failed" />
-          ) : (
-            <ThemedSparkles
-              size={13}
-              uniProps={active ? foregroundColorMapping : mutedColorMapping}
-            />
-          )}
-          <Text style={[styles.label, active ? styles.labelActive : null]} numberOfLines={1}>
-            {t("sideQuestion.triggerLabel")}
-          </Text>
-          {turnCount > 0 && !isOpen ? (
-            <View style={styles.countBadge}>
-              <Text style={styles.countText}>{turnCount}</Text>
+            <View style={styles.statusCorner}>
+              <ComposerTrackMark bucket="running" />
             </View>
+          ) : hasError ? (
+            <View style={styles.statusCorner}>
+              <ComposerTrackMark bucket="failed" />
+            </View>
+          ) : turnCount > 0 && !isOpen ? (
+            <View style={styles.savedDot} />
           ) : null}
         </View>
       );
     },
-    [hasError, isOpen, isPending, t, turnCount],
+    [hasError, isOpen, isPending, turnCount],
   );
 
   if (!supportsHostFeature || !supportsAgentSideQuestion) {
@@ -109,53 +104,35 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
 
 const styles = StyleSheet.create((theme) => ({
   button: {
-    height: 26,
-    paddingHorizontal: theme.spacing[2],
+    ...toolbarSlot(),
     borderRadius: theme.borderRadius.full,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface2,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
-  buttonHover: {
+  buttonActive: {
     backgroundColor: theme.colors.surface3,
-    borderColor: theme.colors.borderAccent,
-  },
-  buttonOpen: {
-    backgroundColor: theme.colors.surface3,
-    borderColor: theme.colors.borderAccent,
   },
   buttonPressed: {
-    opacity: 0.75,
+    opacity: 0.7,
   },
-  content: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
-  label: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foregroundMuted,
-  },
-  labelActive: {
-    color: theme.colors.foreground,
-  },
-  countBadge: {
-    minWidth: 16,
-    height: 16,
-    paddingHorizontal: 4,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.surface1,
+  iconContainer: {
     alignItems: "center",
     justifyContent: "center",
   },
-  countText: {
-    fontSize: 10,
-    fontWeight: theme.fontWeight.semibold,
-    color: theme.colors.foreground,
+  statusCorner: {
+    position: "absolute",
+    top: -3,
+    right: -4,
+  },
+  savedDot: {
+    position: "absolute",
+    top: -2,
+    right: -3,
+    width: 5,
+    height: 5,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.foregroundMuted,
   },
   tooltipText: {
     fontSize: theme.fontSize.sm,
