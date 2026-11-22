@@ -14,9 +14,11 @@ export function CornerWorkbenchCard({
   navigation,
   onPinToPanel,
   onOpenOverview,
+  onOpenSettings,
 }: PluginAgentCornerCardProps & {
   onPinToPanel(input: { workspaceId: string; agentId: string }): void;
   onOpenOverview(): void;
+  onOpenSettings?: () => void;
 }) {
   const settings = useWorkbenchSettingsValues();
   const { card } = useWorkbenchCard(agentId, workspaceId);
@@ -170,6 +172,7 @@ export function CornerWorkbenchCard({
         onOpenOverview={onOpenOverview}
         onPinToPanel={handlePinToPanel}
         onCollapse={handleToggleExpanded}
+        onOpenSettings={onOpenSettings}
       />
     </View>
   );

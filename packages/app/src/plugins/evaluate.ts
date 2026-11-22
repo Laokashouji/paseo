@@ -113,6 +113,7 @@ export type PluginClientRuntime = Pick<
   | "openSurface"
   | "composers"
   | "openPanel"
+  | "closeAgentTab"
   | "subscribe"
   | "addComposerPill"
   | "addHeaderButton"
@@ -589,6 +590,14 @@ export function runPluginClientBundle(
       if (stopped) throw new Error("Plugin has stopped");
       return trackButton(runtime.addHeaderButton(contribution));
     },
+    ...(runtime.closeAgentTab
+      ? {
+          closeAgentTab(options: { agentId: string; workspaceId?: string | null }) {
+            if (stopped) return;
+            runtime.closeAgentTab?.(options);
+          },
+        }
+      : {}),
   };
   const runtimeRequire = (name: string): unknown => {
     // COMPAT(pluginReactNativeEntrypoint): added in v0.13.0, remove after 2027-04-20

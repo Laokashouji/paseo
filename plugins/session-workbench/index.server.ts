@@ -2,6 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi } from "./server/paseo-types.js";
 import {
   addTodoRpc,
+  archiveCompletedSubscription,
   cardSubscription,
   forkTodoRpc,
   getCardRpc,
@@ -12,6 +13,7 @@ import {
   resolveExternalSignalRpc,
   resolveSuggestedTodoRpc,
   runTodoRpc,
+  triggerArchiveRpc,
   updateCardMetaRpc,
   updateTodoRpc,
 } from "./shared/rpc.js";
@@ -22,6 +24,7 @@ import {
   handleTurnCompletedQueueAndTodos,
   resolveExternalSignalAction,
   runTodoAction,
+  triggerArchiveAction,
 } from "./server/actions.js";
 import { createAgentMetadataSync, isHelperAgent, WorkbenchStore } from "./server/store.js";
 import { provisionalTextFromPrompt, RollingSummarizer } from "./server/summarizer.js";
@@ -63,14 +66,17 @@ export default function contribute(server: PluginServerContext) {
     return DEFAULT_WORKBENCH_SETTINGS;
   }
 
-  const tools = createWorkbenchAgentTools(store, (agentId) => {
-    if (!activePaseo) return;
-    void evaluateAgentSettledConditions({
-      store,
-      paseo: activePaseo,
-      settledAgentId: agentId,
-      trigger: "marked_done",
-    });
+  const tools = createWorkbenchAgentTools(store, {
+    onMarkedDone: (agentId) => {
+      if (!activePaseo) return;
+      void evaluateAgentSettledConditions({
+        store,
+        paseo: activePaseo,
+        settledAgentId: agentId,
+        trigger: "marked_done",
+      });
+    },
+    isAutoArchiveEnabled: async () => (await readConfig()).autoArchiveAfterCleanup,
   });
 
   // RPC handlers
@@ -204,6 +210,18 @@ export default function contribute(server: PluginServerContext) {
     return { card };
   });
 
+  server.handle(triggerArchiveRpc, async (input, { paseo }) => {
+    await ensureReady(paseo);
+    return triggerArchiveAction({
+      store,
+      settings,
+      paseo,
+      agentId: input.agentId,
+      workspaceId: input.workspaceId,
+      cancelQueue: input.cancelQueue,
+    });
+  });
+
   // Live subscriptions must return void (not a settling Promise), because settling
   // a subscription handler's Promise closes the subscription immediately.
   server.handle(cardSubscription, (input, context) => {
@@ -302,6 +320,20 @@ export default function contribute(server: PluginServerContext) {
     })();
   });
 
+  server.handle(archiveCompletedSubscription, (_input, context) => {
+    const unsubscribe = store.subscribeArchiveCompleted((event) => {
+      if (context.signal.aborted) return;
+      void context.push(event).catch(() => {});
+    });
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        unsubscribe();
+      },
+      { once: true },
+    );
+  });
+
   // Lifecycle hooks
   const removeOpenHook = server.addHook("agent.open.before", async ({ request }) => {
     await store.ensureLoaded();
@@ -381,13 +413,18 @@ export default function contribute(server: PluginServerContext) {
         runtimeStatus: outcome.kind === "failed" ? "error" : "idle",
       });
 
-      await handleTurnCompletedQueueAndTodos({
+      const turnResult = await handleTurnCompletedQueueAndTodos({
         store,
+        settings,
         paseo,
         agentId: agent.id,
         turnId,
         outcomeKind: outcome.kind,
       });
+
+      if (turnResult.archived) {
+        return;
+      }
 
       if (outcome.kind === "completed") {
         await evaluateAgentSettledConditions({
@@ -396,11 +433,13 @@ export default function contribute(server: PluginServerContext) {
           settledAgentId: agent.id,
           trigger: "turn_completed",
         });
-        await summarizer.scheduleForTurn({
-          agentId: agent.id,
-          turnId,
-          paseo,
-        });
+        if (!turnResult.skipSummary) {
+          await summarizer.scheduleForTurn({
+            agentId: agent.id,
+            turnId,
+            paseo,
+          });
+        }
       }
     },
   );
@@ -429,6 +468,7 @@ export default function contribute(server: PluginServerContext) {
     await ensureReady(paseo);
     store.updateCard(agent.id, {
       archived: true,
+      archiveState: "idle",
       runtimeStatus: "closed",
     });
     await evaluateAgentSettledConditions({

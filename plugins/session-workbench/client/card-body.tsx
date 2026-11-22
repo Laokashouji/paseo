@@ -11,6 +11,7 @@ import {
   resolveExternalSignalRpc,
   resolveSuggestedTodoRpc,
   runTodoRpc,
+  triggerArchiveRpc,
   updateCardMetaRpc,
   updateTodoRpc,
 } from "../shared/rpc.js";
@@ -22,7 +23,7 @@ import type {
   WaitCondition,
   WorkflowStatus,
 } from "../shared/schema.js";
-import { useWorkbenchOverview } from "./hooks.js";
+import { useWorkbenchOverview, useWorkbenchSettingsValues } from "./hooks.js";
 import {
   getRuntimeStatusLabel,
   getTodoStatusLabel,
@@ -41,6 +42,7 @@ export interface WorkbenchCardBodyProps {
   onOpenOverview?: () => void;
   onPinToPanel?: () => void;
   onCollapse?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export function WorkbenchCardBody({
@@ -53,8 +55,10 @@ export function WorkbenchCardBody({
   onOpenOverview,
   onPinToPanel,
   onCollapse,
+  onOpenSettings,
 }: WorkbenchCardBodyProps) {
   const toast = useToast();
+  const settings = useWorkbenchSettingsValues();
   const agentSnapshot = useAgent(agentId);
   const [composer] = useComposers({ agentId });
 
@@ -67,22 +71,35 @@ export function WorkbenchCardBody({
   const forkTodo = useRpc(forkTodoRpc);
   const refreshSummary = useRpc(refreshSummaryRpc);
   const resolveExternalSignal = useRpc(resolveExternalSignalRpc);
+  const triggerArchive = useRpc(triggerArchiveRpc);
 
   const [newTodoText, setNewTodoText] = useState("");
   const [expandedTodoId, setExpandedTodoId] = useState<string | null>(null);
   const [showDoneTodos, setShowDoneTodos] = useState(false);
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
+  const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
   const [topicDraft, setTopicDraft] = useState("");
   const [statusNoteDraft, setStatusNoteDraft] = useState("");
   const [busyTodoId, setBusyTodoId] = useState<string | null>(null);
   const [refreshingSummary, setRefreshingSummary] = useState(false);
+  const [archiving, setArchiving] = useState(false);
 
   const effectiveRuntime = agentSnapshot?.status ?? card.runtimeStatus;
   const isRunning = effectiveRuntime === "running";
   const statusVisual = getWorkflowStatusVisual(card.workflowStatus);
   const statusColor = statusVisual.color(theme);
   const isSummarizing = card.summaryState === "running" || refreshingSummary;
+  const isArchiveInProgress =
+    archiving || card.archiveState === "running" || card.archiveState === "pending_archive";
+  const isArchiveQueued = card.archiveState === "queued";
+  const archiveCommandPreview = useMemo(() => {
+    const firstLine = settings.archiveCommand
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    return firstLine ?? "";
+  }, [settings.archiveCommand]);
 
   const activeTodos = useMemo(
     () => card.todos.filter((item) => item.status !== "done" && item.status !== "dismissed"),
@@ -182,6 +199,33 @@ export function WorkbenchCardBody({
       setRefreshingSummary(false);
     }
   }, [agentId, card.summaryState, refreshSummary, refreshingSummary, toast, workspaceId]);
+
+  const handleTriggerArchive = useCallback(
+    async (cancelQueue = false) => {
+      if (archiving) return;
+      setArchiving(true);
+      try {
+        const result = await triggerArchive({
+          agentId,
+          workspaceId,
+          ...(cancelQueue ? { cancelQueue: true } : {}),
+        });
+        setArchiveConfirmOpen(false);
+        if (result.status === "canceled") {
+          toast.show("已取消归档排队", { variant: "info" });
+        } else if (result.status === "queued") {
+          toast.show("已排队：本轮结束后将自动发送归档命令", { variant: "info" });
+        } else {
+          toast.show("已发送归档命令，等待 AI 清理完成", { variant: "success" });
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "触发归档失败");
+      } finally {
+        setArchiving(false);
+      }
+    },
+    [agentId, archiving, toast, triggerArchive, workspaceId],
+  );
 
   const handleRunTodo = useCallback(
     async (todo: TodoItem, mode: "send_now" | "queue_next") => {
@@ -305,6 +349,7 @@ export function WorkbenchCardBody({
             <Pressable
               onPress={() => {
                 setStatusNoteDraft(card.statusNote);
+                setArchiveConfirmOpen(false);
                 setStatusPickerOpen((open) => !open);
               }}
               style={{
@@ -373,6 +418,25 @@ export function WorkbenchCardBody({
           </View>
 
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            {!card.archived ? (
+              <ToolbarIconButton
+                theme={theme}
+                icon="Archive"
+                accessibilityLabel={
+                  isArchiveQueued
+                    ? "管理已排队的归档命令"
+                    : isArchiveInProgress
+                      ? "正在执行归档清理"
+                      : "发送归档命令清理工程痕迹"
+                }
+                active={archiveConfirmOpen || isArchiveQueued || isArchiveInProgress}
+                disabled={isArchiveInProgress}
+                onPress={() => {
+                  setStatusPickerOpen(false);
+                  setArchiveConfirmOpen((open) => !open);
+                }}
+              />
+            ) : null}
             <ToolbarIconButton
               theme={theme}
               icon="RefreshCw"
@@ -407,6 +471,173 @@ export function WorkbenchCardBody({
             ) : null}
           </View>
         </View>
+
+        {!card.archived && (isArchiveInProgress || isArchiveQueued) ? (
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              paddingHorizontal: 10,
+              paddingVertical: 7,
+              borderRadius: 9,
+              backgroundColor: withAlpha(theme.colors.statusWarning, 0.12),
+              borderWidth: 1,
+              borderColor: withAlpha(theme.colors.statusWarning, 0.35),
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+              <Icon name="Archive" size={13} color={theme.colors.statusWarning} />
+              <Text
+                numberOfLines={2}
+                style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}
+              >
+                {card.archiveState === "pending_archive"
+                  ? "清理完成，本轮结束后将自动归档并关闭标签页…"
+                  : isArchiveQueued
+                    ? "已排队：本轮结束后自动发送归档命令"
+                    : "AI 正在执行归档清理，完成后自动归档关闭…"}
+              </Text>
+            </View>
+            {isArchiveQueued ? (
+              <Pressable
+                onPress={() => void handleTriggerArchive(true)}
+                disabled={archiving}
+                style={{
+                  paddingHorizontal: 8,
+                  paddingVertical: 4,
+                  borderRadius: 6,
+                  backgroundColor: theme.colors.surface0,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                }}
+              >
+                <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foreground }}>
+                  取消排队
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+
+        {!card.archived && archiveConfirmOpen && !isArchiveInProgress ? (
+          <View
+            style={{
+              padding: 10,
+              borderRadius: 10,
+              backgroundColor: theme.colors.surface1,
+              borderWidth: 1,
+              borderColor: withAlpha(theme.colors.statusWarning, 0.45),
+              gap: 8,
+            }}
+          >
+            <View style={{ gap: 3 }}>
+              <Text style={{ fontSize: 12, fontWeight: "700", color: theme.colors.foreground }}>
+                {isArchiveQueued
+                  ? "归档命令已排队"
+                  : isRunning
+                    ? "本轮结束后自动发送归档命令？"
+                    : "在当前对话发送归档命令？"}
+              </Text>
+              <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
+                {settings.autoArchiveAfterCleanup
+                  ? "将交由 AI 清理本对话残留的 worktree 与临时文件，确认无风险后自动归档并关闭标签页。"
+                  : "将交由 AI 清理本对话残留的 worktree 与临时文件并汇报结果（当前未开启自动归档）。"}
+              </Text>
+              {archiveCommandPreview ? (
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    fontSize: 11,
+                    color: theme.colors.foregroundMuted,
+                    backgroundColor: theme.colors.surface0,
+                    paddingHorizontal: 7,
+                    paddingVertical: 4,
+                    borderRadius: 6,
+                    borderWidth: 1,
+                    borderColor: theme.colors.border,
+                    marginTop: 2,
+                  }}
+                >
+                  {archiveCommandPreview}
+                </Text>
+              ) : null}
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              {isArchiveQueued ? (
+                <Pressable
+                  onPress={() => void handleTriggerArchive(true)}
+                  disabled={archiving}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 7,
+                    backgroundColor: theme.colors.statusWarning,
+                  }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: "#000000" }}>
+                    取消排队
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  onPress={() => void handleTriggerArchive(false)}
+                  disabled={archiving}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 7,
+                    backgroundColor: theme.colors.accent,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: "600",
+                      color: theme.colors.accentForeground,
+                    }}
+                  >
+                    {isRunning ? "本轮后发送归档" : "确认归档"}
+                  </Text>
+                </Pressable>
+              )}
+              {onOpenSettings ? (
+                <Pressable
+                  onPress={() => {
+                    setArchiveConfirmOpen(false);
+                    onOpenSettings();
+                  }}
+                  style={{
+                    paddingHorizontal: 9,
+                    paddingVertical: 6,
+                    borderRadius: 7,
+                    backgroundColor: theme.colors.surface0,
+                    borderWidth: 1,
+                    borderColor: theme.colors.border,
+                  }}
+                >
+                  <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
+                    编辑命令
+                  </Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={() => setArchiveConfirmOpen(false)}
+                style={{
+                  paddingHorizontal: 9,
+                  paddingVertical: 6,
+                  borderRadius: 7,
+                  backgroundColor: theme.colors.surface0,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                }}
+              >
+                <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>取消</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {statusPickerOpen ? (
           <View
@@ -488,7 +719,9 @@ export function WorkbenchCardBody({
                   backgroundColor: theme.colors.accent,
                 }}
               >
-                <Text style={{ fontSize: 12, fontWeight: "600", color: theme.colors.accentForeground }}>
+                <Text
+                  style={{ fontSize: 12, fontWeight: "600", color: theme.colors.accentForeground }}
+                >
                   保存
                 </Text>
               </Pressable>
@@ -515,7 +748,9 @@ export function WorkbenchCardBody({
         >
           <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 7 }}>
             <Icon name="Sparkles" size={14} color={theme.colors.statusWarning} />
-            <Text style={{ flex: 1, fontSize: 12, fontWeight: "600", color: theme.colors.foreground }}>
+            <Text
+              style={{ flex: 1, fontSize: 12, fontWeight: "600", color: theme.colors.foreground }}
+            >
               {card.conditionMetNotice}
             </Text>
           </View>
@@ -540,7 +775,14 @@ export function WorkbenchCardBody({
       >
         {/* Primary headline: Topic */}
         <View style={{ gap: 4 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 6,
+            }}
+          >
             <Text
               style={{
                 fontSize: 11,
@@ -554,7 +796,9 @@ export function WorkbenchCardBody({
               <Pressable
                 onPress={() => void handleToggleTopicLock()}
                 hitSlop={6}
-                accessibilityLabel={card.topicLocked ? "解锁主题允许 AI 更新" : "锁定主题禁止 AI 覆盖"}
+                accessibilityLabel={
+                  card.topicLocked ? "解锁主题允许 AI 更新" : "锁定主题禁止 AI 覆盖"
+                }
               >
                 <Icon
                   name={card.topicLocked ? "Pin" : "PinOff"}
@@ -605,7 +849,9 @@ export function WorkbenchCardBody({
                   backgroundColor: theme.colors.accent,
                 }}
               >
-                <Text style={{ fontSize: 12, color: theme.colors.accentForeground, fontWeight: "600" }}>
+                <Text
+                  style={{ fontSize: 12, color: theme.colors.accentForeground, fontWeight: "600" }}
+                >
                   确定
                 </Text>
               </Pressable>
@@ -617,7 +863,10 @@ export function WorkbenchCardBody({
                 fontSize: 15,
                 fontWeight: "700",
                 lineHeight: 21,
-                color: card.topic || card.agentTitle ? theme.colors.foreground : theme.colors.foregroundMuted,
+                color:
+                  card.topic || card.agentTitle
+                    ? theme.colors.foreground
+                    : theme.colors.foregroundMuted,
               }}
             >
               {card.topic || card.agentTitle || "待自动总结主题…"}
@@ -637,12 +886,17 @@ export function WorkbenchCardBody({
             gap: 5,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 6,
+            }}
+          >
             <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
               <Icon name="Zap" size={12} color={statusColor} />
-              <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
-                当前在做
-              </Text>
+              <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>当前在做</Text>
             </View>
             {isSummarizing ? (
               <Text style={{ fontSize: 10, fontWeight: "600", color: theme.colors.statusWarning }}>
@@ -744,7 +998,9 @@ export function WorkbenchCardBody({
                   borderColor: withAlpha(theme.colors.statusSuccess, 0.45),
                 }}
               >
-                <Text style={{ fontSize: 11, color: theme.colors.statusSuccess, fontWeight: "700" }}>
+                <Text
+                  style={{ fontSize: 11, color: theme.colors.statusSuccess, fontWeight: "700" }}
+                >
                   已确认
                 </Text>
               </Pressable>
@@ -756,7 +1012,9 @@ export function WorkbenchCardBody({
           <Pressable
             onPress={() =>
               onOpenAgent?.(
-                card.waitCondition!.kind === "agent_settled" ? card.waitCondition!.targetAgentId : "",
+                card.waitCondition!.kind === "agent_settled"
+                  ? card.waitCondition!.targetAgentId
+                  : "",
               )
             }
             style={{
@@ -772,7 +1030,10 @@ export function WorkbenchCardBody({
             }}
           >
             <Icon name="GitMerge" size={12} color={theme.colors.statusWarning} />
-            <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}>
+            <Text
+              numberOfLines={1}
+              style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}
+            >
               等待关联对话：{card.waitCondition.targetLabel || "查看目标对话"}
             </Text>
             <Icon name="ArrowUpRight" size={12} color={theme.colors.foregroundMuted} />
@@ -785,9 +1046,7 @@ export function WorkbenchCardBody({
             style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
           >
             <Icon name="Split" size={12} color={theme.colors.foregroundMuted} />
-            <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
-              查看来源对话
-            </Text>
+            <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>查看来源对话</Text>
             <Icon name="ArrowUpRight" size={11} color={theme.colors.foregroundMuted} />
           </Pressable>
         ) : null}
@@ -795,7 +1054,9 @@ export function WorkbenchCardBody({
 
       {/* Todos workspace */}
       <View style={{ gap: 8 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <View
+          style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+        >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
             <Text style={{ fontSize: 12, fontWeight: "700", color: theme.colors.foreground }}>
               待办
@@ -806,9 +1067,7 @@ export function WorkbenchCardBody({
                 paddingVertical: 1,
                 borderRadius: 999,
                 backgroundColor:
-                  activeTodos.length > 0
-                    ? statusVisual.tintBg(theme)
-                    : theme.colors.surface2,
+                  activeTodos.length > 0 ? statusVisual.tintBg(theme) : theme.colors.surface2,
               }}
             >
               <Text
@@ -920,9 +1179,7 @@ export function WorkbenchCardBody({
                               fontSize: 10,
                               fontWeight: "700",
                               color:
-                                todo.status === "forked"
-                                  ? theme.colors.statusSuccess
-                                  : statusColor,
+                                todo.status === "forked" ? theme.colors.statusSuccess : statusColor,
                             }}
                           >
                             {getTodoStatusLabel(todo.status)}
@@ -946,14 +1203,22 @@ export function WorkbenchCardBody({
                           borderColor: withAlpha(theme.colors.statusSuccess, 0.35),
                         }}
                       >
-                        <Text style={{ fontSize: 11, color: theme.colors.statusSuccess, fontWeight: "600" }}>
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            color: theme.colors.statusSuccess,
+                            fontWeight: "600",
+                          }}
+                        >
                           分支
                         </Text>
                         <Icon name="ArrowUpRight" size={11} color={theme.colors.statusSuccess} />
                       </Pressable>
                     ) : (
                       <Pressable
-                        onPress={() => void handleRunTodo(todo, isRunning ? "queue_next" : "send_now")}
+                        onPress={() =>
+                          void handleRunTodo(todo, isRunning ? "queue_next" : "send_now")
+                        }
                         disabled={isBusy}
                         style={{
                           flexDirection: "row",
@@ -977,7 +1242,9 @@ export function WorkbenchCardBody({
                   </View>
 
                   {isExpanded ? (
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingLeft: 23 }}>
+                    <View
+                      style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingLeft: 23 }}
+                    >
                       <ActionChip
                         theme={theme}
                         icon="SquarePen"
@@ -1055,7 +1322,9 @@ export function WorkbenchCardBody({
           <View style={{ gap: 5, paddingTop: 2 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
               <Icon name="Sparkles" size={11} color={theme.colors.foregroundMuted} />
-              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}>
+              <Text
+                style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}
+              >
                 AI 建议待办
               </Text>
             </View>
@@ -1075,7 +1344,10 @@ export function WorkbenchCardBody({
                   backgroundColor: theme.colors.surface0,
                 }}
               >
-                <Text numberOfLines={2} style={{ flex: 1, fontSize: 12, color: theme.colors.foregroundMuted }}>
+                <Text
+                  numberOfLines={2}
+                  style={{ flex: 1, fontSize: 12, color: theme.colors.foregroundMuted }}
+                >
                   {sug.title}
                 </Text>
                 <Pressable
@@ -1092,7 +1364,10 @@ export function WorkbenchCardBody({
                     + 收纳
                   </Text>
                 </Pressable>
-                <Pressable onPress={() => void handleResolveSuggested(sug.id, "dismiss")} hitSlop={6}>
+                <Pressable
+                  onPress={() => void handleResolveSuggested(sug.id, "dismiss")}
+                  hitSlop={6}
+                >
                   <Icon name="X" size={13} color={theme.colors.foregroundMuted} />
                 </Pressable>
               </View>
@@ -1138,7 +1413,9 @@ export function WorkbenchCardBody({
             <Icon
               name="Plus"
               size={15}
-              color={newTodoText.trim() ? theme.colors.accentForeground : theme.colors.foregroundMuted}
+              color={
+                newTodoText.trim() ? theme.colors.accentForeground : theme.colors.foregroundMuted
+              }
             />
           </Pressable>
         </View>
@@ -1185,7 +1462,9 @@ function ToolbarIconButton({
         borderRadius: 7,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: active ? withAlpha(theme.colors.statusWarning, 0.16) : theme.colors.surface1,
+        backgroundColor: active
+          ? withAlpha(theme.colors.statusWarning, 0.16)
+          : theme.colors.surface1,
         borderWidth: 1,
         borderColor: active ? withAlpha(theme.colors.statusWarning, 0.4) : theme.colors.border,
         opacity: disabled && !active ? 0.5 : 1,
@@ -1230,9 +1509,7 @@ function ActionChip({
           ? withAlpha(theme.colors.statusSuccess, 0.16)
           : theme.colors.surface2,
         borderWidth: 1,
-        borderColor: selected
-          ? withAlpha(theme.colors.statusSuccess, 0.5)
-          : theme.colors.border,
+        borderColor: selected ? withAlpha(theme.colors.statusSuccess, 0.5) : theme.colors.border,
         opacity: disabled ? 0.5 : 1,
       }}
     >
@@ -1320,7 +1597,17 @@ function WaitConditionEditor({
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存等待条件失败");
     }
-  }, [agentId, autoPrompt, expectMode, otherCards, policyMode, selectedTargetId, toast, updateMeta, workspaceId]);
+  }, [
+    agentId,
+    autoPrompt,
+    expectMode,
+    otherCards,
+    policyMode,
+    selectedTargetId,
+    toast,
+    updateMeta,
+    workspaceId,
+  ]);
 
   const handleClearDependency = useCallback(async () => {
     try {
@@ -1355,7 +1642,12 @@ function WaitConditionEditor({
     >
       <Pressable
         onPress={() => setOpen((value) => !value)}
-        style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+        }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
           <Icon name="GitMerge" size={13} color={theme.colors.foregroundMuted} />
@@ -1364,28 +1656,47 @@ function WaitConditionEditor({
           </Text>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <Text numberOfLines={1} style={{ fontSize: 11, color: theme.colors.foregroundMuted, maxWidth: 140 }}>
+          <Text
+            numberOfLines={1}
+            style={{ fontSize: 11, color: theme.colors.foregroundMuted, maxWidth: 140 }}
+          >
             {summaryBadge}
           </Text>
-          <Icon name={open ? "ChevronDown" : "ChevronRight"} size={13} color={theme.colors.foregroundMuted} />
+          <Icon
+            name={open ? "ChevronDown" : "ChevronRight"}
+            size={13}
+            color={theme.colors.foregroundMuted}
+          />
         </View>
       </Pressable>
 
       {open ? (
         <View style={{ gap: 9 }}>
           {card.waitCondition ? (
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
               {card.waitCondition.kind === "agent_settled" ? (
                 <Pressable
                   onPress={() =>
                     onOpenAgent?.(
-                      card.waitCondition!.kind === "agent_settled" ? card.waitCondition!.targetAgentId : "",
+                      card.waitCondition!.kind === "agent_settled"
+                        ? card.waitCondition!.targetAgentId
+                        : "",
                     )
                   }
                   style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 5 }}
                 >
                   <Icon name="GitMerge" size={12} color={theme.colors.statusWarning} />
-                  <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}>
+                  <Text
+                    numberOfLines={1}
+                    style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}
+                  >
                     当前等待：{card.waitCondition.targetLabel || "查看目标对话"}
                   </Text>
                 </Pressable>
@@ -1406,7 +1717,11 @@ function WaitConditionEditor({
             选择要等待的关联对话（对方达成条件后自动通知或推进）：
           </Text>
 
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 6 }}
+          >
             {otherCards.slice(0, 12).map((item) => {
               const selected = selectedTargetId === item.agentId;
               const label = item.topic || item.agentTitle || "未命名对话";
@@ -1442,7 +1757,9 @@ function WaitConditionEditor({
               );
             })}
             {otherCards.length === 0 ? (
-              <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>暂无其他活跃对话</Text>
+              <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
+                暂无其他活跃对话
+              </Text>
             ) : null}
           </ScrollView>
 

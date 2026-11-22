@@ -268,6 +268,8 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
     contribution: PluginTimelineRendererContribution<Schema>,
   ): PluginCleanup;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
+  /** Closes any open tabs or sheets for an agent in its workspace layout. Idempotent. */
+  closeAgentTab?(options: { agentId: string; workspaceId?: string | null }): void;
   /**
    * Subscribes to a plugin subscription on this client's host. Paseo re-subscribes after a
    * reconnect and releases what is left when the plugin stops.
