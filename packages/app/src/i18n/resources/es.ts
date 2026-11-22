@@ -2125,7 +2125,7 @@ export const es: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "Caché compartida · no se guarda en el chat",
     minimize: "Minimizar panel BTW",
-    close: "Cerrar y limpiar panel BTW",
+    close: "Cerrar panel BTW (escribe /btw o pulsa BTW para reabrir)",
     thinking: "Pensando…",
     failed: "Error en la pregunta lateral",
     copyAnswer: "Copiar",
@@ -2135,6 +2135,12 @@ export const es: TranslationResources = {
     sendFollowUp: "Enviar seguimiento",
     pillPending: "BTW · Pensando…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "Borrar historial",
+    triggerLabel: "BTW",
+    triggerTooltip: "Pregunta lateral (/btw) · caché compartida, no se añade al chat",
+    askPlaceholder: "Haz una pregunta lateral…",
+    emptyHint: "Pregunta sobre esta conversación sin añadirla al historial, reutilizando la caché.",
+    continueInBranch: "Continuar en nueva rama",
   },
   subagents: {
     parent: {

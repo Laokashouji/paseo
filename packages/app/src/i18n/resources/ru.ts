@@ -2111,7 +2111,7 @@ export const ru: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "Общий кэш · не добавляется в чат",
     minimize: "Свернуть панель BTW",
-    close: "Закрыть и очистить панель BTW",
+    close: "Закрыть панель BTW (введите /btw или нажмите BTW для повторного открытия)",
     thinking: "Думаю…",
     failed: "Не удалось выполнить побочный вопрос",
     copyAnswer: "Копировать",
@@ -2121,6 +2121,12 @@ export const ru: TranslationResources = {
     sendFollowUp: "Отправить",
     pillPending: "BTW · Думаю…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "Очистить историю",
+    triggerLabel: "BTW",
+    triggerTooltip: "Побочный вопрос (/btw) · общий кэш, не добавляется в чат",
+    askPlaceholder: "Задайте побочный вопрос…",
+    emptyHint: "Задавайте вопросы по контексту диалога без записи в основную историю, используя кэш.",
+    continueInBranch: "Продолжить в новой ветке",
   },
   subagents: {
     parent: {

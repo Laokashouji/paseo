@@ -2124,7 +2124,7 @@ export const fr: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "Cache partagé · non ajouté au chat",
     minimize: "Réduire le panneau BTW",
-    close: "Fermer et effacer le panneau BTW",
+    close: "Fermer le panneau BTW (tapez /btw ou cliquez sur BTW pour rouvrir)",
     thinking: "Réflexion…",
     failed: "Échec de la question annexe",
     copyAnswer: "Copier",
@@ -2134,6 +2134,12 @@ export const fr: TranslationResources = {
     sendFollowUp: "Envoyer la suite",
     pillPending: "BTW · Réflexion…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "Effacer l’historique",
+    triggerLabel: "BTW",
+    triggerTooltip: "Question annexe (/btw) · cache partagé, hors historique",
+    askPlaceholder: "Poser une question annexe…",
+    emptyHint: "Posez une question sur cette conversation sans l’ajouter à l’historique, en réutilisant le cache.",
+    continueInBranch: "Continuer dans une branche",
   },
   subagents: {
     parent: {

@@ -65,10 +65,10 @@ export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
     aliases: [],
     description: "Ask an ephemeral side question sharing this chat's cache",
     descriptionKey: "composer.clientCommands.sideQuestion",
-    argumentHint: "<question>",
+    argumentHint: "[question]",
     kind: "side-question",
     execution: "insert",
-    argsMode: "required",
+    argsMode: "optional",
   },
 ];
 

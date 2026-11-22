@@ -106,6 +106,7 @@ import {
 import { useVoiceOptional } from "@/contexts/voice-context";
 import { useToast } from "@/contexts/toast-context";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { SideQuestionTriggerButton } from "@/side-questions";
 import { Shortcut } from "@/components/ui/shortcut";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { AutocompletePopover } from "@/components/ui/autocomplete-popover";
@@ -2223,19 +2224,26 @@ function ComposerContentImpl({
   const beforeVoiceContent = useMemo(
     () =>
       hasAgent ? (
-        <View style={styles.contextWindowMeterSlot}>
-          <ContextWindowMeter
-            serverId={serverId}
-            agentId={agentId}
-            maxTokens={agentState.contextWindowMaxTokens}
-            usedTokens={agentState.contextWindowUsedTokens}
-            totalCostUsd={agentState.totalCostUsd}
-            toolbarRing={TOOLBAR_RINGS[controlSizing]}
-          />
+        <View style={styles.rightControls}>
+          {mode.showAgentControls && !readOnly ? (
+            <SideQuestionTriggerButton serverId={serverId} agentId={agentId} />
+          ) : null}
+          <View style={styles.contextWindowMeterSlot}>
+            <ContextWindowMeter
+              serverId={serverId}
+              agentId={agentId}
+              maxTokens={agentState.contextWindowMaxTokens}
+              usedTokens={agentState.contextWindowUsedTokens}
+              totalCostUsd={agentState.totalCostUsd}
+              toolbarRing={TOOLBAR_RINGS[controlSizing]}
+            />
+          </View>
         </View>
       ) : null,
     [
       hasAgent,
+      mode.showAgentControls,
+      readOnly,
       serverId,
       agentId,
       agentState.contextWindowMaxTokens,

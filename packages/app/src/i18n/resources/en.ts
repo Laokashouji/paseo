@@ -2104,7 +2104,7 @@ export const en = {
   sideQuestion: {
     ephemeralHint: "Shared cache · not added to chat",
     minimize: "Minimize BTW panel",
-    close: "Close and clear BTW panel",
+    close: "Close BTW panel (type /btw or click BTW to reopen)",
     thinking: "Thinking…",
     failed: "Side question failed",
     copyAnswer: "Copy",
@@ -2114,6 +2114,12 @@ export const en = {
     sendFollowUp: "Send follow-up",
     pillPending: "BTW · Thinking…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "Clear history",
+    triggerLabel: "BTW",
+    triggerTooltip: "Side question (/btw) · shared cache, not added to chat",
+    askPlaceholder: "Ask a side question…",
+    emptyHint: "Ask about this conversation without adding to chat history. Reuses active prompt cache.",
+    continueInBranch: "Continue in branch",
   },
   subagents: {
     parent: {

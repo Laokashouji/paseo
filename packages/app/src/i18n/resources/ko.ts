@@ -2087,7 +2087,7 @@ export const ko: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "캐시 공유 · 대화에 기록되지 않음",
     minimize: "BTW 패널 접기",
-    close: "BTW 패널 닫기 및 지우기",
+    close: "BTW 패널 닫기 (/btw 입력 또는 BTW 버튼으로 다시 열기)",
     thinking: "생각 중…",
     failed: "사이드 질문에 실패했습니다",
     copyAnswer: "복사",
@@ -2097,6 +2097,12 @@ export const ko: TranslationResources = {
     sendFollowUp: "보내기",
     pillPending: "BTW · 생각 중…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "기록 지우기",
+    triggerLabel: "BTW",
+    triggerTooltip: "사이드 질문 (/btw) · 캐시 공유, 메인 대화에 기록되지 않음",
+    askPlaceholder: "사이드 질문을 입력하세요…",
+    emptyHint: "메인 대화 기록에 추가하지 않고 현재 문맥과 캐시를 재사용해 질문합니다.",
+    continueInBranch: "새 브랜치에서 계속하기",
   },
   subagents: {
     parent: {

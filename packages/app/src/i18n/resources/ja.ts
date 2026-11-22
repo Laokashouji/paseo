@@ -2097,7 +2097,7 @@ export const ja: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "キャッシュ共有・会話履歴に追加されません",
     minimize: "BTW パネルを最小化",
-    close: "BTW パネルを閉じてクリア",
+    close: "パネルを閉じる（/btw または BTW ボタンで再表示）",
     thinking: "思考中…",
     failed: "サイド質問に失敗しました",
     copyAnswer: "コピー",
@@ -2107,6 +2107,12 @@ export const ja: TranslationResources = {
     sendFollowUp: "送信",
     pillPending: "BTW · 思考中…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "履歴をクリア",
+    triggerLabel: "BTW",
+    triggerTooltip: "サイド質問 (/btw) · キャッシュ共有・メイン会話に記録しない",
+    askPlaceholder: "サイド質問を入力…",
+    emptyHint: "メイン会話に記録せず現在の文脈・キャッシュを使って質問できます。",
+    continueInBranch: "新しいブランチで続ける",
   },
   subagents: {
     parent: {

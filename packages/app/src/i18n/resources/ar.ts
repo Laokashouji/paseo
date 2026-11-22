@@ -2076,7 +2076,7 @@ export const ar: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "ذاكرة مشتركة · لا يُحفظ في المحادثة",
     minimize: "تصغير بطاقة BTW",
-    close: "إغلاق ومسح بطاقة BTW",
+    close: "إغلاق لوحة BTW (اكتب /btw أو اضغط BTW لإعادة الفتح)",
     thinking: "جارٍ التفكير…",
     failed: "فشل السؤال الجانبي",
     copyAnswer: "نسخ",
@@ -2086,6 +2086,12 @@ export const ar: TranslationResources = {
     sendFollowUp: "إرسال المتابعة",
     pillPending: "BTW · جارٍ التفكير…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "مسح السجل",
+    triggerLabel: "BTW",
+    triggerTooltip: "سؤال جانبي (/btw) · ذاكرة مشتركة ولا يُضاف للمحادثة",
+    askPlaceholder: "اطرح سؤالاً جانبياً…",
+    emptyHint: "اسأل حول هذه المحادثة دون إضافتها للسجل مع إعادة استخدام الذاكرة المؤقتة.",
+    continueInBranch: "المتابعة في فرع جديد",
   },
   subagents: {
     parent: {

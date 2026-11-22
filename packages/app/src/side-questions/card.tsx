@@ -10,12 +10,14 @@ import {
   GitBranch,
   RotateCw,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
 import { MarkdownRenderer } from "@/components/markdown/renderer";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { COMPOSER_PILL_CLEARANCE, COMPOSER_PILL_MIN_HEIGHT } from "@/composer/pill-styles";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
@@ -29,6 +31,7 @@ import {
 
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedTrash2 = withUnistyles(Trash2);
 const ThemedX = withUnistyles(X);
 const ThemedCopy = withUnistyles(Copy);
 const ThemedCheck = withUnistyles(Check);
@@ -48,7 +51,7 @@ export interface SideQuestionCardProps {
   serverId: string;
   agentId: string;
   onInsertToComposer?: (text: string) => void;
-  onForkToBranch?: () => void;
+  onForkToBranch?: (turn: SideQuestionTurnEntry) => void;
 }
 
 export const SideQuestionCard = memo(function SideQuestionCard({
@@ -63,25 +66,42 @@ export const SideQuestionCard = memo(function SideQuestionCard({
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const [followUp, setFollowUp] = useState("");
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
+  const isOpen = thread?.displayMode === "open";
   const turnCount = thread?.turns.length ?? 0;
   const lastTurnStatus = thread?.turns[turnCount - 1]?.status ?? null;
   const hasPending = thread?.turns.some((turn) => turn.status === "pending") ?? false;
 
   useEffect(() => {
-    if (!thread?.isOpen || turnCount === 0) return;
+    if (!isOpen) return;
     const timer = setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
+      if (turnCount > 0) {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }
     }, 30);
     return () => clearTimeout(timer);
-  }, [lastTurnStatus, thread?.isOpen, turnCount]);
+  }, [isOpen, lastTurnStatus, turnCount]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const timer = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 30);
+    return () => clearTimeout(timer);
+  }, [isOpen]);
 
   const handleMinimize = useCallback(() => {
     useSideQuestionStore.getState().minimize(serverId, agentId);
   }, [agentId, serverId]);
 
-  const handleDismiss = useCallback(() => {
-    useSideQuestionStore.getState().dismiss(serverId, agentId);
+  const handleClose = useCallback(() => {
+    useSideQuestionStore.getState().close(serverId, agentId);
+  }, [agentId, serverId]);
+
+  const handleClear = useCallback(() => {
+    useSideQuestionStore.getState().clear(serverId, agentId);
+    setTimeout(() => inputRef.current?.focus(), 20);
   }, [agentId, serverId]);
 
   const handleSendFollowUp = useCallback(() => {
@@ -110,7 +130,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
     [agentId, client, serverId, t],
   );
 
-  if (!thread || !thread.isOpen || thread.turns.length === 0) {
+  if (!thread || !isOpen) {
     return null;
   }
 
@@ -133,50 +153,89 @@ export const SideQuestionCard = memo(function SideQuestionCard({
             </Text>
           </View>
           <View style={styles.headerActions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("sideQuestion.minimize")}
-              onPress={handleMinimize}
-              style={styles.iconButton}
-              testID="side-question-minimize"
-            >
-              <ThemedChevronDown size={15} uniProps={mutedColorMapping} />
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("sideQuestion.close")}
-              onPress={handleDismiss}
-              style={styles.iconButton}
-              testID="side-question-close"
-            >
-              <ThemedX size={15} uniProps={mutedColorMapping} />
-            </Pressable>
+            {turnCount > 0 && !hasPending ? (
+              <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
+                <TooltipTrigger
+                  accessibilityRole="button"
+                  accessibilityLabel={t("sideQuestion.clearHistory")}
+                  onPress={handleClear}
+                  style={styles.iconButton}
+                  testID="side-question-clear"
+                >
+                  <ThemedTrash2 size={14} uniProps={mutedColorMapping} />
+                </TooltipTrigger>
+                <TooltipContent side="top" align="center" offset={6}>
+                  <Text style={styles.tooltipText}>{t("sideQuestion.clearHistory")}</Text>
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+            {turnCount > 0 ? (
+              <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
+                <TooltipTrigger
+                  accessibilityRole="button"
+                  accessibilityLabel={t("sideQuestion.minimize")}
+                  onPress={handleMinimize}
+                  style={styles.iconButton}
+                  testID="side-question-minimize"
+                >
+                  <ThemedChevronDown size={15} uniProps={mutedColorMapping} />
+                </TooltipTrigger>
+                <TooltipContent side="top" align="center" offset={6}>
+                  <Text style={styles.tooltipText}>{t("sideQuestion.minimize")}</Text>
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+            <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
+              <TooltipTrigger
+                accessibilityRole="button"
+                accessibilityLabel={t("sideQuestion.close")}
+                onPress={handleClose}
+                style={styles.iconButton}
+                testID="side-question-close"
+              >
+                <ThemedX size={15} uniProps={mutedColorMapping} />
+              </TooltipTrigger>
+              <TooltipContent side="top" align="center" offset={6}>
+                <Text style={styles.tooltipText}>{t("sideQuestion.close")}</Text>
+              </TooltipContent>
+            </Tooltip>
           </View>
         </View>
 
-        <ScrollView
-          ref={scrollRef}
-          style={styles.bodyScroll}
-          contentContainerStyle={styles.bodyContent}
-          keyboardShouldPersistTaps="handled"
-        >
-          {thread.turns.map((turn) => (
-            <SideQuestionTurnView
-              key={turn.id}
-              turn={turn}
-              onRetry={handleRetry}
-              onInsertToComposer={onInsertToComposer}
-              onForkToBranch={onForkToBranch}
-            />
-          ))}
-        </ScrollView>
+        {turnCount === 0 ? (
+          <View style={styles.emptyState} testID="side-question-empty">
+            <Text style={styles.emptyHintText}>{t("sideQuestion.emptyHint")}</Text>
+          </View>
+        ) : (
+          <ScrollView
+            ref={scrollRef}
+            style={styles.bodyScroll}
+            contentContainerStyle={styles.bodyContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {thread.turns.map((turn) => (
+              <SideQuestionTurnView
+                key={turn.id}
+                turn={turn}
+                onRetry={handleRetry}
+                onInsertToComposer={onInsertToComposer}
+                onForkToBranch={onForkToBranch}
+              />
+            ))}
+          </ScrollView>
+        )}
 
         <View style={styles.footer}>
           <ThemedTextInput
+            ref={inputRef}
             value={followUp}
             onChangeText={setFollowUp}
             onSubmitEditing={handleSendFollowUp}
-            placeholder={t("sideQuestion.followUpPlaceholder")}
+            placeholder={
+              turnCount === 0
+                ? t("sideQuestion.askPlaceholder")
+                : t("sideQuestion.followUpPlaceholder")
+            }
             returnKeyType="send"
             editable={!hasPending}
             style={styles.followUpInput}
@@ -210,7 +269,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
   turn: SideQuestionTurnEntry;
   onRetry: (turnId: string) => void;
   onInsertToComposer?: (text: string) => void;
-  onForkToBranch?: () => void;
+  onForkToBranch?: (turn: SideQuestionTurnEntry) => void;
 }) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
@@ -234,6 +293,10 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
   const handleRetryPress = useCallback(() => {
     onRetry(turn.id);
   }, [onRetry, turn.id]);
+
+  const handleForkPress = useCallback(() => {
+    onForkToBranch?.(turn);
+  }, [onForkToBranch, turn]);
 
   return (
     <View style={styles.turnContainer} testID={`side-question-turn-${turn.id}`}>
@@ -269,7 +332,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
             {onForkToBranch ? (
               <Pressable
                 accessibilityRole="button"
-                onPress={onForkToBranch}
+                onPress={handleForkPress}
                 style={styles.actionChip}
                 testID={`side-question-fork-${turn.id}`}
               >
@@ -309,6 +372,17 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
               >
                 <ThemedCornerDownLeft size={12} uniProps={mutedColorMapping} />
                 <Text style={styles.actionChipText}>{t("sideQuestion.insertToComposer")}</Text>
+              </Pressable>
+            ) : null}
+            {onForkToBranch ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={handleForkPress}
+                style={styles.actionChip}
+                testID={`side-question-fork-${turn.id}`}
+              >
+                <ThemedGitBranch size={12} uniProps={mutedColorMapping} />
+                <Text style={styles.actionChipText}>{t("sideQuestion.continueInBranch")}</Text>
               </Pressable>
             ) : null}
           </View>
@@ -392,6 +466,18 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.md,
     alignItems: "center",
     justifyContent: "center",
+  },
+  tooltipText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.popoverForeground,
+  },
+  emptyState: {
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[3],
+  },
+  emptyHintText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
   },
   bodyScroll: {
     maxHeight: 280,

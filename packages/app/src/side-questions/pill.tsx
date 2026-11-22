@@ -32,7 +32,7 @@ export const SideQuestionPill = memo(function SideQuestionPill({
   const handleHoverIn = useCallback(() => setIsHovered(true), []);
   const handleHoverOut = useCallback(() => setIsHovered(false), []);
   const handlePress = useCallback(() => {
-    useSideQuestionStore.getState().reopen(serverId, agentId);
+    useSideQuestionStore.getState().open(serverId, agentId);
   }, [agentId, serverId]);
 
   const bodyStyle = useMemo(
@@ -44,7 +44,7 @@ export const SideQuestionPill = memo(function SideQuestionPill({
     [isHovered],
   );
 
-  if (!thread || thread.isOpen || thread.turns.length === 0) {
+  if (!thread || thread.displayMode !== "minimized" || thread.turns.length === 0) {
     return null;
   }
 
