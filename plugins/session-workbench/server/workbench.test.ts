@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { PaseoApi } from "./paseo-types.js";
 import { HELPER_LABEL_KEY, HELPER_LABEL_VALUE } from "../shared/schema.js";
 import { DEFAULT_WORKBENCH_SETTINGS, type workbenchSettingsSchema } from "../shared/settings.js";
 import {

@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { PaseoAgentTimelineHandle, PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { z } from "zod";
+import type { PaseoAgentTimelineHandle, PaseoApi } from "./paseo-types.js";
 import {
   HELPER_LABEL_KEY,
   HELPER_LABEL_VALUE,
