@@ -17,15 +17,13 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { resolveAppVersion } from "@/utils/app-version";
 import { openExternalUrl } from "@/utils/open-external-url";
-import { useChangelog, type ChangelogState } from "./changelog-source";
+import { resolveWebsiteChangelogUrl, useChangelog, type ChangelogState } from "./changelog-source";
 import { useRevealedReleases } from "./use-revealed-releases";
 import {
   formatChangelogDate,
   type ChangelogRelease,
   type ChangelogSection,
 } from "./parse-changelog";
-
-const WEBSITE_CHANGELOG_URL = "https://paseo.sh/changelog";
 
 const ThemedGift = withUnistyles(Gift);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
@@ -43,7 +41,7 @@ export function ChangelogSheet({ visible, onClose }: ChangelogSheetProps) {
   const { count, showMore } = useRevealedReleases(visible && state.status === "ready");
 
   const handleOpenWebsite = useCallback(() => {
-    void openExternalUrl(WEBSITE_CHANGELOG_URL);
+    void openExternalUrl(resolveWebsiteChangelogUrl());
   }, []);
 
   const header: SheetHeader = useMemo(
@@ -122,7 +120,7 @@ function ChangelogBody({ state, shownReleases, onShowMore, onRetry }: ChangelogB
     <View style={styles.releaseList}>
       {visibleReleases.map((release) => (
         <ReleaseView
-          key={`${release.version}:${release.date}`}
+          key={`${release.source ?? "upstream"}:${release.version}:${release.date}`}
           release={release}
           isCurrent={release.version === appVersion}
         />
@@ -164,6 +162,7 @@ const ReleaseView = memo(function ReleaseView({ release, isCurrent }: ReleaseVie
     <View style={styles.release} testID={`changelog-release-${release.version}`}>
       <View style={styles.releaseHeading}>
         <Text style={styles.version}>{release.version}</Text>
+        {release.source === "fork" ? <StatusBadge label="Fork" variant="success" /> : null}
         {isCurrent ? <StatusBadge label={t("changelog.installed")} /> : null}
         <View style={styles.headingSpacer} />
         {date ? <Text style={styles.date}>{date}</Text> : null}

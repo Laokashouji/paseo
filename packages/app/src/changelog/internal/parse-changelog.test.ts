@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   formatChangelogDate,
+  mergeChangelogReleases,
   parseChangelog,
   type ChangelogRelease,
   type ChangelogSection,
@@ -370,5 +371,85 @@ describe("the repository's own CHANGELOG.md", () => {
     expect(releases.flatMap(authoredLines).filter(isNotBlank)).toEqual(
       fromFirstRelease.filter(isNotBlank).filter((line) => !line.startsWith("## ")),
     );
+  });
+});
+
+describe("mergeChangelogReleases", () => {
+  it("interleaves fork and upstream releases by ISO date descending with same-day fork priority", () => {
+    const fork = parseChangelog(
+      [
+        "## 0.17.504 - 2026-11-22",
+        "",
+        "- Fork fix",
+        "",
+        "## 0.17.503 - 2026-11-22",
+        "",
+        "- Fork feature",
+        "",
+        "## 0.17.502 - 2026-11-21",
+        "",
+        "- Blue icon",
+        "",
+        "## 0.17.501 - 2026-11-20",
+        "",
+        "- Initial fork",
+      ].join("\n"),
+    );
+    const upstream = parseChangelog(
+      [
+        "## 0.17.1 - 2026-11-21",
+        "",
+        "- Upstream 0.17.1",
+        "",
+        "## 0.16.2 - 2026-11-18",
+        "",
+        "- Upstream 0.16.2",
+      ].join("\n"),
+    );
+
+    const merged = mergeChangelogReleases(fork, upstream);
+    expect(
+      merged.map((entry) => ({
+        version: entry.version,
+        date: entry.date,
+        source: entry.source ?? "upstream",
+      })),
+    ).toEqual([
+      { version: "0.17.504", date: "2026-11-22", source: "fork" },
+      { version: "0.17.503", date: "2026-11-22", source: "fork" },
+      { version: "0.17.502", date: "2026-11-21", source: "fork" },
+      { version: "0.17.1", date: "2026-11-21", source: "upstream" },
+      { version: "0.17.501", date: "2026-11-20", source: "fork" },
+      { version: "0.16.2", date: "2026-11-18", source: "upstream" },
+    ]);
+  });
+
+  it("places a newer upstream release ahead of an older fork release", () => {
+    const fork = parseChangelog("## 0.17.504 - 2026-11-22\n\n- Fork\n");
+    const upstream = parseChangelog("## 0.18.0 - 2026-11-25\n\n- Upstream\n");
+
+    const merged = mergeChangelogReleases(fork, upstream);
+    expect(merged.map((entry) => entry.version)).toEqual(["0.18.0", "0.17.504"]);
+  });
+
+  it("deduplicates versions present in both feeds in favor of the fork entry", () => {
+    const fork = parseChangelog("## 0.17.1 - 2026-11-21\n\n- Fork override\n");
+    const upstream = parseChangelog("## 0.17.1 - 2026-11-21\n\n- Upstream original\n");
+
+    const merged = mergeChangelogReleases(fork, upstream);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      version: "0.17.1",
+      highlights: "- Fork override",
+      source: "fork",
+    });
+  });
+
+  it("keeps undated fork releases ahead of dated upstream entries", () => {
+    const fork = parseChangelog("## Unreleased\n\n- Pending\n");
+    const upstream = parseChangelog("## 0.17.1 - 2026-11-21\n\n- Upstream\n");
+
+    const merged = mergeChangelogReleases(fork, upstream);
+    expect(merged.map((entry) => entry.version)).toEqual(["Unreleased", "0.17.1"]);
   });
 });

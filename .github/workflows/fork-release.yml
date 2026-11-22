@@ -65,7 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           sparse-checkout: |
+            FORK_CHANGELOG.md
             package.json
             scripts/fork
             scripts/github-release.mjs
@@ -152,29 +154,44 @@ jobs:
             echo 'matrix=[{"runner":"macos-latest","electron_arch":"arm64","node_heap_mb":4096}]' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create or reuse draft GitHub release
+      - name: Create or update draft GitHub release
         if: env.SHOULD_PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" > /dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists, reusing it."
-            exit 0
-          fi
-
           upstream_pkg_version="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version)')"
           commit_sha="$(git rev-parse --short HEAD)"
+          prev_fork_tag="$(git tag --merged HEAD -l 'fork-v*' --sort=-version:refname | grep -Fxv "$RELEASE_TAG" | head -n 1 || true)"
+          if [[ -n "$prev_fork_tag" ]]; then
+            fallback_commits="$(git log --no-merges --format='%s' "${prev_fork_tag}..HEAD" || true)"
+          else
+            fallback_commits="$(git log --no-merges -n 20 --format='%s' HEAD || true)"
+          fi
+
           notes_file="$(mktemp)"
           trap 'rm -f "$notes_file"' EXIT
-          cat > "$notes_file" <<EOF
-          Paseo Fork desktop build \`${FORK_VERSION}\`
+          printf '%s\n' "$fallback_commits" | node scripts/fork/changelog-utils.mjs release-notes \
+            --file FORK_CHANGELOG.md \
+            --version "$FORK_VERSION" \
+            --upstream-version "$upstream_pkg_version" \
+            --commit "$commit_sha" \
+            --repo "${{ github.repository }}" \
+            --commits-stdin \
+            --output "$notes_file"
 
-          - Upstream package base: \`${upstream_pkg_version}\`
-          - Built commit: \`${commit_sha}\`
-          - Auto-update repository: \`${{ github.repository }}\`
-          EOF
+          echo "=== Release Notes (${RELEASE_TAG}) ==="
+          cat "$notes_file"
+
+          if release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" 2>/dev/null)"; then
+            echo "Release $RELEASE_TAG already exists, syncing release notes."
+            gh release edit "$release_lookup" \
+              --repo "${{ github.repository }}" \
+              --title "Paseo $RELEASE_TAG" \
+              --notes-file "$notes_file"
+            exit 0
+          fi
 
           gh release create "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
@@ -242,6 +259,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           PASEO_DESKTOP_SMOKE: ${{ env.RUN_SMOKE == 'true' && '1' || '0' }}
           PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+          EXPO_PUBLIC_FORK_CHANGELOG_URL: https://raw.githubusercontent.com/${{ github.repository }}/fork/FORK_CHANGELOG.md
+          EXPO_PUBLIC_CHANGELOG_WEB_URL: https://github.com/${{ github.repository }}/releases
           NODE_OPTIONS: --max-old-space-size=${{ matrix.node_heap_mb }}
         run: |
           set -euo pipefail
@@ -382,6 +401,21 @@ jobs:
             exit 1
           fi
           echo "Verified packaged fork icon (${icon_file} and icon.png)"
+
+          if grep -Fq 'EXPO_PUBLIC_FORK_CHANGELOG_URL' packages/app/src/changelog/internal/changelog-source.ts; then
+            expected_changelog_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/fork/FORK_CHANGELOG.md"
+            expected_web_url="https://github.com/${GITHUB_REPOSITORY}/releases"
+            app_dist_dir="$app_path/Contents/Resources/app-dist"
+            if ! grep -RqF "$expected_changelog_url" "$app_dist_dir"; then
+              echo "::error::Packaged app-dist bundle is missing inlined fork changelog URL ($expected_changelog_url)"
+              exit 1
+            fi
+            if ! grep -RqF "$expected_web_url" "$app_dist_dir"; then
+              echo "::error::Packaged app-dist bundle is missing inlined changelog web URL ($expected_web_url)"
+              exit 1
+            fi
+            echo "Verified packaged fork changelog URLs ($expected_changelog_url)"
+          fi
 
       - name: Upload packaged smoke diagnostics on failure
         if: failure()
