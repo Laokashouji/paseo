@@ -2364,6 +2364,7 @@ export const ja: TranslationResources = {
       chat: "チャット",
       appearance: "外観",
       sidebar: "サイドバー",
+      mainChat: en.settings.sections.mainChat,
       terminal: "ターミナル",
       browser: "ブラウザ",
       editor: "エディター",

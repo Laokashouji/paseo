@@ -2368,6 +2368,7 @@ export const en = {
       chat: "Chat",
       appearance: "Appearance",
       sidebar: "Sidebar",
+      mainChat: "Conversation Steward",
       editor: "Editor",
       files: "Files",
       terminal: "Terminal",
@@ -3387,10 +3388,35 @@ export const en = {
     },
   },
   mainChat: {
+    defaultTitle: "Conversation Steward",
+    cannotArchive: "The pinned steward conversation cannot be archived.",
+    openFailed: "Failed to open the steward conversation.",
+    patrolFailed: "Failed to run steward patrol.",
+    pinnedMenuLabel: "Steward actions",
+    pinnedSubtitleNeedsYou: "{{count}} needs you",
+    pinnedSubtitleRunning: "{{count}} running",
+    pinnedSubtitleAttention: "{{count}} to review",
+    pinnedSubtitleQuietActive: "{{count}} active · all quiet",
+    pinnedSubtitleIdle: "Always on · standing by",
     sidebarBadgeNeedsYou: "{{count}} needs you",
     sidebarBadgeRunning: "{{count}} running",
     childPermissionBadge: "Needs you",
     openChildAgent: "Open task",
+    style: {
+      conservativeShort: "Conservative",
+      proactiveShort: "Proactive",
+    },
+    actions: {
+      triggerPatrol: "Patrol & brief now",
+      triggerPatrolShort: "Patrol now",
+      switchToProactive: "Switch to Proactive style (B)",
+      switchToConservative: "Switch to Conservative style (A)",
+      openSettings: "Steward settings...",
+    },
+    renameModal: {
+      title: "Rename pinned steward",
+      hint: "Updates the display name in Pinned, tabs, and the steward's identity.",
+    },
     mode: {
       readonly: "Read-only",
       write: "Write",
@@ -3438,25 +3464,132 @@ export const en = {
       tag: "Task",
       hint: "Send directly to child task",
       bannerLabel: "Sending directly to: {{title}}",
-      clear: "Back to Main Chat",
+      clear: "Back to Steward",
       sentToast: 'Sent directly to "{{title}}"',
     },
     board: {
       pillTitle: "Tasks",
-      panelTitle: "Main Chat Board & Rules",
+      panelTitle: "Steward Board & Rules",
       briefHeading: "Supervisor brief",
       liveCounts: "{{needsYou}} needs you · {{running}} running · {{done}} done",
       supervisorMetrics:
-        "Auto-approved {{held}} · Auto-continued {{autoContinued}} · Rework {{rework}} · Interrupts {{interrupts}}",
-      emptyTasks: "No child tasks dispatched from Main Chat yet.",
+        "Auto-handled {{held}} · Auto-continued {{autoContinued}} · Rework {{rework}} · Interrupts {{interrupts}}",
+      emptyTasks: "No active steward tasks or waiting sessions right now.",
       groupNeedsYou: "Needs you",
       groupRunning: "Running",
       groupDone: "Done",
+      manualSessionBadge: "Manual",
       talkDirectly: "Direct",
       rulesHeading: "Saved trust rules",
       emptyRules:
         'No saved rules yet. Use "Start & auto-start similar" or "Approve & remember similar" to add one.',
       removeRule: "Remove rule",
+    },
+    settings: {
+      title: "Conversation Steward",
+      description:
+        "Configure the pinned steward's name, autonomy style, background model, and patrol intervals.",
+      noCapableHost: "No connected host supports the Conversation Steward yet.",
+      hostLabel: "Target host",
+      nameLabel: "Display name",
+      nameHint: "Shown at the top of the Pinned section and synced to the workspace tab.",
+      patrolNowHint: "Immediately scan all active workspaces and wake the steward with a brief.",
+      savedToast: "Steward settings saved",
+      saveFailed: "Failed to save steward settings",
+      renamedToast: 'Renamed steward to "{{title}}"',
+      switchedConservativeToast: "Switched to Conservative preset (A)",
+      switchedProactiveToast: "Switched to Proactive preset (B)",
+      identity: {
+        title: "Identity & quick patrol",
+        description:
+          "Rename your pinned steward conversation or trigger an immediate fleet briefing.",
+      },
+      style: {
+        title: "Steward style presets",
+        description:
+          "Choose how proactively the steward intervenes across manually opened sessions. Selecting a preset applies its recommended intervals and switches, which you can fine-tune below.",
+        activeBadge: "Active",
+        conservativeTitle: "Preset A · Conservative (Default)",
+        conservativeDescription:
+          "Full-fleet awareness, proactive briefings, and automatic recovery from transient/quota errors. Never sends unsolicited instructions or answers to manual sessions without your approval.",
+        conservativeIntervalsSummary:
+          "Patrol 60s · Triage settle 20s · Stalled 15m · No-progress 10m · Escalate 5m · Wakeup cooldown 10m",
+        proactiveTitle: "Preset B · Proactive (Persona-style)",
+        proactiveDescription:
+          "Adds automatic answers for low-risk technical questions and automatic nudges for stalled or looping manual sessions. Hard redlines (git push, releases, deletions, external sends, product choices) still require your decision.",
+        proactiveIntervalsSummary:
+          "Patrol 30s · Triage settle 15s · Stalled 10m · No-progress 6m · Escalate 3m · Wakeup cooldown 3m",
+      },
+      backgroundModel: {
+        title: "Background triage model",
+        description: "Model used when background semantic triage evaluates stopped sessions.",
+        modeAuto: "Auto lightweight",
+        modeMain: "Same as steward",
+        modeCustom: "Custom model",
+        modeAutoHint:
+          "Uses Paseo's lightweight metadata model preference first to conserve main quota.",
+        modeMainHint: "Reuses the provider and model currently active on the steward conversation.",
+        modeCustomHint:
+          "Explicitly choose any enabled provider, model, and thinking level on this host.",
+        providerLabel: "Provider",
+        providerPlaceholder: "Select provider",
+        noProviders: "No enabled providers on this host",
+        modelLabel: "Model",
+        modelPlaceholder: "Select model",
+        noModels: "No models available for this provider",
+        thinkingLabel: "Thinking level",
+        thinkingDefault: "Provider default",
+      },
+      intervals: {
+        title: "Trigger intervals",
+        description:
+          "Control patrol cadence, settle debounce, stall detection, and wakeup throttling.",
+        patrolIntervalSec: "Rule patrol interval",
+        patrolIntervalSecHint:
+          "Zero-token background scan cadence across all active sessions (15–3600s).",
+        triageSettleSec: "Post-turn settle delay",
+        triageSettleSecHint: "Wait after a turn completes before running triage (5–300s).",
+        stalledThresholdMin: "Stalled session threshold",
+        stalledThresholdMinHint:
+          "Flag a running session with no new events after this duration (2–240m).",
+        noProgressThresholdMin: "No-progress loop threshold",
+        noProgressThresholdMinHint:
+          "Flag repeated wait/poll tool calls without substantive changes (2–120m).",
+        needsYouEscalateMin: "Approval escalation delay",
+        needsYouEscalateMinHint:
+          "Wake the steward if a permission or user question waits this long (1–120m).",
+        wakeupCooldownMin: "Proactive wakeup cooldown",
+        wakeupCooldownMinHint:
+          "Minimum gap between automatic steward briefings to avoid chatter (1–240m).",
+        invalidRange: "{{label}} must be between {{min}} and {{max}}.",
+        saveButton: "Save intervals",
+      },
+      units: {
+        seconds: "sec",
+        minutes: "min",
+      },
+      capabilities: {
+        title: "Proactive behavior toggles",
+        description: "Fine-tune individual autonomous behaviors on top of the selected preset.",
+        semanticTriage: "Background semantic triage",
+        semanticTriageHint:
+          "Use the configured background model to classify stopped turns as done, waiting on you, or waiting on external state.",
+        proactiveWakeup: "Proactive steward wakeups",
+        proactiveWakeupHint:
+          "Automatically wake the steward to brief you when sessions block, fail, or complete.",
+        initialBriefing: "Initial global briefing",
+        initialBriefingHint:
+          "Post a concise fleet summary automatically when the steward starts with active sessions.",
+        autoContinueManualErrors: "Auto-recover manual session errors",
+        autoContinueManualErrorsHint:
+          "Automatically retry transient network/5xx hiccups and schedule quota-reset continuations on manual sessions.",
+        autoDelegateManualQuestions: "Auto-answer low-risk technical questions",
+        autoDelegateManualQuestionsHint:
+          "Allow the steward to answer non-redline technical questions on manual sessions automatically (redlines always escalate).",
+        autoNudgeManualStalled: "Auto-nudge stalled/looping manual sessions",
+        autoNudgeManualStalledHint:
+          "Automatically nudge manual sessions that go silent or repeat wait/poll commands.",
+      },
     },
   },
 } as const;

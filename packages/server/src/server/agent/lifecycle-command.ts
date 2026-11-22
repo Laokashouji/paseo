@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import { isMainChatLabels } from "@getpaseo/protocol/main-chat";
 
 import {
   AgentRunCancellationError,
@@ -8,7 +9,9 @@ import {
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type { AgentProviderNotice } from "./agent-sdk-types.js";
 
-export type LifecycleAgentSnapshot = Pick<ManagedAgent, "id" | "cwd" | "lifecycle" | "internal">;
+export type LifecycleAgentSnapshot = Pick<ManagedAgent, "id" | "cwd" | "lifecycle" | "internal"> & {
+  labels?: Record<string, string>;
+};
 
 export interface LifecycleAgentManager {
   getAgent(agentId: string): LifecycleAgentSnapshot | null;
@@ -121,6 +124,15 @@ export async function archiveAgentCommand(
   agentId: string,
 ): Promise<ArchiveAgentResult> {
   const liveAgent = dependencies.agentManager.getAgent(agentId);
+  if (liveAgent && isMainChatLabels(liveAgent.labels)) {
+    throw new Error("对话管理主对话不支持归档");
+  }
+  if (!liveAgent) {
+    const existing = await dependencies.agentStorage.get(agentId);
+    if (existing && isMainChatLabels(existing.labels)) {
+      throw new Error("对话管理主对话不支持归档");
+    }
+  }
   let record: StoredAgentRecord | null;
   if (liveAgent) {
     await requestAgentRunCancellation(dependencies, agentId);

@@ -29,6 +29,8 @@ import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { useToast } from "@/contexts/toast-context";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1651,6 +1653,8 @@ function ActiveAgentComposer({
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const { workspaceId, tabId, retargetCurrentTab } = paneContext;
   const { archiveAgent } = useArchiveAgent();
+  const { t } = useTranslation();
+  const toast = useToast();
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
   const unpinWorkspaceAgent = useWorkspaceLayoutStore((state) => state.unpinAgent);
@@ -1683,6 +1687,10 @@ function ActiveAgentComposer({
       if (!agent) {
         throw new Error("Agent not found");
       }
+      if (isMainChatAgent(agent)) {
+        toast.show(t("mainChat.cannotArchive"), { variant: "info" });
+        return;
+      }
 
       const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
       if (workspaceKey) {
@@ -1709,7 +1717,9 @@ function ActiveAgentComposer({
       hideWorkspaceAgent,
       retargetCurrentTab,
       serverId,
+      t,
       tabId,
+      toast,
       unpinWorkspaceAgent,
       workspaceId,
     ],

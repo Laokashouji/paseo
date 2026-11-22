@@ -2391,6 +2391,7 @@ export const fr: TranslationResources = {
       chat: "Discussion",
       appearance: "Apparence",
       sidebar: "Barre latérale",
+      mainChat: en.settings.sections.mainChat,
       terminal: "Terminal",
       browser: "Navigateur",
       editor: "Éditeur",

@@ -1,9 +1,11 @@
 import { getParentAddressFromLabels } from "@getpaseo/protocol/agent-labels";
 import { isAgentRunning } from "@getpaseo/protocol/agent-state-bucket";
 import {
+  MAIN_CHAT_DEFAULT_TITLE,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   getMainChatTaskMetaFromLabels,
   isMainChatAgent,
+  isMainChatWorkspaceDirectory,
   type MainChatTaskMode,
 } from "@getpaseo/protocol/main-chat";
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
@@ -24,8 +26,13 @@ export interface MainChatSidebarSummary {
   existing: MainChatAgentRef | null;
   targetServerId: string | null;
   supportsMainChat: boolean;
+  displayTitle: string;
+  hostLabel: string | null;
+  isMainRunning: boolean;
   needsYouCount: number;
   runningCount: number;
+  attentionCount: number;
+  totalActiveCount: number;
 }
 
 export interface MainChatPendingPermissionItem {
@@ -41,6 +48,7 @@ export interface MainChatDockTaskItem {
   workspaceId: string | null;
   title: string;
   mode: MainChatTaskMode | null;
+  managedByMainChat: boolean;
   bucket: SidebarStateBucket;
   pendingPermissionCount: number;
   updatedAtMs: number;
@@ -53,13 +61,17 @@ function directoryBasename(dirPath: string): string {
 }
 
 /**
- * Identifies the dedicated workspace that backs the pinned Main Chat sidebar item so it does not
- * appear a second time under the regular project list.
+ * Identifies the dedicated workspace that backs the pinned Main Chat steward so it never
+ * appears a second time under the regular Workspaces / Projects lists (even before agents hydrate).
  */
 export function isMainChatDedicatedWorkspace(
   workspace: Pick<WorkspaceDescriptor, "id" | "workspaceDirectory" | "projectRootPath">,
   agents: ReadonlyMap<string, Agent> | undefined,
 ): boolean {
+  const candidatePath = workspace.workspaceDirectory || workspace.projectRootPath;
+  if (isMainChatWorkspaceDirectory(candidatePath)) {
+    return true;
+  }
   let hasMainChatAgent = false;
   let hasNonMainAgent = false;
   if (agents) {
@@ -70,7 +82,7 @@ export function isMainChatDedicatedWorkspace(
     }
   }
   if (hasMainChatAgent && !hasNonMainAgent) return true;
-  const base = directoryBasename(workspace.workspaceDirectory || workspace.projectRootPath);
+  const base = directoryBasename(candidatePath);
   return base === MAIN_CHAT_WORKSPACE_DIR_NAME && hasMainChatAgent;
 }
 
@@ -124,39 +136,69 @@ function resolveTargetMainChatHost(
   };
 }
 
-function countMainChatFamilyActivity(
+function summarizeFleetActivity(
   state: SessionStoreState,
-  mainRef: MainChatAgentRef,
-): { needsYouCount: number; runningCount: number } {
-  const familyAgentIds = new Set<string>([mainRef.agentId]);
+  mainRef: MainChatAgentRef | null,
+): {
+  isMainRunning: boolean;
+  needsYouCount: number;
+  runningCount: number;
+  attentionCount: number;
+  totalActiveCount: number;
+} {
+  let isMainRunning = false;
   let runningCount = 0;
+  let attentionCount = 0;
+  let totalActiveCount = 0;
+  const activeAgentIds = new Set<string>();
+  const needsYouAgentIds = new Set<string>();
 
   for (const [serverId, session] of Object.entries(state.sessions)) {
     for (const agent of session.agents.values()) {
       if (agent.archivedAt || agent.background) continue;
-      const parent = getParentAddressFromLabels(agent.labels, serverId);
-      if (parent?.serverId !== mainRef.serverId || parent.agentId !== mainRef.agentId) continue;
-      familyAgentIds.add(agent.id);
       const running =
         agent.turn.phase === "open" ||
         isAgentRunning({ status: agent.status, backgroundWork: agent.backgroundWork });
-      if (running) runningCount += 1;
-    }
-  }
 
-  let needsYouCount = 0;
-  for (const session of Object.values(state.sessions)) {
+      if (isMainChatAgent(agent)) {
+        if (mainRef && serverId === mainRef.serverId && agent.id === mainRef.agentId) {
+          isMainRunning = running;
+        }
+        activeAgentIds.add(agent.id);
+        continue;
+      }
+
+      totalActiveCount += 1;
+      activeAgentIds.add(agent.id);
+      if (agent.pendingPermissions.length > 0 || agent.attentionReason === "permission") {
+        needsYouAgentIds.add(agent.id);
+      } else if (running) {
+        runningCount += 1;
+      } else if (agent.requiresAttention || agent.status === "error") {
+        attentionCount += 1;
+      }
+    }
+
     for (const perm of session.pendingPermissions.values()) {
-      if (familyAgentIds.has(perm.agentId)) needsYouCount += 1;
+      if (activeAgentIds.has(perm.agentId)) {
+        needsYouAgentIds.add(perm.agentId);
+      }
     }
   }
 
-  return { needsYouCount, runningCount };
+  return {
+    isMainRunning,
+    needsYouCount: needsYouAgentIds.size,
+    runningCount,
+    attentionCount,
+    totalActiveCount,
+  };
 }
 
 export function selectMainChatSidebarSummary(
   state: SessionStoreState,
   preferredServerId: string | null,
+  configuredTitle?: string | null,
 ): MainChatSidebarSummary {
   const orderedIds = resolveOrderedServerIds(state, preferredServerId);
   const { existing, targetServerId } = resolveTargetMainChatHost(state, orderedIds);
@@ -164,23 +206,27 @@ export function selectMainChatSidebarSummary(
   const supportsMainChat =
     existing !== null || targetSession?.serverInfo?.features?.mainChat === true;
 
-  if (!existing) {
-    return {
-      existing: null,
-      targetServerId,
-      supportsMainChat,
-      needsYouCount: 0,
-      runningCount: 0,
-    };
-  }
+  const existingAgent = existing
+    ? (state.sessions[existing.serverId]?.agents.get(existing.agentId) ??
+      state.sessions[existing.serverId]?.agentDetails.get(existing.agentId))
+    : undefined;
+  const displayTitle =
+    configuredTitle?.trim() || existingAgent?.title?.trim() || MAIN_CHAT_DEFAULT_TITLE;
+  const hostLabel = targetSession?.serverInfo?.hostname?.trim() || null;
 
-  const activity = countMainChatFamilyActivity(state, existing);
+  const activity = summarizeFleetActivity(state, existing);
+
   return {
     existing,
     targetServerId,
     supportsMainChat,
+    displayTitle,
+    hostLabel,
+    isMainRunning: activity.isMainRunning,
     needsYouCount: activity.needsYouCount,
     runningCount: activity.runningCount,
+    attentionCount: activity.attentionCount,
+    totalActiveCount: activity.totalActiveCount,
   };
 }
 
@@ -250,6 +296,7 @@ function toDockTaskItem(
   hostId: string,
   agent: Agent,
   pendingPermissionCount: number,
+  managedByMainChat: boolean,
 ): MainChatDockTaskItem {
   const meta = getMainChatTaskMetaFromLabels(agent.labels);
   const bucket = derivePlanTaskLiveBucket(agent, pendingPermissionCount) ?? "done";
@@ -257,14 +304,20 @@ function toDockTaskItem(
     serverId: hostId,
     agentId: agent.id,
     workspaceId: agent.workspaceId ?? null,
-    title: agent.title?.trim() || meta?.goal || agent.id,
+    title: agent.title?.trim() || meta?.goal || directoryBasename(agent.cwd) || agent.id,
     mode: meta?.mode ?? null,
+    managedByMainChat,
     bucket,
     pendingPermissionCount,
     updatedAtMs: agent.updatedAt.getTime(),
   };
 }
 
+/**
+ * Returns tasks dispatched from this main chat FIRST, followed by manually started working,
+ * waiting, failed, or unread-attention sessions across connected hosts (mirroring Persona's
+ * unified dock).
+ */
 export function selectMainChatDockTasks(
   state: SessionStoreState,
   serverId: string,
@@ -275,29 +328,40 @@ export function selectMainChatDockTasks(
   const currentAgent = session.agents.get(mainAgentId) ?? session.agentDetails.get(mainAgentId);
   if (!isMainChatAgent(currentAgent)) return [];
 
-  const pendingCounts = new Map<string, number>();
-  for (const perm of session.pendingPermissions.values()) {
-    pendingCounts.set(perm.agentId, (pendingCounts.get(perm.agentId) ?? 0) + 1);
-  }
-
-  const tasks: MainChatDockTaskItem[] = [];
+  const pendingByHostAndAgent = new Map<string, number>();
   for (const [hostId, hostSession] of Object.entries(state.sessions)) {
-    for (const agent of hostSession.agents.values()) {
-      if (agent.archivedAt || agent.background) continue;
-      const parent = getParentAddressFromLabels(agent.labels, hostId);
-      if (parent?.serverId !== serverId || parent.agentId !== mainAgentId) continue;
-      const pendingCount =
-        hostId === serverId
-          ? (pendingCounts.get(agent.id) ?? agent.pendingPermissions.length)
-          : agent.pendingPermissions.length;
-      tasks.push(toDockTaskItem(hostId, agent, pendingCount));
+    for (const perm of hostSession.pendingPermissions.values()) {
+      const key = `${hostId}:${perm.agentId}`;
+      pendingByHostAndAgent.set(key, (pendingByHostAndAgent.get(key) ?? 0) + 1);
     }
   }
 
-  tasks.sort((left, right) => {
+  const managedTasks: MainChatDockTaskItem[] = [];
+  const manualTasks: MainChatDockTaskItem[] = [];
+
+  for (const [hostId, hostSession] of Object.entries(state.sessions)) {
+    for (const agent of hostSession.agents.values()) {
+      if (agent.archivedAt || agent.background || isMainChatAgent(agent)) continue;
+      const parent = getParentAddressFromLabels(agent.labels, hostId);
+      const isManaged = parent?.serverId === serverId && parent.agentId === mainAgentId;
+      const pendingCount =
+        pendingByHostAndAgent.get(`${hostId}:${agent.id}`) ?? agent.pendingPermissions.length;
+      const item = toDockTaskItem(hostId, agent, pendingCount, isManaged);
+      if (isManaged) {
+        managedTasks.push(item);
+      } else if (item.bucket !== "done") {
+        manualTasks.push(item);
+      }
+    }
+  }
+
+  const sortByBucketThenRecency = (left: MainChatDockTaskItem, right: MainChatDockTaskItem) => {
     const priorityDiff = BUCKET_PRIORITY[left.bucket] - BUCKET_PRIORITY[right.bucket];
     if (priorityDiff !== 0) return priorityDiff;
     return right.updatedAtMs - left.updatedAtMs;
-  });
-  return tasks;
+  };
+
+  managedTasks.sort(sortByBucketThenRecency);
+  manualTasks.sort(sortByBucketThenRecency);
+  return [...managedTasks, ...manualTasks];
 }

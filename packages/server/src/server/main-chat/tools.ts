@@ -160,18 +160,22 @@ export function registerMainChatTools(options: {
 
   register({
     name: "task_list",
-    title: "List main-chat tasks and plans",
+    title: "List main-chat tasks, plans, and fleet sessions",
     description:
-      "查看当前主对话名下所有任务计划与子 Agent 的实时状态（运行中、待审批、已完成、失败等）。",
+      "查看当前管家名下所有任务计划、子 Agent 以及全机其他手动会话的实时状态与最新分诊结论。",
     inputSchema: z.object({}),
     async handler() {
       const tasks = await mainChatService.listTasks(callerAgentId);
       const plans = mainChatService.listPlans(callerAgentId);
+      const fleet = await mainChatService.listFleetSessions(callerAgentId);
+      const settings = await mainChatService.getSettings();
       return addModelVisibleStructuredContent({
         content: [],
         structuredContent: ensureValidJson({
+          settings,
           tasks,
           plans,
+          fleet,
           metrics: mainChatService.getMetrics(),
         }),
       });

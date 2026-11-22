@@ -1,12 +1,14 @@
+import { router } from "expo-router";
 import type { AgentAddress } from "@getpaseo/protocol/addresses";
 import {
   isMainChatAgent,
   type MainChatAutoStartRule,
   type MainChatPermissionRule,
   type MainChatRuleKind,
+  type MainChatSessionTriage,
 } from "@getpaseo/protocol/main-chat";
 import equal from "fast-deep-equal";
-import { AtSign, ShieldCheck, Trash2 } from "lucide-react-native";
+import { AtSign, Radar, Settings, ShieldCheck, Trash2 } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -21,16 +23,21 @@ import {
   ComposerTrackRow,
   type ComposerTrackPillSegment,
 } from "@/composer/tracks";
+import { useToast } from "@/contexts/toast-context";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
+import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { useMainChatRouteStore } from "./route-store";
 import { selectMainChatDockTasks, type MainChatDockTaskItem } from "./selectors";
+import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedAtIcon = withUnistyles(AtSign);
+const ThemedRadarIcon = withUnistyles(Radar);
+const ThemedSettingsIcon = withUnistyles(Settings);
 const ThemedShieldIcon = withUnistyles(ShieldCheck);
 const ThemedTrashIcon = withUnistyles(Trash2);
 
@@ -68,15 +75,67 @@ function BoardStatusMark({ bucket }: { bucket: SidebarStateBucket }) {
   }
 }
 
+function TaskModeBadge({ task }: { task: MainChatDockTaskItem }) {
+  const { t } = useTranslation();
+  if (task.mode) {
+    return (
+      <StatusBadge
+        size="xs"
+        variant={task.mode === "readonly" ? "success" : "warning"}
+        label={task.mode === "readonly" ? t("mainChat.mode.readonly") : t("mainChat.mode.write")}
+      />
+    );
+  }
+  if (!task.managedByMainChat) {
+    return <StatusBadge size="xs" variant="muted" label={t("mainChat.board.manualSessionBadge")} />;
+  }
+  return null;
+}
+
+const BoardTaskGroupSection = memo(function BoardTaskGroupSection({
+  title,
+  tasks,
+  serverId,
+  mainAgentId,
+  triageByAgentId,
+  onOpenSubagent,
+}: {
+  title: string;
+  tasks: readonly MainChatDockTaskItem[];
+  serverId: string;
+  mainAgentId: string;
+  triageByAgentId: ReadonlyMap<string, MainChatSessionTriage>;
+  onOpenSubagent: (address: AgentAddress) => void;
+}) {
+  if (tasks.length === 0) return null;
+  return (
+    <View style={styles.groupSection}>
+      <Text style={styles.groupTitle}>{title}</Text>
+      {tasks.map((task) => (
+        <BoardTaskRow
+          key={`${task.serverId}:${task.agentId}`}
+          serverId={serverId}
+          mainAgentId={mainAgentId}
+          task={task}
+          triage={triageByAgentId.get(task.agentId)}
+          onOpenSubagent={onOpenSubagent}
+        />
+      ))}
+    </View>
+  );
+});
+
 const BoardTaskRow = memo(function BoardTaskRow({
   serverId,
   mainAgentId,
   task,
+  triage,
   onOpenSubagent,
 }: {
   serverId: string;
   mainAgentId: string;
   task: MainChatDockTaskItem;
+  triage?: MainChatSessionTriage;
   onOpenSubagent: (address: AgentAddress) => void;
 }) {
   const { t } = useTranslation();
@@ -104,16 +163,17 @@ const BoardTaskRow = memo(function BoardTaskRow({
       testID={`main-chat-board-task-${task.agentId}`}
     >
       <BoardStatusMark bucket={task.bucket} />
-      <Text style={styles.rowTitle} numberOfLines={1}>
-        {task.title}
-      </Text>
-      {task.mode ? (
-        <StatusBadge
-          size="xs"
-          variant={task.mode === "readonly" ? "success" : "warning"}
-          label={task.mode === "readonly" ? t("mainChat.mode.readonly") : t("mainChat.mode.write")}
-        />
-      ) : null}
+      <View style={styles.rowBody}>
+        <Text style={styles.rowTitle} numberOfLines={1}>
+          {task.title}
+        </Text>
+        {triage?.summary ? (
+          <Text style={styles.rowSummary} numberOfLines={1}>
+            {triage.summary}
+          </Text>
+        ) : null}
+      </View>
+      <TaskModeBadge task={task} />
       <PressHighlight
         onPress={handleTalkDirectly}
         style={styles.talkButton}
@@ -188,14 +248,18 @@ function MainChatBoardContent({
   onOpenSubagent: (address: AgentAddress) => void;
 }) {
   const { t } = useTranslation();
-  const { open } = useMenuContext("MainChatBoardContent");
+  const toast = useToast();
+  const { open, selectItem } = useMenuContext("MainChatBoardContent");
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const overview = useMainChatOverviewStore(
     (state) => state.overviewsByKey[overviewStoreKey(serverId, agentId)] ?? null,
   );
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const removeRule = useMainChatOverviewStore((state) => state.removeRule);
+  const triggerPatrol = useMainChatSettingsStore((state) => state.triggerPatrol);
+  const cachedSettings = useMainChatSettingsStore((state) => state.settingsByServerId[serverId]);
   const [removingRuleId, setRemovingRuleId] = useState<string | null>(null);
+  const [patrolling, setPatrolling] = useState(false);
 
   useEffect(() => {
     if (!open || !client) return;
@@ -213,6 +277,36 @@ function MainChatBoardContent({
     [agentId, client, removeRule, removingRuleId, serverId],
   );
 
+  const handlePatrolNow = useCallback(() => {
+    if (!client || patrolling) return;
+    setPatrolling(true);
+    void triggerPatrol(serverId, client, { mainAgentId: agentId, forceWakeup: true })
+      .then((result) => {
+        toast.show(result.summary, { variant: "success" });
+        return loadOverview(serverId, agentId, client);
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : t("mainChat.patrolFailed"));
+      })
+      .finally(() => {
+        setPatrolling(false);
+      });
+  }, [agentId, client, loadOverview, patrolling, serverId, t, toast, triggerPatrol]);
+
+  const handleOpenSettings = useCallback(() => {
+    selectItem(() => {
+      router.push(buildSettingsSectionRoute("main-chat"));
+    }, true);
+  }, [selectItem]);
+
+  const triageByAgentId = useMemo(() => {
+    const map = new Map<string, MainChatSessionTriage>();
+    for (const entry of overview?.triages ?? []) {
+      map.set(entry.agentId, entry);
+    }
+    return map;
+  }, [overview?.triages]);
+
   const grouped = useMemo(() => {
     const needsYou: MainChatDockTaskItem[] = [];
     const running: MainChatDockTaskItem[] = [];
@@ -225,6 +319,7 @@ function MainChatBoardContent({
     return { needsYou, running, done };
   }, [tasks]);
 
+  const currentStyle = overview?.settings?.style ?? cachedSettings?.style ?? "conservative";
   const metrics = overview?.metrics;
   const autoStartRules = overview?.autoStartRules ?? [];
   const permissionRules = overview?.permissionRules ?? [];
@@ -232,7 +327,43 @@ function MainChatBoardContent({
   return (
     <View style={styles.panelBody}>
       <View style={styles.metricsStrip}>
-        <Text style={styles.sectionHeader}>{t("mainChat.board.briefHeading")}</Text>
+        <View style={styles.headerActionRow}>
+          <View style={styles.headerTitleGroup}>
+            <Text style={styles.sectionHeader}>{t("mainChat.board.briefHeading")}</Text>
+            <StatusBadge
+              size="xs"
+              variant={currentStyle === "proactive" ? "warning" : "muted"}
+              label={
+                currentStyle === "proactive"
+                  ? t("mainChat.style.proactiveShort")
+                  : t("mainChat.style.conservativeShort")
+              }
+            />
+          </View>
+          <View style={styles.headerButtons}>
+            <PressHighlight
+              onPress={handlePatrolNow}
+              disabled={patrolling}
+              style={styles.talkButton}
+              highlightStyle={styles.talkButtonPressed}
+              accessibilityRole="button"
+              testID="main-chat-board-patrol"
+            >
+              <ThemedRadarIcon size={12} uniProps={mutedIconMapping} />
+              <Text style={styles.talkLabel}>{t("mainChat.actions.triggerPatrolShort")}</Text>
+            </PressHighlight>
+            <PressHighlight
+              onPress={handleOpenSettings}
+              style={styles.talkButton}
+              highlightStyle={styles.talkButtonPressed}
+              accessibilityRole="button"
+              testID="main-chat-board-settings"
+            >
+              <ThemedSettingsIcon size={12} uniProps={mutedIconMapping} />
+              <Text style={styles.talkLabel}>{t("sidebar.actions.settings")}</Text>
+            </PressHighlight>
+          </View>
+        </View>
         <Text style={styles.metricsLine}>
           {t("mainChat.board.liveCounts", {
             needsYou: grouped.needsYou.length,
@@ -258,50 +389,30 @@ function MainChatBoardContent({
         <Text style={styles.emptyText}>{t("mainChat.board.emptyTasks")}</Text>
       ) : (
         <View style={styles.taskGroups}>
-          {grouped.needsYou.length > 0 ? (
-            <View style={styles.groupSection}>
-              <Text style={styles.groupTitle}>{t("mainChat.board.groupNeedsYou")}</Text>
-              {grouped.needsYou.map((task) => (
-                <BoardTaskRow
-                  key={`${task.serverId}:${task.agentId}`}
-                  serverId={serverId}
-                  mainAgentId={agentId}
-                  task={task}
-                  onOpenSubagent={onOpenSubagent}
-                />
-              ))}
-            </View>
-          ) : null}
-
-          {grouped.running.length > 0 ? (
-            <View style={styles.groupSection}>
-              <Text style={styles.groupTitle}>{t("mainChat.board.groupRunning")}</Text>
-              {grouped.running.map((task) => (
-                <BoardTaskRow
-                  key={`${task.serverId}:${task.agentId}`}
-                  serverId={serverId}
-                  mainAgentId={agentId}
-                  task={task}
-                  onOpenSubagent={onOpenSubagent}
-                />
-              ))}
-            </View>
-          ) : null}
-
-          {grouped.done.length > 0 ? (
-            <View style={styles.groupSection}>
-              <Text style={styles.groupTitle}>{t("mainChat.board.groupDone")}</Text>
-              {grouped.done.map((task) => (
-                <BoardTaskRow
-                  key={`${task.serverId}:${task.agentId}`}
-                  serverId={serverId}
-                  mainAgentId={agentId}
-                  task={task}
-                  onOpenSubagent={onOpenSubagent}
-                />
-              ))}
-            </View>
-          ) : null}
+          <BoardTaskGroupSection
+            title={t("mainChat.board.groupNeedsYou")}
+            tasks={grouped.needsYou}
+            serverId={serverId}
+            mainAgentId={agentId}
+            triageByAgentId={triageByAgentId}
+            onOpenSubagent={onOpenSubagent}
+          />
+          <BoardTaskGroupSection
+            title={t("mainChat.board.groupRunning")}
+            tasks={grouped.running}
+            serverId={serverId}
+            mainAgentId={agentId}
+            triageByAgentId={triageByAgentId}
+            onOpenSubagent={onOpenSubagent}
+          />
+          <BoardTaskGroupSection
+            title={t("mainChat.board.groupDone")}
+            tasks={grouped.done}
+            serverId={serverId}
+            mainAgentId={agentId}
+            triageByAgentId={triageByAgentId}
+            onOpenSubagent={onOpenSubagent}
+          />
         </View>
       )}
 
@@ -424,6 +535,23 @@ const styles = StyleSheet.create((theme) => {
       paddingVertical: theme.spacing[1],
       gap: theme.spacing[0.5],
     },
+    headerActionRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: theme.spacing[2],
+      marginBottom: theme.spacing[0.5],
+    },
+    headerTitleGroup: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[1.5],
+    },
+    headerButtons: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[1.5],
+    },
     sectionHeader: {
       fontSize: theme.fontSize.sm,
       fontWeight: theme.fontWeight.medium,
@@ -451,11 +579,18 @@ const styles = StyleSheet.create((theme) => {
       paddingHorizontal: theme.spacing[3],
       paddingTop: theme.spacing[0.5],
     },
-    rowTitle: {
+    rowBody: {
       flex: 1,
       minWidth: 0,
+      gap: 1,
+    },
+    rowTitle: {
       fontSize: theme.fontSize.sm,
       color: theme.colors.foreground,
+    },
+    rowSummary: {
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
     },
     talkButton: {
       flexDirection: "row",

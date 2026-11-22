@@ -5,6 +5,7 @@ import type {
   MainChatRuleKind,
 } from "@getpaseo/protocol/main-chat";
 import { create } from "zustand";
+import { useMainChatSettingsStore } from "./settings-store";
 
 interface MainChatOverviewStoreState {
   overviewsByKey: Record<string, MainChatOverview | undefined>;
@@ -64,6 +65,9 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
       return null;
     }
     const overview = response.overview;
+    if (overview.settings) {
+      useMainChatSettingsStore.getState().hydrateSettings(serverId, overview.settings);
+    }
     set((state) => ({
       overviewsByKey: {
         ...state.overviewsByKey,

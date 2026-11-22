@@ -2377,6 +2377,7 @@ export const ru: TranslationResources = {
       chat: "Чат",
       appearance: "Оформление",
       sidebar: "Боковая панель",
+      mainChat: en.settings.sections.mainChat,
       terminal: "Терминал",
       browser: "Браузер",
       editor: "Редактор",

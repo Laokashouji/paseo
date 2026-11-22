@@ -6,6 +6,8 @@ export {
   projectAgentMessages,
   formatSystemNotificationPrompt,
   isSystemInjectedEnvelope,
+  wrapMainChatContextBlock,
+  stripMainChatContextBlock,
   type AgentPromptSource,
 } from "./envelope.js";
 export { createAgentMessageDelivery, type AgentMessageDelivery } from "./delivery.js";

@@ -179,16 +179,29 @@ export function projectAgentMessages(item: AgentTimelineItem): AgentTimelineItem
   return projected ? [projected] : [];
 }
 
+const MAIN_CHAT_CONTEXT_PREFIX_RE = /^<paseo-main-context>\n[\s\S]*?\n<\/paseo-main-context>\s*/;
+
+export function wrapMainChatContextBlock(context: string): string {
+  return `<paseo-main-context>\n${context.trim()}\n</paseo-main-context>`;
+}
+
+export function stripMainChatContextBlock(text: string): string {
+  return text.replace(MAIN_CHAT_CONTEXT_PREFIX_RE, "");
+}
+
 function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null {
   if (item.type !== "user_message") return item;
-  const message = parseAgentMessage(item.text);
+  const cleanedText = stripMainChatContextBlock(item.text);
+  const message = parseAgentMessage(cleanedText);
   if (!message) {
-    if (!isSystemInjectedEnvelope(item.text)) return item;
+    if (!isSystemInjectedEnvelope(cleanedText)) {
+      return cleanedText === item.text ? item : { ...item, text: cleanedText };
+    }
     // Schedule bodies include the run ID, keeping identity stable across replay.
-    const text = item.text.slice("<paseo-system>\n".length, -"\n</paseo-system>".length);
+    const text = cleanedText.slice("<paseo-system>\n".length, -"\n</paseo-system>".length);
     return {
       type: "tool_call",
-      callId: `paseo-system:${createHash("sha256").update(item.text).digest("hex")}`,
+      callId: `paseo-system:${createHash("sha256").update(cleanedText).digest("hex")}`,
       name: "heartbeat",
       status: "completed",
       error: null,

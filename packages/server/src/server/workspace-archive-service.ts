@@ -1,3 +1,4 @@
+import { isMainChatLabels, isMainChatWorkspaceDirectory } from "@getpaseo/protocol/main-chat";
 import { resolve } from "node:path";
 
 import type { Logger } from "pino";
@@ -246,6 +247,9 @@ async function resolveArchiveTarget(
         "Workspace not found for archive-by-scope; skipping",
       );
       return { backing: null, teardownTargets: [], setupWorkspaceIds: [], workspaceIds: [] };
+    }
+    if (isMainChatWorkspaceDirectory(record.cwd)) {
+      throw new Error("对话管理专属工作区不支持归档");
     }
     const isArchived = "archivedAt" in record && Boolean(record.archivedAt);
     return {
@@ -564,6 +568,9 @@ export async function archiveWorkspaceContents(
   const liveAgents = dependencies.agentManager
     .listAgents({ includeInternal: true })
     .filter((agent) => agent.workspaceId === workspaceId);
+  if (liveAgents.some((agent) => isMainChatLabels(agent.labels))) {
+    throw new Error("包含对话管理主对话的工作区不支持归档");
+  }
   for (const agent of liveAgents) {
     archivedAgents.add(agent.id);
   }
@@ -576,6 +583,9 @@ export async function archiveWorkspaceContents(
       { err: error, workspaceId },
       "Failed to list stored agents during workspace archive; continuing",
     );
+  }
+  if (storedRecords.some((record) => !record.archivedAt && isMainChatLabels(record.labels))) {
+    throw new Error("包含对话管理主对话的工作区不支持归档");
   }
   const matchingStoredRecords = storedRecords;
   for (const record of matchingStoredRecords) {

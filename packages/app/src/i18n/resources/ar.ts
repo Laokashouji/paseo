@@ -2377,6 +2377,7 @@ export const ar: TranslationResources = {
       chat: "الدردشة",
       appearance: "مظهر",
       sidebar: "الشريط الجانبي",
+      mainChat: en.settings.sections.mainChat,
       terminal: "الطرفية",
       browser: "المتصفح",
       editor: "المحرر",

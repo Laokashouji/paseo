@@ -22,10 +22,14 @@ import type {
   MainChatCancelPlanResponsePayload,
   MainChatEnsureResponsePayload,
   MainChatGetOverviewResponsePayload,
+  MainChatGetSettingsResponsePayload,
   MainChatListPlansResponsePayload,
   MainChatRemoveRuleResponsePayload,
   MainChatRuleKind,
+  MainChatSettingsPatch,
   MainChatStartPlanResponsePayload,
+  MainChatTriggerPatrolResponsePayload,
+  MainChatUpdateSettingsResponsePayload,
 } from "@getpaseo/protocol/main-chat";
 import type { PluginListingDetail, PluginListingIndex } from "@getpaseo/protocol/plugin-registry";
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
@@ -5384,6 +5388,48 @@ export class DaemonClient {
         ruleId,
       },
       timeout: 30000,
+    });
+  }
+
+  async getMainChatSettings(requestId?: string): Promise<MainChatGetSettingsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.get_settings.response">({
+      requestId,
+      message: {
+        type: "main_chat.get_settings.request",
+      },
+      timeout: 30000,
+    });
+  }
+
+  async updateMainChatSettings(
+    patch: MainChatSettingsPatch,
+    requestId?: string,
+  ): Promise<MainChatUpdateSettingsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.update_settings.response">({
+      requestId,
+      message: {
+        type: "main_chat.update_settings.request",
+        patch,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async triggerMainChatPatrol(
+    options?: {
+      mainAgentId?: string;
+      forceWakeup?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatTriggerPatrolResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.trigger_patrol.response">({
+      requestId,
+      message: {
+        type: "main_chat.trigger_patrol.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.forceWakeup !== undefined ? { forceWakeup: options.forceWakeup } : {}),
+      },
+      timeout: 60000,
     });
   }
 

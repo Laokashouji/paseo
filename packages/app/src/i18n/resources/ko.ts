@@ -2352,6 +2352,7 @@ export const ko: TranslationResources = {
       chat: "채팅",
       appearance: "모양",
       sidebar: "사이드바",
+      mainChat: en.settings.sections.mainChat,
       terminal: "터미널",
       browser: "브라우저",
       editor: "편집기",

@@ -15,6 +15,7 @@ import {
   PanelLeft,
   Plus,
   Settings,
+  Sparkles,
 } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -27,7 +28,14 @@ import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatch
 import { useHardwareKeyboardPresent } from "@/keyboard";
 import { resolveShortcutKeysForAction } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
+import { selectMainChatSidebarSummary } from "@/main-chat/selectors";
+import { useMainChatSettingsStore } from "@/main-chat/settings-store";
+import {
+  navigateToWorkspace,
+  useActiveWorkspaceSelection,
+} from "@/stores/navigation-active-workspace-store";
 import { usePanelStore } from "@/stores/panel-store";
+import { useSessionStore } from "@/stores/session-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
 import { copyToClipboard } from "@/utils/copy-to-clipboard";
@@ -66,6 +74,9 @@ const ThemedCircleDashed = withUnistyles(CircleDashed, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
 const ThemedPanelLeft = withUnistyles(PanelLeft, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
+const ThemedSparkles = withUnistyles(Sparkles, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
 const BrowserHostCopyIcon = getCommandCenterIcon(Copy);
@@ -114,10 +125,25 @@ function PanelLeftIcon({ size }: CommandCenterIconProps) {
   return <ThemedPanelLeft size={size} strokeWidth={2.2} />;
 }
 
+function MainChatIcon({ size }: CommandCenterIconProps) {
+  return <ThemedSparkles size={size} strokeWidth={2.2} />;
+}
+
 export function CommandCenterRootActions() {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const { t } = useTranslation();
   const toast = useToast();
+  const activeWorkspace = useActiveWorkspaceSelection();
+  const preferredServerId = activeWorkspace?.serverId ?? null;
+  const mainChatSummary = useSessionStore((state) =>
+    selectMainChatSidebarSummary(state, preferredServerId),
+  );
+  const configuredMainChatTitle = useMainChatSettingsStore((state) =>
+    mainChatSummary.targetServerId
+      ? state.settingsByServerId[mainChatSummary.targetServerId]?.title
+      : undefined,
+  );
+  const mainChatTitle = configuredMainChatTitle?.trim() || mainChatSummary.displayTitle;
   const browserHostLabel = getDesktopHost()?.browserHostLabel;
   const { overrides } = useKeyboardShortcutOverrides();
   const shortcutsAvailable = useHardwareKeyboardPresent();
@@ -254,6 +280,61 @@ export function CommandCenterRootActions() {
           icon: SchedulesIcon,
         },
       },
+      ...(mainChatSummary.supportsMainChat
+        ? [
+            {
+              id: "open-main-chat",
+              group: "actions" as const,
+              groupRank: 0,
+              rank: 5.5,
+              keywords: ["main chat", "steward", "persona", "主对话", "对话管理", "管家"],
+              visibility: "always" as const,
+              run: () => {
+                clearCommandCenterFocusRestoreElement();
+                const latest = selectMainChatSidebarSummary(
+                  useSessionStore.getState(),
+                  preferredServerId,
+                );
+                if (latest.existing) {
+                  navigateToWorkspace({
+                    serverId: latest.existing.serverId,
+                    workspaceId: latest.existing.workspaceId,
+                    target: { kind: "agent", agentId: latest.existing.agentId },
+                  });
+                  return;
+                }
+                const targetServerId = latest.targetServerId;
+                const client = targetServerId
+                  ? useSessionStore.getState().sessions[targetServerId]?.client
+                  : null;
+                if (!targetServerId || !client) return;
+                void client
+                  .ensureMainChat()
+                  .then((result) => {
+                    if (result.error || !result.agentId || !result.workspaceId) {
+                      toast.error(result.error ?? t("mainChat.openFailed"));
+                      return null;
+                    }
+                    navigateToWorkspace({
+                      serverId: targetServerId,
+                      workspaceId: result.workspaceId,
+                      target: { kind: "agent", agentId: result.agentId },
+                    });
+                    return result.agentId;
+                  })
+                  .catch((error) => {
+                    toast.error(error instanceof Error ? error.message : t("mainChat.openFailed"));
+                  });
+              },
+              presentation: {
+                kind: "action" as const,
+                title: mainChatTitle,
+                sectionTitle: t("shell.commandCenter.actions"),
+                icon: MainChatIcon,
+              },
+            },
+          ]
+        : []),
       {
         id: "settings",
         group: "actions",
@@ -370,8 +451,11 @@ export function CommandCenterRootActions() {
     groupMode,
     homeRoute,
     keyboardActionDispatcher,
+    mainChatSummary.supportsMainChat,
+    mainChatTitle,
     openAddProject,
     openImportSession,
+    preferredServerId,
     overrides,
     schedulesRoute,
     sessionsRoute,
