@@ -244,15 +244,6 @@ describe("plugin composer SDK boundary", () => {
       }
       export default function contribute(client: PluginClientContext) {
         client.addComposerItem({ id: "item", Component: Item });
-        client.addAgentCornerCard({
-          id: "card",
-          Component({ workspaceId, agentId, navigation }) {
-            workspaceId.toUpperCase();
-            agentId.toUpperCase();
-            navigation?.openAgent({ agentId });
-            return null;
-          },
-        });
         return () => {};
       }
     `),

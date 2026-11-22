@@ -4,4 +4,3 @@ export { PluginSurfaceScreen } from "./surface-screen";
 export { usePluginAttachmentPicker } from "./attachments/picker";
 export { PluginResourceAttachmentPill } from "./attachments/pill";
 export { PluginComposerPills, PluginHeaderButtons, usePluginWorkspaceMenu } from "./buttons/view";
-export { PluginAgentCornerCards } from "./agent-corner-cards";

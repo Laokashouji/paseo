@@ -92,7 +92,6 @@ import {
 import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
-import { PluginAgentCornerCards } from "@/plugins";
 import {
   buildSideQuestionForkDraft,
   buildSideQuestionForkTitle,
@@ -1294,14 +1293,6 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   const dockContent = (
     <View style={styles.contentContainer}>
       {streamContent}
-
-      {!draft && !isComposerFullscreen ? (
-        <PluginAgentCornerCards
-          serverId={serverId}
-          workspaceId={workspaceId}
-          agentId={agentId}
-        />
-      ) : null}
 
       {showHistorySyncError ? (
         <TimelineSyncErrorCallout isRetrying={isRetryingHistorySync} onRetry={retryTimelineSync} />

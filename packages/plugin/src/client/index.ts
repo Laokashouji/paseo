@@ -18,8 +18,6 @@ export type {
   PluginSidebarViewProps,
   PluginSidebarViewContribution,
   PluginSidebarItemContribution,
-  PluginAgentCornerCardProps,
-  PluginAgentCornerCardContribution,
   PluginWorkspaceRowBadgeItemProps,
   PluginWorkspaceRowBadgeItemContribution,
   PluginIcon,

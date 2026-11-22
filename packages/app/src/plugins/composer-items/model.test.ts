@@ -38,7 +38,6 @@ function installed(): InstalledPlugin {
     composerItems: [],
     newWorkspaceItems: [],
     workspaceRowBadgeItems: [],
-    agentCornerCards: [],
     workspacePanels: [],
     commandCenterItems: [],
     clientSlashCommands: [],

@@ -11,7 +11,6 @@ import type {
   PluginFilePanelContribution as SDKPluginFilePanelContribution,
   PluginCommandCenterItemContribution as SDKPluginCommandCenterItemContribution,
   PluginClientSlashCommandContribution as SDKPluginClientSlashCommandContribution,
-  PluginAgentCornerCardContribution,
   PluginComposerItemContribution,
   PluginNewWorkspaceItemContribution,
   PluginComposerPillContribution as SDKPluginComposerPillContribution,
@@ -61,7 +60,6 @@ export interface EvaluatedPlugin {
   /** `addSidebarItem` registrations, so `/plugin/<id>/sidebar/<item>` routes keep resolving. */
   legacySidebarItems: PluginSidebarContribution[];
   workspaceRowBadgeItems: PluginWorkspaceRowBadgeItemContribution[];
-  agentCornerCards: PluginAgentCornerCardContribution[];
   filePanels: PluginFilePanelContribution[];
   composerItems: PluginComposerItemContribution[];
   newWorkspaceItems: PluginNewWorkspaceItemContribution[];
@@ -96,7 +94,6 @@ export type {
   PluginAttachmentSourceContribution,
   PluginCommandCenterItemContribution,
   PluginClientSlashCommandContribution,
-  PluginAgentCornerCardContribution,
   PluginComposerItemContribution,
   PluginNewWorkspaceItemContribution,
   PluginComposerPillContribution,

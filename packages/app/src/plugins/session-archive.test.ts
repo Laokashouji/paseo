@@ -2,12 +2,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
-import { compilePlugin } from "../../../../server/src/server/plugins/compiler";
-import { closePluginAgentTab } from "../client-runtime";
-import { runPluginClientBundle, type PluginClientRuntime } from "../evaluate";
-import { isLucideIconName } from "../icons";
+import { compilePlugin } from "../../../server/src/server/plugins/compiler";
+import { closePluginAgentTab } from "./client-runtime";
+import { runPluginClientBundle, type PluginClientRuntime } from "./evaluate";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 function createRuntime() {
   const closeAgentTab = vi.fn();
@@ -47,70 +46,7 @@ function createRuntime() {
   return { runtime, closeAgentTab, subscriptions };
 }
 
-describe("session-workbench builtin client bundle", () => {
-  it("uses only valid Lucide icon names", () => {
-    const iconNames = [
-      "ListTodo",
-      "PanelRight",
-      "PanelsTopLeft",
-      "Minimize",
-      "ChevronDown",
-      "ChevronRight",
-      "Play",
-      "CircleDot",
-      "History",
-      "GitMerge",
-      "CircleSlash",
-      "CheckCircle2",
-      "Sparkles",
-      "X",
-      "RefreshCw",
-      "Pin",
-      "PinOff",
-      "Pencil",
-      "Split",
-      "GitBranch",
-      "RotateCw",
-      "Circle",
-      "SquarePen",
-      "Trash2",
-      "Plus",
-      "Zap",
-      "Search",
-      "ArrowUpRight",
-    ];
-    const invalid = iconNames.filter((name) => !isLucideIconName(name));
-    expect(invalid).toEqual([]);
-  });
-
-  it("compiles and evaluates inside Paseo app plugin host with all expected contributions", async () => {
-    const pluginDir = path.join(repoRoot, "plugins", "session-workbench");
-    const bundles = await compilePlugin({
-      server: path.join(pluginDir, "index.server.ts"),
-      client: path.join(pluginDir, "index.client.tsx"),
-    });
-    expect(bundles.clientBundle).toBeTruthy();
-
-    const { runtime, subscriptions } = createRuntime();
-    const evaluated = runPluginClientBundle("session-workbench", bundles.clientBundle!, runtime);
-    expect(evaluated.surfaces.map((item) => item.id)).toEqual(["overview"]);
-    expect(evaluated.sidebarItems.header.map((item) => item.id)).toEqual(["overview"]);
-    expect(evaluated.workspaceRowBadgeItems.map((item) => item.id)).toEqual(["status-badge"]);
-    expect(evaluated.workspacePanels.map((item) => item.id)).toEqual(["workbench-panel"]);
-    expect(evaluated.agentCornerCards.map((item) => item.id)).toEqual(["corner-card"]);
-    expect(evaluated.commandCenterItems.map((item) => item.id)).toEqual([
-      "open-overview",
-      "open-agent-panel",
-    ]);
-    expect(evaluated.settingsScreens.map((item) => item.id)).toEqual(["settings"]);
-    expect(
-      subscriptions.some((entry) => entry.name === "workbench.session.archive_completed"),
-    ).toBe(false);
-
-    await evaluated.cleanup();
-    expect(evaluated.agentCornerCards).toEqual([]);
-  });
-
+describe("session-archive builtin client bundle and closePluginAgentTab", () => {
   it("compiles and evaluates session-archive builtin bundle and closes agent tab on completion", async () => {
     const pluginDir = path.join(repoRoot, "plugins", "session-archive");
     const bundles = await compilePlugin({
@@ -152,8 +88,8 @@ describe("session-workbench builtin client bundle", () => {
       workspaceKey,
       target: {
         kind: "plugin",
-        pluginId: "session-workbench",
-        panelId: "workbench-panel",
+        pluginId: "example-plugin",
+        panelId: "agent-panel",
         context: "agent",
         agentId: "agent-target",
       },

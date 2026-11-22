@@ -106,7 +106,6 @@ function plugin(onAgentSelect: AgentCommandItem["onSelect"]): InstalledPlugin {
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
     workspaceRowBadgeItems: [],
-    agentCornerCards: [],
     filePanels: [],
     composerItems: [],
     newWorkspaceItems: [],
