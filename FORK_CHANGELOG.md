@@ -2,6 +2,19 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.505 - 2026-11-22
+
+- **更新公告适配个人 Fork**：应用内「新功能 / 更新内容」弹窗支持并发拉取 `FORK_CHANGELOG.md` 与上游 `CHANGELOG.md`，按发布日期倒序混排展示（同天 Fork 置顶并带 `Fork` 徽章），自动点亮当前已安装版本，并将外链跳转至 Fork Releases 页面。
+- **工作台摘要与卡片优化**：修复 `session-workbench` 摘要校验与实时同步问题，支持自动选择轻量模型并优化右上角卡片样式。
+
+### Added
+
+- 新增独立的 `FORK_CHANGELOG.md`、`scripts/fork/changelog-utils.mjs` 与发版前条目校验，`fork-release.yml` 自动将同源公告同步至 GitHub Release 说明。
+
+### Fixed
+
+- 修复对话工作台摘要校验、实时同步与轻量模型选择逻辑，并优化右上角卡片布局与交互样式。
+
 ## 0.17.504 - 2026-11-22
 
 - **修复打包版工作台插件编译依赖**：移除内置 `session-workbench` 插件对 `@getpaseo/client` 的类型导入，解决正式打包客户端中插件编译加载失败的问题。
