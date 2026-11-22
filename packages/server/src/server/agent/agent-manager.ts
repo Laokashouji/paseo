@@ -22,6 +22,7 @@ import {
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
+import { appendMainChatSystemPrompt } from "../main-chat/prompts.js";
 import type { Logger } from "pino";
 import type { ToolPolicy } from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
@@ -6319,6 +6320,7 @@ export class AgentManager {
         mcpServerOwners = transformed.mcpServerOwners;
       }
     }
+    appendSystemPrompt = appendMainChatSystemPrompt(opening, appendSystemPrompt);
     const context: AgentLaunchContext = {
       agentId,
       ...pluginPromptContext(appendSystemPrompt),

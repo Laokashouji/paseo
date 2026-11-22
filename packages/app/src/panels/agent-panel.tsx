@@ -29,6 +29,7 @@ import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
+import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
   useComposerEditingSession,
@@ -91,6 +92,7 @@ import {
 import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
+import { selectMainChatPendingPermissions } from "@/main-chat/selectors";
 import { OverlayDismissalScope } from "@/components/ui/overlay-dismissal";
 import { ParentAgentCallout, useParentAgentId } from "@/subagents/parent";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
@@ -1461,17 +1463,10 @@ const AgentStreamSection = memo(function AgentStreamSection({
       if (!agentId) {
         return EMPTY_PENDING_PERMISSION_LIST;
       }
-      const allPendingPermissions = state.sessions[serverId]?.pendingPermissions;
-      if (!allPendingPermissions) {
-        return EMPTY_PENDING_PERMISSION_LIST;
-      }
-      const filtered: PendingPermission[] = [];
-      for (const permission of allPendingPermissions.values()) {
-        if (permission.agentId === agentId) {
-          filtered.push(permission);
-        }
-      }
-      return filtered.length > 0 ? filtered : EMPTY_PENDING_PERMISSION_LIST;
+      const items = selectMainChatPendingPermissions(state, serverId, agentId);
+      return items.length > 0
+        ? items.map((item) => item.permission)
+        : EMPTY_PENDING_PERMISSION_LIST;
     },
     shallow,
   );
@@ -1720,8 +1715,14 @@ function ActiveAgentComposer({
     ],
   );
 
+  const mainChatDirectRoute = useMainChatDirectRoute({ serverId, agentId });
+
   return (
     <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
+      <MainChatRouteBanner
+        target={mainChatDirectRoute.target}
+        onClear={mainChatDirectRoute.clearTarget}
+      />
       <Composer
         agentId={agentId}
         serverId={serverId}
@@ -1745,6 +1746,7 @@ function ActiveAgentComposer({
         onAttentionPromptSend={onAttentionPromptSend}
         onComposerHeightChange={onComposerHeightChange}
         onMessageSent={onMessageSent}
+        onSubmitMessage={mainChatDirectRoute.onSubmitMessage}
         onClientSlashCommand={handleClientSlashCommand}
         isCompactLayout={isCompactComposerLayout}
       />

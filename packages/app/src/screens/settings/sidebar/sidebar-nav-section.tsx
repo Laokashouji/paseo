@@ -12,6 +12,7 @@ import {
   History,
   Plus,
   Search,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -41,6 +42,7 @@ const moveUpIcon = <ThemedArrowUp size={ICON_SIZE.sm} uniProps={mutedColorMappin
 const moveDownIcon = <ThemedArrowDown size={ICON_SIZE.sm} uniProps={mutedColorMapping} />;
 
 const BUILTIN_ICONS: Record<BuiltinSidebarItemId, LucideIcon> = {
+  "main-chat": Sparkles,
   "new-workspace": Plus,
   history: History,
   search: Search,

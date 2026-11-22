@@ -1,3 +1,4 @@
+import { isMainChatInlineCardToolName } from "@getpaseo/protocol/main-chat";
 import { isTurnBoundary, isTurnTrigger } from "../turn-membership";
 import {
   getStreamItemMessageId,
@@ -100,7 +101,13 @@ function summaryRow(
 }
 
 function staysVisibleWhenCollapsed(item: StreamItem): boolean {
-  return isTurnTrigger(item) || item.kind === "compaction";
+  if (isTurnTrigger(item) || item.kind === "compaction") return true;
+  if (item.kind === "tool_call") {
+    const name =
+      item.payload.source === "agent" ? item.payload.data.name : item.payload.data.toolName;
+    return isMainChatInlineCardToolName(name);
+  }
+  return false;
 }
 
 function isAssistantReply(item: StreamItem): boolean {

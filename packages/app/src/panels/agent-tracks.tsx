@@ -18,6 +18,8 @@ import {
 } from "@/subagents";
 import { ParentAgentPill } from "@/subagents/parent";
 import { SubagentsTrack } from "@/subagents/track";
+import { MainChatBoardPill } from "@/main-chat/board-pill";
+import { MainChatTaskDock } from "@/main-chat/task-dock";
 import type { TodoEntry } from "@/types/stream";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTabTarget } from "@/workspace-tabs/model";
@@ -124,6 +126,12 @@ export const AgentTracks = memo(function AgentTracks({
       <BackgroundWorkTrack model={backgroundModel} count={backgroundWorkCount} />
       {parentAgentId ? <ParentAgentPill serverId={serverId} parentAgentId={parentAgentId} /> : null}
       <AgentTaskList tasks={tasks} />
+      <MainChatBoardPill
+        serverId={serverId}
+        agentId={agentId}
+        onOpenSubagent={handleOpenSubagent}
+      />
+      <MainChatTaskDock serverId={serverId} agentId={agentId} onOpenSubagent={handleOpenSubagent} />
       <SubagentsTrack
         serverId={serverId}
         rows={subagentRows}

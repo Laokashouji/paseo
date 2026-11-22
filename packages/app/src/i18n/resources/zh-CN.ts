@@ -1293,6 +1293,7 @@ export const zhCN: TranslationResources = {
       appName: "Paseo",
     },
     sections: {
+      mainChat: "主对话",
       sessions: "历史",
       search: "搜索",
       schedules: "计划",
@@ -3211,6 +3212,79 @@ export const zhCN: TranslationResources = {
         saving: "正在保存...",
         cancel: "取消",
       },
+    },
+  },
+  mainChat: {
+    sidebarBadgeNeedsYou: "{{count}} 待处理",
+    sidebarBadgeRunning: "{{count}} 进行中",
+    childPermissionBadge: "来自子任务",
+    openChildAgent: "查看任务",
+    mode: {
+      readonly: "只读",
+      write: "可写",
+    },
+    isolation: {
+      local: "当前目录",
+      worktree: "独立 Worktree",
+    },
+    taskStatus: {
+      needsYou: "需要你",
+      working: "进行中",
+      done: "已完成",
+      failed: "出错",
+      startFailed: "启动失败",
+      starting: "启动中",
+    },
+    planCard: {
+      title: "任务计划",
+      planning: "正在拆解任务计划…",
+      failed: "任务计划生成失败",
+      awaitingApproval: "待开始",
+      startedTitle: "已开始执行",
+      autoStartedTitle: "已自动开工",
+      cancelledSummary: "计划已取消（{{count}} 个任务）",
+      start: "开始执行",
+      startAndRemember: "开始并记住同类",
+      cancel: "取消",
+    },
+    receiptCard: {
+      verified: "已复核通过",
+      nextSteps: "下一步建议",
+    },
+    reworkCard: {
+      roundBadge: "返工 {{round}}/{{maxRounds}}",
+    },
+    decisionCard: {
+      needsDecision: "待你拍板",
+      recommended: "推荐",
+      answeredSummary: "已拍板（{{title}}）：{{answer}}",
+    },
+    permission: {
+      approveAndRemember: "批准并记住同类",
+    },
+    directRoute: {
+      tag: "任务直发",
+      hint: "直发给该子任务",
+      bannerLabel: "直发给：{{title}}",
+      clear: "切回主对话",
+      sentToast: "已直发给「{{title}}」",
+    },
+    board: {
+      pillTitle: "任务板",
+      panelTitle: "主对话任务板与督办规则",
+      briefHeading: "督办简报",
+      liveCounts: "需要你 {{needsYou}} · 进行中 {{running}} · 已完成 {{done}}",
+      supervisorMetrics:
+        "督办代处理 {{held}} · 自动续跑 {{autoContinued}} · 返工 {{rework}} · 打扰 {{interrupts}}",
+      emptyTasks: "当前还没有运行或已完成的主对话子任务。",
+      groupNeedsYou: "需要你",
+      groupRunning: "进行中",
+      groupDone: "已完成",
+      talkDirectly: "直发",
+      rulesHeading: "已记住的规则",
+      emptyRules:
+        "暂无规则；在计划卡点击「开始并记住同类」或审批卡点击「批准并记住同类」可自动保存。",
+      removeRule: "移除规则",
     },
   },
 };

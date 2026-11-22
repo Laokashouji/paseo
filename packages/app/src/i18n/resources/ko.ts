@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ko: TranslationResources = {
+  mainChat: en.mainChat,
   pluginCombobox: {
     searching: "검색 중…",
     empty: "결과 없음",
@@ -1308,6 +1309,7 @@ export const ko: TranslationResources = {
       appName: "Paseo",
     },
     sections: {
+      mainChat: en.sidebar.sections.mainChat,
       sessions: "기록",
       search: "검색",
       schedules: "일정",
