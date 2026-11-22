@@ -161,10 +161,12 @@ paseo daemon restart
 | --- | --- | --- | --- | --- |
 | 主文档 | [Paseo Fork — 工程总览](https://bytedance.larkoffice.com/wiki/Nq50wJhwkiRz2gkpNbDcwrjunnb) | 全局（`fork`） | `Nq50wJhwkiRz2gkpNbDcwrjunnb` | `Y5wsdWF18olzKzxEonVcv1qsnXg` |
 | 能力 A1 | [【能力】对话工作台（Session Workbench）](https://bytedance.larkoffice.com/wiki/Ue0SwswU7ijWj3k6eNIc7Knsnbc) | `feat/session-workbench-plugin` | `Ue0SwswU7ijWj3k6eNIc7Knsnbc` | `DIKsdbJploozyvxIdVfc7EYKnkf` |
-| 能力 A5 | [【能力】一键对话归档（Session Archive）](https://bytedance.larkoffice.com/wiki/MGm8wtnd5is5SqkAt7bcci5Jntd) | `feat/session-archive` | `MGm8wtnd5is5SqkAt7bcci5Jntd` | `LQd3dhXgvoqdQIxGEVZcc40tnxh` |
 | 能力 A2 | [【能力】原生无损分叉与分支管理](https://bytedance.larkoffice.com/wiki/BOsFwD4vFiRThrkqDJfcI7WPnib) | `feat/native-fork-and-branches` | `BOsFwD4vFiRThrkqDJfcI7WPnib` | `Ah7Kdn8tQobNzLxxXXmcMDuFnUc` |
 | 能力 A3 | [【能力】原生 `/btw` 旁路提问](https://bytedance.larkoffice.com/wiki/H2TBwgRevixWU0kN1O4ckgERnpd) | `feat/native-btw-side-question` | `H2TBwgRevixWU0kN1O4ckgERnpd` | `Symyd2lpDo0Z1Hx2n6xcoC85nAb` |
 | 能力 A4 | [【能力】插件扩展底座增强](https://bytedance.larkoffice.com/wiki/AfVfwyvXbi9YTakQlijcuZ8anbd) | `feat/plugin-agent-corner-slot` | `AfVfwyvXbi9YTakQlijcuZ8anbd` | `MkT8dxyLxoLbuzxiivXcLOSMnIc` |
+| 能力 A5 | [【能力】一键对话归档（Session Archive）](https://bytedance.larkoffice.com/wiki/MGm8wtnd5is5SqkAt7bcci5Jntd) | `feat/session-archive` | `MGm8wtnd5is5SqkAt7bcci5Jntd` | `LQd3dhXgvoqdQIxGEVZcc40tnxh` |
+| 能力 A6 | [【能力】输入框 Markdown 实时语法样式与用户消息渲染](https://bytedance.larkoffice.com/wiki/XTqSwA5vXiswJ3kMTwTcsq3qnIe) | `feat/composer-markdown` | `XTqSwA5vXiswJ3kMTwTcsq3qnIe` | `D7NvdEldbolDPCxn3h2cZ15anPf` |
+| 能力 A7 | [【能力】双源更新公告（Fork + 上游混排）与发版联动](https://bytedance.larkoffice.com/wiki/EpHzwpv9EiI29tkVjmOcTYiAn4g) | `feat/fork-changelog`、`FORK_CHANGELOG.md` | `EpHzwpv9EiI29tkVjmOcTYiAn4g` | `XAm3dHuHhoDJKZx3HMGcTW29n3b` |
 | 工程 B1 | [【工程】Fork 架构与上游同步机制](https://bytedance.larkoffice.com/wiki/DlKSwCe61iiBtGkI2ygcdpg9nJg) | `fork-infra`、`FORK.md` | `DlKSwCe61iiBtGkI2ygcdpg9nJg` | `O6IIdIOBEoDCwzxE1cvceaXZnuy` |
 | 指南 B2 | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre) | `scripts/fork/*`、`.github/workflows/fork-release.yml` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
 | 演进 B3 | [【演进】版本记录、路线图与文档维护规范](https://bytedance.larkoffice.com/wiki/SnOUwoR0miYuYVkt5ENcPU3Ynnd) | `fork-v*` 标签、`FORK_CHANGELOG.md`、路线图 | `SnOUwoR0miYuYVkt5ENcPU3Ynnd` | `VL42dzHpAor2OyxY4rdcd2cInwx` |
