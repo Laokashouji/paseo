@@ -1314,6 +1314,7 @@ export const en = {
       appName: "Paseo",
     },
     sections: {
+      mainChat: "Main Chat",
       sessions: "History",
       search: "Search",
       schedules: "Schedules",
@@ -3457,6 +3458,79 @@ export const en = {
         saving: "Saving...",
         cancel: "Cancel",
       },
+    },
+  },
+  mainChat: {
+    sidebarBadgeNeedsYou: "{{count}} needs you",
+    sidebarBadgeRunning: "{{count}} running",
+    childPermissionBadge: "Needs you",
+    openChildAgent: "Open task",
+    mode: {
+      readonly: "Read-only",
+      write: "Write",
+    },
+    isolation: {
+      local: "Local",
+      worktree: "Worktree",
+    },
+    taskStatus: {
+      needsYou: "Needs you",
+      working: "Working",
+      done: "Done",
+      failed: "Failed",
+      startFailed: "Start failed",
+      starting: "Starting",
+    },
+    planCard: {
+      title: "Task plan",
+      planning: "Planning tasks...",
+      failed: "Plan failed",
+      awaitingApproval: "Ready to start",
+      startedTitle: "Plan started",
+      autoStartedTitle: "Auto-started",
+      cancelledSummary: "Plan cancelled ({{count}} tasks)",
+      start: "Start",
+      startAndRemember: "Start & auto-start similar",
+      cancel: "Cancel",
+    },
+    receiptCard: {
+      verified: "Verified",
+      nextSteps: "Next steps",
+    },
+    reworkCard: {
+      roundBadge: "Rework {{round}}/{{maxRounds}}",
+    },
+    decisionCard: {
+      needsDecision: "Needs decision",
+      recommended: "Recommended",
+      answeredSummary: "Decided ({{title}}): {{answer}}",
+    },
+    permission: {
+      approveAndRemember: "Approve & remember similar",
+    },
+    directRoute: {
+      tag: "Task",
+      hint: "Send directly to child task",
+      bannerLabel: "Sending directly to: {{title}}",
+      clear: "Back to Main Chat",
+      sentToast: 'Sent directly to "{{title}}"',
+    },
+    board: {
+      pillTitle: "Tasks",
+      panelTitle: "Main Chat Board & Rules",
+      briefHeading: "Supervisor brief",
+      liveCounts: "{{needsYou}} needs you · {{running}} running · {{done}} done",
+      supervisorMetrics:
+        "Auto-approved {{held}} · Auto-continued {{autoContinued}} · Rework {{rework}} · Interrupts {{interrupts}}",
+      emptyTasks: "No child tasks dispatched from Main Chat yet.",
+      groupNeedsYou: "Needs you",
+      groupRunning: "Running",
+      groupDone: "Done",
+      talkDirectly: "Direct",
+      rulesHeading: "Saved trust rules",
+      emptyRules:
+        'No saved rules yet. Use "Start & auto-start similar" or "Approve & remember similar" to add one.',
+      removeRule: "Remove rule",
     },
   },
 } as const;

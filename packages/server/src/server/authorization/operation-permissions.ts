@@ -246,6 +246,14 @@ const INBOUND_PERMISSION = {
   "workspace.setup.subscribe.request": "workspace.read",
   "workspace.setup.run.request": "workspace.write",
   write_project_config_request: "workspace.write",
+  "main_chat.ensure.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_plans.request": "workspace.read",
+  "main_chat.start_plan.request": ["workspace.write", "hub.execute"],
+  "main_chat.cancel_plan.request": ["workspace.write", "hub.execute"],
+  "main_chat.get_overview.request": "workspace.read",
+  "main_chat.answer_decision.request": ["workspace.write", "hub.execute"],
+  "main_chat.add_permission_rule.request": ["workspace.write", "hub.execute"],
+  "main_chat.remove_rule.request": ["workspace.write", "hub.execute"],
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -510,6 +518,14 @@ const OUTBOUND_PERMISSION = {
   "workspace.setup.run.response": "workspace.write",
   workspace_update: ["workspace.read", "hub.execute"],
   write_project_config_response: "workspace.write",
+  "main_chat.ensure.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_plans.response": "workspace.read",
+  "main_chat.start_plan.response": ["workspace.write", "hub.execute"],
+  "main_chat.cancel_plan.response": ["workspace.write", "hub.execute"],
+  "main_chat.get_overview.response": "workspace.read",
+  "main_chat.answer_decision.response": ["workspace.write", "hub.execute"],
+  "main_chat.add_permission_rule.response": ["workspace.write", "hub.execute"],
+  "main_chat.remove_rule.response": ["workspace.write", "hub.execute"],
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

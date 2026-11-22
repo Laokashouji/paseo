@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const fr: TranslationResources = {
+  mainChat: en.mainChat,
   pluginCombobox: {
     searching: "Recherche…",
     empty: "Aucun résultat",
@@ -1334,6 +1335,7 @@ export const fr: TranslationResources = {
       appName: "Paseo",
     },
     sections: {
+      mainChat: en.sidebar.sections.mainChat,
       sessions: "Historique",
       search: "Recherche",
       schedules: "Planifications",

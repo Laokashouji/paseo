@@ -32,6 +32,14 @@ import {
   findActiveFileMention,
   type FileMentionRange,
 } from "@/utils/file-mention-autocomplete";
+import {
+  applyMainChatTaskMentionSelection,
+  buildMainChatTaskMentionOptions,
+  resolveMainChatFileMenuFlags,
+  useMainChatAutocompleteTasks,
+  type MainChatTaskAutocompleteOption,
+} from "@/main-chat/autocomplete-tasks";
+import type { MainChatDockTaskItem } from "@/main-chat/selectors";
 
 interface UseAgentAutocompleteInput {
   userInput: string;
@@ -64,6 +72,7 @@ type AgentAutocompleteOption =
       command: PluginClientSlashCommand;
     })
   | (AutocompleteOption & { type: "provider_command" })
+  | MainChatTaskAutocompleteOption
   | (AutocompleteOption & {
       type: "workspace_entry";
       entryPath: string;
@@ -234,6 +243,7 @@ interface BuildAutocompleteOptionsInput {
   activeSlashCommand: SlashCommandRange | null;
   activeFileMention: FileMentionRange | null;
   fileSuggestions: DirectorySuggestionEntry[];
+  mainChatTasks: readonly MainChatDockTaskItem[];
   t: TFunction;
 }
 
@@ -276,8 +286,13 @@ function buildAutocompleteOptions(input: BuildAutocompleteOptionsInput): AgentAu
 
   const activeFileMention = input.activeFileMention;
   if (input.mode === "file" && activeFileMention) {
+    const taskOptions = buildMainChatTaskMentionOptions({
+      tasks: input.mainChatTasks,
+      mention: activeFileMention,
+      t: input.t,
+    });
     const orderedEntries = orderAutocompleteOptions(input.fileSuggestions);
-    return orderedEntries.map((entry) => ({
+    const fileOptions = orderedEntries.map((entry) => ({
       type: "workspace_entry" as const,
       id: `${entry.kind}:${entry.path}`,
       label: entry.path,
@@ -285,6 +300,7 @@ function buildAutocompleteOptions(input: BuildAutocompleteOptionsInput): AgentAu
       entryPath: entry.path,
       mention: activeFileMention,
     }));
+    return [...taskOptions, ...fileOptions];
   }
 
   return [];
@@ -553,11 +569,23 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
   const isConnected = useHostRuntimeIsConnected(serverId);
 
   const mode = resolveAutocompleteMode({ showFileAutocomplete, showCommandAutocomplete });
+  const mainChatTasks = useMainChatAutocompleteTasks({
+    serverId,
+    agentId,
+    mode,
+    isDraftContext,
+  });
   const canShowAutocomplete = resolveAutocompleteIsVisible({
     mode,
     canLoadCommands,
     serverId,
-    autocompleteCwd,
+    autocompleteCwd: resolveMainChatFileMenuFlags({
+      autocompleteCwd,
+      mainChatTasksCount: mainChatTasks.length,
+      isPending: false,
+      isLoading: false,
+      error: null,
+    }).effectiveCwd,
   });
 
   const commandsQuery = useAutocompleteCommands({
@@ -640,16 +668,24 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         pluginNames,
         activeSlashCommand,
         fileSuggestions: fileSuggestionsQuery.data ?? [],
+        mainChatTasks,
         isDraftContext,
         mode,
         t,
       });
     if (mode === "file") {
-      return resolveFileMenu({
-        options: buildOptions,
+      const fileMenuFlags = resolveMainChatFileMenuFlags({
+        autocompleteCwd,
+        mainChatTasksCount: mainChatTasks.length,
         isPending: fileSuggestionsQuery.isPending,
         isLoading: fileSuggestionsQuery.isLoading,
         error: fileSuggestionsQuery.error,
+      });
+      return resolveFileMenu({
+        options: buildOptions,
+        isPending: fileMenuFlags.isPending,
+        isLoading: fileMenuFlags.isLoading,
+        error: fileMenuFlags.error,
         t,
       });
     }
@@ -665,6 +701,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
   }, [
     activeFileMention,
     activeSlashCommand,
+    autocompleteCwd,
     commandFilterQuery,
     commandsEmptyText,
     commandsQuery.commands,
@@ -676,6 +713,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     fileSuggestionsQuery.isPending,
     isDraftContext,
     isVisible,
+    mainChatTasks,
     mode,
     pluginClientSlashCommands,
     pluginNames,
@@ -727,6 +765,18 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       }
 
       if (!current.fileMention) return;
+      if (selected.type === "main_chat_task") {
+        applyMainChatTaskMentionSelection({
+          serverId,
+          agentId,
+          option: selected,
+          text: current.text,
+          mention: current.fileMention,
+          setUserInput,
+          onAutocompleteApplied,
+        });
+        return;
+      }
       const nextInput = applyFileMentionReplacement({
         text: current.text,
         mention: current.fileMention,
@@ -736,9 +786,11 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       onAutocompleteApplied?.();
     },
     [
+      agentId,
       canExecuteClientSlashCommand,
       onAutocompleteApplied,
       onClientSlashCommand,
+      serverId,
       setUserInput,
       userInput,
       cursorIndex,

@@ -1,3 +1,4 @@
+import { isMainChatInlineCardToolName } from "@getpaseo/protocol/main-chat";
 import { isTurnTrigger, isTurnBoundary } from "@/agent-stream/turn-membership";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import type { StreamItem, ToolCallItem, ThoughtItem } from "@/types/stream";
@@ -74,7 +75,11 @@ export function isGroupableToolCall(
     return false;
   }
   const descriptor = describeToolCall(item);
-  return descriptor.detail.type !== "plan" && descriptor.name.trim().toLowerCase() !== "speak";
+  return (
+    descriptor.detail.type !== "plan" &&
+    descriptor.name.trim().toLowerCase() !== "speak" &&
+    !isMainChatInlineCardToolName(descriptor.name)
+  );
 }
 
 function createRun(calls: readonly GroupableItem[], isSealed: boolean): ToolCallRun {

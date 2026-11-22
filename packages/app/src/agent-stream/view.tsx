@@ -1,4 +1,6 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
+import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
+import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -150,15 +152,43 @@ function BottomOverlayInset({ height }: { height: number }) {
 function renderPendingPermissionsNode(input: {
   pendingPermissions: PendingPermission[];
   client: DaemonClient | null;
+  agentId: string;
+  serverId: string;
 }): ReactNode {
   if (input.pendingPermissions.length === 0) {
     return null;
   }
+  const session = useSessionStore.getState().sessions[input.serverId];
   return (
     <View style={stylesheet.permissionsContainer}>
-      {input.pendingPermissions.map((permission) => (
-        <PermissionRequestCard key={permission.key} permission={permission} client={input.client} />
-      ))}
+      {input.pendingPermissions.map((permission) => {
+        const card = (
+          <PermissionRequestCard
+            key={permission.key}
+            permission={permission}
+            client={input.client}
+          />
+        );
+        if (permission.agentId === input.agentId) {
+          return card;
+        }
+        const sourceAgent =
+          session?.agents.get(permission.agentId) ?? session?.agentDetails.get(permission.agentId);
+        return (
+          <ChildPermissionWrapper
+            key={permission.key}
+            serverId={input.serverId}
+            mainAgentId={input.agentId}
+            permission={permission}
+            client={input.client}
+            sourceAgentId={permission.agentId}
+            sourceAgentTitle={sourceAgent?.title?.trim() || permission.agentId}
+            sourceAgentCwd={sourceAgent?.cwd ?? null}
+          >
+            {card}
+          </ChildPermissionWrapper>
+        );
+      })}
     </View>
   );
 }
@@ -834,6 +864,17 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             );
           }
 
+          const mainChatCard = renderMainChatInlineToolCard({
+            serverId: resolvedServerId,
+            agentId,
+            toolName: data.name,
+            toolStatus: data.status,
+            toolInput: data.detail.type === "unknown" ? data.detail.input : null,
+            toolOutput: data.detail.type === "unknown" ? data.detail.output : null,
+            error: data.error,
+          });
+          if (mainChatCard) return mainChatCard;
+
           return (
             <ToolCallSlot
               itemId={item.id}
@@ -855,6 +896,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         }
 
         const data = payload.data;
+        const legacyMainChatCard = renderMainChatInlineToolCard({
+          serverId: resolvedServerId,
+          agentId,
+          toolName: data.toolName,
+          toolStatus: data.status,
+          toolInput: data.arguments,
+          toolOutput: data.result,
+          error: data.error,
+        });
+        if (legacyMainChatCard) return legacyMainChatCard;
         return (
           <ToolCallSlot
             itemId={item.id}
@@ -870,7 +921,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           />
         );
       },
-      [context.cwd, resolvedServerId, setInlineDetailsExpanded, handleToolCallOpenFile],
+      [agentId, context.cwd, resolvedServerId, setInlineDetailsExpanded, handleToolCallOpenFile],
     );
 
     // Read through a stable event so live group updates do not change the renderer identity
@@ -1014,8 +1065,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
 
     const pendingPermissionItems = useMemo(
-      () => Array.from(pendingPermissions.values()).filter((perm) => perm.agentId === agentId),
-      [pendingPermissions, agentId],
+      () => Array.from(pendingPermissions.values()),
+      [pendingPermissions],
     );
 
     const pendingPermissionsNode = useMemo(
@@ -1023,8 +1074,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         renderPendingPermissionsNode({
           pendingPermissions: pendingPermissionItems,
           client,
+          agentId,
+          serverId: resolvedServerId,
         }),
-      [client, pendingPermissionItems],
+      [agentId, client, pendingPermissionItems, resolvedServerId],
     );
     const turnFooterNode = useMemo(
       () =>

@@ -109,6 +109,8 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
+import { registerMainChatTools } from "../../main-chat/tools.js";
+import type { MainChatService } from "../../main-chat/service.js";
 import {
   PaseoToolInputError,
   type PaseoToolCatalog,
@@ -162,6 +164,7 @@ export interface PaseoToolHostDependencies {
   ) => Promise<string>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
+  mainChatService?: MainChatService | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -3360,6 +3363,15 @@ function createToolCatalog(
     },
   );
 
+  registerMainChatTools({
+    agentManager,
+    mainChatService: options.mainChatService,
+    callerAgentId,
+    scope,
+    tools,
+    builtinNames,
+    policy: options.paseoToolPolicy,
+  });
   registerPluginTools({
     agentManager,
     callerAgentId,

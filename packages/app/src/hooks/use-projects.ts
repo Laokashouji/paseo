@@ -13,6 +13,7 @@ import {
   type WorkspaceDescriptor,
 } from "@/stores/session-store";
 import { buildProjects, type ProjectHost, type ProjectSummary } from "@/utils/projects";
+import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 
 export interface ProjectHostError {
   serverId: string;
@@ -83,11 +84,25 @@ function selectProjectHostReplicas(
   return (state) =>
     hosts.map((host) => {
       const session = state.sessions[host.serverId];
+      const allWorkspaces = Array.from(session?.workspaces.values() ?? []);
+      const hiddenProjectIds = new Set<string>();
+      const visibleWorkspaces = allWorkspaces.filter((workspace) => {
+        if (isMainChatDedicatedWorkspace(workspace, session?.agents)) {
+          hiddenProjectIds.add(workspace.projectId);
+          return false;
+        }
+        return true;
+      });
+      const visibleProjectIds = new Set(visibleWorkspaces.map((workspace) => workspace.projectId));
+      const projects = Array.from(session?.projects.values() ?? []).filter(
+        (project) =>
+          !hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId),
+      );
       return {
         serverId: host.serverId,
         serverName: host.label,
-        workspaces: Array.from(session?.workspaces.values() ?? []),
-        projects: Array.from(session?.projects.values() ?? []),
+        workspaces: visibleWorkspaces,
+        projects,
       };
     });
 }

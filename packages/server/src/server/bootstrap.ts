@@ -9,6 +9,7 @@ import {
   createJsonFinishSubscriptionStore,
 } from "./agent/finish-subscriptions/index.js";
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { createMainChatService } from "./main-chat/service.js";
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
@@ -1554,6 +1555,38 @@ export async function createPaseoDaemon(
     idleRuntimeCleanup,
   );
 
+  const createDirectoryWorkspaceExternal = async (
+    cwd: string,
+    title?: string | null,
+    projectId?: string,
+    context?: { background?: boolean; callerWorkspaceId?: string },
+  ) => {
+    const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
+      cwd,
+      title,
+      projectId,
+      context,
+    );
+    await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
+    return workspace;
+  };
+
+  const mainChatService = createMainChatService({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    serverId,
+    agentManager,
+    agentStorage,
+    providerSnapshotManager,
+    workspaceRegistry,
+    createDirectoryWorkspace: createDirectoryWorkspaceExternal,
+    ensureWorkspaceForCreate: createAgentCommandDependencies.ensureWorkspaceForCreate,
+    createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
+    finishSubscriptions: () => finishSubscriptions,
+    terminalManager,
+    logger,
+  });
+
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -1584,16 +1617,7 @@ export async function createPaseoDaemon(
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
     workspaceRegistry,
     projectRegistry,
-    createDirectoryWorkspace: async (cwd, title, projectId, context) => {
-      const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
-        cwd,
-        title,
-        projectId,
-        context,
-      );
-      await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
-      return workspace;
-    },
+    createDirectoryWorkspace: createDirectoryWorkspaceExternal,
     workspaceScripts: createWorkspaceScriptsService({
       serviceProxy,
       scriptRuntimeStore,
@@ -1619,6 +1643,7 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
+    mainChatService,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -1924,6 +1949,7 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              mainChatService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -1931,6 +1957,7 @@ export async function createPaseoDaemon(
             restartRecovery.resumePending();
             await finishSubscriptions.start();
             await changeRequestWatches.start();
+            await mainChatService.start();
             wsServer.beginAcceptingConnections();
             const relaySecurityLogger = logger.child({ module: "relay-security" });
             relayRuntime = createRelayRuntime({
@@ -2022,6 +2049,7 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     await changeRequestWatches.close();
+    mainChatService.stop();
     await finishSubscriptions.close();
     await wsServer?.agentMessages.close();
     agentManager.prepareForShutdown();

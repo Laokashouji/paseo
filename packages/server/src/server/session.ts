@@ -1,4 +1,6 @@
 import { DiffSession } from "./diff/index.js";
+import type { MainChatService } from "./main-chat/service.js";
+import { handleMainChatSessionMessage } from "./main-chat/session.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory, type BackgroundVisibility } from "./agent/directory.js";
@@ -513,6 +515,7 @@ export interface SessionOptions {
   workspaceBaseBranch?: WorkspaceBaseBranchService;
   directorySync?: DirectorySyncService;
   workspaceLabelService?: WorkspaceLabelService;
+  mainChatService?: MainChatService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
   checkoutDiffManager: CheckoutDiffManager;
@@ -845,6 +848,7 @@ export class Session {
     WorkspaceUpdatesSubscriptionState
   >();
   private readonly workspaceLabelService: WorkspaceLabelService | null;
+  private readonly mainChatService: MainChatService | undefined;
   private readonly eventSubscriptions = new Map<
     string,
     { owner: OwnedSubscription; events: Set<SessionEventSubscription>; notifications: boolean }
@@ -910,6 +914,7 @@ export class Session {
       workspaceRegistry,
       directorySync,
       workspaceLabelService,
+      mainChatService,
       filesystem,
       scheduleService,
       checkoutDiffManager,
@@ -995,6 +1000,7 @@ export class Session {
     this.workspaceRegistry = workspaceRegistry;
     this.directorySync = resolveDirectorySync(directorySync);
     this.workspaceLabelService = resolveWorkspaceLabelService(workspaceLabelService);
+    this.mainChatService = mainChatService;
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
@@ -2719,8 +2725,27 @@ export class Session {
     return (
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
+      this.dispatchMainChatMessage(msg) ??
       this.speechModelsSession.dispatch(msg)
     );
+  }
+
+  private dispatchMainChatMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "main_chat.ensure.request":
+      case "main_chat.list_plans.request":
+      case "main_chat.start_plan.request":
+      case "main_chat.cancel_plan.request":
+      case "main_chat.get_overview.request":
+      case "main_chat.answer_decision.request":
+      case "main_chat.add_permission_rule.request":
+      case "main_chat.remove_rule.request":
+        return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
+          this.emit(response),
+        );
+      default:
+        return undefined;
+    }
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
