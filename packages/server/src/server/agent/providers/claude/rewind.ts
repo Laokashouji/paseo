@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -12,28 +12,55 @@ import {
 export interface ClaudeRewindSdk {
   forkSession(
     sessionId: string,
-    options: { upToMessageId: string; transcriptPath: string },
+    options: {
+      upToMessageId?: string;
+      transcriptPath: string;
+      targetProjectFolder?: string;
+      sourceCwd?: string;
+      targetCwd?: string;
+      title?: string;
+    },
   ): Promise<{ sessionId: string }>;
 }
 
 // On its own, the SDK looks for the session under the daemon's CLAUDE_CONFIG_DIR, while a
 // provider can point Claude Code at another one. Forking through a store rooted at the
-// transcript's folder reads the session where Claude Code wrote it and writes the fork beside it.
+// transcript's folder reads the session where Claude Code wrote it and writes the fork beside it
+// (or into the target project folder when forking across working directories).
 export const realClaudeRewindSdk: ClaudeRewindSdk = {
   forkSession: (sessionId, options) =>
     claudeForkSession(sessionId, {
-      upToMessageId: options.upToMessageId,
-      sessionStore: projectFolderSessionStore(path.dirname(options.transcriptPath)),
+      ...(options.upToMessageId ? { upToMessageId: options.upToMessageId } : {}),
+      ...(options.title ? { title: options.title } : {}),
+      sessionStore: projectFolderSessionStore(path.dirname(options.transcriptPath), {
+        targetProjectFolder: options.targetProjectFolder,
+        sourceCwd: options.sourceCwd,
+        targetCwd: options.targetCwd,
+      }),
     }),
 };
 
-function projectFolderSessionStore(projectFolder: string): SessionStore {
-  const transcriptPath = (sessionId: string) => path.join(projectFolder, `${sessionId}.jsonl`);
+function projectFolderSessionStore(
+  sourceProjectFolder: string,
+  options?: {
+    targetProjectFolder?: string;
+    sourceCwd?: string;
+    targetCwd?: string;
+  },
+): SessionStore {
+  const destProjectFolder = options?.targetProjectFolder ?? sourceProjectFolder;
+  const sourceCwd = options?.sourceCwd;
+  const targetCwd = options?.targetCwd;
+  const shouldRelocateCwd = Boolean(sourceCwd && targetCwd && sourceCwd !== targetCwd);
+  const sourceTranscriptPath = (sessionId: string) =>
+    path.join(sourceProjectFolder, `${sessionId}.jsonl`);
+  const destTranscriptPath = (sessionId: string) =>
+    path.join(destProjectFolder, `${sessionId}.jsonl`);
   return {
     async load({ sessionId }) {
       let text: string;
       try {
-        text = await readFile(transcriptPath(sessionId), "utf8");
+        text = await readFile(sourceTranscriptPath(sessionId), "utf8");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
         throw error;
@@ -41,8 +68,14 @@ function projectFolderSessionStore(projectFolder: string): SessionStore {
       return parseTranscriptEntries(text);
     },
     async append({ sessionId }, entries) {
-      const lines = entries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
-      await appendFile(transcriptPath(sessionId), lines, "utf8");
+      await mkdir(destProjectFolder, { recursive: true });
+      const prepared = shouldRelocateCwd
+        ? entries.map((entry) =>
+            (entry as { cwd?: unknown }).cwd === sourceCwd ? { ...entry, cwd: targetCwd } : entry,
+          )
+        : entries;
+      const lines = prepared.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+      await appendFile(destTranscriptPath(sessionId), lines, "utf8");
     },
   };
 }
@@ -118,6 +151,29 @@ export async function findSteeredMessageParent(
     input.destroy();
   }
   return null;
+}
+
+export async function forkClaudeConversation(input: {
+  sdk: ClaudeRewindSdk;
+  sessionId: string | null;
+  transcriptPath: string | null;
+  upToMessageId?: string;
+  targetProjectFolder?: string;
+  sourceCwd?: string;
+  targetCwd?: string;
+  title?: string;
+}): Promise<{ sessionId: string }> {
+  if (!input.sessionId || !input.transcriptPath) {
+    throw new Error("Claude session is not ready to fork");
+  }
+  return input.sdk.forkSession(input.sessionId, {
+    ...(input.upToMessageId ? { upToMessageId: input.upToMessageId } : {}),
+    transcriptPath: input.transcriptPath,
+    ...(input.targetProjectFolder ? { targetProjectFolder: input.targetProjectFolder } : {}),
+    ...(input.sourceCwd ? { sourceCwd: input.sourceCwd } : {}),
+    ...(input.targetCwd ? { targetCwd: input.targetCwd } : {}),
+    ...(input.title ? { title: input.title } : {}),
+  });
 }
 
 export async function revertClaudeConversation(input: {

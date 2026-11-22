@@ -185,6 +185,15 @@ export interface AgentCapabilityFlags {
   supportsRewindConversation?: boolean;
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
+  supportsNativeFork?: boolean;
+}
+
+export interface AgentSessionForkInput {
+  nextUserMessageId?: string;
+  currentTurnUserMessageId?: string;
+  boundaryAssistantMessageId?: string;
+  targetCwd?: string;
+  title?: string;
 }
 
 export interface AgentPersistenceHandle {
@@ -777,6 +786,13 @@ export interface AgentSession {
   revertConversation?(input: { messageId: string }): Promise<void>;
   revertFiles?(input: { messageId: string }): Promise<void>;
   revertBoth?(input: { messageId: string }): Promise<void>;
+  /**
+   * Create a lossless native provider session forked from this session without mutating it.
+   * When `nextUserMessageId` is provided, the fork stops immediately before that user turn
+   * (preserving everything up to and including the preceding completed turn). When omitted,
+   * the full committed conversation is forked.
+   */
+  forkSession?(input: AgentSessionForkInput): Promise<AgentPersistenceHandle>;
   /**
    * Out-of-band prompt handler. When non-null, the manager runs the returned
    * handler instead of allocating a turn. The handler emits stream events

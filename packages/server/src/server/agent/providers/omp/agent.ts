@@ -45,6 +45,7 @@ import {
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
+import { forkJsonlTreeSessionFile } from "../pi/fork.js";
 import { runProviderTurn } from "../provider-runner.js";
 import {
   checkProviderLaunchAvailable,
@@ -130,6 +131,7 @@ const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: false,
   supportsRewindBoth: false,
+  supportsNativeFork: true,
 };
 
 export interface OmpAgentClientOptions {
@@ -1181,6 +1183,40 @@ export class OmpAgentSession implements AgentSession {
     await this.runtimeSession.branch(target);
     await this.refreshState();
     this.activeToolCalls.clear();
+  }
+
+  async forkSession(input: {
+    nextUserMessageId?: string;
+    targetCwd?: string;
+  }): Promise<AgentPersistenceHandle> {
+    await this.refreshState().catch(() => undefined);
+    const sourceFile = this.state.sessionFile;
+    if (!sourceFile) {
+      throw new Error("OMP session has no persisted session file to fork");
+    }
+    const targetCwd = input.targetCwd?.trim() || this.config.cwd;
+    const forked = await forkJsonlTreeSessionFile({
+      sourceFile,
+      stopBeforeEntryId: input.nextUserMessageId,
+      activeBranchEntryId: this.runtimeSession.activeBranchEntryId,
+      targetCwd,
+    });
+    return {
+      provider: this.provider,
+      sessionId: forked.sessionId,
+      nativeHandle: forked.sessionFile,
+      metadata: {
+        cwd: targetCwd,
+        ...(this.hostTools?.bridge
+          ? { bridgedTools: [...this.hostTools.bridge.toolIdentities()] }
+          : {}),
+        ...(this.config.model ? { model: this.config.model } : {}),
+        ...(this.config.thinkingOptionId
+          ? { thinkingOptionId: this.config.thinkingOptionId }
+          : {}),
+        ...(this.currentModeId ? { modeId: this.currentModeId } : {}),
+      },
+    };
   }
 
   async canStopRuntime(): Promise<boolean> {

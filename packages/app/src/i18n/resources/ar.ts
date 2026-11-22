@@ -206,6 +206,7 @@ export const ar: TranslationResources = {
     clientCommands: {
       archiveAgent: "أرشفة الوكيل الحالي",
       freshDraft: "أرشفة هذا الوكيل وابدأ مسودة جديدة",
+      branchAgent: "تفريع هذه المحادثة في علامة تبويب فرع جديدة",
     },
     github: {
       searching: "جارٍ البحث...",
@@ -351,6 +352,7 @@ export const ar: TranslationResources = {
       forkMenu: "تفريع الرسالة",
       forkInNewTab: "تفريع في تبويب جديد",
       forkInNewWorkspace: "تفريع في مساحة عمل جديدة",
+      forkAsSummaryDraft: "تفريع كمسودة ملخصة",
       forkUnavailable: "حدّث المضيف لاستخدام هذا.",
       forkMissingWorkspace: "هذا الوكيل ليس في مساحة عمل.",
       forkFailed: "فشل تفريع المحادثة",
@@ -2058,6 +2060,17 @@ export const ar: TranslationResources = {
   },
   menu: {
     backdrop: "خلفية القائمة",
+  },
+  branches: {
+    title: "الفروع",
+    pillLabelOne: "فرع واحد",
+    pillLabelMany: "{{count}} فروع",
+    newBranchAction: "فرع جديد من هنا",
+    creatingAction: "جارٍ إنشاء الفرع…",
+    currentBadge: "الحالي",
+    rootBadge: "الرئيسي",
+    archiveAction: "أرشفة {{label}}",
+    archiveTooltip: "أرشفة الفرع",
   },
   subagents: {
     parent: {

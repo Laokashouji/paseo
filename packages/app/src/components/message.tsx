@@ -560,6 +560,7 @@ interface AssistantTurnFooterProps {
   completedAt?: Date;
   durationMs?: number | null;
   onFork?: (target: AssistantForkTarget) => Promise<void> | void;
+  supportsNativeFork?: boolean;
 }
 
 const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
@@ -617,6 +618,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
   completedAt,
   durationMs,
   onFork,
+  supportsNativeFork = false,
 }: AssistantTurnFooterProps) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
@@ -677,7 +679,9 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
               containerStyle={assistantTurnFooterStylesheet.copyButton}
             />
           ) : null}
-          {canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
+          {canFork ? (
+            <AssistantForkMenu onFork={handleFork} supportsNativeFork={supportsNativeFork} />
+          ) : null}
         </View>
       ) : null}
       {primaryLabel ? (

@@ -209,6 +209,7 @@ export const fr: TranslationResources = {
     clientCommands: {
       archiveAgent: "Archiver l’agent actuel",
       freshDraft: "Archiver cet agent et démarrer un nouveau brouillon",
+      branchAgent: "Forker cette conversation dans un nouvel onglet de branche",
     },
     github: {
       searching: "Recherche…",
@@ -356,6 +357,7 @@ export const fr: TranslationResources = {
       forkMenu: "Forker la conversation à partir d’ici",
       forkInNewTab: "Forker dans un nouvel onglet",
       forkInNewWorkspace: "Forker dans un nouvel espace de travail",
+      forkAsSummaryDraft: "Forker comme brouillon de résumé",
       forkUnavailable: "Mettez à jour l’hôte pour utiliser cette fonction.",
       forkMissingWorkspace: "Cet agent n’est dans aucun espace de travail.",
       forkFailed: "Impossible de forker la conversation",
@@ -2106,6 +2108,17 @@ export const fr: TranslationResources = {
   },
   menu: {
     backdrop: "Arrière-plan du menu",
+  },
+  branches: {
+    title: "Branches",
+    pillLabelOne: "1 branche",
+    pillLabelMany: "{{count}} branches",
+    newBranchAction: "Nouvelle branche à partir d’ici",
+    creatingAction: "Création de la branche…",
+    currentBadge: "Actuelle",
+    rootBadge: "Principale",
+    archiveAction: "Archiver {{label}}",
+    archiveTooltip: "Archiver la branche",
   },
   subagents: {
     parent: {

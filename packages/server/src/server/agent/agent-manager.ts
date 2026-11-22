@@ -82,6 +82,7 @@ import {
   type SeedAgentTimelineOptions,
 } from "./agent-timeline-store.js";
 import type {
+  AgentTimelineCursor,
   AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
   AgentTimelineRow,
@@ -99,6 +100,12 @@ import {
   type PendingForegroundRun,
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
+import {
+  buildNativeForkLabels,
+  buildSessionForkInput,
+  resolveForkAgentTitle,
+  resolveNativeForkBoundary,
+} from "./native-fork.js";
 import { parseAgentMessage, projectAgentMessages } from "./agent-messages/index.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import {
@@ -4119,6 +4126,124 @@ export class AgentManager {
     } finally {
       this.runs.settleForegroundRun(agentId, lock.token);
     }
+  }
+
+  async forkAgent(input: {
+    sourceAgentId: string;
+    workspaceId?: string;
+    cwd?: string;
+    boundaryCursor?: AgentTimelineCursor;
+    boundaryMessageId?: string;
+    title?: string;
+    labels?: Record<string, string>;
+  }): Promise<ManagedAgent> {
+    let source = this.requireSessionAgent(input.sourceAgentId);
+    if (this.historySessions.has(source.session)) {
+      const record = await this.registry?.get(input.sourceAgentId);
+      if (!record?.archivedAt) {
+        source = await this.ensureInteractiveSession(input.sourceAgentId);
+      }
+    }
+
+    if (!source.session.capabilities.supportsNativeFork || !source.session.forkSession) {
+      throw new Error(`Provider '${source.provider}' does not support native session fork`);
+    }
+
+    const timeline = this.fetchTimeline(input.sourceAgentId, {
+      direction: "tail",
+      limit: 0,
+    });
+    const boundary = resolveNativeForkBoundary({
+      rows: timeline.rows,
+      timelineEpoch: timeline.epoch,
+      boundaryCursor: input.boundaryCursor,
+      boundaryMessageId: input.boundaryMessageId,
+    });
+
+    const storedSource = await this.registry?.get(input.sourceAgentId);
+    const sourceTitle = storedSource?.title ?? source.config.title ?? null;
+    const title = resolveForkAgentTitle({
+      explicitTitle: input.title,
+      sourceTitle,
+    });
+    const targetCwd = input.cwd?.trim() || source.cwd;
+    const targetWorkspaceId = input.workspaceId ?? source.workspaceId;
+    const labels = buildNativeForkLabels({
+      sourceAgentId: source.id,
+      sourceLabels: source.labels,
+      extraLabels: input.labels,
+    });
+
+    this.logger.info(
+      {
+        sourceAgentId: source.id,
+        provider: source.provider,
+        targetWorkspaceId,
+        targetCwd,
+        hasBoundary: Boolean(input.boundaryCursor || input.boundaryMessageId),
+      },
+      "agent.fork.start",
+    );
+
+    const forkedHandle = await source.session.forkSession(
+      buildSessionForkInput({
+        boundary,
+        targetCwd,
+        title,
+      }),
+    );
+
+    const now = new Date();
+    const {
+      pluginAppendSystemPrompt: _pluginAppendSystemPrompt,
+      daemonAppendSystemPrompt: _daemonAppendSystemPrompt,
+      ...baseConfig
+    } = source.config;
+
+    const forkedAgent = await this.resumeAgentFromPersistence(
+      forkedHandle,
+      {
+        ...stripInternalPaseoMcpServer(baseConfig),
+        cwd: targetCwd,
+        title,
+        modeId: source.currentModeId ?? source.config.modeId,
+        model: source.runtimeInfo?.model ?? source.config.model,
+        thinkingOptionId: source.runtimeInfo?.thinkingOptionId ?? source.config.thinkingOptionId,
+        providerOptions: { ...source.config.providerOptions },
+      },
+      undefined,
+      {
+        createdAt: now,
+        updatedAt: now,
+        lastUserMessageAt: now,
+        labels,
+        workspaceId: targetWorkspaceId,
+      },
+    );
+
+    await this.hydrateTimelineFromProvider(forkedAgent.id, {
+      force: true,
+      broadcast: false,
+      broadcastTimeline: false,
+    });
+
+    const liveForked = this.agents.get(forkedAgent.id);
+    if (liveForked) {
+      this.refreshSessionPersistence(liveForked);
+      await this.persistSnapshot(liveForked, { title });
+      this.emitState(liveForked, { persist: false });
+      this.logger.info(
+        {
+          sourceAgentId: source.id,
+          forkedAgentId: liveForked.id,
+          provider: liveForked.provider,
+        },
+        "agent.fork.complete",
+      );
+      return { ...liveForked };
+    }
+
+    return forkedAgent;
   }
 
   async deleteAgentState(agentId: string): Promise<void> {

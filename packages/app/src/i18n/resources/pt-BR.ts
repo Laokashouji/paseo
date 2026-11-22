@@ -207,6 +207,7 @@ export const ptBR: TranslationResources = {
     clientCommands: {
       archiveAgent: "Arquivar o agente atual",
       freshDraft: "Arquivar este agente e iniciar um novo rascunho",
+      branchAgent: "Bifurcar esta conversa em uma nova aba de ramificação",
     },
     github: {
       searching: "Buscando...",
@@ -355,6 +356,7 @@ export const ptBR: TranslationResources = {
       forkMenu: "Bifurcar mensagem",
       forkInNewTab: "Bifurcar em uma nova aba",
       forkInNewWorkspace: "Bifurcar em um novo workspace",
+      forkAsSummaryDraft: "Bifurcar como rascunho resumido",
       forkUnavailable: "Atualize o host para usar isto.",
       forkMissingWorkspace: "Este agente não está em um workspace.",
       forkFailed: "Falha ao bifurcar o chat",
@@ -2092,6 +2094,17 @@ export const ptBR: TranslationResources = {
   },
   menu: {
     backdrop: "Fundo do menu",
+  },
+  branches: {
+    title: "Ramificações",
+    pillLabelOne: "1 ramificação",
+    pillLabelMany: "{{count}} ramificações",
+    newBranchAction: "Nova ramificação a partir daqui",
+    creatingAction: "Criando ramificação…",
+    currentBadge: "Atual",
+    rootBadge: "Principal",
+    archiveAction: "Arquivar {{label}}",
+    archiveTooltip: "Arquivar ramificação",
   },
   subagents: {
     parent: {

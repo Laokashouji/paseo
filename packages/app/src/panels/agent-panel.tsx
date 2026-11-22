@@ -66,6 +66,7 @@ import {
   type AgentScreenReadySyncState,
 } from "@/hooks/use-agent-screen-state-machine";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
+import { useForkAgent } from "@/hooks/use-fork-agent";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
@@ -1185,6 +1186,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         isSubmitLoading={false}
         agentInputDraft={agentInputDraft}
         editingSession={composerEditingSession}
+        toast={toastApi}
         onAttentionInputFocus={onAttentionInputFocus}
         onAttentionPromptSend={onAttentionPromptSend}
         onComposerHeightChange={handleComposerHeightChange}
@@ -1240,6 +1242,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           workspaceId={workspaceId}
           agentId={agentId}
           parentAgentId={parentPillAgentId}
+          toast={toastApi}
         />
       ) : null}
     </View>
@@ -1576,6 +1579,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   isSubmitLoading,
   agentInputDraft,
   editingSession,
+  toast,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1590,6 +1594,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
   editingSession: ComposerEditingSession;
+  toast: ToastApi;
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1614,6 +1619,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
       isSubmitLoading={isSubmitLoading}
       agentInputDraft={agentInputDraft}
       editingSession={editingSession}
+      toast={toast}
       onAttentionInputFocus={onAttentionInputFocus}
       onAttentionPromptSend={onAttentionPromptSend}
       onComposerHeightChange={onComposerHeightChange}
@@ -1630,6 +1636,7 @@ function ActiveAgentComposer({
   isSubmitLoading,
   agentInputDraft,
   editingSession,
+  toast,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1642,6 +1649,7 @@ function ActiveAgentComposer({
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
   editingSession: ComposerEditingSession;
+  toast: ToastApi;
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1656,6 +1664,7 @@ function ActiveAgentComposer({
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const { workspaceId, tabId, retargetCurrentTab } = paneContext;
   const { archiveAgent } = useArchiveAgent();
+  const forkAgent = useForkAgent({ serverId, toast });
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
   const unpinWorkspaceAgent = useWorkspaceLayoutStore((state) => state.unpinAgent);
@@ -1683,10 +1692,21 @@ function ActiveAgentComposer({
   );
 
   const handleClientSlashCommand = useCallback(
-    async (command: ClientSlashCommand) => {
+    async (command: ClientSlashCommand, args: string) => {
       const agent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
       if (!agent) {
         throw new Error("Agent not found");
+      }
+
+      if (command.kind === "branch-agent") {
+        await forkAgent({
+          agentId,
+          agent,
+          workspaceId,
+          target: "tab",
+          title: args.trim() || undefined,
+        });
+        return;
       }
 
       const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
@@ -1711,6 +1731,7 @@ function ActiveAgentComposer({
       agentId,
       archiveAgent,
       closeWorkspaceTab,
+      forkAgent,
       hideWorkspaceAgent,
       retargetCurrentTab,
       serverId,

@@ -208,6 +208,7 @@ export const es: TranslationResources = {
     clientCommands: {
       archiveAgent: "Archivar el agente actual",
       freshDraft: "Archive este agente y comience un nuevo borrador",
+      branchAgent: "Bifurcar esta conversación en una nueva pestaña de rama",
     },
     github: {
       searching: "Búsqueda...",
@@ -356,6 +357,7 @@ export const es: TranslationResources = {
       forkMenu: "Bifurcar mensaje",
       forkInNewTab: "Bifurcar en una pestaña nueva",
       forkInNewWorkspace: "Bifurcar en un espacio de trabajo nuevo",
+      forkAsSummaryDraft: "Bifurcar como borrador de resumen",
       forkUnavailable: "Actualiza el host para usar esto.",
       forkMissingWorkspace: "Este agente no está en un espacio de trabajo.",
       forkFailed: "No se pudo bifurcar el chat",
@@ -2107,6 +2109,17 @@ export const es: TranslationResources = {
   },
   menu: {
     backdrop: "Fondo del menú",
+  },
+  branches: {
+    title: "Ramas",
+    pillLabelOne: "1 rama",
+    pillLabelMany: "{{count}} ramas",
+    newBranchAction: "Nueva rama desde aquí",
+    creatingAction: "Creando rama…",
+    currentBadge: "Actual",
+    rootBadge: "Principal",
+    archiveAction: "Archivar {{label}}",
+    archiveTooltip: "Archivar rama",
   },
   subagents: {
     parent: {

@@ -1,17 +1,27 @@
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceDraftTabSetup } from "@/workspace-tabs/model";
 
-export type ClientSlashCommandKind = "archive-agent" | "replace-agent-with-draft";
+export type ClientSlashCommandKind = "archive-agent" | "replace-agent-with-draft" | "branch-agent";
 export type ClientSlashCommandExecution = "immediate" | "insert";
+export type ClientSlashCommandArgsMode = "none" | "optional" | "required";
 
 export interface ClientSlashCommand {
   name: string;
   aliases: readonly string[];
   description: string;
-  descriptionKey: "composer.clientCommands.archiveAgent" | "composer.clientCommands.freshDraft";
+  descriptionKey:
+    | "composer.clientCommands.archiveAgent"
+    | "composer.clientCommands.freshDraft"
+    | "composer.clientCommands.branchAgent";
   argumentHint: string;
   kind: ClientSlashCommandKind;
   execution: ClientSlashCommandExecution;
+  argsMode: ClientSlashCommandArgsMode;
+}
+
+export interface ClientSlashCommandInvocation {
+  command: ClientSlashCommand;
+  args: string;
 }
 
 export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
@@ -23,6 +33,7 @@ export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
     argumentHint: "",
     kind: "archive-agent",
     execution: "immediate",
+    argsMode: "none",
   },
   {
     name: "clear",
@@ -32,6 +43,17 @@ export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
     argumentHint: "",
     kind: "replace-agent-with-draft",
     execution: "immediate",
+    argsMode: "none",
+  },
+  {
+    name: "branch",
+    aliases: ["fork"],
+    description: "Fork this conversation into a new branch tab",
+    descriptionKey: "composer.clientCommands.branchAgent",
+    argumentHint: "[name]",
+    kind: "branch-agent",
+    execution: "insert",
+    argsMode: "optional",
   },
 ];
 
@@ -43,10 +65,10 @@ for (const command of CLIENT_SLASH_COMMANDS) {
   }
 }
 
-export function resolveClientSlashCommand(input: {
+export function resolveClientSlashCommandInvocation(input: {
   text: string;
   hasAttachments: boolean;
-}): ClientSlashCommand | null {
+}): ClientSlashCommandInvocation | null {
   if (input.hasAttachments) {
     return null;
   }
@@ -56,12 +78,35 @@ export function resolveClientSlashCommand(input: {
     return null;
   }
 
-  const commandName = trimmed.slice(1);
-  if (!commandName || /\s/.test(commandName)) {
+  const withoutSlash = trimmed.slice(1);
+  if (!withoutSlash) {
     return null;
   }
 
-  return COMMAND_BY_NAME.get(commandName) ?? null;
+  const firstWhitespace = withoutSlash.search(/\s/);
+  const commandName =
+    firstWhitespace === -1 ? withoutSlash : withoutSlash.slice(0, firstWhitespace);
+  const args = firstWhitespace === -1 ? "" : withoutSlash.slice(firstWhitespace + 1).trim();
+  const command = COMMAND_BY_NAME.get(commandName);
+  if (!command) {
+    return null;
+  }
+
+  if (command.argsMode === "none" && args.length > 0) {
+    return null;
+  }
+  if (command.argsMode === "required" && args.length === 0) {
+    return null;
+  }
+
+  return { command, args };
+}
+
+export function resolveClientSlashCommand(input: {
+  text: string;
+  hasAttachments: boolean;
+}): ClientSlashCommand | null {
+  return resolveClientSlashCommandInvocation(input)?.command ?? null;
 }
 
 export function buildDraftAgentSetup(agent: Agent): WorkspaceDraftTabSetup {

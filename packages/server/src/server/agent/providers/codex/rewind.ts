@@ -41,6 +41,77 @@ async function rollbackCodexThread(
   return parseCodexThreadRollbackResponse(await client.request("thread/rollback", params));
 }
 
+export async function forkCodexConversation(input: {
+  client: CodexRewindClient;
+  threadId: string | null;
+  nextUserMessageId?: string;
+  cwd?: string | null;
+  model?: string | null;
+  serviceTier?: string | null;
+  config?: Record<string, unknown> | null;
+  developerInstructions?: string;
+  userMessageTurns: CodexUserMessageTurnIndex;
+  threadRollbackAvailable: boolean;
+}): Promise<{ threadId: string }> {
+  if (!input.threadId) {
+    throw new Error("Codex thread is not ready to fork");
+  }
+
+  // Codex does not carry the parent thread's config into a fork; without it the
+  // forked thread falls back to the default model provider.
+  const forkParams: CodexThreadForkParams = {
+    threadId: input.threadId,
+    cwd: input.cwd ?? null,
+    model: input.model ?? null,
+    serviceTier: input.serviceTier ?? null,
+    ...(input.config ? { config: input.config } : {}),
+    ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {}),
+    excludeTurns: true,
+    persistExtendedHistory: true,
+  };
+
+  if (!input.nextUserMessageId) {
+    const forked = await forkCodexThread(input.client, forkParams);
+    return { threadId: forked.thread.id };
+  }
+
+  const targetTurn = input.userMessageTurns.resolve(input.nextUserMessageId);
+  if (targetTurn === null) {
+    throw new Error(
+      `Codex could not find user message ${input.nextUserMessageId} in the current thread`,
+    );
+  }
+
+  const currentUserTurnCount = input.userMessageTurns.count();
+  const numTurns = currentUserTurnCount - targetTurn.index;
+  if (numTurns < 0) {
+    throw new Error(`Codex user message ${input.nextUserMessageId} is outside the current thread`);
+  }
+
+  if (
+    !input.threadRollbackAvailable ||
+    (await readCodexThreadHistoryMode(input.client, input.threadId)) === "paginated"
+  ) {
+    if (!targetTurn.turnId) {
+      throw new Error(
+        `Codex could not find the turn containing user message ${input.nextUserMessageId}`,
+      );
+    }
+    const forked = await forkCodexThread(input.client, {
+      ...forkParams,
+      beforeTurnId: targetTurn.turnId,
+    });
+    return { threadId: forked.thread.id };
+  }
+
+  const forked = await forkCodexThread(input.client, forkParams);
+  const rolledBack = await rollbackCodexThread(input.client, {
+    threadId: forked.thread.id,
+    numTurns,
+  });
+  return { threadId: rolledBack.thread.id };
+}
+
 export async function revertCodexConversation(input: {
   client: CodexRewindClient;
   threadId: string | null;

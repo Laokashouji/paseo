@@ -15,6 +15,7 @@ import {
   CircleAlert,
   File,
   Folder,
+  GitBranch,
   Puzzle,
   RotateCw,
   Sparkles,
@@ -36,6 +37,7 @@ export type AutocompleteOptionIcon =
   | "plugin"
   | "archive"
   | "new-draft"
+  | "branch"
   | "file"
   | "directory";
 
@@ -71,6 +73,7 @@ const ROW_ICONS = {
   plugin: withUnistyles(Puzzle, mutedIconColorMapping),
   archive: withUnistyles(Archive, mutedIconColorMapping),
   "new-draft": withUnistyles(SquarePen, mutedIconColorMapping),
+  branch: withUnistyles(GitBranch, mutedIconColorMapping),
   file: withUnistyles(File, mutedIconColorMapping),
   directory: withUnistyles(Folder, mutedIconColorMapping),
 } satisfies Record<AutocompleteOptionIcon, unknown>;

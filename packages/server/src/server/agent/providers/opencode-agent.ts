@@ -142,6 +142,7 @@ const OPENCODE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: false,
   supportsRewindFiles: false,
   supportsRewindBoth: true,
+  supportsNativeFork: true,
 };
 
 const OPENCODE_BUILD_MODE_ID = "build";
@@ -3766,6 +3767,37 @@ class OpenCodeAgentSession implements AgentSession {
       cwd: this.config.cwd,
       messageId: input.messageId,
     });
+  }
+
+  async forkSession(input: {
+    nextUserMessageId?: string;
+    targetCwd?: string;
+  }): Promise<AgentPersistenceHandle> {
+    await this.reconnectIfServerExited();
+    const targetCwd = input.targetCwd?.trim() || this.config.cwd;
+    const response = await this.client.session.fork({
+      sessionID: this.sessionId,
+      directory: targetCwd,
+      ...(input.nextUserMessageId ? { messageID: input.nextUserMessageId } : {}),
+    });
+    if (response.error || !response.data?.id) {
+      throw new Error(
+        response.error
+          ? toDiagnosticErrorMessage(response.error)
+          : "OpenCode session fork returned no session ID",
+      );
+    }
+    const forkedSessionId = response.data.id;
+    return {
+      provider: "opencode",
+      sessionId: forkedSessionId,
+      nativeHandle: forkedSessionId,
+      metadata: {
+        cwd: targetCwd,
+        ...(this.config.modeId ? { modeId: this.config.modeId } : {}),
+        ...(this.config.model ? { model: this.config.model } : {}),
+      },
+    };
   }
 
   private abortSession(turnId: string | null, reason: string): Promise<void> {

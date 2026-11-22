@@ -25,9 +25,18 @@ export interface PendingWorkspaceDraftSubmission {
   allowEmptyText?: boolean;
 }
 
+export interface PendingWorkspaceNativeForkSource {
+  sourceAgentId: string;
+  provider: AgentProvider;
+  boundaryCursor?: { epoch: string; seq: number };
+  boundaryMessageId?: string;
+  title?: string;
+}
+
 export interface PendingWorkspaceDraftSetup {
   setup: WorkspaceDraftTabSetup;
   sourceDirectory?: string | null;
+  nativeForkSource?: PendingWorkspaceNativeForkSource | null;
 }
 
 interface WorkspaceDraftSubmissionState {
@@ -38,6 +47,7 @@ interface WorkspaceDraftSubmissionState {
     draftId: string;
     setup: WorkspaceDraftTabSetup;
     sourceDirectory?: string | null;
+    nativeForkSource?: PendingWorkspaceNativeForkSource | null;
   }) => void;
   clearDraftSetup: (input: { draftId: string }) => void;
   consumePending: (input: {
@@ -73,13 +83,17 @@ export const useWorkspaceDraftSubmissionStore = create<WorkspaceDraftSubmissionS
           [submission.draftId]: submission,
         },
       })),
-    setDraftSetup: ({ draftId, setup, sourceDirectory }) => {
+    setDraftSetup: ({ draftId, setup, sourceDirectory, nativeForkSource }) => {
       const normalizedDraftId = normalizeDraftId(draftId);
       if (!normalizedDraftId) return;
       set((state) => ({
         setupByDraftId: {
           ...state.setupByDraftId,
-          [normalizedDraftId]: { setup, sourceDirectory: sourceDirectory ?? null },
+          [normalizedDraftId]: {
+            setup,
+            sourceDirectory: sourceDirectory ?? null,
+            ...(nativeForkSource ? { nativeForkSource } : {}),
+          },
         },
       }));
     },

@@ -208,6 +208,7 @@ export const ru: TranslationResources = {
     clientCommands: {
       archiveAgent: "Архивировать текущего агента",
       freshDraft: "Архивировать этого агента и создать новый черновик",
+      branchAgent: "Создать ветку этого диалога в новой вкладке",
     },
     github: {
       searching: "Идет поиск...",
@@ -355,6 +356,7 @@ export const ru: TranslationResources = {
       forkMenu: "Форкнуть чат отсюда",
       forkInNewTab: "Создать форк в новой вкладке",
       forkInNewWorkspace: "Создать форк в новом рабочем пространстве",
+      forkAsSummaryDraft: "Создать форк как черновик со сводкой",
       forkUnavailable: "Обновите хост, чтобы использовать эту функцию.",
       forkMissingWorkspace: "Этот агент не связан с рабочим пространством.",
       forkFailed: "Не удалось создать форк чата",
@@ -2093,6 +2095,17 @@ export const ru: TranslationResources = {
   },
   menu: {
     backdrop: "Фон меню",
+  },
+  branches: {
+    title: "Ветки",
+    pillLabelOne: "1 ветка",
+    pillLabelMany: "{{count}} веток",
+    newBranchAction: "Новая ветка отсюда",
+    creatingAction: "Создание ветки…",
+    currentBadge: "Текущая",
+    rootBadge: "Основная",
+    archiveAction: "Архивировать {{label}}",
+    archiveTooltip: "Архивировать ветку",
   },
   subagents: {
     parent: {

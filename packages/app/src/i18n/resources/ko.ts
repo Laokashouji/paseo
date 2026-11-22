@@ -206,6 +206,7 @@ export const ko: TranslationResources = {
     clientCommands: {
       archiveAgent: "현재 에이전트 보관",
       freshDraft: "이 에이전트를 보관하고 새 초안을 시작합니다",
+      branchAgent: "이 대화를 새 브랜치 탭으로 분기합니다",
     },
     github: {
       searching: "검색 중...",
@@ -352,6 +353,7 @@ export const ko: TranslationResources = {
       forkMenu: "여기에서 채팅 분기",
       forkInNewTab: "새 탭으로 분기",
       forkInNewWorkspace: "새 워크스페이스로 분기",
+      forkAsSummaryDraft: "요약 초안으로 분기",
       forkUnavailable: "이를 사용하려면 호스트를 업데이트하세요.",
       forkMissingWorkspace: "이 에이전트는 워크스페이스에 속해 있지 않습니다.",
       forkFailed: "채팅을 분기하지 못했습니다.",
@@ -2069,6 +2071,17 @@ export const ko: TranslationResources = {
   },
   menu: {
     backdrop: "메뉴 배경",
+  },
+  branches: {
+    title: "브랜치",
+    pillLabelOne: "브랜치 1개",
+    pillLabelMany: "브랜치 {{count}}개",
+    newBranchAction: "여기서 새 브랜치 만들기",
+    creatingAction: "브랜치 생성 중…",
+    currentBadge: "현재",
+    rootBadge: "메인",
+    archiveAction: "{{label}} 보관",
+    archiveTooltip: "브랜치 보관",
   },
   subagents: {
     parent: {

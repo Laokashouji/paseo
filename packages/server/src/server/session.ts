@@ -3208,6 +3208,8 @@ export class Session {
         return this.handleAgentTimelineSubscription(msg, source);
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      case "agent.fork.request":
+        return this.handleAgentForkRequest(msg, source);
       default:
         return undefined;
     }
@@ -8979,6 +8981,69 @@ export class Session {
           error: error instanceof Error ? error.message : String(error),
         },
       });
+    }
+  }
+
+  private async handleAgentForkRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.fork.request" }>,
+    source?: object,
+  ): Promise<void> {
+    try {
+      const sourceSnapshot = await ensureAgentLoaded(msg.sourceAgentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const targetWorkspaceId = msg.workspaceId ?? sourceSnapshot.workspaceId;
+      let targetCwd = msg.cwd?.trim() || undefined;
+      if (!targetCwd && targetWorkspaceId && targetWorkspaceId !== sourceSnapshot.workspaceId) {
+        const workspace = await this.workspaceRegistry.get(targetWorkspaceId);
+        if (workspace?.cwd) {
+          targetCwd = workspace.cwd;
+        }
+      }
+
+      const forked = await this.agentManager.forkAgent({
+        sourceAgentId: msg.sourceAgentId,
+        workspaceId: targetWorkspaceId,
+        cwd: targetCwd,
+        boundaryCursor: msg.boundaryCursor,
+        boundaryMessageId: msg.boundaryMessageId,
+        title: msg.title,
+        labels: msg.labels,
+      });
+      const payload = await this.buildAgentPayload(forked);
+      this.emitForSource(
+        {
+          type: "agent.fork.response",
+          payload: {
+            requestId: msg.requestId,
+            sourceAgentId: msg.sourceAgentId,
+            agent: payload,
+            forkMode: "native",
+            error: null,
+          },
+        },
+        source,
+      );
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, sourceAgentId: msg.sourceAgentId },
+        "Failed to handle agent.fork.request",
+      );
+      this.emitForSource(
+        {
+          type: "agent.fork.response",
+          payload: {
+            requestId: msg.requestId,
+            sourceAgentId: msg.sourceAgentId,
+            agent: null,
+            forkMode: null,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+        source,
+      );
     }
   }
 
