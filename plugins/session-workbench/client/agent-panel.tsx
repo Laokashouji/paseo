@@ -11,7 +11,10 @@ export function WorkbenchAgentPanel({
   params,
   theme,
   navigation,
-}: PluginAgentPanelProps) {
+  onOpenSettings,
+}: PluginAgentPanelProps & {
+  onOpenSettings?: () => void;
+}) {
   const { card } = useWorkbenchCard(params.agentId, workspaceId);
 
   const handleOpenAgent = useCallback(
@@ -34,6 +37,7 @@ export function WorkbenchAgentPanel({
           theme={theme}
           variant="panel"
           onOpenAgent={handleOpenAgent}
+          onOpenSettings={onOpenSettings}
         />
       </View>
     </ScrollView>

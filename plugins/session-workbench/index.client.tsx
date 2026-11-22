@@ -8,11 +8,23 @@ import {
   WorkbenchSidebarItem,
   WorkbenchWorkspaceRowBadge,
 } from "./client/sidebar-entry.js";
+import { archiveCompletedSubscription } from "./shared/rpc.js";
 
 const SETTINGS_SCREEN_ID = "settings";
 
 export default function contribute(client: PluginClientContext) {
   const cleanups: Array<() => void | Promise<void>> = [];
+
+  if (typeof client.subscribe === "function") {
+    const archiveSub = client.subscribe(archiveCompletedSubscription, {}, (event) => {
+      client.closeAgentTab?.({
+        agentId: event.agentId,
+        workspaceId: event.workspaceId,
+      });
+    });
+    void archiveSub.ready?.catch(() => {});
+    cleanups.push(() => archiveSub());
+  }
 
   cleanups.push(
     client.addScreen({
@@ -45,7 +57,14 @@ export default function contribute(client: PluginClientContext) {
       title: "工作台",
       icon: "ListTodo",
       locations: ["explorer", "workspace"],
-      Component: WorkbenchAgentPanel,
+      Component: (props) => (
+        <WorkbenchAgentPanel
+          {...props}
+          onOpenSettings={() => {
+            client.openSettings(SETTINGS_SCREEN_ID);
+          }}
+        />
+      ),
     }),
   );
 
@@ -65,6 +84,9 @@ export default function contribute(client: PluginClientContext) {
             }}
             onOpenOverview={() => {
               client.openScreen({ screenId: OVERVIEW_SCREEN_ID });
+            }}
+            onOpenSettings={() => {
+              client.openSettings(SETTINGS_SCREEN_ID);
             }}
           />
         ),

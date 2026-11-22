@@ -97,6 +97,17 @@ export const RuntimeStatusSchema = z.enum([
 ]);
 export type RuntimeStatus = z.infer<typeof RuntimeStatusSchema>;
 
+export const ArchiveStateSchema = z.enum(["idle", "queued", "running", "pending_archive"]);
+export type ArchiveState = z.infer<typeof ArchiveStateSchema>;
+
+export const ArchiveCompletedEventSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string().nullable(),
+  archivedAt: z.string(),
+  summary: z.string().nullable(),
+});
+export type ArchiveCompletedEvent = z.infer<typeof ArchiveCompletedEventSchema>;
+
 export const SessionWorkbenchCardSchema = z.object({
   agentId: z.string(),
   workspaceId: z.string().nullable(),
@@ -119,6 +130,8 @@ export const SessionWorkbenchCardSchema = z.object({
   lastSummarizedTurnId: z.string().nullable(),
   forkedFromAgentId: z.string().nullable(),
   forkedFromTodoId: z.string().nullable(),
+  archiveState: ArchiveStateSchema.default("idle"),
+  archiveSummary: z.string().nullable().default(null),
   updatedAt: z.string(),
   archived: z.boolean(),
 });
@@ -173,6 +186,8 @@ export function createEmptyCard(input: {
     lastSummarizedTurnId: null,
     forkedFromAgentId: null,
     forkedFromTodoId: null,
+    archiveState: "idle",
+    archiveSummary: null,
     updatedAt: now,
     archived: false,
   };

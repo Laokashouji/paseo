@@ -1,6 +1,10 @@
 import { defineAgentTool, type AgentToolDefinition } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { TodoStatusSchema, WorkflowStatusSchema, type SessionWorkbenchCard } from "../shared/schema.js";
+import {
+  TodoStatusSchema,
+  WorkflowStatusSchema,
+  type SessionWorkbenchCard,
+} from "../shared/schema.js";
 import type { WorkbenchStore } from "./store.js";
 
 export function buildCardContextPrompt(card: SessionWorkbenchCard | null): string | null {
@@ -15,7 +19,9 @@ export function buildCardContextPrompt(card: SessionWorkbenchCard | null): strin
   if (card.topic) lines.push(`- 主题工作: ${card.topic}`);
   if (card.currentWork) lines.push(`- 当前工作: ${card.currentWork}`);
   if (card.workflowStatus !== "active" || card.statusNote) {
-    lines.push(`- 推进状态: ${card.workflowStatus}${card.statusNote ? ` (${card.statusNote})` : ""}`);
+    lines.push(
+      `- 推进状态: ${card.workflowStatus}${card.statusNote ? ` (${card.statusNote})` : ""}`,
+    );
   }
   if (openTodos.length > 0) {
     lines.push("- 待办列表:");
@@ -27,16 +33,25 @@ export function buildCardContextPrompt(card: SessionWorkbenchCard | null): strin
 }
 
 export const WORKBENCH_TOOLS_PROMPT = [
-  "你拥有 Session Workbench 工具（workbench_add_todo / workbench_update_todo / workbench_set_status），用于与用户共同维护右上角工作台卡片。",
+  "你拥有 Session Workbench 工具（workbench_add_todo / workbench_update_todo / workbench_set_status / workbench_finish_archive），用于与用户共同维护右上角工作台卡片。",
   "- 当发现值得稍后跟进的子任务或顺带修复项，且不适合打断当前主线时，可调用 workbench_add_todo 记录待办。",
   "- 完成卡片上的待办时，调用 workbench_update_todo 将其标记为 done。",
   "- 当需要等待外部确认、人工拍板或切换当前子任务时，可调用 workbench_set_status 更新状态与简短原因。",
+  "- 仅当用户触发了归档收尾指令，且你确认本对话产生的工程残留（worktree、临时文件、临时终端等）已全部安全处理完毕、没有未提交或未合并风险时，调用 workbench_finish_archive；平时不要擅自调用。",
 ].join("\n");
+
+export interface WorkbenchAgentToolsOptions {
+  onMarkedDone?: (agentId: string) => void;
+  isAutoArchiveEnabled?: () => Promise<boolean>;
+}
 
 export function createWorkbenchAgentTools(
   store: WorkbenchStore,
-  onMarkedDone?: (agentId: string) => void,
+  options?: WorkbenchAgentToolsOptions | ((agentId: string) => void),
 ): AgentToolDefinition[] {
+  const resolvedOptions: WorkbenchAgentToolsOptions =
+    typeof options === "function" ? { onMarkedDone: options } : (options ?? {});
+  const { onMarkedDone, isAutoArchiveEnabled } = resolvedOptions;
   return [
     defineAgentTool({
       name: "workbench_add_todo",
@@ -127,6 +142,55 @@ export function createWorkbenchAgentTools(
             workflowStatus: updated.workflowStatus,
             topic: updated.topic,
             currentWork: updated.currentWork,
+          },
+        };
+      },
+    }),
+
+    defineAgentTool({
+      name: "workbench_finish_archive",
+      title: "Workbench: 确认归档清理完成",
+      description:
+        "仅在收到归档收尾指令，且确认本对话残留的 git worktree、临时文件、临时终端等工程痕迹已安全清理完毕且无风险阻塞时调用。调用后本轮正常输出清理摘要，本轮结束时系统会自动归档并关闭该对话。若存在未提交/未合并风险需人工确认，不要调用此工具。",
+      input: z.object({
+        summary: z.string().trim().max(300).optional().describe("可选：本次归档清理结果的简短摘要"),
+      }),
+      async execute(input, context) {
+        const autoArchiveEnabled = isAutoArchiveEnabled ? await isAutoArchiveEnabled() : true;
+        store.getOrCreateCard({
+          agentId: context.agent.id,
+          workspaceId: context.agent.workspaceId,
+          agentTitle: context.agent.title,
+        });
+        const summary = input.summary?.trim() || null;
+        if (!autoArchiveEnabled) {
+          store.updateCard(context.agent.id, {
+            archiveState: "idle",
+            archiveSummary: summary,
+            workflowStatus: "done",
+            ...(summary ? { statusNote: summary } : {}),
+          });
+          onMarkedDone?.(context.agent.id);
+          return {
+            text: "已记录归档清理摘要（当前未开启自动归档，请直接向用户汇报结果，由用户确认后手动关闭对话）。",
+            structuredContent: {
+              willAutoArchive: false,
+              summary,
+            },
+          };
+        }
+
+        store.updateCard(context.agent.id, {
+          archiveState: "pending_archive",
+          archiveSummary: summary,
+          currentWork: "归档清理已完成，等待本轮结束自动归档",
+          ...(summary ? { statusNote: summary } : {}),
+        });
+        return {
+          text: "已标记本轮结束后自动归档并关闭当前对话，请直接输出简洁的归档清理摘要。",
+          structuredContent: {
+            willAutoArchive: true,
+            summary,
           },
         };
       },

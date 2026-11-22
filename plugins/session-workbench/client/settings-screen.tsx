@@ -1,5 +1,5 @@
-import { useCallback } from "react";
-import { ScrollView, View } from "react-native";
+import { useCallback, useEffect, useState } from "react";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import {
   Loading,
@@ -11,22 +11,59 @@ import {
   SettingsSwitch,
   useToast,
 } from "@getpaseo/plugin/client/ui";
-import { workbenchSettings, type WorkbenchSettings } from "../shared/settings.js";
+import {
+  DEFAULT_ARCHIVE_COMMAND,
+  workbenchSettings,
+  type WorkbenchSettings,
+} from "../shared/settings.js";
 
-export function WorkbenchSettingsScreen(_props: PluginSurfaceProps) {
+export function WorkbenchSettingsScreen({ theme }: PluginSurfaceProps) {
   const state = useSettings(workbenchSettings);
   const toast = useToast();
+  const [archiveCommandDraft, setArchiveCommandDraft] = useState("");
+  const [archiveDraftDirty, setArchiveDraftDirty] = useState(false);
+
+  const persistedArchiveCommand = state.status === "ready" ? state.values.archiveCommand : "";
+  useEffect(() => {
+    if (state.status === "ready" && !archiveDraftDirty) {
+      setArchiveCommandDraft(persistedArchiveCommand);
+    }
+  }, [archiveDraftDirty, persistedArchiveCommand, state.status]);
 
   const patch = useCallback(
     async (partial: Partial<WorkbenchSettings>) => {
-      if (state.status !== "ready") return;
+      if (state.status !== "ready") return false;
       const ok = await state.save({ ...state.values, ...partial }, state.revision);
       if (!ok) {
         toast.error(state.saveError ?? "保存设置失败");
       }
+      return ok;
     },
     [state, toast],
   );
+
+  const handleSaveArchiveCommand = useCallback(async () => {
+    const trimmed = archiveCommandDraft.trim();
+    if (!trimmed) {
+      toast.error("归档命令不能为空");
+      return;
+    }
+    const ok = await patch({ archiveCommand: trimmed });
+    if (ok) {
+      setArchiveCommandDraft(trimmed);
+      setArchiveDraftDirty(false);
+      toast.show("已保存归档命令", { variant: "success" });
+    }
+  }, [archiveCommandDraft, patch, toast]);
+
+  const handleResetArchiveCommand = useCallback(async () => {
+    const ok = await patch({ archiveCommand: DEFAULT_ARCHIVE_COMMAND });
+    if (ok) {
+      setArchiveCommandDraft(DEFAULT_ARCHIVE_COMMAND);
+      setArchiveDraftDirty(false);
+      toast.show("已恢复默认归档命令", { variant: "success" });
+    }
+  }, [patch, toast]);
 
   if (state.status === "loading") {
     return <Loading />;
@@ -36,10 +73,7 @@ export function WorkbenchSettingsScreen(_props: PluginSurfaceProps) {
     return (
       <View style={{ padding: 20 }}>
         <SettingsCard>
-          <SettingsRow
-            label="设置读取失败"
-            hint={state.error}
-          />
+          <SettingsRow label="设置读取失败" hint={state.error} />
         </SettingsCard>
       </View>
     );
@@ -122,6 +156,97 @@ export function WorkbenchSettingsScreen(_props: PluginSurfaceProps) {
             ]}
             onValueChange={(defaultForkContextMode) => void patch({ defaultForkContextMode })}
           />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title="对话归档">
+        <SettingsCard>
+          <SettingsSwitch
+            label="AI 清理完成后自动归档并关闭标签页"
+            hint="AI 确认无风险并调用 workbench_finish_archive 后，本轮结束自动归档对话并关闭当前标签页"
+            value={values.autoArchiveAfterCleanup}
+            onValueChange={(autoArchiveAfterCleanup) => void patch({ autoArchiveAfterCleanup })}
+          />
+          <View
+            style={{
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              gap: 8,
+              borderTopWidth: 1,
+              borderTopColor: theme.colors.border,
+            }}
+          >
+            <View style={{ gap: 2 }}>
+              <Text style={{ fontSize: 14, fontWeight: "500", color: theme.colors.foreground }}>
+                归档命令 / 提示词
+              </Text>
+              <Text style={{ fontSize: 12, lineHeight: 17, color: theme.colors.foregroundMuted }}>
+                点击卡片右上角归档按钮时直接发送到当前对话。既可写完整归档步骤，也可填单个斜杠命令或
+                Skill 触发词（如 /archive-session）
+              </Text>
+            </View>
+            <TextInput
+              value={archiveCommandDraft}
+              onChangeText={(text) => {
+                setArchiveCommandDraft(text);
+                setArchiveDraftDirty(true);
+              }}
+              multiline
+              numberOfLines={6}
+              textAlignVertical="top"
+              placeholder="输入点击归档后发送给 AI 的命令或归档步骤…"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{
+                width: "100%",
+                minHeight: 132,
+                fontSize: 13,
+                lineHeight: 19,
+                color: theme.colors.foreground,
+                backgroundColor: theme.colors.surface0,
+                borderWidth: 1,
+                borderColor: theme.colors.border,
+                borderRadius: 8,
+                paddingHorizontal: 10,
+                paddingVertical: 8,
+              }}
+            />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Pressable
+                onPress={() => void handleSaveArchiveCommand()}
+                disabled={!archiveDraftDirty}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                  borderRadius: 7,
+                  backgroundColor: theme.colors.accent,
+                  opacity: archiveDraftDirty ? 1 : 0.45,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 12,
+                    fontWeight: "600",
+                    color: theme.colors.accentForeground,
+                  }}
+                >
+                  保存归档命令
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void handleResetArchiveCommand()}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                  borderRadius: 7,
+                  backgroundColor: theme.colors.surface1,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                }}
+              >
+                <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>恢复默认</Text>
+              </Pressable>
+            </View>
+          </View>
         </SettingsCard>
       </SettingsSection>
     </ScrollView>

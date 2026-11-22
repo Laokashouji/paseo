@@ -2,6 +2,7 @@ import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 import {
   AdvancePolicySchema,
+  ArchiveCompletedEventSchema,
   ForkContextModeSchema,
   ForkModeSchema,
   OverviewSnapshotSchema,
@@ -153,6 +154,19 @@ export const resolveExternalSignalRpc = defineRpc({
   }),
 });
 
+export const triggerArchiveRpc = defineRpc({
+  name: "workbench.session.archive",
+  input: z.object({
+    agentId: z.string().min(1),
+    workspaceId: z.string().nullable().optional(),
+    cancelQueue: z.boolean().optional(),
+  }),
+  output: z.object({
+    card: SessionWorkbenchCardSchema,
+    status: z.enum(["sent", "queued", "canceled"]),
+  }),
+});
+
 export const cardSubscription = defineSubscription({
   name: "workbench.card.watch",
   input: z.object({
@@ -170,4 +184,10 @@ export const overviewSubscription = defineSubscription({
     includeArchived: z.boolean().optional(),
   }),
   event: OverviewSnapshotSchema,
+});
+
+export const archiveCompletedSubscription = defineSubscription({
+  name: "workbench.session.archive_completed",
+  input: z.object({}),
+  event: ArchiveCompletedEventSchema,
 });
