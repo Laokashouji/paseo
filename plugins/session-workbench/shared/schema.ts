@@ -87,6 +87,26 @@ export const SuggestedTodoSchema = z.object({
 });
 export type SuggestedTodo = z.infer<typeof SuggestedTodoSchema>;
 
+export const BlockerKindSchema = z.enum(["external", "dependency", "decision"]);
+export type BlockerKind = z.infer<typeof BlockerKindSchema>;
+
+export const BlockerStatusSchema = z.enum(["open", "resolved"]);
+export type BlockerStatus = z.infer<typeof BlockerStatusSchema>;
+
+export const BlockerItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  kind: BlockerKindSchema.default("external"),
+  author: TodoAuthorSchema.default("user"),
+  status: BlockerStatusSchema.default("open"),
+  targetAgentId: z.string().optional(),
+  targetLabel: z.string().optional(),
+  expect: z.enum(["idle", "done"]).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type BlockerItem = z.infer<typeof BlockerItemSchema>;
+
 export const RuntimeStatusSchema = z.enum([
   "initializing",
   "idle",
@@ -121,6 +141,7 @@ export const SessionWorkbenchCardSchema = z.object({
   waitCondition: WaitConditionSchema.nullable(),
   advancePolicy: AdvancePolicySchema,
   conditionMetNotice: z.string().nullable(),
+  blockers: z.array(BlockerItemSchema).default([]),
   todos: z.array(TodoItemSchema),
   suggestedTodos: z.array(SuggestedTodoSchema),
   summaryState: z.enum(["idle", "running", "error"]),
@@ -147,6 +168,7 @@ export const OverviewCountsSchema = z.object({
   done: z.number(),
   readyToAdvance: z.number(),
   openTodos: z.number(),
+  openBlockers: z.number().default(0),
 });
 export type OverviewCounts = z.infer<typeof OverviewCountsSchema>;
 
@@ -177,6 +199,7 @@ export function createEmptyCard(input: {
     waitCondition: null,
     advancePolicy: { mode: "notify_only" },
     conditionMetNotice: null,
+    blockers: [],
     todos: [],
     suggestedTodos: [],
     summaryState: "idle",
@@ -202,6 +225,7 @@ export function computeOverviewCounts(cards: readonly SessionWorkbenchCard[]): O
   let done = 0;
   let readyToAdvance = 0;
   let openTodos = 0;
+  let openBlockers = 0;
 
   for (const card of cards) {
     if (card.archived) continue;
@@ -233,6 +257,11 @@ export function computeOverviewCounts(cards: readonly SessionWorkbenchCard[]): O
         openTodos += 1;
       }
     }
+    for (const blocker of card.blockers) {
+      if (blocker.status === "open") {
+        openBlockers += 1;
+      }
+    }
   }
 
   const visibleTotal = active + waitingMe + waitingExternal + waitingDependency + snoozed + done;
@@ -246,15 +275,20 @@ export function computeOverviewCounts(cards: readonly SessionWorkbenchCard[]): O
     done,
     readyToAdvance,
     openTodos,
+    openBlockers,
   };
 }
 
 export function buildMetadataMirror(card: SessionWorkbenchCard) {
   let openTodoCount = 0;
   let queuedTodoCount = 0;
+  let openBlockerCount = 0;
   for (const todo of card.todos) {
     if (todo.status === "open") openTodoCount += 1;
     else if (todo.status === "queued") queuedTodoCount += 1;
+  }
+  for (const blocker of card.blockers) {
+    if (blocker.status === "open") openBlockerCount += 1;
   }
   return {
     workflowStatus: card.workflowStatus,
@@ -263,6 +297,7 @@ export function buildMetadataMirror(card: SessionWorkbenchCard) {
     statusNote: card.statusNote || null,
     openTodoCount,
     queuedTodoCount,
+    openBlockerCount,
     conditionMet: Boolean(card.conditionMetNotice),
     updatedAt: card.updatedAt,
   };

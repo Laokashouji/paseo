@@ -472,8 +472,11 @@ export function applySummaryToCard(
   const now = new Date().toISOString();
   const nextTopic = existing.topicLocked && existing.topic ? existing.topic : summary.topic;
 
-  // Never override a user's explicit waiting_external / waiting_dependency / snoozed marker.
+  // Never override a user's explicit waiting_external / waiting_dependency / snoozed marker
+  // or active structured blockers.
+  const hasOpenBlockers = existing.blockers.some((item) => item.status === "open");
   const userPinnedWaiting =
+    hasOpenBlockers ||
     existing.workflowStatus === "waiting_external" ||
     existing.workflowStatus === "waiting_dependency" ||
     existing.workflowStatus === "snoozed" ||
@@ -499,6 +502,19 @@ export function applySummaryToCard(
     lastSummarizedAt: now,
     lastSummarizedTurnId: turnId,
   });
+
+  if (
+    !userPinnedWaiting &&
+    summary.waitingReason &&
+    (summary.suggestedStatus === "waiting_external" || summary.suggestedStatus === "waiting_me")
+  ) {
+    updated = store.addBlocker({
+      agentId,
+      title: summary.waitingReason,
+      kind: summary.suggestedStatus === "waiting_me" ? "decision" : "external",
+      author: "summarizer",
+    }).card;
+  }
 
   if (summary.suggestedTodos && summary.suggestedTodos.length > 0) {
     updated = store.mergeSuggestedTodos(agentId, summary.suggestedTodos);

@@ -55,6 +55,11 @@ export function CornerWorkbenchCard({
     [card.todos],
   );
 
+  const openBlockerCount = useMemo(
+    () => card.blockers.filter((item) => item.status === "open").length,
+    [card.blockers],
+  );
+
   if (!settings.enabled) return null;
 
   const statusVisual = getWorkflowStatusVisual(card.workflowStatus);
@@ -62,28 +67,28 @@ export function CornerWorkbenchCard({
 
   if (!expanded) {
     const headline = card.topic || card.agentTitle || "工作台";
-    const subline = card.currentWork || "";
     return (
       <Pressable
         onPress={handleToggleExpanded}
         style={{
           flexDirection: "row",
           alignItems: "center",
-          gap: 8,
-          maxWidth: layout.compact ? 300 : 420,
-          paddingHorizontal: 12,
+          gap: 9,
+          maxWidth: layout.compact ? 320 : 460,
+          paddingHorizontal: 13,
           paddingVertical: 8,
           borderRadius: 999,
           backgroundColor: theme.colors.surface0,
           borderWidth: 1,
-          borderColor: card.conditionMetNotice
-            ? theme.colors.statusWarning
-            : statusVisual.tintBorder(theme),
+          borderColor:
+            card.conditionMetNotice || openBlockerCount > 0
+              ? withAlpha(theme.colors.statusWarning, 0.5)
+              : statusVisual.tintBorder(theme),
           shadowColor: "#000000",
-          shadowOpacity: 0.22,
-          shadowRadius: 12,
-          shadowOffset: { width: 0, height: 3 },
-          elevation: 5,
+          shadowOpacity: 0.28,
+          shadowRadius: 16,
+          shadowOffset: { width: 0, height: 4 },
+          elevation: 6,
         }}
       >
         <View
@@ -91,12 +96,10 @@ export function CornerWorkbenchCard({
             flexDirection: "row",
             alignItems: "center",
             gap: 5,
-            paddingHorizontal: 7,
+            paddingHorizontal: 8,
             paddingVertical: 2,
             borderRadius: 999,
-            backgroundColor: card.conditionMetNotice
-              ? withAlpha(theme.colors.statusWarning, 0.16)
-              : statusVisual.tintBg(theme),
+            backgroundColor: statusVisual.tintBg(theme),
           }}
         >
           <View
@@ -104,26 +107,35 @@ export function CornerWorkbenchCard({
               width: 7,
               height: 7,
               borderRadius: 999,
-              backgroundColor: card.conditionMetNotice ? theme.colors.statusWarning : statusColor,
+              backgroundColor: statusColor,
             }}
           />
-          <Text
-            style={{
-              fontSize: 11,
-              fontWeight: "700",
-              color: card.conditionMetNotice ? theme.colors.statusWarning : statusColor,
-            }}
-          >
+          <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
             {statusVisual.shortLabel}
           </Text>
         </View>
 
         <Text
           numberOfLines={1}
-          style={{ flexShrink: 1, fontSize: 12, fontWeight: "600", color: theme.colors.foreground }}
+          style={{ flexShrink: 1, fontSize: 13, fontWeight: "700", color: theme.colors.foreground }}
         >
-          {subline ? `${headline} · ${subline}` : headline}
+          {headline}
         </Text>
+
+        {openBlockerCount > 0 ? (
+          <View
+            style={{
+              paddingHorizontal: 7,
+              paddingVertical: 2,
+              borderRadius: 999,
+              backgroundColor: withAlpha(theme.colors.statusWarning, 0.16),
+            }}
+          >
+            <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusWarning }}>
+              {openBlockerCount} 阻塞
+            </Text>
+          </View>
+        ) : null}
 
         {openTodoCount > 0 ? (
           <View
@@ -131,11 +143,11 @@ export function CornerWorkbenchCard({
               paddingHorizontal: 7,
               paddingVertical: 2,
               borderRadius: 999,
-              backgroundColor: withAlpha(theme.colors.accent, 0.16),
+              backgroundColor: statusVisual.tintBg(theme),
             }}
           >
-            <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.foreground }}>
-              {openTodoCount}
+            <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
+              {openTodoCount} 待办
             </Text>
           </View>
         ) : null}
@@ -148,20 +160,31 @@ export function CornerWorkbenchCard({
   return (
     <View
       style={{
-        width: layout.compact ? "100%" : 392,
-        maxWidth: layout.compact ? 420 : 392,
-        borderRadius: 14,
+        width: layout.compact ? "100%" : 428,
+        maxWidth: layout.compact ? 428 : 428,
+        borderRadius: 16,
         backgroundColor: theme.colors.surface0,
         borderWidth: 1,
-        borderColor: card.conditionMetNotice ? theme.colors.statusWarning : theme.colors.border,
-        padding: 14,
+        borderColor: card.conditionMetNotice
+          ? withAlpha(theme.colors.statusWarning, 0.55)
+          : withAlpha(theme.colors.foreground, 0.14),
+        overflow: "hidden",
         shadowColor: "#000000",
-        shadowOpacity: 0.28,
-        shadowRadius: 18,
-        shadowOffset: { width: 0, height: 6 },
-        elevation: 8,
+        shadowOpacity: 0.36,
+        shadowRadius: 24,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 10,
       }}
     >
+      {/* Subtle top status ambient edge */}
+      <View
+        style={{
+          height: 3,
+          width: "100%",
+          backgroundColor: openBlockerCount > 0 ? theme.colors.statusWarning : statusColor,
+          opacity: 0.85,
+        }}
+      />
       <WorkbenchCardBody
         agentId={agentId}
         workspaceId={workspaceId}

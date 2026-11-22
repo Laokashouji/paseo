@@ -14,6 +14,8 @@ import {
   type AdvancePolicy,
   type ArchiveCompletedEvent,
   type ArchiveState,
+  type BlockerItem,
+  type BlockerKind,
   type ForkMode,
   type OverviewSnapshot,
   type RuntimeStatus,
@@ -488,6 +490,141 @@ export class WorkbenchStore {
       ...base,
       suggestedTodos: remaining,
       todos: [...base.todos, todo],
+      updatedAt: timestamp,
+    };
+    this.commit(next, { syncMeta: true });
+    return next;
+  }
+
+  private workflowStatusForBlockerKind(kind: BlockerKind): WorkflowStatus {
+    switch (kind) {
+      case "dependency":
+        return "waiting_dependency";
+      case "decision":
+        return "waiting_me";
+      case "external":
+      default:
+        return "waiting_external";
+    }
+  }
+
+  addBlocker(input: {
+    agentId: string;
+    workspaceId?: string | null;
+    title: string;
+    kind?: BlockerKind;
+    author?: TodoAuthor;
+    targetAgentId?: string;
+    targetLabel?: string;
+    expect?: "idle" | "done";
+  }): { card: SessionWorkbenchCard; blocker: BlockerItem } {
+    const base = this.getOrCreateCard({
+      agentId: input.agentId,
+      workspaceId: input.workspaceId,
+    });
+    const timestamp = this.now();
+    const title = input.title.trim();
+    const existing = base.blockers.find(
+      (item) => item.status === "open" && item.title.trim().toLowerCase() === title.toLowerCase(),
+    );
+    if (existing) {
+      return { card: base, blocker: existing };
+    }
+    const kind: BlockerKind = input.kind ?? "external";
+    const author: TodoAuthor = input.author ?? "user";
+    const blocker: BlockerItem = {
+      id: `blk_${randomUUID().slice(0, 8)}`,
+      title,
+      kind,
+      author,
+      status: "open",
+      ...(input.targetAgentId ? { targetAgentId: input.targetAgentId } : {}),
+      ...(input.targetLabel ? { targetLabel: input.targetLabel } : {}),
+      ...(input.expect ? { expect: input.expect } : {}),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const nextBlockers =
+      author === "user" ? [blocker, ...base.blockers] : [...base.blockers, blocker];
+    const openBlockers = nextBlockers.filter((item) => item.status === "open");
+    const primary = openBlockers[0] ?? blocker;
+    const next: SessionWorkbenchCard = {
+      ...base,
+      blockers: nextBlockers,
+      workflowStatus: this.workflowStatusForBlockerKind(primary.kind),
+      statusNote: primary.title,
+      ...(kind === "dependency" && input.targetAgentId
+        ? {
+            waitCondition: {
+              kind: "agent_settled",
+              targetAgentId: input.targetAgentId,
+              targetLabel: input.targetLabel,
+              expect: input.expect ?? "idle",
+              reason: title,
+            },
+          }
+        : {}),
+      updatedAt: timestamp,
+    };
+    this.commit(next, { syncMeta: true });
+    return { card: next, blocker };
+  }
+
+  resolveBlocker(agentId: string, blockerId: string): { card: SessionWorkbenchCard; resolved: BlockerItem | null; allCleared: boolean } {
+    const base = this.getOrCreateCard({ agentId });
+    const timestamp = this.now();
+    let resolved: BlockerItem | null = null;
+    const blockers = base.blockers.map((item) => {
+      if (item.id !== blockerId) return item;
+      resolved = { ...item, status: "resolved", updatedAt: timestamp };
+      return resolved;
+    });
+    const openBlockers = blockers.filter((item) => item.status === "open");
+    const allCleared = openBlockers.length === 0;
+    const primary = openBlockers[0] ?? null;
+    const wasWaiting =
+      base.workflowStatus === "waiting_external" ||
+      base.workflowStatus === "waiting_dependency" ||
+      base.workflowStatus === "waiting_me";
+
+    const next: SessionWorkbenchCard = {
+      ...base,
+      blockers,
+      workflowStatus: primary
+        ? this.workflowStatusForBlockerKind(primary.kind)
+        : wasWaiting
+          ? "active"
+          : base.workflowStatus,
+      statusNote: primary ? primary.title : allCleared ? "" : base.statusNote,
+      ...(allCleared ? { waitCondition: null } : {}),
+      ...(resolved && allCleared ? { conditionMetNotice: `阻塞已解除：${(resolved as BlockerItem).title}` } : {}),
+      updatedAt: timestamp,
+    };
+    this.commit(next, { syncMeta: true });
+    return { card: next, resolved, allCleared };
+  }
+
+  removeBlocker(agentId: string, blockerId: string): SessionWorkbenchCard {
+    const base = this.getOrCreateCard({ agentId });
+    const timestamp = this.now();
+    const blockers = base.blockers.filter((item) => item.id !== blockerId);
+    const openBlockers = blockers.filter((item) => item.status === "open");
+    const primary = openBlockers[0] ?? null;
+    const wasWaiting =
+      base.workflowStatus === "waiting_external" ||
+      base.workflowStatus === "waiting_dependency" ||
+      base.workflowStatus === "waiting_me";
+
+    const next: SessionWorkbenchCard = {
+      ...base,
+      blockers,
+      workflowStatus: primary
+        ? this.workflowStatusForBlockerKind(primary.kind)
+        : wasWaiting
+          ? "active"
+          : base.workflowStatus,
+      statusNote: primary ? primary.title : openBlockers.length === 0 ? "" : base.statusNote,
+      ...(openBlockers.length === 0 ? { waitCondition: null } : {}),
       updatedAt: timestamp,
     };
     this.commit(next, { syncMeta: true });

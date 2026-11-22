@@ -489,32 +489,81 @@ export async function evaluateAgentSettledConditions(input: {
 
   const triggeredAgentIds: string[] = [];
   for (const waitingCard of input.store.listCards({ includeArchived: false })) {
-    const condition = waitingCard.waitCondition;
-    if (!condition || condition.kind !== "agent_settled") continue;
-    if (condition.targetAgentId !== input.settledAgentId) continue;
+    const matchingBlockers = waitingCard.blockers.filter((item) => {
+      if (item.status !== "open" || item.kind !== "dependency") return false;
+      if (item.targetAgentId !== input.settledAgentId) return false;
+      const expect = item.expect ?? "idle";
+      return expect === "idle"
+        ? input.trigger === "turn_completed" ||
+            input.trigger === "marked_done" ||
+            input.trigger === "archived"
+        : input.trigger === "marked_done" || input.trigger === "archived";
+    });
+    for (const blocker of matchingBlockers) {
+      input.store.resolveBlocker(waitingCard.agentId, blocker.id);
+    }
 
-    const met =
-      condition.expect === "idle"
+    const condition = waitingCard.waitCondition;
+    const conditionMatches =
+      condition?.kind === "agent_settled" &&
+      condition.targetAgentId === input.settledAgentId &&
+      (condition.expect === "idle"
         ? input.trigger === "turn_completed" ||
           input.trigger === "marked_done" ||
           input.trigger === "archived"
-        : input.trigger === "marked_done" || input.trigger === "archived";
-    if (!met) continue;
+        : input.trigger === "marked_done" || input.trigger === "archived");
+
+    if (!conditionMatches && matchingBlockers.length === 0) continue;
 
     triggeredAgentIds.push(waitingCard.agentId);
-    const notice = `依赖对话「${condition.targetLabel || settledLabel}」已${
+    const label =
+      (condition?.kind === "agent_settled" ? condition.targetLabel : undefined) ||
+      matchingBlockers[0]?.targetLabel ||
+      settledLabel;
+    const notice = `依赖对话「${label}」已${
       input.trigger === "turn_completed" ? "完成本轮执行" : "标记完成"
     }`;
+
+    const refreshedWaiting = input.store.getCardIfPresent(waitingCard.agentId) ?? waitingCard;
+    const hasOtherOpenBlockers = refreshedWaiting.blockers.some((item) => item.status === "open");
+    if (hasOtherOpenBlockers) {
+      input.store.updateCard(waitingCard.agentId, { conditionMetNotice: notice });
+      continue;
+    }
 
     await applyConditionMetAdvance({
       store: input.store,
       paseo: input.paseo,
-      waitingCard,
+      waitingCard: refreshedWaiting,
       notice,
       contextSummary: settledCard?.currentWork || settledCard?.topic || "",
     });
   }
   return triggeredAgentIds;
+}
+
+export async function resolveBlockerAction(input: {
+  store: WorkbenchStore;
+  paseo: PaseoApi;
+  agentId: string;
+  blockerId: string;
+}): Promise<SessionWorkbenchCard> {
+  const { card, resolved, allCleared } = input.store.resolveBlocker(input.agentId, input.blockerId);
+  if (!resolved || !allCleared) {
+    return card;
+  }
+  if (card.advancePolicy.mode === "auto_run_next_todo" || card.advancePolicy.mode === "auto_send_prompt") {
+    const notice = `阻塞「${resolved.title}」已解除`;
+    await applyConditionMetAdvance({
+      store: input.store,
+      paseo: input.paseo,
+      waitingCard: card,
+      notice,
+      contextSummary: notice,
+    });
+    return input.store.getOrCreateCard({ agentId: input.agentId });
+  }
+  return card;
 }
 
 export async function resolveExternalSignalAction(input: {
@@ -524,15 +573,21 @@ export async function resolveExternalSignalAction(input: {
   note?: string;
 }): Promise<SessionWorkbenchCard> {
   const waitingCard = input.store.getOrCreateCard({ agentId: input.agentId });
+  for (const blocker of waitingCard.blockers) {
+    if (blocker.status === "open" && blocker.kind === "external") {
+      input.store.resolveBlocker(input.agentId, blocker.id);
+    }
+  }
+  const latestCard = input.store.getOrCreateCard({ agentId: input.agentId });
   const reason =
     input.note?.trim() ||
-    (waitingCard.waitCondition?.kind === "external_signal"
-      ? `外部信号「${waitingCard.waitCondition.reason || waitingCard.waitCondition.ref}」已确认`
+    (latestCard.waitCondition?.kind === "external_signal"
+      ? `外部信号「${latestCard.waitCondition.reason || latestCard.waitCondition.ref}」已确认`
       : "外部确认已达成");
   await applyConditionMetAdvance({
     store: input.store,
     paseo: input.paseo,
-    waitingCard,
+    waitingCard: latestCard,
     notice: reason,
     contextSummary: reason,
   });

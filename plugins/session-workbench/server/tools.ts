@@ -1,6 +1,7 @@
 import { defineAgentTool, type AgentToolDefinition } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import {
+  BlockerKindSchema,
   TodoStatusSchema,
   WorkflowStatusSchema,
   type SessionWorkbenchCard,
@@ -12,7 +13,14 @@ export function buildCardContextPrompt(card: SessionWorkbenchCard | null): strin
   const openTodos = card.todos.filter(
     (item) => item.status === "open" || item.status === "queued" || item.status === "running",
   );
-  if (!card.topic && !card.currentWork && openTodos.length === 0 && !card.statusNote) {
+  const openBlockers = card.blockers.filter((item) => item.status === "open");
+  if (
+    !card.topic &&
+    !card.currentWork &&
+    openTodos.length === 0 &&
+    openBlockers.length === 0 &&
+    !card.statusNote
+  ) {
     return null;
   }
   const lines = ["[Paseo Session Workbench 状态]"];
@@ -22,6 +30,12 @@ export function buildCardContextPrompt(card: SessionWorkbenchCard | null): strin
     lines.push(
       `- 推进状态: ${card.workflowStatus}${card.statusNote ? ` (${card.statusNote})` : ""}`,
     );
+  }
+  if (openBlockers.length > 0) {
+    lines.push("- 当前阻塞项:");
+    for (const blocker of openBlockers.slice(0, 6)) {
+      lines.push(`  - [${blocker.id}] (${blocker.kind}) ${blocker.title}`);
+    }
   }
   if (openTodos.length > 0) {
     lines.push("- 待办列表:");
@@ -33,10 +47,10 @@ export function buildCardContextPrompt(card: SessionWorkbenchCard | null): strin
 }
 
 export const WORKBENCH_TOOLS_PROMPT = [
-  "你拥有 Session Workbench 工具（workbench_add_todo / workbench_update_todo / workbench_set_status / workbench_finish_archive），用于与用户共同维护右上角工作台卡片。",
+  "你拥有 Session Workbench 工具（workbench_add_todo / workbench_update_todo / workbench_add_blocker / workbench_set_status / workbench_finish_archive），用于与用户共同维护右上角工作台卡片。",
   "- 当发现值得稍后跟进的子任务或顺带修复项，且不适合打断当前主线时，可调用 workbench_add_todo 记录待办。",
   "- 完成卡片上的待办时，调用 workbench_update_todo 将其标记为 done。",
-  "- 当需要等待外部确认、人工拍板或切换当前子任务时，可调用 workbench_set_status 更新状态与简短原因。",
+  "- 当遇到需要等待他人确认、外部流程或用户拍板的阻塞点时，调用 workbench_add_blocker 记一条阻塞项，或用 workbench_set_status 更新当前进展。",
   "- 仅当用户触发了归档收尾指令，且你确认本对话产生的工程残留（worktree、临时文件、临时终端等）已全部安全处理完毕、没有未提交或未合并风险时，调用 workbench_finish_archive；平时不要擅自调用。",
 ].join("\n");
 
@@ -102,6 +116,32 @@ export function createWorkbenchAgentTools(
         return {
           text: `已更新待办 [${matched.id}]「${matched.title}」状态为 ${input.status}`,
           structuredContent: { todoId: matched.id, status: input.status },
+        };
+      },
+    }),
+
+    defineAgentTool({
+      name: "workbench_add_blocker",
+      title: "Workbench: 记录阻塞项",
+      description:
+        "向当前对话右上角工作台卡片记录一条阻塞项（如等待外部确认、等待关联任务或待用户拍板），方便统一跟踪并在解除后一键推进。",
+      input: z.object({
+        title: z.string().trim().min(1).max(240).describe("阻塞原因简述"),
+        kind: BlockerKindSchema.default("external").describe(
+          "阻塞类型：external（等外部确认）/ decision（待用户拍板）/ dependency（等关联任务）",
+        ),
+      }),
+      async execute(input, context) {
+        const { blocker } = store.addBlocker({
+          agentId: context.agent.id,
+          workspaceId: context.agent.workspaceId,
+          title: input.title,
+          kind: input.kind,
+          author: "agent",
+        });
+        return {
+          text: `已记录阻塞项 [${blocker.id}] (${blocker.kind}): ${blocker.title}`,
+          structuredContent: { blockerId: blocker.id, title: blocker.title, kind: blocker.kind },
         };
       },
     }),

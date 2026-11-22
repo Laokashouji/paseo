@@ -1,5 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import type { RuntimeStatus, TodoStatus, WorkflowStatus } from "../shared/schema.js";
+import type { BlockerKind, RuntimeStatus, TodoStatus, WorkflowStatus } from "../shared/schema.js";
 
 export function withAlpha(color: string, alpha: number): string {
   const trimmed = color.trim();
@@ -128,5 +128,29 @@ export function getTodoStatusLabel(status: TodoStatus): string {
       return "已完成";
     case "dismissed":
       return "已忽略";
+  }
+}
+
+export function getBlockerKindMeta(kind: BlockerKind): {
+  label: string;
+  color(theme: PluginTheme): string;
+} {
+  switch (kind) {
+    case "dependency":
+      return {
+        label: "等对话",
+        color: (theme) => theme.colors.accent,
+      };
+    case "decision":
+      return {
+        label: "待拍板",
+        color: (theme) => theme.colors.statusWarning,
+      };
+    case "external":
+    default:
+      return {
+        label: "等外部",
+        color: (theme) => theme.colors.statusWarning,
+      };
   }
 }
