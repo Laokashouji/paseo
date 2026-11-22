@@ -36,13 +36,12 @@ function containsDestinations(plainText: string, destinations: string[]): boolea
   return destinations.every((url) => plainText.includes(url) || links.has(url));
 }
 
-/** Paste linked HTML as Markdown through the browser's undoable editing command. */
-export function pasteLinkedClipboardText(
-  input: HTMLElement,
+/** Convert linked HTML from the clipboard to Markdown when plain text drops link destinations. */
+export function resolveLinkedClipboardMarkdown(
   clipboard: Pick<DataTransfer, "getData"> | null,
-): boolean {
+): string | null {
   const html = clipboard?.getData("text/html");
-  if (!html) return false;
+  if (!html) return null;
 
   // Parse in a detached document. Clipboard markup is never mounted in the app.
   const fragment = new DOMParser().parseFromString(html, "text/html");
@@ -50,8 +49,17 @@ export function pasteLinkedClipboardText(
   const plainText = clipboard!.getData("text/plain");
   // Copy actions already put complete Markdown on the clipboard. Keep that
   // representation, including tables and formatting, whenever it carries the URLs.
-  if (containsDestinations(plainText, destinations)) return false;
-  const text = markdown.turndown(fragment.body);
+  if (containsDestinations(plainText, destinations)) return null;
+  return markdown.turndown(fragment.body);
+}
+
+/** Paste linked HTML as Markdown through the browser's undoable editing command. */
+export function pasteLinkedClipboardText(
+  input: HTMLElement,
+  clipboard: Pick<DataTransfer, "getData"> | null,
+): boolean {
+  const text = resolveLinkedClipboardMarkdown(clipboard);
+  if (text === null) return false;
   input.focus();
   // Direct value assignment drops the textarea's undo history. This also emits
   // the normal input event so the editor publishes its new draft as for typing.

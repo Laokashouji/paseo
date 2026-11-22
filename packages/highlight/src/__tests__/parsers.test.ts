@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { highlightCode } from "../highlighter.js";
 import {
   isLanguageSupported,
   getSupportedExtensions,
@@ -104,5 +105,42 @@ describe("getParserForFile", () => {
   it("is case-insensitive for extensions", () => {
     expect(getParserForFile("test.JS")).not.toBeNull();
     expect(getParserForFile("test.Py")).not.toBeNull();
+  });
+
+  it("parses GFM constructs and nested fenced code languages in Markdown", () => {
+    const parser = getParserForFile("prompt.md");
+    expect(parser).not.toBeNull();
+    const doc = [
+      "~~strike~~",
+      "- [x] task",
+      "",
+      "| A | B |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "```typescript",
+      "const value = 42;",
+      "```",
+    ].join("\n");
+    const tree = parser!.parse(doc);
+    const nodeNames = new Set<string>();
+    tree.iterate({
+      enter: (node) => {
+        nodeNames.add(node.name);
+      },
+    });
+    expect(nodeNames.has("Strikethrough")).toBe(true);
+    expect(nodeNames.has("TaskMarker")).toBe(true);
+    expect(nodeNames.has("Table")).toBe(true);
+    expect(nodeNames.has("FencedCode")).toBe(true);
+
+    const highlighted = highlightCode("```typescript\nconst value = 42;\n```", "prompt.md");
+    expect(highlighted[1]).toEqual(
+      expect.arrayContaining([
+        { text: "const", style: "keyword" },
+        { text: "value", style: "definition" },
+        { text: "42", style: "number" },
+      ]),
+    );
   });
 });

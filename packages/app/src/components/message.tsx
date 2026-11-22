@@ -108,6 +108,7 @@ interface UserMessageProps {
   timestamp: number;
   capabilities?: AgentCapabilityFlags;
   client?: DaemonClient | null;
+  workspaceRoot?: string;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   isPending?: boolean;
@@ -327,15 +328,10 @@ const userMessageStylesheet = StyleSheet.create((theme) => ({
     minWidth: 0,
     flexShrink: 1,
   },
-  text: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.content,
-    ...(isWeb
-      ? {
-          lineHeight: Math.round(theme.fontSize.content * 1.4),
-          overflowWrap: "anywhere" as const,
-        }
-      : {}),
+  markdownContainer: {
+    minWidth: 0,
+    maxWidth: "100%",
+    ...(isWeb ? { overflowWrap: "anywhere" as const } : {}),
   },
   imagePreviewContainer: {
     flexDirection: "row",
@@ -408,6 +404,7 @@ export const UserMessage = memo(function UserMessage({
   timestamp,
   capabilities,
   client,
+  workspaceRoot,
   isFirstInGroup = true,
   isLastInGroup = true,
   isPending = false,
@@ -519,9 +516,14 @@ export const UserMessage = memo(function UserMessage({
               </View>
             ) : null}
             {hasText ? (
-              <Text selectable style={userMessageStylesheet.text} dataSet={MESSAGE_TEXT_DATASET}>
-                {message}
-              </Text>
+              <View dataSet={MESSAGE_TEXT_DATASET} style={userMessageStylesheet.markdownContainer}>
+                <MarkdownRenderer
+                  text={message}
+                  client={client}
+                  workspaceRoot={workspaceRoot}
+                  serverId={serverId}
+                />
+              </View>
             ) : null}
           </MessagePreview>
         </View>
