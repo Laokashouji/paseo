@@ -69,6 +69,7 @@ export interface CardMetaPatch {
   clearConditionNotice?: boolean;
   summaryState?: "idle" | "running" | "error";
   summaryError?: string | null;
+  summaryModel?: string | null;
   lastSummarizedAt?: string | null;
   lastSummarizedTurnId?: string | null;
   forkedFromAgentId?: string | null;
@@ -289,6 +290,7 @@ export class WorkbenchStore {
       ...(patch.clearConditionNotice ? { conditionMetNotice: null } : {}),
       ...(patch.summaryState !== undefined ? { summaryState: patch.summaryState } : {}),
       ...(patch.summaryError !== undefined ? { summaryError: patch.summaryError } : {}),
+      ...(patch.summaryModel !== undefined ? { summaryModel: patch.summaryModel } : {}),
       ...(patch.lastSummarizedAt !== undefined ? { lastSummarizedAt: patch.lastSummarizedAt } : {}),
       ...(patch.lastSummarizedTurnId !== undefined
         ? { lastSummarizedTurnId: patch.lastSummarizedTurnId }

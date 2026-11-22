@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRpc, useSettings, useSubscription } from "@getpaseo/plugin/client";
 import {
   cardSubscription,
@@ -18,22 +18,41 @@ export function useWorkbenchSettingsValues(): WorkbenchSettings {
   return state.status === "ready" ? state.values : DEFAULT_WORKBENCH_SETTINGS;
 }
 
+function isNewerOrEqualCard(candidate: SessionWorkbenchCard, current: SessionWorkbenchCard): boolean {
+  if (candidate.agentId !== current.agentId) return true;
+  if (!current.updatedAt) return true;
+  return candidate.updatedAt >= current.updatedAt;
+}
+
 export function useWorkbenchCard(agentId: string, workspaceId: string | null) {
   const fetchCard = useRpc(getCardRpc);
   const [card, setCard] = useState<SessionWorkbenchCard>(() =>
     createEmptyCard({ agentId, workspaceId }),
   );
   const [loaded, setLoaded] = useState(false);
+  const hasServerStateRef = useRef(false);
+
+  const applyServerCard = useCallback((next: SessionWorkbenchCard) => {
+    if (next.agentId !== agentId) return;
+    setCard((prev) => {
+      if (!hasServerStateRef.current || isNewerOrEqualCard(next, prev)) {
+        hasServerStateRef.current = true;
+        return next;
+      }
+      return prev;
+    });
+    setLoaded(true);
+  }, [agentId]);
 
   useEffect(() => {
+    hasServerStateRef.current = false;
     setCard(createEmptyCard({ agentId, workspaceId }));
     setLoaded(false);
     let active = true;
     void fetchCard({ agentId, workspaceId })
       .then((result) => {
         if (!active) return;
-        setCard(result.card);
-        setLoaded(true);
+        applyServerCard(result.card);
       })
       .catch(() => {
         if (active) setLoaded(true);
@@ -41,14 +60,32 @@ export function useWorkbenchCard(agentId: string, workspaceId: string | null) {
     return () => {
       active = false;
     };
-  }, [agentId, workspaceId, fetchCard]);
+  }, [agentId, workspaceId, fetchCard, applyServerCard]);
 
-  const handleEvent = useCallback((event: { card: SessionWorkbenchCard }) => {
-    setCard(event.card);
-    setLoaded(true);
-  }, []);
+  const handleEvent = useCallback(
+    (event: { card: SessionWorkbenchCard }) => {
+      applyServerCard(event.card);
+    },
+    [applyServerCard],
+  );
 
-  useSubscription(cardSubscription, { agentId, workspaceId }, handleEvent);
+  const subState = useSubscription(cardSubscription, { agentId, workspaceId }, handleEvent);
+
+  useEffect(() => {
+    if (subState.status !== "closed" && subState.status !== "error") return;
+    let active = true;
+    const timer = setTimeout(() => {
+      void fetchCard({ agentId, workspaceId })
+        .then((result) => {
+          if (active) applyServerCard(result.card);
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [subState.status, agentId, workspaceId, fetchCard, applyServerCard]);
 
   return { card, setCard, loaded };
 }

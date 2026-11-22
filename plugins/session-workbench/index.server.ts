@@ -204,47 +204,102 @@ export default function contribute(server: PluginServerContext) {
     return { card };
   });
 
-  // Live subscriptions
-  server.handle(cardSubscription, async (input, context) => {
-    await ensureReady(context.paseo);
-    const initial = store.getOrCreateCard({
-      agentId: input.agentId,
-      workspaceId: input.workspaceId,
-    });
-    void context.push({ card: initial }).catch(() => {});
-
-    const unsubscribe = store.subscribeCard(input.agentId, (card) => {
-      if (context.signal.aborted) return;
-      void context.push({ card }).catch(() => {});
-    });
-    context.signal.addEventListener("abort", unsubscribe, { once: true });
-  });
-
-  server.handle(overviewSubscription, async (input, context) => {
-    await ensureReady(context.paseo);
-    await store.hydrateFromDaemon(context.paseo);
-    void context.push(store.getOverview({ includeArchived: input.includeArchived })).catch(() => {});
-
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribe = store.subscribeOverview(() => {
-      if (context.signal.aborted) return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        if (context.signal.aborted) return;
-        void context
-          .push(store.getOverview({ includeArchived: input.includeArchived }))
-          .catch(() => {});
-      }, 120);
-    });
+  // Live subscriptions must return void (not a settling Promise), because settling
+  // a subscription handler's Promise closes the subscription immediately.
+  server.handle(cardSubscription, (input, context) => {
+    let unsubscribe: (() => void) | null = null;
     context.signal.addEventListener(
       "abort",
       () => {
-        if (timer) clearTimeout(timer);
-        unsubscribe();
+        unsubscribe?.();
+        unsubscribe = null;
       },
       { once: true },
     );
+
+    void (async () => {
+      try {
+        await ensureReady(context.paseo);
+        if (context.signal.aborted) return;
+
+        const existing = store.getCardIfPresent(input.agentId);
+        if (!existing) {
+          const fetched = await context.paseo.agents
+            .ref(input.agentId)
+            .refresh()
+            .catch(() => null);
+          if (fetched) {
+            store.syncAgentSnapshot(fetched.agent);
+          }
+        }
+        if (context.signal.aborted) return;
+
+        const initial = store.getOrCreateCard({
+          agentId: input.agentId,
+          workspaceId: input.workspaceId,
+        });
+        void context.push({ card: initial }).catch(() => {});
+
+        unsubscribe = store.subscribeCard(input.agentId, (card) => {
+          if (context.signal.aborted) return;
+          void context.push({ card }).catch(() => {});
+        });
+        if (context.signal.aborted) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      } catch {
+        // Ignore initialization errors after client disconnect.
+      }
+    })();
+  });
+
+  server.handle(overviewSubscription, (input, context) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribe: (() => void) | null = null;
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        unsubscribe?.();
+        unsubscribe = null;
+      },
+      { once: true },
+    );
+
+    void (async () => {
+      try {
+        await ensureReady(context.paseo);
+        if (context.signal.aborted) return;
+        await store.hydrateFromDaemon(context.paseo);
+        if (context.signal.aborted) return;
+
+        void context
+          .push(store.getOverview({ includeArchived: input.includeArchived }))
+          .catch(() => {});
+
+        unsubscribe = store.subscribeOverview(() => {
+          if (context.signal.aborted) return;
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            timer = null;
+            if (context.signal.aborted) return;
+            void context
+              .push(store.getOverview({ includeArchived: input.includeArchived }))
+              .catch(() => {});
+          }, 120);
+        });
+        if (context.signal.aborted) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      } catch {
+        // Ignore initialization errors after client disconnect.
+      }
+    })();
   });
 
   // Lifecycle hooks

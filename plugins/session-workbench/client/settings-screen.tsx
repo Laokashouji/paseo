@@ -75,6 +75,12 @@ export function WorkbenchSettingsScreen(_props: PluginSurfaceProps) {
             onValueChange={(autoSummarize) => void patch({ autoSummarize })}
           />
           <SettingsSwitch
+            label="自动优先选用轻量摘要模型"
+            hint="未填自定义模型时，优先选用同 Provider 或已就绪的 flash / haiku / mini 轻量模型提速省费"
+            value={values.autoSelectLightModel}
+            onValueChange={(autoSelectLightModel) => void patch({ autoSelectLightModel })}
+          />
+          <SettingsSwitch
             label="总结时自动降级/关闭思考模式"
             hint="加快摘要速度并降低 Token 消耗"
             value={values.disableSummaryThinking}
@@ -82,9 +88,9 @@ export function WorkbenchSettingsScreen(_props: PluginSurfaceProps) {
           />
           <SettingsInput
             label="自定义摘要模型（可选）"
-            hint="留空则沿用当前对话的 Provider 与模型；格式如 claude/claude-haiku-4-5"
+            hint="填写后固定使用该模型；留空则按上方开关自动选轻量模型或沿用当前对话模型"
             initialValue={values.summaryCustomProviderModel}
-            placeholder="例如：claude/claude-haiku-4-5"
+            placeholder="例如：claude-magpie/agy-cli/gemini-3.8-flash[1m]"
             onChangeText={(summaryCustomProviderModel) =>
               void patch({ summaryCustomProviderModel: summaryCustomProviderModel.trim() })
             }
