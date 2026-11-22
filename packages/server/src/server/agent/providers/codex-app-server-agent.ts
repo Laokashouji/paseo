@@ -103,7 +103,11 @@ import {
   type CodexAppServerTraceContext,
 } from "./codex/app-server-transport.js";
 import { codexAppServerStartup } from "./codex/app-server-startup.js";
-import { type CodexUserMessageTurnIndex, revertCodexConversation } from "./codex/rewind.js";
+import {
+  type CodexUserMessageTurnIndex,
+  forkCodexConversation,
+  revertCodexConversation,
+} from "./codex/rewind.js";
 import {
   type CodexHistoryRow,
   type CodexHistoryStatus,
@@ -290,6 +294,7 @@ const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: false,
   supportsRewindBoth: false,
+  supportsNativeFork: true,
 };
 
 const CODEX_MODES: AgentMode[] = [
@@ -5512,6 +5517,62 @@ export class CodexAppServerAgentSession implements AgentSession {
         this.reconcileAsyncQuestionsAfterRewind(this.stagedHistory.timeline);
       },
     });
+  }
+
+  async forkSession(input: {
+    nextUserMessageId?: string;
+    targetCwd?: string;
+    title?: string;
+  }): Promise<AgentPersistenceHandle> {
+    await this.connect();
+    if (!this.client) {
+      throw new Error("Codex client is not initialized");
+    }
+    if (!this.currentThreadId) {
+      throw new Error("Codex thread is not ready to fork");
+    }
+    await this.ensureThreadLoaded();
+    await this.ensureHistoryIndexed();
+
+    const targetCwd = input.targetCwd?.trim() || this.config.cwd;
+    const forked = await forkCodexConversation({
+      client: this.client,
+      threadId: this.currentThreadId,
+      nextUserMessageId: input.nextUserMessageId,
+      cwd: targetCwd ?? null,
+      model: this.config.model ?? null,
+      serviceTier: this.serviceTier,
+      config: this.buildCodexInnerConfig(),
+      developerInstructions: composeAgentSystemPrompt(this.config),
+      userMessageTurns: this.codexUserMessageTurns(),
+      threadRollbackAvailable: this.threadRollbackAvailable,
+    });
+    await this.instructionSnapshot.apply(
+      forked.threadId,
+      this.client.request.bind(this.client),
+      this.supportsInstructionSnapshots,
+    );
+
+    const thinkingOptionId = normalizeCodexThinkingOptionId(this.config.thinkingOptionId) ?? null;
+    const receipt = this.instructionSnapshot.describe(forked.threadId);
+    return {
+      provider: CODEX_PROVIDER,
+      sessionId: forked.threadId,
+      nativeHandle: forked.threadId,
+      metadata: {
+        provider: CODEX_PROVIDER,
+        cwd: targetCwd,
+        title: input.title?.trim() || this.config.title || null,
+        threadId: forked.threadId,
+        modeId: this.config.modeId,
+        model: this.config.model ?? null,
+        thinkingOptionId,
+        toolPolicy: this.config.toolPolicy,
+        systemPrompt: this.config.systemPrompt,
+        mcpServers: this.config.mcpServers,
+        ...(receipt ? { paseoInstructionReceipt: receipt } : {}),
+      },
+    };
   }
 
   async interrupt(): Promise<void> {

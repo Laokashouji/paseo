@@ -3,6 +3,7 @@ import {
   CLIENT_SLASH_COMMANDS,
   buildDraftAgentSetup,
   resolveClientSlashCommand,
+  resolveClientSlashCommandInvocation,
 } from "@/client-slash-commands";
 import type { Agent } from "@/stores/session-store";
 
@@ -59,7 +60,46 @@ describe("resolveClientSlashCommand", () => {
     ).toEqual([
       ["exit", ["quit", "q"], "immediate"],
       ["clear", ["new"], "immediate"],
+      ["branch", ["fork"], "insert"],
+      ["btw", [], "insert"],
     ]);
+  });
+
+  it("resolves /btw only when a question argument is provided", () => {
+    expect(resolveClientSlashCommandInvocation({ text: "/btw", hasAttachments: false })).toBeNull();
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/btw   ", hasAttachments: false }),
+    ).toBeNull();
+    expect(
+      resolveClientSlashCommandInvocation({
+        text: "/btw 这个函数为什么返回 null？",
+        hasAttachments: false,
+      }),
+    ).toMatchObject({
+      command: { name: "btw", kind: "side-question" },
+      args: "这个函数为什么返回 null？",
+    });
+  });
+
+  it("resolves /branch and /fork with or without an explicit branch title", () => {
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/branch", hasAttachments: false }),
+    ).toMatchObject({
+      command: { name: "branch", kind: "branch-agent" },
+      args: "",
+    });
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/branch 方案 B ", hasAttachments: false }),
+    ).toMatchObject({
+      command: { name: "branch", kind: "branch-agent" },
+      args: "方案 B",
+    });
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/fork exp-1", hasAttachments: false }),
+    ).toMatchObject({
+      command: { name: "branch", kind: "branch-agent" },
+      args: "exp-1",
+    });
   });
 
   it("resolves canonical names and aliases after trimming", () => {

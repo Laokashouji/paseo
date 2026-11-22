@@ -90,13 +90,19 @@ import { discoverClaudeModels, killExitingClaudeModelDiscoveries } from "./model
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
 import {
   findSteeredMessageParent,
+  forkClaudeConversation,
   realClaudeRewindSdk,
   revertClaudeConversation,
   revertClaudeFiles,
   type ClaudeRewindSdk,
 } from "./rewind.js";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
-import { claudeConfigDir, claudeProjectDirSync, claudeTranscriptPath } from "./project-dir.js";
+import {
+  claudeConfigDir,
+  claudeProjectDir,
+  claudeProjectDirSync,
+  claudeTranscriptPath,
+} from "./project-dir.js";
 import {
   compareWithLatestRelease,
   fetchHomebrewCaskVersion,
@@ -398,6 +404,8 @@ const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: true,
   supportsRewindBoth: true,
+  supportsNativeFork: true,
+  supportsSideQuestion: true,
 };
 
 const DEFAULT_MODES: AgentMode[] = [
@@ -2449,6 +2457,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly runtimeSafety = new ClaudeRuntimeSafety();
   private readonly backgroundStops = new Map<string, (outcome: string) => void>();
   private processingSdkMessages = 0;
+  private inFlightSideQuestions = 0;
   private readonly harnessEnvironment: Record<string, string>;
   private readonly usageSessionKey = randomUUID();
   private childProcess: ChildProcess | null = null;
@@ -3310,6 +3319,7 @@ class ClaudeAgentSession implements AgentSession {
       this.unstartedMessageUuids.size === 0 &&
       this.pendingPermissions.size === 0 &&
       this.processingSdkMessages === 0 &&
+      this.inFlightSideQuestions === 0 &&
       this.runtimeSafety.canStopRuntime()
     );
   }
@@ -3447,6 +3457,128 @@ class ClaudeAgentSession implements AgentSession {
   async revertBoth(input: { messageId: string }): Promise<void> {
     await this.revertFiles(input);
     await this.revertConversation(input);
+  }
+
+  async forkSession(input: {
+    nextUserMessageId?: string;
+    currentTurnUserMessageId?: string;
+    boundaryAssistantMessageId?: string;
+    targetCwd?: string;
+    title?: string;
+  }): Promise<AgentPersistenceHandle> {
+    await this.ensureHistoryReady();
+    const currentSessionId = this.claudeSessionId;
+    const transcriptPath = currentSessionId
+      ? await this.resolveHistoryPath(currentSessionId)
+      : null;
+    if (!currentSessionId || !transcriptPath || !(await transcriptExists(transcriptPath))) {
+      throw new Error("Claude session has no persisted history to fork");
+    }
+
+    let upToMessageId: string | undefined;
+    if (input.nextUserMessageId) {
+      try {
+        const target = await this.resolveConversationRewindTarget(input.nextUserMessageId);
+        if (target.kind === "fresh-session") {
+          throw new Error("Selected turn has no committed assistant response to fork");
+        }
+        upToMessageId = this.resolveClaudeMessageId(target.messageId);
+      } catch (error) {
+        const fallbackAnchor = input.currentTurnUserMessageId
+          ? this.rewindTurnAnchors.find(
+              (anchor) => anchor.userMessageId === input.currentTurnUserMessageId,
+            )?.assistantMessageId
+          : null;
+        if (fallbackAnchor) {
+          upToMessageId = fallbackAnchor;
+        } else if (
+          input.boundaryAssistantMessageId &&
+          UUID_PATTERN.test(input.boundaryAssistantMessageId)
+        ) {
+          upToMessageId = input.boundaryAssistantMessageId;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const targetCwd = input.targetCwd?.trim() || this.config.cwd;
+    const targetProjectFolder =
+      targetCwd && targetCwd !== this.config.cwd
+        ? await claudeProjectDir(targetCwd, {
+            configDir: claudeConfigDir(this.harnessEnvironment),
+          })
+        : undefined;
+
+    const forked = await forkClaudeConversation({
+      sdk: this.rewindSdk,
+      sessionId: currentSessionId,
+      transcriptPath,
+      upToMessageId,
+      targetProjectFolder,
+      sourceCwd: this.config.cwd,
+      targetCwd,
+      title: input.title?.trim() || undefined,
+    });
+
+    const {
+      providerOptions: _providerOptions,
+      pluginAppendSystemPrompt: _pluginAppendSystemPrompt,
+      ...persistedConfig
+    } = this.config;
+    return {
+      provider: "claude",
+      sessionId: forked.sessionId,
+      nativeHandle: forked.sessionId,
+      metadata: {
+        ...persistedConfig,
+        cwd: targetCwd,
+        ...(input.title?.trim() ? { title: input.title.trim() } : {}),
+      },
+    };
+  }
+
+  async askSideQuestion(input: {
+    question: string;
+    history?: readonly { question: string; response: string }[];
+    signal?: AbortSignal;
+  }): Promise<{ response: string; synthetic?: boolean; model?: string | null }> {
+    const question = input.question.trim();
+    if (!question) {
+      throw new Error("Side question cannot be empty");
+    }
+    await this.ensureHistoryReady();
+    const q = await this.ensureQuery();
+    type ClaudeSideQuestionQuery = Query & {
+      askSideQuestion?: (
+        question: string,
+        options?: {
+          history?: readonly { question: string; response: string }[];
+          signal?: AbortSignal;
+        },
+      ) => Promise<{ response: string; synthetic?: boolean } | null>;
+    };
+    const sideQuery = q as ClaudeSideQuestionQuery;
+    if (typeof sideQuery.askSideQuestion !== "function") {
+      throw new Error("Current Claude SDK runtime does not support native /btw side questions");
+    }
+    this.inFlightSideQuestions += 1;
+    try {
+      const result = await sideQuery.askSideQuestion(question, {
+        ...(input.history?.length ? { history: input.history } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      if (!result || typeof result.response !== "string" || result.response.trim().length === 0) {
+        throw new Error("Claude returned an empty side question response");
+      }
+      return {
+        response: result.response,
+        synthetic: result.synthetic ?? false,
+        model: this.cachedRuntimeInfo?.model ?? this.config.model ?? null,
+      };
+    } finally {
+      this.inFlightSideQuestions = Math.max(0, this.inFlightSideQuestions - 1);
+    }
   }
 
   private resolveSlashCommandInvocation(prompt: AgentPromptInput): SlashCommandInvocation | null {

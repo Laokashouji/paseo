@@ -66,6 +66,7 @@ import {
   type AgentScreenReadySyncState,
 } from "@/hooks/use-agent-screen-state-machine";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
+import { useForkAgent } from "@/hooks/use-fork-agent";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
@@ -91,6 +92,8 @@ import {
 import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
+import { PluginAgentCornerCards } from "@/plugins";
+import { SideQuestionCard, useSideQuestionStore } from "@/side-questions";
 import { OverlayDismissalScope } from "@/components/ui/overlay-dismissal";
 import { ParentAgentCallout, useParentAgentId } from "@/subagents/parent";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
@@ -1185,6 +1188,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         isSubmitLoading={false}
         agentInputDraft={agentInputDraft}
         editingSession={composerEditingSession}
+        toast={toastApi}
         onAttentionInputFocus={onAttentionInputFocus}
         onAttentionPromptSend={onAttentionPromptSend}
         onComposerHeightChange={handleComposerHeightChange}
@@ -1208,6 +1212,28 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     onAttentionInputFocus();
     return false;
   }, [onAttentionInputFocus]);
+  const handleInsertSideQuestionToComposer = useCallback(
+    (text: string) => {
+      const existing = agentInputDraft.textSource.getSnapshot();
+      const next = existing.trim().length > 0 ? `${existing}\n\n${text}` : text;
+      agentInputDraft.replaceText(next);
+      useSideQuestionStore.getState().minimize(serverId, agentId);
+      requestAnimationFrame(() => composerEditingSession.focus());
+    },
+    [agentId, agentInputDraft, composerEditingSession, serverId],
+  );
+  const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
+  const handleForkFromSideQuestion = useCallback(() => {
+    const currentAgent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
+    if (!currentAgent) return;
+    useSideQuestionStore.getState().minimize(serverId, agentId);
+    void sideQuestionForkAgent({
+      agentId,
+      agent: currentAgent,
+      workspaceId,
+      target: "tab",
+    });
+  }, [agentId, serverId, sideQuestionForkAgent, workspaceId]);
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1235,11 +1261,20 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         />
       </RenderProfile>
       {hasActiveComposer && !draft ? (
+        <SideQuestionCard
+          serverId={serverId}
+          agentId={agentId}
+          onInsertToComposer={handleInsertSideQuestionToComposer}
+          onForkToBranch={handleForkFromSideQuestion}
+        />
+      ) : null}
+      {hasActiveComposer && !draft ? (
         <AgentTracks
           serverId={serverId}
           workspaceId={workspaceId}
           agentId={agentId}
           parentAgentId={parentPillAgentId}
+          toast={toastApi}
         />
       ) : null}
     </View>
@@ -1248,6 +1283,14 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   const dockContent = (
     <View style={styles.contentContainer}>
       {streamContent}
+
+      {!draft && !isComposerFullscreen ? (
+        <PluginAgentCornerCards
+          serverId={serverId}
+          workspaceId={workspaceId}
+          agentId={agentId}
+        />
+      ) : null}
 
       {showHistorySyncError ? (
         <TimelineSyncErrorCallout isRetrying={isRetryingHistorySync} onRetry={retryTimelineSync} />
@@ -1576,6 +1619,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   isSubmitLoading,
   agentInputDraft,
   editingSession,
+  toast,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1590,6 +1634,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
   editingSession: ComposerEditingSession;
+  toast: ToastApi;
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1614,6 +1659,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
       isSubmitLoading={isSubmitLoading}
       agentInputDraft={agentInputDraft}
       editingSession={editingSession}
+      toast={toast}
       onAttentionInputFocus={onAttentionInputFocus}
       onAttentionPromptSend={onAttentionPromptSend}
       onComposerHeightChange={onComposerHeightChange}
@@ -1630,6 +1676,7 @@ function ActiveAgentComposer({
   isSubmitLoading,
   agentInputDraft,
   editingSession,
+  toast,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1642,6 +1689,7 @@ function ActiveAgentComposer({
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
   editingSession: ComposerEditingSession;
+  toast: ToastApi;
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1656,6 +1704,8 @@ function ActiveAgentComposer({
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const { workspaceId, tabId, retargetCurrentTab } = paneContext;
   const { archiveAgent } = useArchiveAgent();
+  const { t } = useTranslation();
+  const forkAgent = useForkAgent({ serverId, toast });
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
   const unpinWorkspaceAgent = useWorkspaceLayoutStore((state) => state.unpinAgent);
@@ -1683,10 +1733,33 @@ function ActiveAgentComposer({
   );
 
   const handleClientSlashCommand = useCallback(
-    async (command: ClientSlashCommand) => {
+    async (command: ClientSlashCommand, args: string) => {
       const agent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
       if (!agent) {
         throw new Error("Agent not found");
+      }
+
+      if (command.kind === "branch-agent") {
+        await forkAgent({
+          agentId,
+          agent,
+          workspaceId,
+          target: "tab",
+          title: args.trim() || undefined,
+        });
+        return;
+      }
+
+      if (command.kind === "side-question") {
+        const client = useSessionStore.getState().sessions[serverId]?.client ?? null;
+        void useSideQuestionStore.getState().askQuestion({
+          serverId,
+          agentId,
+          question: args,
+          client,
+          disconnectedMessage: t("workspace.terminal.hostDisconnected"),
+        });
+        return;
       }
 
       const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
@@ -1711,9 +1784,11 @@ function ActiveAgentComposer({
       agentId,
       archiveAgent,
       closeWorkspaceTab,
+      forkAgent,
       hideWorkspaceAgent,
       retargetCurrentTab,
       serverId,
+      t,
       tabId,
       unpinWorkspaceAgent,
       workspaceId,

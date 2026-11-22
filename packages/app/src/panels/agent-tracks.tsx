@@ -1,14 +1,19 @@
 import type { AgentAddress } from "@getpaseo/protocol/addresses";
-import { memo, useCallback, useMemo, type ReactElement } from "react";
+import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import { BackgroundWorkTrack, createHostBackgroundWorkModel } from "@/background-work";
+import { BranchesTrack, useBranchesForAgent } from "@/branches";
+import { SideQuestionPill } from "@/side-questions";
+import type { ToastApi } from "@/components/toast-host";
 import { WorkspaceDiffStatPill } from "@/composer/diff-stat-pill";
 import { AgentTaskList } from "@/composer/task-list";
 import { ComposerTrackBar } from "@/composer/tracks";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { useForkAgent } from "@/hooks/use-fork-agent";
 import { usePaneContext } from "@/panels/pane-context";
 import { useSettings } from "@/hooks/use-settings";
 import { PluginComposerPills } from "@/plugins";
 import { useSessionStore } from "@/stores/session-store";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import {
   useArchiveFinishedSubagents,
   useArchiveSubagent,
@@ -36,13 +41,18 @@ export const AgentTracks = memo(function AgentTracks({
   workspaceId,
   agentId,
   parentAgentId,
+  toast,
 }: {
   serverId: string;
   workspaceId: string;
   agentId: string;
   parentAgentId: string | null;
+  toast?: ToastApi;
 }): ReactElement {
   const subagentRows = useSubagentsForParent({ serverId, parentAgentId: agentId });
+  const branchRows = useBranchesForAgent({ serverId, agentId });
+  const [isCreatingBranch, setIsCreatingBranch] = useState(false);
+  const forkAgent = useForkAgent({ serverId, toast });
   const tasks = useSessionStore((state): TodoEntry[] | undefined =>
     state.sessions[serverId]?.agentTasks.get(agentId),
   );
@@ -108,6 +118,40 @@ export const AgentTracks = memo(function AgentTracks({
     [openSubagentTarget],
   );
   const sheetTabFor = useSubagentSheetTab(workspaceKey, tabId);
+  const handleOpenBranch = useCallback(
+    ({ serverId: targetServerId, agentId: branchAgentId }: AgentAddress) => {
+      const session = useSessionStore.getState().sessions[targetServerId];
+      const agent = session?.agents.get(branchAgentId) ?? session?.agentDetails.get(branchAgentId);
+      if (
+        targetServerId !== serverId ||
+        (agent?.workspaceId && agent.workspaceId !== workspaceId)
+      ) {
+        navigateToAgent({ serverId: targetServerId, agentId: branchAgentId });
+        return;
+      }
+      navigateToWorkspace({
+        serverId,
+        workspaceId,
+        target: { kind: "agent", agentId: branchAgentId },
+      });
+    },
+    [serverId, workspaceId],
+  );
+  const handleCreateBranch = useCallback(() => {
+    if (isCreatingBranch) return;
+    const session = useSessionStore.getState().sessions[serverId];
+    const currentAgent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    if (!currentAgent) return;
+    setIsCreatingBranch(true);
+    void forkAgent({
+      agentId,
+      agent: currentAgent,
+      workspaceId,
+      target: "tab",
+    }).finally(() => {
+      setIsCreatingBranch(false);
+    });
+  }, [agentId, forkAgent, isCreatingBranch, serverId, workspaceId]);
   const handleOpenChanges = useCallback(() => {
     if (!workspaceKey) {
       return;
@@ -124,6 +168,16 @@ export const AgentTracks = memo(function AgentTracks({
       <BackgroundWorkTrack model={backgroundModel} count={backgroundWorkCount} />
       {parentAgentId ? <ParentAgentPill serverId={serverId} parentAgentId={parentAgentId} /> : null}
       <AgentTaskList tasks={tasks} />
+      <SideQuestionPill serverId={serverId} agentId={agentId} />
+      <BranchesTrack
+        serverId={serverId}
+        workspaceId={workspaceId}
+        rows={branchRows}
+        onOpenBranch={handleOpenBranch}
+        onCreateBranch={handleCreateBranch}
+        isCreatingBranch={isCreatingBranch}
+        onArchiveBranch={archiveSubagent}
+      />
       <SubagentsTrack
         serverId={serverId}
         rows={subagentRows}

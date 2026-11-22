@@ -167,6 +167,8 @@ function mapDirectorySuggestionsToEntries(payload: {
 const CLIENT_COMMAND_ICONS = {
   "archive-agent": "archive",
   "replace-agent-with-draft": "new-draft",
+  "branch-agent": "branch",
+  "side-question": "side-question",
 } as const satisfies Record<ClientSlashCommand["kind"], AutocompleteOption["icon"]>;
 
 interface CommandOptionContext {

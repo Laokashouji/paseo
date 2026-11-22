@@ -85,6 +85,7 @@ import {
   type PiExtensionEventOutput,
 } from "./extensions/index.js";
 import { resolveResumeProcessCwd } from "../resume-process-cwd.js";
+import { forkJsonlTreeSessionFile } from "./fork.js";
 import { revertPiConversation } from "./rewind.js";
 import {
   copyPiSessionFileWithCwd,
@@ -186,6 +187,7 @@ const PI_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindConversation: true,
   supportsRewindFiles: false,
   supportsRewindBoth: false,
+  supportsNativeFork: true,
 };
 
 const PI_THINKING_OPTIONS: ReadonlyArray<{
@@ -1609,6 +1611,37 @@ export class PiRpcAgentSession implements AgentSession {
     });
     this.currentLeafOverrideId = targetEntry.parentId;
     this.activeToolCalls.clear();
+  }
+
+  async forkSession(input: {
+    nextUserMessageId?: string;
+    targetCwd?: string;
+  }): Promise<AgentPersistenceHandle> {
+    await this.refreshState().catch(() => undefined);
+    const sourceFile = this.persistedSessionFile ?? this.state.sessionFile;
+    if (!sourceFile) {
+      throw new Error("Pi session has no persisted session file to fork");
+    }
+    const targetCwd = input.targetCwd?.trim() || this.config.cwd;
+    const forked = await forkJsonlTreeSessionFile({
+      sourceFile,
+      stopBeforeEntryId: input.nextUserMessageId,
+      activeBranchEntryId: this.currentLeafOverrideId,
+      targetCwd,
+    });
+    return {
+      provider: this.provider,
+      sessionId: forked.sessionId,
+      nativeHandle: forked.sessionFile,
+      metadata: {
+        cwd: targetCwd,
+        ...(this.config.model ? { model: this.config.model } : {}),
+        ...(this.config.thinkingOptionId
+          ? { thinkingOptionId: this.config.thinkingOptionId }
+          : {}),
+        ...(this.currentModeId ? { modeId: this.currentModeId } : {}),
+      },
+    };
   }
 
   private async runPiTreeExtensionCommand(targetId: string): Promise<unknown> {

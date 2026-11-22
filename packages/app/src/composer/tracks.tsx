@@ -92,6 +92,8 @@ export interface ComposerTrackPillProps {
    * of them is hidden behind the others.
    */
   segments: readonly ComposerTrackPillSegment[];
+  /** Optional icon placed ahead of the pill's text segments (e.g. a branch glyph). */
+  leadingIcon?: ReactNode;
   /** Sheet header on compact. Popovers never show one. */
   panelTitle: string;
   testID: string;
@@ -121,6 +123,7 @@ const PANEL_OFFSET = 12;
 
 export function ComposerTrackPill({
   segments,
+  leadingIcon,
   panelTitle,
   testID,
   accessibilityLabel,
@@ -131,6 +134,7 @@ export function ComposerTrackPill({
     <MenuRoot compactMode="sheet">
       <ComposerTrackPillTrigger
         segments={segments}
+        leadingIcon={leadingIcon}
         testID={testID}
         accessibilityLabel={accessibilityLabel ?? segments.map((segment) => segment.text).join(" ")}
       />
@@ -154,10 +158,12 @@ export function ComposerTrackPill({
 
 function ComposerTrackPillTrigger({
   segments,
+  leadingIcon,
   testID,
   accessibilityLabel,
 }: {
   segments: readonly ComposerTrackPillSegment[];
+  leadingIcon?: ReactNode;
   testID: string;
   accessibilityLabel: string;
 }): ReactElement {
@@ -188,9 +194,10 @@ function ComposerTrackPillTrigger({
       style={pillStyle}
     >
       <View style={styles.segments}>
+        {leadingIcon ? <View style={styles.segment}>{leadingIcon}</View> : null}
         {segments.map((segment, index) => (
           <View
-            key={segment.bucket ?? "plain"}
+            key={`${segment.bucket ?? "plain"}-${index}`}
             style={styles.segment}
             testID={`${testID}-segment-${index}`}
           >

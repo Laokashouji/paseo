@@ -28,6 +28,7 @@ function plugin(input: {
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
     workspaceRowBadgeItems: [],
+    agentCornerCards: [],
     filePanels: [],
     composerItems: [],
     newWorkspaceItems: [],

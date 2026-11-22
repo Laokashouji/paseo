@@ -470,6 +470,8 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
     supportsRewindFiles: z.boolean().optional().default(false),
     // COMPAT(rewind): added in v0.1.X, drop when floor >= v0.1.X.
     supportsRewindBoth: z.boolean().optional().default(false),
+    supportsNativeFork: z.boolean().optional(),
+    supportsSideQuestion: z.boolean().optional(),
   })
   .catchall(z.boolean());
 
@@ -2161,6 +2163,31 @@ export const AgentForkContextRequestMessageSchema = z.object({
   requestId: z.string(),
 });
 
+export const AgentForkRequestMessageSchema = z.object({
+  type: z.literal("agent.fork.request"),
+  sourceAgentId: z.string(),
+  workspaceId: z.string().optional(),
+  cwd: z.string().optional(),
+  boundaryCursor: AgentTimelineCursorSchema.optional(),
+  boundaryMessageId: z.string().optional(),
+  title: z.string().optional(),
+  labels: z.record(z.string(), z.string()).optional(),
+  requestId: z.string(),
+});
+
+export const AgentSideQuestionTurnSchema = z.object({
+  question: z.string(),
+  response: z.string(),
+});
+
+export const AgentSideQuestionRequestMessageSchema = z.object({
+  type: z.literal("agent.side_question.request"),
+  agentId: z.string(),
+  question: z.string(),
+  history: z.array(AgentSideQuestionTurnSchema).optional(),
+  requestId: z.string(),
+});
+
 export const SetAgentModeRequestMessageSchema = z.object({
   type: z.literal("set_agent_mode_request"),
   agentId: z.string(),
@@ -3676,6 +3703,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderSubagentTimelineRequestMessageSchema,
   SetAgentTimelineSubscriptionRequestMessageSchema,
   AgentForkContextRequestMessageSchema,
+  AgentForkRequestMessageSchema,
+  AgentSideQuestionRequestMessageSchema,
   SetAgentModeRequestMessageSchema,
   SetAgentModelRequestMessageSchema,
   SetAgentThinkingRequestMessageSchema,
@@ -4111,6 +4140,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentForkContext: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: z.boolean().optional(),
+        agentNativeFork: z.boolean().optional(),
+        agentSideQuestion: z.boolean().optional(),
         // COMPAT(providerSubagents): added in v0.1.107, remove gate after 2027-01-12.
         providerSubagents: z.boolean().optional(),
         // COMPAT(agentBackgroundWork): added after v0.11.0-beta.5, remove gate after 2027-04-06.
@@ -5397,6 +5428,29 @@ export const AgentForkContextResponseMessageSchema = z.object({
     itemCount: z.number().int().nonnegative(),
     boundaryMessageId: z.string().nullable(),
     boundaryCursor: AgentTimelineCursorSchema.nullable().optional(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const AgentForkResponseMessageSchema = z.object({
+  type: z.literal("agent.fork.response"),
+  payload: z.object({
+    requestId: z.string(),
+    sourceAgentId: z.string(),
+    agent: AgentSnapshotPayloadSchema.nullable(),
+    forkMode: z.enum(["native"]).nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const AgentSideQuestionResponseMessageSchema = z.object({
+  type: z.literal("agent.side_question.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    response: z.string().nullable(),
+    synthetic: z.boolean().optional(),
+    model: z.string().nullable().optional(),
     error: z.string().nullable(),
   }),
 });
@@ -7736,6 +7790,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentTimelineSubscriptionResponseMessageSchema,
   AgentAttentionRequiredMessageSchema,
   AgentForkContextResponseMessageSchema,
+  AgentForkResponseMessageSchema,
+  AgentSideQuestionResponseMessageSchema,
   CancelAgentResponseMessageSchema,
   ClearAgentAttentionResponseMessageSchema,
   WorkspaceCreateResponseSchema,
@@ -7973,6 +8029,10 @@ export type AgentTimelineListPromptsResponseMessage = z.infer<
   typeof AgentTimelineListPromptsResponseMessageSchema
 >;
 export type AgentForkContextResponseMessage = z.infer<typeof AgentForkContextResponseMessageSchema>;
+export type AgentForkResponseMessage = z.infer<typeof AgentForkResponseMessageSchema>;
+export type AgentSideQuestionResponseMessage = z.infer<
+  typeof AgentSideQuestionResponseMessageSchema
+>;
 export type CancelAgentResponseMessage = z.infer<typeof CancelAgentResponseMessageSchema>;
 export type SendAgentMessageResponseMessage = z.infer<typeof SendAgentMessageResponseMessageSchema>;
 export type SetVoiceModeResponseMessage = z.infer<typeof SetVoiceModeResponseMessageSchema>;
@@ -8109,6 +8169,10 @@ export type ProjectSuggestion = z.infer<typeof ProjectSuggestionSchema>;
 export type ProjectSuggestionsResponse = z.infer<typeof ProjectSuggestionsResponseSchema>;
 export type FetchAgentRequestMessage = z.infer<typeof FetchAgentRequestMessageSchema>;
 export type AgentForkContextRequestMessage = z.infer<typeof AgentForkContextRequestMessageSchema>;
+export type AgentForkRequestMessage = z.infer<typeof AgentForkRequestMessageSchema>;
+export type AgentSideQuestionRequestMessage = z.infer<
+  typeof AgentSideQuestionRequestMessageSchema
+>;
 export type SendAgentMessageRequest = z.infer<typeof SendAgentMessageRequestSchema>;
 export type WaitForFinishRequest = z.infer<typeof WaitForFinishRequestSchema>;
 export type DictationStreamStartMessage = z.infer<typeof DictationStreamStartMessageSchema>;

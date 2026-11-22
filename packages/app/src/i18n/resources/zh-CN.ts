@@ -206,6 +206,8 @@ export const zhCN: TranslationResources = {
     clientCommands: {
       archiveAgent: "归档当前 Agent",
       freshDraft: "归档此 Agent 并开始新的草稿",
+      branchAgent: "从当前对话无损分叉到新分支标签页",
+      sideQuestion: "发起不写入主对话的旁路提问（共享上下文缓存）",
     },
     github: {
       searching: "正在搜索...",
@@ -351,6 +353,7 @@ export const zhCN: TranslationResources = {
       forkMenu: "分叉消息",
       forkInNewTab: "分叉到新标签页",
       forkInNewWorkspace: "分叉到新工作区",
+      forkAsSummaryDraft: "以摘要草稿分叉",
       forkUnavailable: "请更新主机以使用此功能。",
       forkMissingWorkspace: "此 Agent 不在工作区中。",
       forkFailed: "分叉聊天失败",
@@ -2035,6 +2038,31 @@ export const zhCN: TranslationResources = {
   },
   menu: {
     backdrop: "菜单背景",
+  },
+  branches: {
+    title: "分支列表",
+    pillLabelOne: "1 个分支",
+    pillLabelMany: "{{count}} 个分支",
+    newBranchAction: "从当前位置新建分支",
+    creatingAction: "正在创建分支…",
+    currentBadge: "当前",
+    rootBadge: "主分支",
+    archiveAction: "归档 {{label}}",
+    archiveTooltip: "归档分支",
+  },
+  sideQuestion: {
+    ephemeralHint: "共享缓存 · 不写入主对话",
+    minimize: "收起旁路提问卡片",
+    close: "关闭并清空旁路提问",
+    thinking: "正在思考…",
+    failed: "旁路提问失败",
+    copyAnswer: "复制回答",
+    insertToComposer: "填入主输入框",
+    askInBranch: "新建分支去问",
+    followUpPlaceholder: "继续旁路追问…",
+    sendFollowUp: "发送追问",
+    pillPending: "BTW · 思考中…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

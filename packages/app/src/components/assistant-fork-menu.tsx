@@ -1,31 +1,35 @@
 import { memo, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
-import { Split } from "lucide-react-native";
+import { FileText, Split } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 
-export type AssistantForkTarget = "tab" | "workspace";
+export type AssistantForkTarget = "tab" | "workspace" | "draft_tab";
 
 interface AssistantForkMenuProps {
   onFork: (target: AssistantForkTarget) => Promise<void> | void;
+  supportsNativeFork?: boolean;
   testID?: string;
 }
 
 const ThemedSplit = withUnistyles(Split);
+const ThemedFileText = withUnistyles(FileText);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 export const AssistantForkMenu = memo(function AssistantForkMenu({
   onFork,
+  supportsNativeFork = false,
   testID = "assistant-fork-menu",
 }: AssistantForkMenuProps) {
   const { t } = useTranslation();
@@ -73,6 +77,10 @@ export const AssistantForkMenu = memo(function AssistantForkMenu({
     () => <ThemedSplit size={ICON_SIZE.sm} uniProps={foregroundColorMapping} />,
     [],
   );
+  const draftIcon = useMemo(
+    () => <ThemedFileText size={ICON_SIZE.sm} uniProps={foregroundColorMapping} />,
+    [],
+  );
 
   return (
     <DropdownMenu open={isOpen} onOpenChange={handleOpenChange}>
@@ -118,6 +126,21 @@ export const AssistantForkMenu = memo(function AssistantForkMenu({
         >
           {t("message.actions.forkInNewWorkspace")}
         </DropdownMenuItem>
+        {supportsNativeFork ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              closeOnSelect={false}
+              disabled={isLocked && pendingTarget !== "draft_tab"}
+              leading={draftIcon}
+              onSelect={handleSelect("draft_tab")}
+              status={pendingTarget === "draft_tab" ? "pending" : undefined}
+              testID={`${testID}-summary-draft`}
+            >
+              {t("message.actions.forkAsSummaryDraft")}
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

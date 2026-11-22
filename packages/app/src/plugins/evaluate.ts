@@ -135,6 +135,7 @@ export function runPluginClientBundle(
     sidebarItems: { header: [], footer: [] },
     legacySidebarItems: [],
     workspaceRowBadgeItems: [],
+    agentCornerCards: [],
     filePanels: [],
     composerItems: [],
     newWorkspaceItems: [],
@@ -154,6 +155,7 @@ export function runPluginClientBundle(
     footer: new Set(),
   };
   const workspaceRowItemIds = new Set<string>();
+  const agentCornerCardIds = new Set<string>();
   const filePanelIds = new Set<string>();
   const composerItemIds = new Set<string>();
   const newWorkspaceItemIds = new Set<string>();
@@ -292,6 +294,20 @@ export function runPluginClientBundle(
         collector.composerItems,
         { id: normalizedId, Component: contribution.Component },
         () => composerItemIds.delete(normalizedId),
+      );
+    },
+    addAgentCornerCard(contribution) {
+      const normalizedId = requireId(contribution.id, "agent corner card id");
+      if (agentCornerCardIds.has(normalizedId))
+        throw new Error(`Duplicate agent corner card: ${normalizedId}`);
+      if (!isComponentType(contribution.Component)) {
+        throw new Error(`Agent corner card ${normalizedId} is not a component`);
+      }
+      agentCornerCardIds.add(normalizedId);
+      return register(
+        collector.agentCornerCards,
+        { id: normalizedId, Component: contribution.Component },
+        () => agentCornerCardIds.delete(normalizedId),
       );
     },
     addNewWorkspaceItem(contribution) {
@@ -655,6 +671,7 @@ export function runPluginClientBundle(
     sidebarItems: collector.sidebarItems,
     legacySidebarItems: collector.legacySidebarItems,
     workspaceRowBadgeItems: collector.workspaceRowBadgeItems,
+    agentCornerCards: collector.agentCornerCards,
     filePanels: collector.filePanels,
     composerItems: collector.composerItems,
     newWorkspaceItems: collector.newWorkspaceItems,

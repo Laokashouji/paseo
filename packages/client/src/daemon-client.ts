@@ -65,6 +65,8 @@ import type {
   FileWriteResult,
   FetchAgentTimelineResponseMessage,
   AgentForkContextResponseMessage,
+  AgentForkResponseMessage,
+  AgentSideQuestionResponseMessage,
   GitSetupOptions,
   CheckoutStatusResponse,
   CheckoutCommit,
@@ -727,6 +729,8 @@ type ScheduleUpdatePayload = Extract<
 >["payload"];
 export type FetchAgentTimelinePayload = FetchAgentTimelineResponseMessage["payload"];
 export type AgentForkContextPayload = AgentForkContextResponseMessage["payload"];
+export type AgentForkPayload = AgentForkResponseMessage["payload"];
+export type AgentSideQuestionPayload = AgentSideQuestionResponseMessage["payload"];
 
 export type FetchAgentTimelineDirection = FetchAgentTimelinePayload["direction"];
 export type FetchAgentTimelineProjection = FetchAgentTimelinePayload["projection"];
@@ -812,6 +816,28 @@ export interface AgentForkContextOptions {
   boundaryCursor?: FetchAgentTimelineCursor;
   boundaryMessageId?: string;
   requestId?: string;
+}
+
+export interface AgentForkOptions {
+  workspaceId?: string;
+  cwd?: string;
+  boundaryCursor?: FetchAgentTimelineCursor;
+  boundaryMessageId?: string;
+  title?: string;
+  labels?: Record<string, string>;
+  requestId?: string;
+  timeout?: number;
+}
+
+export interface AgentSideQuestionTurn {
+  question: string;
+  response: string;
+}
+
+export interface AgentSideQuestionOptions {
+  history?: readonly AgentSideQuestionTurn[];
+  requestId?: string;
+  timeout?: number;
 }
 
 type AgentRefreshedStatusPayload = z.infer<typeof AgentRefreshedStatusPayloadSchema>;
@@ -4243,6 +4269,90 @@ export class DaemonClient {
     }
 
     return payload;
+  }
+
+  async forkAgent(
+    sourceAgentId: string,
+    options: AgentForkOptions = {},
+  ): Promise<{ agent: AgentSnapshotPayload; forkMode: "native" }> {
+    const resolvedRequestId = this.createRequestId(options.requestId);
+    const message = SessionInboundMessageSchema.parse({
+      type: "agent.fork.request",
+      sourceAgentId,
+      requestId: resolvedRequestId,
+      ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.boundaryCursor ? { boundaryCursor: options.boundaryCursor } : {}),
+      ...(options.boundaryMessageId ? { boundaryMessageId: options.boundaryMessageId } : {}),
+      ...(options.title ? { title: options.title } : {}),
+      ...(options.labels ? { labels: options.labels } : {}),
+    });
+
+    const payload = await this.sendRequest({
+      requestId: resolvedRequestId,
+      message,
+      timeout: options.timeout ?? 30000,
+      options: { skipQueue: true },
+      select: (msg) => {
+        if (msg.type !== "agent.fork.response") {
+          return null;
+        }
+        if (msg.payload.requestId !== resolvedRequestId) {
+          return null;
+        }
+        return msg.payload;
+      },
+    });
+
+    if (payload.error || !payload.agent || !payload.forkMode) {
+      throw new Error(payload.error ?? "Agent fork failed");
+    }
+
+    return {
+      agent: payload.agent,
+      forkMode: payload.forkMode,
+    };
+  }
+
+  async askAgentSideQuestion(
+    agentId: string,
+    question: string,
+    options: AgentSideQuestionOptions = {},
+  ): Promise<{ response: string; synthetic?: boolean; model?: string | null }> {
+    const resolvedRequestId = this.createRequestId(options.requestId);
+    const message = SessionInboundMessageSchema.parse({
+      type: "agent.side_question.request",
+      agentId,
+      question,
+      ...(options.history?.length ? { history: [...options.history] } : {}),
+      requestId: resolvedRequestId,
+    });
+
+    const payload = await this.sendRequest({
+      requestId: resolvedRequestId,
+      message,
+      timeout: options.timeout ?? 120000,
+      options: { skipQueue: true },
+      select: (msg) => {
+        if (msg.type !== "agent.side_question.response") {
+          return null;
+        }
+        if (msg.payload.requestId !== resolvedRequestId) {
+          return null;
+        }
+        return msg.payload;
+      },
+    });
+
+    if (payload.error || payload.response === null) {
+      throw new Error(payload.error ?? "Side question failed");
+    }
+
+    return {
+      response: payload.response,
+      synthetic: payload.synthetic,
+      model: payload.model ?? null,
+    };
   }
 
   // ============================================================================

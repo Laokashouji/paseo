@@ -207,6 +207,8 @@ export const ptBR: TranslationResources = {
     clientCommands: {
       archiveAgent: "Arquivar o agente atual",
       freshDraft: "Arquivar este agente e iniciar um novo rascunho",
+      branchAgent: "Bifurcar esta conversa em uma nova aba de ramificação",
+      sideQuestion: "Fazer uma pergunta lateral efêmera compartilhando o cache deste chat",
     },
     github: {
       searching: "Buscando...",
@@ -355,6 +357,7 @@ export const ptBR: TranslationResources = {
       forkMenu: "Bifurcar mensagem",
       forkInNewTab: "Bifurcar em uma nova aba",
       forkInNewWorkspace: "Bifurcar em um novo workspace",
+      forkAsSummaryDraft: "Bifurcar como rascunho resumido",
       forkUnavailable: "Atualize o host para usar isto.",
       forkMissingWorkspace: "Este agente não está em um workspace.",
       forkFailed: "Falha ao bifurcar o chat",
@@ -2092,6 +2095,31 @@ export const ptBR: TranslationResources = {
   },
   menu: {
     backdrop: "Fundo do menu",
+  },
+  branches: {
+    title: "Ramificações",
+    pillLabelOne: "1 ramificação",
+    pillLabelMany: "{{count}} ramificações",
+    newBranchAction: "Nova ramificação a partir daqui",
+    creatingAction: "Criando ramificação…",
+    currentBadge: "Atual",
+    rootBadge: "Principal",
+    archiveAction: "Arquivar {{label}}",
+    archiveTooltip: "Arquivar ramificação",
+  },
+  sideQuestion: {
+    ephemeralHint: "Cache compartilhado · não salvo no chat",
+    minimize: "Minimizar painel BTW",
+    close: "Fechar e limpar painel BTW",
+    thinking: "Pensando…",
+    failed: "Falha na pergunta lateral",
+    copyAnswer: "Copiar",
+    insertToComposer: "Inserir na entrada",
+    askInBranch: "Perguntar em nova ramificação",
+    followUpPlaceholder: "Fazer uma pergunta adicional…",
+    sendFollowUp: "Enviar",
+    pillPending: "BTW · Pensando…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {
