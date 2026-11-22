@@ -26,6 +26,8 @@ export interface ChangelogSection {
   body: string;
 }
 
+export type ChangelogReleaseSource = "upstream" | "fork";
+
 export interface ChangelogRelease {
   /** Version as authored, stripped of link, bracket and `v` decoration. */
   version: string;
@@ -35,6 +37,8 @@ export interface ChangelogRelease {
   highlights: string;
   /** The `###` sections in document order. */
   sections: ChangelogSection[];
+  /** Present when merged from a fork changelog feed alongside upstream releases. */
+  source?: ChangelogReleaseSource;
 }
 
 // `##` / `###` must be followed by whitespace, which is what keeps each pattern
@@ -148,14 +152,85 @@ function normalizeVersion(raw: string): string {
  * as authored rather than guessed at.
  */
 export function formatChangelogDate(date: string): string {
-  if (!ISO_DATE.test(date)) return date;
-  const [year, month, day] = date.split("-").map(Number);
+  const isoDate = parseSortableIsoDate(date);
+  if (!isoDate) return date;
+  const [year, month, day] = isoDate.split("-").map(Number);
   const value = new Date(Date.UTC(year, month - 1, day));
-  if (Number.isNaN(value.getTime())) return date;
   return new Intl.DateTimeFormat(undefined, {
     month: "long",
     day: "numeric",
     year: "numeric",
     timeZone: "UTC",
   }).format(value);
+}
+
+/**
+ * Interleaves fork releases with upstream releases in reverse chronological order.
+ *
+ * Each input list keeps its authored order; when both heads carry valid ISO dates,
+ * the newer date wins and same-day ties favor the fork release. Duplicate versions
+ * already present in the fork list are omitted from the upstream list.
+ */
+export function mergeChangelogReleases(
+  forkReleases: readonly ChangelogRelease[],
+  upstreamReleases: readonly ChangelogRelease[],
+): ChangelogRelease[] {
+  const taggedFork: ChangelogRelease[] = forkReleases.map((release) => ({
+    ...release,
+    source: "fork",
+  }));
+  if (upstreamReleases.length === 0) return taggedFork;
+
+  const forkVersions = new Set(taggedFork.map((release) => release.version));
+  const filteredUpstream = upstreamReleases.filter((release) => !forkVersions.has(release.version));
+  if (taggedFork.length === 0) return filteredUpstream;
+
+  const merged: ChangelogRelease[] = [];
+  let forkIndex = 0;
+  let upstreamIndex = 0;
+
+  while (forkIndex < taggedFork.length && upstreamIndex < filteredUpstream.length) {
+    const forkRelease = taggedFork[forkIndex];
+    const upstreamRelease = filteredUpstream[upstreamIndex];
+    if (shouldTakeForkFirst(forkRelease.date, upstreamRelease.date)) {
+      merged.push(forkRelease);
+      forkIndex += 1;
+    } else {
+      merged.push(upstreamRelease);
+      upstreamIndex += 1;
+    }
+  }
+
+  while (forkIndex < taggedFork.length) {
+    merged.push(taggedFork[forkIndex]);
+    forkIndex += 1;
+  }
+  while (upstreamIndex < filteredUpstream.length) {
+    merged.push(filteredUpstream[upstreamIndex]);
+    upstreamIndex += 1;
+  }
+
+  return merged;
+}
+
+function shouldTakeForkFirst(forkDateRaw: string, upstreamDateRaw: string): boolean {
+  const forkDate = parseSortableIsoDate(forkDateRaw);
+  const upstreamDate = parseSortableIsoDate(upstreamDateRaw);
+  if (!forkDate || !upstreamDate) return true;
+  return forkDate >= upstreamDate;
+}
+
+function parseSortableIsoDate(date: string): string | null {
+  if (!ISO_DATE.test(date)) return null;
+  const [year, month, day] = date.split("-").map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day));
+  if (
+    Number.isNaN(value.getTime()) ||
+    value.getUTCFullYear() !== year ||
+    value.getUTCMonth() !== month - 1 ||
+    value.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
 }
