@@ -1,9 +1,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { PluginSettings } from "@getpaseo/plugin/server";
+import type { PluginServerContext, PluginSettings } from "@getpaseo/plugin/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import contribute from "../index.server.js";
 import type { PaseoApi } from "./paseo-types.js";
+import { cardSubscription, updateCardMetaRpc } from "../shared/rpc.js";
 import { HELPER_LABEL_KEY, HELPER_LABEL_VALUE } from "../shared/schema.js";
 import { DEFAULT_WORKBENCH_SETTINGS, type workbenchSettingsSchema } from "../shared/settings.js";
 import {
@@ -13,7 +15,13 @@ import {
   runTodoAction,
 } from "./actions.js";
 import { isHelperAgent, WorkbenchStore } from "./store.js";
-import { applySummaryToCard, parseSummaryOutput } from "./summarizer.js";
+import {
+  applySummaryToCard,
+  formatSummaryError,
+  parseSummaryOutput,
+  resolveSummaryTarget,
+  selectLightweightModelFromCatalog,
+} from "./summarizer.js";
 import { buildCardContextPrompt, createWorkbenchAgentTools } from "./tools.js";
 
 const tempDirs: string[] = [];
@@ -386,5 +394,215 @@ describe("WaitCondition auto-advance and summary protection", () => {
     expect(prompt).toContain("检查暗色模式对比度");
     await store.flush();
     store.dispose();
+  });
+
+  test("tolerates null optional fields in summary JSON and formats Zod errors cleanly", () => {
+    const parsed = parseSummaryOutput(
+      JSON.stringify({
+        topic: "fork 能力优化",
+        currentWork: "已完成根因排查与方案设计",
+        suggestedStatus: null,
+        waitingReason: null,
+        suggestedTodos: [
+          { title: "补齐轻量模型测试", prompt: null },
+          { title: "   ", prompt: "ignored" },
+        ],
+      }),
+    );
+    expect(parsed.topic).toBe("fork 能力优化");
+    expect(parsed.waitingReason).toBeUndefined();
+    expect(parsed.suggestedStatus).toBeUndefined();
+    expect(parsed.suggestedTodos).toEqual([{ title: "补齐轻量模型测试", prompt: undefined }]);
+
+    const nullTodos = parseSummaryOutput(
+      JSON.stringify({
+        topic: "清理状态",
+        currentWork: "核验中",
+        waitingReason: null,
+        suggestedTodos: null,
+      }),
+    );
+    expect(nullTodos.suggestedTodos).toBeUndefined();
+
+    let caught: unknown;
+    try {
+      parseSummaryOutput(JSON.stringify({ topic: "", currentWork: "" }));
+    } catch (error) {
+      caught = error;
+    }
+    const formatted = formatSummaryError(caught);
+    expect(formatted).toContain("摘要格式校验失败");
+    expect(formatted).not.toContain("\n");
+  });
+
+  test("auto-selects lightweight model from same provider first, skips image models, and falls back across providers", async () => {
+    const pickedFromCpa = selectLightweightModelFromCatalog([
+      { id: "gemini-3.1-flash-image" },
+      { id: "claude-opus-5-5-high" },
+      { id: "gemini-3.5-flash-lite" },
+      { id: "gemini-3-flash" },
+    ]);
+    expect(pickedFromCpa?.id).toBe("gemini-3.5-flash-lite");
+
+    const sameProviderPaseo = {
+      providers: {
+        listModels: vi.fn(async () => ({
+          models: [
+            { id: "agy-cli/gemini-4-neon[1m]", thinkingOptions: [{ id: "low" }, { id: "xhigh" }] },
+            { id: "agy-cli/gemini-3.8-flash[1m]", thinkingOptions: [{ id: "off" }, { id: "high" }] },
+            { id: "agy-cli/claude-opus-5-5" },
+          ],
+        })),
+        snapshot: vi.fn(async () => ({ entries: [] })),
+      },
+    } as unknown as PaseoApi;
+
+    const targetSame = await resolveSummaryTarget({
+      paseo: sameProviderPaseo,
+      config: DEFAULT_WORKBENCH_SETTINGS,
+      sourceProvider: "claude-magpie",
+      sourceModel: "agy-cli/gemini-4-neon[1m]",
+    });
+    expect(targetSame).toEqual({
+      provider: "claude-magpie",
+      model: "agy-cli/gemini-3.8-flash[1m]",
+      thinkingOptionId: "off",
+      displayLabel: "gemini-3.8-flash",
+    });
+
+    const crossProviderPaseo = {
+      providers: {
+        listModels: vi.fn(async () => ({
+          models: [{ id: "claude-opus-5-5" }],
+        })),
+        snapshot: vi.fn(async () => ({
+          entries: [
+            {
+              provider: "claude-cpa",
+              enabled: true,
+              status: "ready",
+              models: [
+                { id: "gemini-3.1-flash-image" },
+                { id: "gemini-3.5-flash-lite", thinkingOptions: [{ id: "low" }] },
+              ],
+            },
+          ],
+        })),
+      },
+    } as unknown as PaseoApi;
+
+    const targetCross = await resolveSummaryTarget({
+      paseo: crossProviderPaseo,
+      config: DEFAULT_WORKBENCH_SETTINGS,
+      sourceProvider: "claude-sub2api",
+      sourceModel: "claude-opus-5-5",
+    });
+    expect(targetCross).toEqual({
+      provider: "claude-cpa",
+      model: "gemini-3.5-flash-lite",
+      thinkingOptionId: "low",
+      displayLabel: "gemini-3.5-flash-lite",
+    });
+
+    const targetCustom = await resolveSummaryTarget({
+      paseo: sameProviderPaseo,
+      config: {
+        ...DEFAULT_WORKBENCH_SETTINGS,
+        summaryCustomProviderModel: "claude-magpie/agy-cli/gemini-3.8-flash[1m]",
+      },
+      sourceProvider: "claude-sub2api",
+      sourceModel: "claude-opus-5-5",
+    });
+    expect(targetCustom.provider).toBe("claude-magpie");
+    expect(targetCustom.model).toBe("agy-cli/gemini-3.8-flash[1m]");
+    expect(targetCustom.thinkingOptionId).toBe("off");
+  });
+
+  test("cardSubscription stays open synchronously and pushes live updates to multiple subscribers", async () => {
+    const prevHome = process.env.PASEO_HOME;
+    const dir = await createTempDir();
+    process.env.PASEO_HOME = dir;
+    try {
+      const handlers = new Map<string, (input: unknown, ctx: unknown) => unknown>();
+      const mockServer = {
+        registerSettings: () => createMockSettings(),
+        handle: (contract: { name: string }, handler: (input: unknown, ctx: unknown) => unknown) => {
+          handlers.set(contract.name, handler);
+        },
+        addHook: () => () => {},
+        registerProvider: () => {},
+        registerUsageSource: () => {},
+      } as unknown as PluginServerContext;
+
+      const cleanup = contribute(mockServer);
+      const mockPaseo = {
+        agents: {
+          list: async () => ({ entries: [] }),
+          ref: () => ({
+            refresh: async () => null,
+          }),
+        },
+      } as unknown as PaseoApi;
+
+      const cornerEvents: Array<{ card: { topic: string; currentWork: string } }> = [];
+      const panelEvents: Array<{ card: { topic: string; currentWork: string } }> = [];
+      const cornerAbort = new AbortController();
+      const panelAbort = new AbortController();
+
+      const cardSubHandler = handlers.get(cardSubscription.name)!;
+      const ret1 = cardSubHandler(
+        { agentId: "agent-sync", workspaceId: "wks-1" },
+        {
+          paseo: mockPaseo,
+          signal: cornerAbort.signal,
+          push: async (event: { card: { topic: string; currentWork: string } }) => {
+            cornerEvents.push(event);
+          },
+        },
+      );
+      const ret2 = cardSubHandler(
+        { agentId: "agent-sync", workspaceId: "wks-1" },
+        {
+          paseo: mockPaseo,
+          signal: panelAbort.signal,
+          push: async (event: { card: { topic: string; currentWork: string } }) => {
+            panelEvents.push(event);
+          },
+        },
+      );
+
+      // Must return undefined (not a settling Promise that would immediately close the stream).
+      expect(ret1).toBeUndefined();
+      expect(ret2).toBeUndefined();
+
+      await vi.waitFor(() => {
+        expect(cornerEvents.length).toBeGreaterThanOrEqual(1);
+        expect(panelEvents.length).toBeGreaterThanOrEqual(1);
+      });
+
+      const updateHandler = handlers.get(updateCardMetaRpc.name)!;
+      await updateHandler(
+        {
+          agentId: "agent-sync",
+          workspaceId: "wks-1",
+          topic: "同步测试主题",
+          currentWork: "实时推送到卡片与侧边栏",
+        },
+        { paseo: mockPaseo },
+      );
+
+      await vi.waitFor(() => {
+        expect(cornerEvents.at(-1)?.card.topic).toBe("同步测试主题");
+        expect(panelEvents.at(-1)?.card.topic).toBe("同步测试主题");
+        expect(cornerEvents.at(-1)?.card.currentWork).toBe("实时推送到卡片与侧边栏");
+      });
+
+      cornerAbort.abort();
+      panelAbort.abort();
+      await cleanup?.();
+    } finally {
+      if (prevHome === undefined) delete process.env.PASEO_HOME;
+      else process.env.PASEO_HOME = prevHome;
+    }
   });
 });

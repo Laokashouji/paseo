@@ -23,23 +23,75 @@ const SYSTEM_PROMPT = [
   "Return ONLY valid JSON matching the requested schema, with concise Chinese phrasing unless the conversation is strictly English.",
 ].join(" ");
 
+function clipText(value: string, maxLen: number): string {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= maxLen) return collapsed;
+  return `${collapsed.slice(0, maxLen - 1)}…`;
+}
+
+function requiredSummaryString(maxLen: number) {
+  return z.preprocess(
+    (value) => (typeof value === "string" ? clipText(value, maxLen) : value),
+    z.string().min(1).max(maxLen),
+  );
+}
+
+function optionalSummaryString(maxLen: number) {
+  return z.preprocess((value) => {
+    if (value === null || value === undefined) return undefined;
+    if (typeof value !== "string") return undefined;
+    const clipped = clipText(value, maxLen);
+    return clipped.length > 0 ? clipped : undefined;
+  }, z.string().max(maxLen).optional());
+}
+
+const OptionalWorkflowStatusSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return WorkflowStatusSchema.safeParse(trimmed).success ? trimmed : undefined;
+}, WorkflowStatusSchema.optional());
+
+const SuggestedTodoEntrySchema = z.object({
+  title: requiredSummaryString(160),
+  prompt: optionalSummaryString(600),
+});
+
 export const SummaryResultSchema = z.object({
-  topic: z.string().trim().min(1).max(80),
-  currentWork: z.string().trim().min(1).max(140),
-  suggestedStatus: WorkflowStatusSchema.optional(),
-  waitingReason: z.string().trim().max(120).optional(),
-  suggestedTodos: z
-    .array(
-      z.object({
-        title: z.string().trim().min(1).max(160),
-        prompt: z.string().trim().max(600).optional(),
-      }),
-    )
-    .max(5)
-    .optional(),
+  topic: requiredSummaryString(80),
+  currentWork: requiredSummaryString(160),
+  suggestedStatus: OptionalWorkflowStatusSchema,
+  waitingReason: optionalSummaryString(140),
+  suggestedTodos: z.preprocess((value) => {
+    if (value === null || value === undefined) return undefined;
+    if (!Array.isArray(value)) return undefined;
+    const cleaned = value
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => ({
+        title: typeof item.title === "string" ? clipText(item.title, 160) : "",
+        prompt: item.prompt,
+      }))
+      .filter((item) => item.title.length > 0)
+      .slice(0, 5);
+    return cleaned;
+  }, z.array(SuggestedTodoEntrySchema).max(5).optional()),
 });
 
 export type SummaryResult = z.infer<typeof SummaryResultSchema>;
+
+export function formatSummaryError(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    const details = error.issues
+      .slice(0, 2)
+      .map((issue) => {
+        const field = issue.path.length > 0 ? issue.path.join(".") : "输出";
+        return `${field}: ${issue.message}`;
+      })
+      .join("；");
+    return clipText(`摘要格式校验失败（${details || "结构不符合要求"}）`, 180);
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  return clipText(raw || "摘要生成失败", 180);
+}
 
 const SUMMARY_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -59,11 +111,11 @@ const SUMMARY_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
       enum: ["active", "waiting_me", "waiting_external", "waiting_dependency", "snoozed", "done"],
     },
     waitingReason: {
-      type: "string",
-      description: "Short note when waiting on external confirmation, dependency, or user decision.",
+      type: ["string", "null"],
+      description: "Short note when waiting on external confirmation, dependency, or user decision; omit or null otherwise.",
     },
     suggestedTodos: {
-      type: "array",
+      type: ["array", "null"],
       maxItems: 4,
       items: {
         type: "object",
@@ -71,7 +123,7 @@ const SUMMARY_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
         required: ["title"],
         properties: {
           title: { type: "string" },
-          prompt: { type: "string" },
+          prompt: { type: ["string", "null"] },
         },
       },
     },
@@ -191,7 +243,7 @@ export function buildSummaryPrompt(input: {
   ].join("\n");
 }
 
-function parseCustomProviderModel(raw: string): { provider: string; model: string } | null {
+export function parseCustomProviderModel(raw: string): { provider: string; model: string } | null {
   const trimmed = raw.trim();
   const slash = trimmed.indexOf("/");
   if (slash <= 0 || slash === trimmed.length - 1) return null;
@@ -201,11 +253,220 @@ function parseCustomProviderModel(raw: string): { provider: string; model: strin
   };
 }
 
+export interface ModelCandidate {
+  id: string;
+  label?: string;
+  thinkingOptions?: ReadonlyArray<{ id: string }>;
+}
+
+const DISQUALIFIED_MODEL_RE =
+  /(?:^|[^a-z])(image|imagen|audio|tts|whisper|embed|embedding|rerank|moderation|realtime|transcribe|video|vision)(?:[^a-z]|$)/i;
+
+const HEAVY_MODEL_RE =
+  /(?:^|[^a-z0-9])(opus|neon|carbon|argon|hydrogen|pro|max|ultra|o1|o3|codex|sonnet-5|gpt-6)(?:[^a-z0-9]|$)/i;
+
+/**
+ * Lower score = lighter/faster text model preferred for background summarization.
+ * Returns null if the model is non-text or not considered a lightweight tier.
+ */
+export function scoreLightweightModel(modelId: string, label?: string): number | null {
+  const normalized = `${modelId} ${label ?? ""}`.toLowerCase();
+  if (DISQUALIFIED_MODEL_RE.test(normalized)) return null;
+
+  if (/\bflash[-_ ]?lite\b/.test(normalized) || normalized.includes("flash-lite") || normalized.includes("flash_lite")) {
+    return 10;
+  }
+  if (normalized.includes("haiku")) {
+    return 15;
+  }
+  if (/(?:^|[^a-z])nano(?:[^a-z]|$)/.test(normalized)) {
+    return 18;
+  }
+  if (normalized.includes("flash-low") || normalized.includes("flash_low")) {
+    return 20;
+  }
+  if (normalized.includes("flash") && !/(?:[-_ ])high(?:[^a-z]|$)/.test(normalized)) {
+    return 25;
+  }
+  if (/(?:^|[^a-z])mini(?:[^a-z]|$)/.test(normalized)) {
+    return 30;
+  }
+  if (normalized.includes("flash") || /(?:^|[^a-z])(lite|small|fast)(?:[^a-z]|$)/.test(normalized)) {
+    return 35;
+  }
+  if (normalized.includes("sonnet")) {
+    return 50;
+  }
+  return null;
+}
+
+export function pickLightestThinkingOption(
+  options: ReadonlyArray<{ id: string }> | undefined,
+): string | undefined {
+  if (!options || options.length === 0) return undefined;
+  return (
+    ["off", "none", "disabled", "minimal", "low"].find((id) =>
+      options.some((option) => option.id === id),
+    ) ?? options[0]?.id
+  );
+}
+
+export function selectLightweightModelFromCatalog(
+  models: readonly ModelCandidate[],
+  options: { currentModel?: string | null; allowSonnetDowngrade?: boolean } = {},
+): ModelCandidate | null {
+  const currentIsHeavy = options.currentModel ? HEAVY_MODEL_RE.test(options.currentModel) : false;
+  const maxScore = options.allowSonnetDowngrade && currentIsHeavy ? 50 : 35;
+
+  let best: { candidate: ModelCandidate; score: number } | null = null;
+  for (const candidate of models) {
+    const score = scoreLightweightModel(candidate.id, candidate.label);
+    if (score === null || score > maxScore) continue;
+    if (!best || score < best.score) {
+      best = { candidate, score };
+    }
+  }
+  return best?.candidate ?? null;
+}
+
+export function formatSummaryModelLabel(provider: string, model?: string): string {
+  if (!model) return provider;
+  const cleaned = model.replace(/\[[^\]]+\]$/g, "").trim();
+  const tail = cleaned.includes("/") ? cleaned.slice(cleaned.lastIndexOf("/") + 1) : cleaned;
+  return tail || model;
+}
+
+export interface ResolvedSummaryTarget {
+  provider: string;
+  model?: string;
+  thinkingOptionId?: string;
+  displayLabel: string;
+}
+
+export async function resolveSummaryTarget(input: {
+  paseo: PaseoApi;
+  config: WorkbenchSettings;
+  sourceProvider?: string | null;
+  sourceModel?: string | null;
+}): Promise<ResolvedSummaryTarget> {
+  const { paseo, config, sourceProvider, sourceModel } = input;
+
+  // 1. Explicit user override always wins.
+  const custom = parseCustomProviderModel(config.summaryCustomProviderModel);
+  if (custom) {
+    let thinkingOptionId: string | undefined;
+    if (config.disableSummaryThinking) {
+      try {
+        const catalog = await paseo.providers.listModels(custom.provider);
+        const selected = catalog.models?.find((entry) => entry.id === custom.model);
+        thinkingOptionId = pickLightestThinkingOption(selected?.thinkingOptions);
+      } catch {
+        // Best-effort thinking downgrade.
+      }
+    }
+    return {
+      provider: custom.provider,
+      model: custom.model,
+      thinkingOptionId,
+      displayLabel: formatSummaryModelLabel(custom.provider, custom.model),
+    };
+  }
+
+  // 2. Auto-select lightweight model: prefer same provider first (guaranteed auth/proxy parity),
+  //    then scan other enabled ready providers if the current provider has no lightweight model.
+  if (config.autoSelectLightModel) {
+    if (sourceProvider) {
+      try {
+        const catalog = await paseo.providers.listModels(sourceProvider);
+        const light = selectLightweightModelFromCatalog(catalog.models ?? [], {
+          currentModel: sourceModel,
+          allowSonnetDowngrade: true,
+        });
+        if (light) {
+          return {
+            provider: sourceProvider,
+            model: light.id,
+            thinkingOptionId: config.disableSummaryThinking
+              ? pickLightestThinkingOption(light.thinkingOptions)
+              : undefined,
+            displayLabel: formatSummaryModelLabel(sourceProvider, light.id),
+          };
+        }
+      } catch {
+        // Fall through to cross-provider discovery.
+      }
+    }
+
+    try {
+      const snapshot = await paseo.providers.snapshot();
+      let bestCross: {
+        provider: string;
+        candidate: ModelCandidate;
+        score: number;
+      } | null = null;
+
+      for (const entry of snapshot.entries) {
+        if (entry.enabled === false) continue;
+        if (entry.status === "error") continue;
+        const models = entry.models ?? [];
+        if (models.length === 0) continue;
+
+        for (const candidate of models) {
+          const score = scoreLightweightModel(candidate.id, candidate.label);
+          if (score === null || score > 35) continue;
+          if (!bestCross || score < bestCross.score) {
+            bestCross = { provider: entry.provider, candidate, score };
+          }
+        }
+      }
+
+      if (bestCross) {
+        return {
+          provider: bestCross.provider,
+          model: bestCross.candidate.id,
+          thinkingOptionId: config.disableSummaryThinking
+            ? pickLightestThinkingOption(bestCross.candidate.thinkingOptions)
+            : undefined,
+          displayLabel: formatSummaryModelLabel(bestCross.provider, bestCross.candidate.id),
+        };
+      }
+    } catch {
+      // Fall through to source provider fallback.
+    }
+  }
+
+  // 3. Fallback to the conversation's own provider & model (with thinking downgraded).
+  const fallbackProvider = sourceProvider ?? undefined;
+  const fallbackModel = sourceModel ?? undefined;
+  if (!fallbackProvider) {
+    throw new Error("未找到可用的摘要模型 Provider");
+  }
+
+  let thinkingOptionId: string | undefined;
+  if (config.disableSummaryThinking && fallbackModel) {
+    try {
+      const catalog = await paseo.providers.listModels(fallbackProvider);
+      const selected = catalog.models?.find((entry) => entry.id === fallbackModel);
+      thinkingOptionId = pickLightestThinkingOption(selected?.thinkingOptions);
+    } catch {
+      // Best-effort thinking downgrade.
+    }
+  }
+
+  return {
+    provider: fallbackProvider,
+    model: fallbackModel,
+    thinkingOptionId,
+    displayLabel: formatSummaryModelLabel(fallbackProvider, fallbackModel),
+  };
+}
+
 export function applySummaryToCard(
   store: WorkbenchStore,
   agentId: string,
   summary: SummaryResult,
   turnId: string | null,
+  summaryModel?: string | null,
 ): SessionWorkbenchCard {
   const existing = store.getOrCreateCard({ agentId });
   const now = new Date().toISOString();
@@ -234,6 +495,7 @@ export function applySummaryToCard(
     statusNote: nextStatusNote,
     summaryState: "idle",
     summaryError: null,
+    ...(summaryModel !== undefined ? { summaryModel } : {}),
     lastSummarizedAt: now,
     lastSummarizedTurnId: turnId,
   });
@@ -362,27 +624,12 @@ export class RollingSummarizer {
         return;
       }
 
-      const custom = parseCustomProviderModel(config.summaryCustomProviderModel);
-      const provider = custom?.provider ?? refreshed.agent.provider;
-      const model = custom?.model ?? refreshed.agent.model ?? undefined;
-      if (!provider) {
-        throw new Error("未找到可用的摘要模型 Provider");
-      }
-
-      let thinkingOptionId: string | undefined;
-      if (config.disableSummaryThinking && model) {
-        try {
-          const catalog = await input.paseo.providers.listModels(provider);
-          const selected = catalog.models?.find((entry) => entry.id === model);
-          const options = selected?.thinkingOptions ?? [];
-          thinkingOptionId =
-            ["off", "none", "disabled", "minimal", "low"].find((id) =>
-              options.some((option) => option.id === id),
-            ) ?? options[0]?.id;
-        } catch {
-          // Best-effort thinking downgrade.
-        }
-      }
+      const target = await resolveSummaryTarget({
+        paseo: input.paseo,
+        config,
+        sourceProvider: refreshed.agent.provider,
+        sourceModel: refreshed.agent.model,
+      });
 
       await mkdir(this.helperCwd, { recursive: true });
       const helper = await input.paseo.agents.create({
@@ -393,28 +640,33 @@ export class RollingSummarizer {
         labels: { [HELPER_LABEL_KEY]: HELPER_LABEL_VALUE },
         outputSchema: SUMMARY_OUTPUT_JSON_SCHEMA,
         config: {
-          provider: model ? `${provider}/${model}` : provider,
+          provider: target.model ? `${target.provider}/${target.model}` : target.provider,
           systemPrompt: SYSTEM_PROMPT,
-          ...(thinkingOptionId ? { thinkingOptionId } : {}),
+          ...(target.thinkingOptionId ? { thinkingOptionId: target.thinkingOptionId } : {}),
         },
       });
 
+      let turnSettled = false;
       try {
         const prompt = buildSummaryPrompt({ card, excerpts });
         const result = await helper.run(prompt, { timeoutMs: 60_000 });
+        turnSettled = result.status === "idle" || result.status === "error";
         if (result.status !== "idle" || !result.lastMessage) {
           throw new Error(result.error || `摘要助手异常结束 (${result.status})`);
         }
         const summary = parseSummaryOutput(result.lastMessage);
-        applySummaryToCard(this.store, input.agentId, summary, input.turnId);
+        applySummaryToCard(this.store, input.agentId, summary, input.turnId, target.displayLabel);
       } finally {
-        await helper.archive().catch(() => {});
+        // autoArchive: true already archives the helper once its first turn settles.
+        // Only fall back to manual archive when run() timed out or aborted mid-turn.
+        if (!turnSettled) {
+          await helper.archive().catch(() => {});
+        }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       this.store.updateCard(input.agentId, {
         summaryState: "error",
-        summaryError: message.slice(0, 200),
+        summaryError: formatSummaryError(error),
       });
     } finally {
       this.inFlight.delete(input.agentId);

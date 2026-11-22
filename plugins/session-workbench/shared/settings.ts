@@ -6,6 +6,7 @@ export const workbenchSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   defaultExpanded: z.boolean().default(true),
   autoSummarize: z.boolean().default(true),
+  autoSelectLightModel: z.boolean().default(true),
   summaryDebounceMs: z.number().int().min(500).max(30_000).default(3000),
   summaryCustomProviderModel: z.string().default(""),
   disableSummaryThinking: z.boolean().default(true),
