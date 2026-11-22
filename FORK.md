@@ -160,7 +160,8 @@ paseo daemon restart
 | 类别 | 飞书文档 | 绑定分支 / 目录 | Wiki `node_token` | `doc_id` |
 | --- | --- | --- | --- | --- |
 | 主文档 | [Paseo Fork — 工程总览](https://bytedance.larkoffice.com/wiki/Nq50wJhwkiRz2gkpNbDcwrjunnb) | 全局（`fork`） | `Nq50wJhwkiRz2gkpNbDcwrjunnb` | `Y5wsdWF18olzKzxEonVcv1qsnXg` |
-| 能力 A1 | [【能力】对话工作台（Session Workbench）](https://bytedance.larkoffice.com/wiki/Ue0SwswU7ijWj3k6eNIc7Knsnbc) | `feat/session-workbench-plugin`、`feat/session-workbench-archive` | `Ue0SwswU7ijWj3k6eNIc7Knsnbc` | `DIKsdbJploozyvxIdVfc7EYKnkf` |
+| 能力 A1 | [【能力】对话工作台（Session Workbench）](https://bytedance.larkoffice.com/wiki/Ue0SwswU7ijWj3k6eNIc7Knsnbc) | `feat/session-workbench-plugin` | `Ue0SwswU7ijWj3k6eNIc7Knsnbc` | `DIKsdbJploozyvxIdVfc7EYKnkf` |
+| 能力 A5 | [【能力】一键对话归档（Session Archive）](https://bytedance.larkoffice.com/wiki/MGm8wtnd5is5SqkAt7bcci5Jntd) | `feat/session-archive` | `MGm8wtnd5is5SqkAt7bcci5Jntd` | `LQd3dhXgvoqdQIxGEVZcc40tnxh` |
 | 能力 A2 | [【能力】原生无损分叉与分支管理](https://bytedance.larkoffice.com/wiki/BOsFwD4vFiRThrkqDJfcI7WPnib) | `feat/native-fork-and-branches` | `BOsFwD4vFiRThrkqDJfcI7WPnib` | `Ah7Kdn8tQobNzLxxXXmcMDuFnUc` |
 | 能力 A3 | [【能力】原生 `/btw` 旁路提问](https://bytedance.larkoffice.com/wiki/H2TBwgRevixWU0kN1O4ckgERnpd) | `feat/native-btw-side-question` | `H2TBwgRevixWU0kN1O4ckgERnpd` | `Symyd2lpDo0Z1Hx2n6xcoC85nAb` |
 | 能力 A4 | [【能力】插件扩展底座增强](https://bytedance.larkoffice.com/wiki/AfVfwyvXbi9YTakQlijcuZ8anbd) | `feat/plugin-agent-corner-slot` | `AfVfwyvXbi9YTakQlijcuZ8anbd` | `MkT8dxyLxoLbuzxiivXcLOSMnIc` |
