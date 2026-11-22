@@ -49,14 +49,14 @@ main@upstream (trunk)
 
 或在 GitHub 网页端 `Settings -> Secrets and variables -> Actions` 手动添加以下 Secret：
 
-| 类别 | Secret 名称 | 内容 |
-| --- | --- | --- |
-| 签名（必填） | `APPLE_CERTIFICATE` | Developer ID Application `.p12` 单行 base64（`base64 -i cert.p12 \| tr -d '\n'`） |
-| 签名（必填） | `APPLE_CERTIFICATE_PASSWORD` | `.p12` 导出密码 |
-| 公证（方式 1，推荐） | `APPLE_API_KEY` | App Store Connect `.p8` 私钥（支持单行 base64 或原始 PEM） |
-| 公证（方式 1，推荐） | `APPLE_API_KEY_ID` | API Key ID（10 位字符） |
-| 公证（方式 1，推荐） | `APPLE_API_ISSUER` | API Issuer ID（UUID） |
-| 公证（方式 2，备选） | `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 邮箱、App 专用密码与 10 位 Team ID |
+| 类别                 | Secret 名称                                     | 内容                                                                              |
+| -------------------- | ----------------------------------------------- | --------------------------------------------------------------------------------- |
+| 签名（必填）         | `APPLE_CERTIFICATE`                             | Developer ID Application `.p12` 单行 base64（`base64 -i cert.p12 \| tr -d '\n'`） |
+| 签名（必填）         | `APPLE_CERTIFICATE_PASSWORD`                    | `.p12` 导出密码                                                                   |
+| 公证（方式 1，推荐） | `APPLE_API_KEY`                                 | App Store Connect `.p8` 私钥（支持单行 base64 或原始 PEM）                        |
+| 公证（方式 1，推荐） | `APPLE_API_KEY_ID`                              | API Key ID（10 位字符）                                                           |
+| 公证（方式 1，推荐） | `APPLE_API_ISSUER`                              | API Issuer ID（UUID）                                                             |
+| 公证（方式 2，备选） | `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 邮箱、App 专用密码与 10 位 Team ID                                       |
 
 检查配置状态：
 
@@ -131,6 +131,7 @@ gh run watch --repo Laokashouji/paseo
 
 - **首次切换安装（仅需一次）**：因为你的 Apple Developer Team ID 与官方不同，官方签名包无法直接热更新到你的 fork。首次请从 `https://github.com/Laokashouji/paseo/releases/latest` 下载 `Paseo-<version>-arm64.dmg`；如果想保留官方 `/Applications/Paseo.app` 当备份，可先把 DMG 里的 `Paseo.app` 拖出来重命名为 `Paseo Fork.app` 再放进 `/Applications/`（不破坏签名与公证，且共用 `~/.paseo/` 与 `~/Library/Application Support/Paseo/`）。
 - **应用图标区分**：构建流水线会在打包前通过 `scripts/fork/apply-icon.sh` 临时将 `packages/desktop/assets/icon.icns` 与 `icon.png` 替换为仓库内置的蓝图蓝版 `icon-dev.png`（不改动上游跟踪文件），每次自动更新都会保持蓝色图标，便于与官方黑色图标区分。
+- **更新公告与 Release 联动**：仓库根目录的 `FORK_CHANGELOG.md` 独立记录 Fork 变更（不修改上游 `CHANGELOG.md`，零合并冲突）。桌面端在打包时自动注入 `EXPO_PUBLIC_FORK_CHANGELOG_URL` 与 `EXPO_PUBLIC_CHANGELOG_WEB_URL`，应用内「新功能 / 更新内容」弹窗会并发拉取 `FORK_CHANGELOG.md` 与上游 `CHANGELOG.md` 按发布日期倒序混排展示（同天 Fork 置顶并带 `Fork` 徽章）；`release.sh` 会在发版前校验并预览对应版本条目，CI 也会将同一份内容同步写入 GitHub Release 说明。
 - **后续所有更新**：`Paseo.app` 内的 `app-update.yml` 已自动指向 `Laokashouji/paseo`，且 `rolloutHours` 为 `0`（即时生效）。每次发版完成后，MacBook / Mac mini 上的 Paseo Desktop 都会直接检测到新版本并在应用内一键自动更新（原地替换当前运行中的 `.app`，不会覆盖旁边的官方 `Paseo.app`）。
 
 ## 5. 更新 Linux DevBox CLI / Daemon

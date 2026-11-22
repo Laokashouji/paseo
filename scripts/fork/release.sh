@@ -9,6 +9,7 @@ REMOTE="origin"
 EXPLICIT_VERSION=""
 DO_PUSH=false
 SKIP_SECRET_CHECK=false
+ALLOW_MISSING_CHANGELOG=false
 
 usage() {
   cat <<'EOF'
@@ -21,12 +22,13 @@ By default this script runs in DRY-RUN mode and makes no changes. Pass --push
 to actually create the git tag and push to GitHub.
 
 Options:
-  --push                Create git tag and push bookmark + tag to origin
-  --version <X.Y.Z>     Override computed version (must be stable semver X.Y.Z)
-  --bookmark <name>     Bookmark to release (default: fork)
-  --remote <name>       Git remote to push to (default: origin)
-  --skip-secret-check   Skip checking required Apple GitHub Secrets via gh
-  -h, --help            Show this help message
+  --push                      Create git tag and push bookmark + tag to origin
+  --version <X.Y.Z>           Override computed version (must be stable semver X.Y.Z)
+  --bookmark <name>           Bookmark to release (default: fork)
+  --remote <name>             Git remote to push to (default: origin)
+  --skip-secret-check         Skip checking required Apple GitHub Secrets via gh
+  --allow-missing-changelog   Allow --push even if FORK_CHANGELOG.md has no entry for the next version
+  -h, --help                  Show this help message
 EOF
 }
 
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-secret-check)
       SKIP_SECRET_CHECK=true
+      shift
+      ;;
+    --allow-missing-changelog)
+      ALLOW_MISSING_CHANGELOG=true
       shift
       ;;
     -h|--help)
@@ -133,6 +139,46 @@ echo "  Release tag     : $NEXT_TAG"
 echo ""
 echo "Commits above trunk():"
 jj log -r "trunk()..$BOOKMARK" --limit 30
+
+# Verify FORK_CHANGELOG.md in the target bookmark contains an entry for NEXT_VERSION.
+CHANGELOG_MISSING=false
+FORK_CHANGELOG_CONTENT="$(git show "${FORK_SHA}:FORK_CHANGELOG.md" 2>/dev/null || true)"
+CHANGELOG_CHECK_JSON=""
+if [[ -n "$FORK_CHANGELOG_CONTENT" ]] &&
+  CHANGELOG_CHECK_JSON="$(printf '%s' "$FORK_CHANGELOG_CONTENT" | node scripts/fork/changelog-utils.mjs check --version "$NEXT_VERSION" --stdin 2>/dev/null)"; then
+  echo ""
+  echo "Fork changelog entry verified (FORK_CHANGELOG.md -> ${NEXT_VERSION}):"
+  printf '%s' "$CHANGELOG_CHECK_JSON" | node -e '
+    const data = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const header = data.entry.date ? `## ${data.entry.version} - ${data.entry.date}` : `## ${data.entry.version}`;
+    console.log(`  ${header}`);
+    for (const line of data.entry.bodyLines) {
+      console.log(`  ${line}`);
+    }
+  '
+else
+  CHANGELOG_MISSING=true
+  PREV_FORK_TAG="$(git tag --merged "$FORK_SHA" -l 'fork-v*' --sort=-version:refname | grep -Fxv "$NEXT_TAG" | head -n 1 || true)"
+  if [[ -n "$PREV_FORK_TAG" ]]; then
+    DRAFT_COMMITS="$(git log --no-merges --format='%s' "${PREV_FORK_TAG}..${FORK_SHA}" 2>/dev/null || true)"
+  else
+    DRAFT_COMMITS="$(jj log -r "trunk()..$BOOKMARK" --no-graph -T 'description.first_line() ++ "\n"' 2>/dev/null || true)"
+  fi
+  TODAY_UTC="$(date -u +%Y-%m-%d)"
+  DRAFT_ENTRY="$(printf '%s\n' "$DRAFT_COMMITS" | node scripts/fork/changelog-utils.mjs draft --version "$NEXT_VERSION" --date "$TODAY_UTC" --commits-stdin)"
+
+  echo ""
+  echo "WARNING: FORK_CHANGELOG.md in '$BOOKMARK' has no entry for version $NEXT_VERSION."
+  echo "         Add an entry before pushing so the in-app What's New dialog and GitHub Release show your changes."
+  echo ""
+  echo "Suggested FORK_CHANGELOG.md entry draft:"
+  printf '%s\n' "$DRAFT_ENTRY" | sed 's/^/  /'
+fi
+
+if [[ "$CHANGELOG_MISSING" == "true" && "$DO_PUSH" == "true" && "$ALLOW_MISSING_CHANGELOG" != "true" ]]; then
+  echo "Aborting --push because FORK_CHANGELOG.md is missing an entry for $NEXT_VERSION (pass --allow-missing-changelog to override)." >&2
+  exit 1
+fi
 
 if [[ "$SKIP_SECRET_CHECK" != "true" ]] && command -v gh >/dev/null 2>&1; then
   SECRETS="$(gh secret list --repo "$GH_REPO" 2>/dev/null | awk '{print $1}' || true)"
