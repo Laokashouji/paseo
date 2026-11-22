@@ -38,6 +38,7 @@ export type AutocompleteOptionIcon =
   | "archive"
   | "new-draft"
   | "branch"
+  | "side-question"
   | "file"
   | "directory";
 
@@ -74,6 +75,7 @@ const ROW_ICONS = {
   archive: withUnistyles(Archive, mutedIconColorMapping),
   "new-draft": withUnistyles(SquarePen, mutedIconColorMapping),
   branch: withUnistyles(GitBranch, mutedIconColorMapping),
+  "side-question": withUnistyles(Sparkles, mutedIconColorMapping),
   file: withUnistyles(File, mutedIconColorMapping),
   directory: withUnistyles(Folder, mutedIconColorMapping),
 } satisfies Record<AutocompleteOptionIcon, unknown>;

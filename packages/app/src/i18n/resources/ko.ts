@@ -207,6 +207,7 @@ export const ko: TranslationResources = {
       archiveAgent: "현재 에이전트 보관",
       freshDraft: "이 에이전트를 보관하고 새 초안을 시작합니다",
       branchAgent: "이 대화를 새 브랜치 탭으로 분기합니다",
+      sideQuestion: "이 대화의 캐시를 공유하는 임시 사이드 질문을 합니다",
     },
     github: {
       searching: "검색 중...",
@@ -2082,6 +2083,20 @@ export const ko: TranslationResources = {
     rootBadge: "메인",
     archiveAction: "{{label}} 보관",
     archiveTooltip: "브랜치 보관",
+  },
+  sideQuestion: {
+    ephemeralHint: "캐시 공유 · 대화에 기록되지 않음",
+    minimize: "BTW 패널 접기",
+    close: "BTW 패널 닫기 및 지우기",
+    thinking: "생각 중…",
+    failed: "사이드 질문에 실패했습니다",
+    copyAnswer: "복사",
+    insertToComposer: "입력창에 삽입",
+    askInBranch: "새 브랜치에서 질문",
+    followUpPlaceholder: "후속 질문 입력…",
+    sendFollowUp: "보내기",
+    pillPending: "BTW · 생각 중…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

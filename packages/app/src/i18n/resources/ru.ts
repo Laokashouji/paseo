@@ -209,6 +209,7 @@ export const ru: TranslationResources = {
       archiveAgent: "Архивировать текущего агента",
       freshDraft: "Архивировать этого агента и создать новый черновик",
       branchAgent: "Создать ветку этого диалога в новой вкладке",
+      sideQuestion: "Задать временный побочный вопрос с общим кэшем этого чата",
     },
     github: {
       searching: "Идет поиск...",
@@ -2106,6 +2107,20 @@ export const ru: TranslationResources = {
     rootBadge: "Основная",
     archiveAction: "Архивировать {{label}}",
     archiveTooltip: "Архивировать ветку",
+  },
+  sideQuestion: {
+    ephemeralHint: "Общий кэш · не добавляется в чат",
+    minimize: "Свернуть панель BTW",
+    close: "Закрыть и очистить панель BTW",
+    thinking: "Думаю…",
+    failed: "Не удалось выполнить побочный вопрос",
+    copyAnswer: "Копировать",
+    insertToComposer: "Вставить в поле ввода",
+    askInBranch: "Спросить в новой ветке",
+    followUpPlaceholder: "Задать уточняющий вопрос…",
+    sendFollowUp: "Отправить",
+    pillPending: "BTW · Думаю…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

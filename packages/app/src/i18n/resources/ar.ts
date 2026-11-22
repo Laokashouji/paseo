@@ -207,6 +207,7 @@ export const ar: TranslationResources = {
       archiveAgent: "أرشفة الوكيل الحالي",
       freshDraft: "أرشفة هذا الوكيل وابدأ مسودة جديدة",
       branchAgent: "تفريع هذه المحادثة في علامة تبويب فرع جديدة",
+      sideQuestion: "اطرح سؤالاً جانبياً مؤقتاً يشارك ذاكرة التخزين المؤقت لهذه المحادثة",
     },
     github: {
       searching: "جارٍ البحث...",
@@ -2071,6 +2072,20 @@ export const ar: TranslationResources = {
     rootBadge: "الرئيسي",
     archiveAction: "أرشفة {{label}}",
     archiveTooltip: "أرشفة الفرع",
+  },
+  sideQuestion: {
+    ephemeralHint: "ذاكرة مشتركة · لا يُحفظ في المحادثة",
+    minimize: "تصغير بطاقة BTW",
+    close: "إغلاق ومسح بطاقة BTW",
+    thinking: "جارٍ التفكير…",
+    failed: "فشل السؤال الجانبي",
+    copyAnswer: "نسخ",
+    insertToComposer: "إدراج في حقل الإدخال",
+    askInBranch: "اسأل في فرع جديد",
+    followUpPlaceholder: "اطرح سؤال متابعة…",
+    sendFollowUp: "إرسال المتابعة",
+    pillPending: "BTW · جارٍ التفكير…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

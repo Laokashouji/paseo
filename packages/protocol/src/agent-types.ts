@@ -188,6 +188,18 @@ export interface AgentCapabilityFlags {
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
   supportsNativeFork?: boolean;
+  supportsSideQuestion?: boolean;
+}
+
+export interface AgentSideQuestionTurn {
+  question: string;
+  response: string;
+}
+
+export interface AgentSideQuestionResult {
+  response: string;
+  synthetic?: boolean;
+  model?: string | null;
 }
 
 export interface AgentPersistenceHandle {

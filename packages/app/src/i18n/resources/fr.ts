@@ -210,6 +210,7 @@ export const fr: TranslationResources = {
       archiveAgent: "Archiver l’agent actuel",
       freshDraft: "Archiver cet agent et démarrer un nouveau brouillon",
       branchAgent: "Forker cette conversation dans un nouvel onglet de branche",
+      sideQuestion: "Poser une question annexe éphémère en partageant le cache de ce chat",
     },
     github: {
       searching: "Recherche…",
@@ -2119,6 +2120,20 @@ export const fr: TranslationResources = {
     rootBadge: "Principale",
     archiveAction: "Archiver {{label}}",
     archiveTooltip: "Archiver la branche",
+  },
+  sideQuestion: {
+    ephemeralHint: "Cache partagé · non ajouté au chat",
+    minimize: "Réduire le panneau BTW",
+    close: "Fermer et effacer le panneau BTW",
+    thinking: "Réflexion…",
+    failed: "Échec de la question annexe",
+    copyAnswer: "Copier",
+    insertToComposer: "Insérer dans la saisie",
+    askInBranch: "Demander dans une branche",
+    followUpPlaceholder: "Poser une question de suivi…",
+    sendFollowUp: "Envoyer la suite",
+    pillPending: "BTW · Réflexion…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

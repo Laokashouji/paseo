@@ -209,6 +209,7 @@ export const ja: TranslationResources = {
       archiveAgent: "現在のエージェントをアーカイブ",
       freshDraft: "このエージェントをアーカイブして新しい下書きを開始",
       branchAgent: "この会話を新しいブランチタブにフォーク",
+      sideQuestion: "このチャットのキャッシュを共有して一時的なサイド質問を行う",
     },
     github: {
       searching: "検索中...",
@@ -2092,6 +2093,20 @@ export const ja: TranslationResources = {
     rootBadge: "メイン",
     archiveAction: "{{label}} をアーカイブ",
     archiveTooltip: "ブランチをアーカイブ",
+  },
+  sideQuestion: {
+    ephemeralHint: "キャッシュ共有・会話履歴に追加されません",
+    minimize: "BTW パネルを最小化",
+    close: "BTW パネルを閉じてクリア",
+    thinking: "思考中…",
+    failed: "サイド質問に失敗しました",
+    copyAnswer: "コピー",
+    insertToComposer: "入力欄に挿入",
+    askInBranch: "新しいブランチで質問",
+    followUpPlaceholder: "続けて質問…",
+    sendFollowUp: "送信",
+    pillPending: "BTW · 思考中…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

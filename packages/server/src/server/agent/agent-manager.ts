@@ -4246,6 +4246,49 @@ export class AgentManager {
     return forkedAgent;
   }
 
+  async askSideQuestion(
+    agentId: string,
+    input: {
+      question: string;
+      history?: readonly { question: string; response: string }[];
+      signal?: AbortSignal;
+    },
+  ): Promise<{ response: string; synthetic?: boolean; model?: string | null }> {
+    let agent = this.requireSessionAgent(agentId);
+    if (this.historySessions.has(agent.session)) {
+      const record = await this.registry?.get(agentId);
+      if (record?.archivedAt) {
+        throw new Error(`Agent is archived: ${agentId}`);
+      }
+      agent = await this.ensureInteractiveSession(agentId);
+    }
+
+    if (!agent.session.capabilities.supportsSideQuestion || !agent.session.askSideQuestion) {
+      throw new Error(
+        `Provider '${agent.provider}' does not support native /btw side questions`,
+      );
+    }
+
+    this.logger.info(
+      {
+        agentId: agent.id,
+        provider: agent.provider,
+        historyTurns: input.history?.length ?? 0,
+      },
+      "agent.side_question.start",
+    );
+    const result = await agent.session.askSideQuestion(input);
+    this.logger.info(
+      {
+        agentId: agent.id,
+        provider: agent.provider,
+        synthetic: result.synthetic === true,
+      },
+      "agent.side_question.complete",
+    );
+    return result;
+  }
+
   async deleteAgentState(agentId: string): Promise<void> {
     this.discardRetainedAgentState(agentId);
     await this.deleteCommittedTimeline(agentId);

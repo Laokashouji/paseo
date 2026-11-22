@@ -405,6 +405,7 @@ const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
   supportsRewindFiles: true,
   supportsRewindBoth: true,
   supportsNativeFork: true,
+  supportsSideQuestion: true,
 };
 
 const DEFAULT_MODES: AgentMode[] = [
@@ -2456,6 +2457,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly runtimeSafety = new ClaudeRuntimeSafety();
   private readonly backgroundStops = new Map<string, (outcome: string) => void>();
   private processingSdkMessages = 0;
+  private inFlightSideQuestions = 0;
   private readonly harnessEnvironment: Record<string, string>;
   private readonly usageSessionKey = randomUUID();
   private childProcess: ChildProcess | null = null;
@@ -3317,6 +3319,7 @@ class ClaudeAgentSession implements AgentSession {
       this.unstartedMessageUuids.size === 0 &&
       this.pendingPermissions.size === 0 &&
       this.processingSdkMessages === 0 &&
+      this.inFlightSideQuestions === 0 &&
       this.runtimeSafety.canStopRuntime()
     );
   }
@@ -3533,6 +3536,49 @@ class ClaudeAgentSession implements AgentSession {
         ...(input.title?.trim() ? { title: input.title.trim() } : {}),
       },
     };
+  }
+
+  async askSideQuestion(input: {
+    question: string;
+    history?: readonly { question: string; response: string }[];
+    signal?: AbortSignal;
+  }): Promise<{ response: string; synthetic?: boolean; model?: string | null }> {
+    const question = input.question.trim();
+    if (!question) {
+      throw new Error("Side question cannot be empty");
+    }
+    await this.ensureHistoryReady();
+    const q = await this.ensureQuery();
+    type ClaudeSideQuestionQuery = Query & {
+      askSideQuestion?: (
+        question: string,
+        options?: {
+          history?: readonly { question: string; response: string }[];
+          signal?: AbortSignal;
+        },
+      ) => Promise<{ response: string; synthetic?: boolean } | null>;
+    };
+    const sideQuery = q as ClaudeSideQuestionQuery;
+    if (typeof sideQuery.askSideQuestion !== "function") {
+      throw new Error("Current Claude SDK runtime does not support native /btw side questions");
+    }
+    this.inFlightSideQuestions += 1;
+    try {
+      const result = await sideQuery.askSideQuestion(question, {
+        ...(input.history?.length ? { history: input.history } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      if (!result || typeof result.response !== "string" || result.response.trim().length === 0) {
+        throw new Error("Claude returned an empty side question response");
+      }
+      return {
+        response: result.response,
+        synthetic: result.synthetic ?? false,
+        model: this.cachedRuntimeInfo?.model ?? this.config.model ?? null,
+      };
+    } finally {
+      this.inFlightSideQuestions = Math.max(0, this.inFlightSideQuestions - 1);
+    }
   }
 
   private resolveSlashCommandInvocation(prompt: AgentPromptInput): SlashCommandInvocation | null {

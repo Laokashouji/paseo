@@ -1,7 +1,11 @@
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceDraftTabSetup } from "@/workspace-tabs/model";
 
-export type ClientSlashCommandKind = "archive-agent" | "replace-agent-with-draft" | "branch-agent";
+export type ClientSlashCommandKind =
+  | "archive-agent"
+  | "replace-agent-with-draft"
+  | "branch-agent"
+  | "side-question";
 export type ClientSlashCommandExecution = "immediate" | "insert";
 export type ClientSlashCommandArgsMode = "none" | "optional" | "required";
 
@@ -12,7 +16,8 @@ export interface ClientSlashCommand {
   descriptionKey:
     | "composer.clientCommands.archiveAgent"
     | "composer.clientCommands.freshDraft"
-    | "composer.clientCommands.branchAgent";
+    | "composer.clientCommands.branchAgent"
+    | "composer.clientCommands.sideQuestion";
   argumentHint: string;
   kind: ClientSlashCommandKind;
   execution: ClientSlashCommandExecution;
@@ -54,6 +59,16 @@ export const CLIENT_SLASH_COMMANDS: readonly ClientSlashCommand[] = [
     kind: "branch-agent",
     execution: "insert",
     argsMode: "optional",
+  },
+  {
+    name: "btw",
+    aliases: [],
+    description: "Ask an ephemeral side question sharing this chat's cache",
+    descriptionKey: "composer.clientCommands.sideQuestion",
+    argumentHint: "<question>",
+    kind: "side-question",
+    execution: "insert",
+    argsMode: "required",
   },
 ];
 

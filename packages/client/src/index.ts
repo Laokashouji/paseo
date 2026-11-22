@@ -38,7 +38,12 @@ import type {
   WorkspaceDescriptorPayload,
   WorkspaceCreateRequest,
 } from "@getpaseo/protocol/messages";
-import { DaemonClient, type CreateAgentRequestOptions } from "./daemon-client.js";
+import {
+  DaemonClient,
+  type AgentForkOptions,
+  type AgentSideQuestionOptions,
+  type CreateAgentRequestOptions,
+} from "./daemon-client.js";
 import {
   createTerminalActions,
   type PaseoTerminalActions,
@@ -466,6 +471,13 @@ export interface PaseoAgentHandle {
   commands(options?: PaseoAgentCommandsOptions): Promise<PaseoAgentCommandsResult>;
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
+  /** Fork this agent natively without losing provider history or prompt cache. */
+  fork(options?: AgentForkOptions): Promise<PaseoAgentHandle>;
+  /** Ask an ephemeral read-only side question (/btw) sharing this agent's context cache. */
+  askSideQuestion(
+    question: string,
+    options?: AgentSideQuestionOptions,
+  ): Promise<{ response: string; synthetic?: boolean; model?: string | null }>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
 }
 
@@ -1005,7 +1017,7 @@ function createAgentHandleFactory(
   subscribeTimeline: DaemonClient["subscribeAgentTimeline"],
   observeBackgroundWork: () => ReturnType<DaemonClient["observeAgentBackgroundWork"]>,
 ): AgentHandleFactory {
-  return (agent) => {
+  const createHandle: AgentHandleFactory = (agent) => {
     const id = typeof agent === "string" ? agent : agent.id;
     let current = typeof agent === "string" ? null : agent;
 
@@ -1195,6 +1207,12 @@ function createAgentHandleFactory(
       detach: async () => {
         await daemonClient.detachAgent(id);
       },
+      fork: async (options) => {
+        const result = await daemonClient.forkAgent(id, options);
+        return createHandle(result.agent);
+      },
+      askSideQuestion: (question, options) =>
+        daemonClient.askAgentSideQuestion(id, question, options),
       subscribe: (handler) =>
         listen((update) => {
           if (update.kind === "upsert" && update.agent.id === id) {
@@ -1209,6 +1227,7 @@ function createAgentHandleFactory(
 
     return handle;
   };
+  return createHandle;
 }
 
 async function openWorkspace(

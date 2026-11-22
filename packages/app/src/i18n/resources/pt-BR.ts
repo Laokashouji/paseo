@@ -208,6 +208,7 @@ export const ptBR: TranslationResources = {
       archiveAgent: "Arquivar o agente atual",
       freshDraft: "Arquivar este agente e iniciar um novo rascunho",
       branchAgent: "Bifurcar esta conversa em uma nova aba de ramificação",
+      sideQuestion: "Fazer uma pergunta lateral efêmera compartilhando o cache deste chat",
     },
     github: {
       searching: "Buscando...",
@@ -2105,6 +2106,20 @@ export const ptBR: TranslationResources = {
     rootBadge: "Principal",
     archiveAction: "Arquivar {{label}}",
     archiveTooltip: "Arquivar ramificação",
+  },
+  sideQuestion: {
+    ephemeralHint: "Cache compartilhado · não salvo no chat",
+    minimize: "Minimizar painel BTW",
+    close: "Fechar e limpar painel BTW",
+    thinking: "Pensando…",
+    failed: "Falha na pergunta lateral",
+    copyAnswer: "Copiar",
+    insertToComposer: "Inserir na entrada",
+    askInBranch: "Perguntar em nova ramificação",
+    followUpPlaceholder: "Fazer uma pergunta adicional…",
+    sendFollowUp: "Enviar",
+    pillPending: "BTW · Pensando…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

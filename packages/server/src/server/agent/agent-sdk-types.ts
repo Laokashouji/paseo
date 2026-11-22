@@ -186,6 +186,24 @@ export interface AgentCapabilityFlags {
   supportsRewindFiles?: boolean;
   supportsRewindBoth?: boolean;
   supportsNativeFork?: boolean;
+  supportsSideQuestion?: boolean;
+}
+
+export interface AgentSideQuestionTurn {
+  question: string;
+  response: string;
+}
+
+export interface AgentSideQuestionInput {
+  question: string;
+  history?: readonly AgentSideQuestionTurn[];
+  signal?: AbortSignal;
+}
+
+export interface AgentSideQuestionResult {
+  response: string;
+  synthetic?: boolean;
+  model?: string | null;
 }
 
 export interface AgentSessionForkInput {
@@ -793,6 +811,12 @@ export interface AgentSession {
    * the full committed conversation is forked.
    */
   forkSession?(input: AgentSessionForkInput): Promise<AgentPersistenceHandle>;
+  /**
+   * Ask an ephemeral read-only side question (/btw) that shares the live session's
+   * prompt cache and full context without mutating the main timeline or interrupting
+   * an in-flight turn.
+   */
+  askSideQuestion?(input: AgentSideQuestionInput): Promise<AgentSideQuestionResult>;
   /**
    * Out-of-band prompt handler. When non-null, the manager runs the returned
    * handler instead of allocating a turn. The handler emits stream events

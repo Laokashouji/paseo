@@ -66,6 +66,7 @@ import type {
   FetchAgentTimelineResponseMessage,
   AgentForkContextResponseMessage,
   AgentForkResponseMessage,
+  AgentSideQuestionResponseMessage,
   GitSetupOptions,
   CheckoutStatusResponse,
   CheckoutCommit,
@@ -729,6 +730,7 @@ type ScheduleUpdatePayload = Extract<
 export type FetchAgentTimelinePayload = FetchAgentTimelineResponseMessage["payload"];
 export type AgentForkContextPayload = AgentForkContextResponseMessage["payload"];
 export type AgentForkPayload = AgentForkResponseMessage["payload"];
+export type AgentSideQuestionPayload = AgentSideQuestionResponseMessage["payload"];
 
 export type FetchAgentTimelineDirection = FetchAgentTimelinePayload["direction"];
 export type FetchAgentTimelineProjection = FetchAgentTimelinePayload["projection"];
@@ -823,6 +825,17 @@ export interface AgentForkOptions {
   boundaryMessageId?: string;
   title?: string;
   labels?: Record<string, string>;
+  requestId?: string;
+  timeout?: number;
+}
+
+export interface AgentSideQuestionTurn {
+  question: string;
+  response: string;
+}
+
+export interface AgentSideQuestionOptions {
+  history?: readonly AgentSideQuestionTurn[];
   requestId?: string;
   timeout?: number;
 }
@@ -4298,6 +4311,47 @@ export class DaemonClient {
     return {
       agent: payload.agent,
       forkMode: payload.forkMode,
+    };
+  }
+
+  async askAgentSideQuestion(
+    agentId: string,
+    question: string,
+    options: AgentSideQuestionOptions = {},
+  ): Promise<{ response: string; synthetic?: boolean; model?: string | null }> {
+    const resolvedRequestId = this.createRequestId(options.requestId);
+    const message = SessionInboundMessageSchema.parse({
+      type: "agent.side_question.request",
+      agentId,
+      question,
+      ...(options.history?.length ? { history: [...options.history] } : {}),
+      requestId: resolvedRequestId,
+    });
+
+    const payload = await this.sendRequest({
+      requestId: resolvedRequestId,
+      message,
+      timeout: options.timeout ?? 120000,
+      options: { skipQueue: true },
+      select: (msg) => {
+        if (msg.type !== "agent.side_question.response") {
+          return null;
+        }
+        if (msg.payload.requestId !== resolvedRequestId) {
+          return null;
+        }
+        return msg.payload;
+      },
+    });
+
+    if (payload.error || payload.response === null) {
+      throw new Error(payload.error ?? "Side question failed");
+    }
+
+    return {
+      response: payload.response,
+      synthetic: payload.synthetic,
+      model: payload.model ?? null,
     };
   }
 

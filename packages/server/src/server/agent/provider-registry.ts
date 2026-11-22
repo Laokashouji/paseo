@@ -495,6 +495,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
           return mapped;
         }
       : undefined,
+    askSideQuestion: inner.askSideQuestion?.bind(inner),
     tryHandleOutOfBand: inner.tryHandleOutOfBand?.bind(inner),
   } satisfies ForwardedAgentSession;
 }

@@ -61,7 +61,24 @@ describe("resolveClientSlashCommand", () => {
       ["exit", ["quit", "q"], "immediate"],
       ["clear", ["new"], "immediate"],
       ["branch", ["fork"], "insert"],
+      ["btw", [], "insert"],
     ]);
+  });
+
+  it("resolves /btw only when a question argument is provided", () => {
+    expect(resolveClientSlashCommandInvocation({ text: "/btw", hasAttachments: false })).toBeNull();
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/btw   ", hasAttachments: false }),
+    ).toBeNull();
+    expect(
+      resolveClientSlashCommandInvocation({
+        text: "/btw 这个函数为什么返回 null？",
+        hasAttachments: false,
+      }),
+    ).toMatchObject({
+      command: { name: "btw", kind: "side-question" },
+      args: "这个函数为什么返回 null？",
+    });
   });
 
   it("resolves /branch and /fork with or without an explicit branch title", () => {

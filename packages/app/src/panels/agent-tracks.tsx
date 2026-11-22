@@ -2,6 +2,7 @@ import type { AgentAddress } from "@getpaseo/protocol/addresses";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import { BackgroundWorkTrack, createHostBackgroundWorkModel } from "@/background-work";
 import { BranchesTrack, useBranchesForAgent } from "@/branches";
+import { SideQuestionPill } from "@/side-questions";
 import type { ToastApi } from "@/components/toast-host";
 import { WorkspaceDiffStatPill } from "@/composer/diff-stat-pill";
 import { AgentTaskList } from "@/composer/task-list";
@@ -167,6 +168,7 @@ export const AgentTracks = memo(function AgentTracks({
       <BackgroundWorkTrack model={backgroundModel} count={backgroundWorkCount} />
       {parentAgentId ? <ParentAgentPill serverId={serverId} parentAgentId={parentAgentId} /> : null}
       <AgentTaskList tasks={tasks} />
+      <SideQuestionPill serverId={serverId} agentId={agentId} />
       <BranchesTrack
         serverId={serverId}
         workspaceId={workspaceId}

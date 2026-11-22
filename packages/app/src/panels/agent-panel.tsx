@@ -92,6 +92,7 @@ import {
 import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
+import { SideQuestionCard, useSideQuestionStore } from "@/side-questions";
 import { OverlayDismissalScope } from "@/components/ui/overlay-dismissal";
 import { ParentAgentCallout, useParentAgentId } from "@/subagents/parent";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
@@ -1210,6 +1211,28 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     onAttentionInputFocus();
     return false;
   }, [onAttentionInputFocus]);
+  const handleInsertSideQuestionToComposer = useCallback(
+    (text: string) => {
+      const existing = agentInputDraft.textSource.getSnapshot();
+      const next = existing.trim().length > 0 ? `${existing}\n\n${text}` : text;
+      agentInputDraft.replaceText(next);
+      useSideQuestionStore.getState().minimize(serverId, agentId);
+      requestAnimationFrame(() => composerEditingSession.focus());
+    },
+    [agentId, agentInputDraft, composerEditingSession, serverId],
+  );
+  const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
+  const handleForkFromSideQuestion = useCallback(() => {
+    const currentAgent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
+    if (!currentAgent) return;
+    useSideQuestionStore.getState().minimize(serverId, agentId);
+    void sideQuestionForkAgent({
+      agentId,
+      agent: currentAgent,
+      workspaceId,
+      target: "tab",
+    });
+  }, [agentId, serverId, sideQuestionForkAgent, workspaceId]);
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1236,6 +1259,14 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           onOpenWorkspaceFile={onOpenWorkspaceFile}
         />
       </RenderProfile>
+      {hasActiveComposer && !draft ? (
+        <SideQuestionCard
+          serverId={serverId}
+          agentId={agentId}
+          onInsertToComposer={handleInsertSideQuestionToComposer}
+          onForkToBranch={handleForkFromSideQuestion}
+        />
+      ) : null}
       {hasActiveComposer && !draft ? (
         <AgentTracks
           serverId={serverId}
@@ -1664,6 +1695,7 @@ function ActiveAgentComposer({
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const { workspaceId, tabId, retargetCurrentTab } = paneContext;
   const { archiveAgent } = useArchiveAgent();
+  const { t } = useTranslation();
   const forkAgent = useForkAgent({ serverId, toast });
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
@@ -1709,6 +1741,18 @@ function ActiveAgentComposer({
         return;
       }
 
+      if (command.kind === "side-question") {
+        const client = useSessionStore.getState().sessions[serverId]?.client ?? null;
+        void useSideQuestionStore.getState().askQuestion({
+          serverId,
+          agentId,
+          question: args,
+          client,
+          disconnectedMessage: t("workspace.terminal.hostDisconnected"),
+        });
+        return;
+      }
+
       const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
       if (workspaceKey) {
         unpinWorkspaceAgent(workspaceKey, agentId);
@@ -1735,6 +1779,7 @@ function ActiveAgentComposer({
       hideWorkspaceAgent,
       retargetCurrentTab,
       serverId,
+      t,
       tabId,
       unpinWorkspaceAgent,
       workspaceId,

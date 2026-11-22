@@ -3210,6 +3210,8 @@ export class Session {
         return this.handleAgentForkContextRequest(msg);
       case "agent.fork.request":
         return this.handleAgentForkRequest(msg, source);
+      case "agent.side_question.request":
+        return this.handleAgentSideQuestionRequest(msg, source);
       default:
         return undefined;
     }
@@ -9039,6 +9041,54 @@ export class Session {
             sourceAgentId: msg.sourceAgentId,
             agent: null,
             forkMode: null,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+        source,
+      );
+    }
+  }
+
+  private async handleAgentSideQuestionRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.side_question.request" }>,
+    source?: object,
+  ): Promise<void> {
+    try {
+      await ensureAgentLoaded(msg.agentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const result = await this.agentManager.askSideQuestion(msg.agentId, {
+        question: msg.question,
+        history: msg.history,
+      });
+      this.emitForSource(
+        {
+          type: "agent.side_question.response",
+          payload: {
+            requestId: msg.requestId,
+            agentId: msg.agentId,
+            response: result.response,
+            synthetic: result.synthetic,
+            model: result.model ?? null,
+            error: null,
+          },
+        },
+        source,
+      );
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, agentId: msg.agentId },
+        "Failed to handle agent.side_question.request",
+      );
+      this.emitForSource(
+        {
+          type: "agent.side_question.response",
+          payload: {
+            requestId: msg.requestId,
+            agentId: msg.agentId,
+            response: null,
             error: error instanceof Error ? error.message : String(error),
           },
         },

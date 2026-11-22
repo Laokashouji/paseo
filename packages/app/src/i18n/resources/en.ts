@@ -205,6 +205,7 @@ export const en = {
       archiveAgent: "Archive the current agent",
       freshDraft: "Archive this agent and start a fresh draft",
       branchAgent: "Fork this conversation into a new branch tab",
+      sideQuestion: "Ask an ephemeral side question sharing this chat's cache",
     },
     github: {
       searching: "Searching...",
@@ -2099,6 +2100,20 @@ export const en = {
     rootBadge: "Main",
     archiveAction: "Archive {{label}}",
     archiveTooltip: "Archive branch",
+  },
+  sideQuestion: {
+    ephemeralHint: "Shared cache · not added to chat",
+    minimize: "Minimize BTW panel",
+    close: "Close and clear BTW panel",
+    thinking: "Thinking…",
+    failed: "Side question failed",
+    copyAnswer: "Copy",
+    insertToComposer: "Insert into input",
+    askInBranch: "Ask in new branch",
+    followUpPlaceholder: "Ask a follow-up…",
+    sendFollowUp: "Send follow-up",
+    pillPending: "BTW · Thinking…",
+    pillCount: "BTW · {{count}}",
   },
   subagents: {
     parent: {

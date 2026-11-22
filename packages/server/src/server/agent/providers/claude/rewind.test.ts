@@ -15,6 +15,7 @@ import type { Query } from "@anthropic-ai/claude-agent-sdk";
 
 import {
   findSteeredMessageParent,
+  forkClaudeConversation,
   revertClaudeConversation,
   revertClaudeConversationAndFiles,
   revertClaudeFiles,
@@ -277,6 +278,83 @@ describe("Claude rewind against the Claude SDK", () => {
       "running a tool",
       "tool output",
     ]);
+  });
+
+  test("forks full conversation losslessly into a target project folder and relocates cwd", async () => {
+    tempRoot = mkdtempSync(path.join(tmpdir(), "claude-native-fork-cwd-"));
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const sourceDir = path.join(tempRoot, "projects", "-repo-a");
+    const targetDir = path.join(tempRoot, "projects", "-repo-b");
+    mkdirSync(sourceDir, { recursive: true });
+    const sessionId = randomUUID();
+    const u1 = randomUUID();
+    const a1 = randomUUID();
+    const u2 = randomUUID();
+    const a2 = randomUUID();
+    const transcriptPath = path.join(sourceDir, `${sessionId}.jsonl`);
+    const entries = [
+      {
+        type: "user",
+        uuid: u1,
+        parentUuid: null,
+        sessionId,
+        cwd: "/repo/a",
+        message: { role: "user", content: "first" },
+      },
+      {
+        type: "assistant",
+        uuid: a1,
+        parentUuid: u1,
+        sessionId,
+        cwd: "/repo/a",
+        message: { role: "assistant", content: [{ type: "text", text: "first reply" }] },
+      },
+      {
+        type: "user",
+        uuid: u2,
+        parentUuid: a1,
+        sessionId,
+        cwd: "/repo/a",
+        message: { role: "user", content: "second" },
+      },
+      {
+        type: "assistant",
+        uuid: a2,
+        parentUuid: u2,
+        sessionId,
+        cwd: "/repo/a",
+        message: { role: "assistant", content: [{ type: "text", text: "second reply" }] },
+      },
+    ];
+    writeFileSync(transcriptPath, `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+
+    const forked = await forkClaudeConversation({
+      sdk: realClaudeRewindSdk,
+      sessionId,
+      transcriptPath,
+      targetProjectFolder: targetDir,
+      sourceCwd: "/repo/a",
+      targetCwd: "/repo/b",
+      title: "Worktree Fork",
+    });
+
+    expect(forked.sessionId).not.toBe(sessionId);
+    const forkedPath = path.join(targetDir, `${forked.sessionId}.jsonl`);
+    expect(readMessageTexts(forkedPath)).toEqual([
+      "first",
+      [{ type: "text", text: "first reply" }],
+      "second",
+      [{ type: "text", text: "second reply" }],
+    ]);
+    const forkedEntries = readFileSync(forkedPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type?: string; cwd?: string });
+    const messageEntries = forkedEntries.filter(
+      (entry) => entry.type === "user" || entry.type === "assistant",
+    );
+    expect(messageEntries.length).toBe(4);
+    expect(messageEntries.every((entry) => entry.cwd === "/repo/b")).toBe(true);
   });
 });
 
