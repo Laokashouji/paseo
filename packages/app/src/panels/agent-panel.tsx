@@ -92,7 +92,13 @@ import {
 import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
-import { SideQuestionCard, useSideQuestionStore } from "@/side-questions";
+import {
+  buildSideQuestionForkDraft,
+  buildSideQuestionForkTitle,
+  SideQuestionCard,
+  useSideQuestionStore,
+  type SideQuestionTurnEntry,
+} from "@/side-questions";
 import { OverlayDismissalScope } from "@/components/ui/overlay-dismissal";
 import { ParentAgentCallout, useParentAgentId } from "@/subagents/parent";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
@@ -1222,17 +1228,22 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     [agentId, agentInputDraft, composerEditingSession, serverId],
   );
   const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
-  const handleForkFromSideQuestion = useCallback(() => {
-    const currentAgent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
-    if (!currentAgent) return;
-    useSideQuestionStore.getState().minimize(serverId, agentId);
-    void sideQuestionForkAgent({
-      agentId,
-      agent: currentAgent,
-      workspaceId,
-      target: "tab",
-    });
-  }, [agentId, serverId, sideQuestionForkAgent, workspaceId]);
+  const handleForkFromSideQuestion = useCallback(
+    (turn: SideQuestionTurnEntry) => {
+      const currentAgent = resolveChatAgentFromSession(useSessionStore.getState(), serverId, agentId);
+      if (!currentAgent) return;
+      useSideQuestionStore.getState().minimize(serverId, agentId);
+      void sideQuestionForkAgent({
+        agentId,
+        agent: currentAgent,
+        workspaceId,
+        target: "tab",
+        title: buildSideQuestionForkTitle(turn),
+        initialDraftText: buildSideQuestionForkDraft(turn),
+      });
+    },
+    [agentId, serverId, sideQuestionForkAgent, workspaceId],
+  );
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1742,11 +1753,16 @@ function ActiveAgentComposer({
       }
 
       if (command.kind === "side-question") {
+        const trimmedArgs = args.trim();
+        if (!trimmedArgs) {
+          useSideQuestionStore.getState().open(serverId, agentId);
+          return;
+        }
         const client = useSessionStore.getState().sessions[serverId]?.client ?? null;
         void useSideQuestionStore.getState().askQuestion({
           serverId,
           agentId,
-          question: args,
+          question: trimmedArgs,
           client,
           disconnectedMessage: t("workspace.terminal.hostDisconnected"),
         });

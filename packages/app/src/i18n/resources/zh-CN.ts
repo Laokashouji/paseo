@@ -2053,7 +2053,7 @@ export const zhCN: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "共享缓存 · 不写入主对话",
     minimize: "收起旁路提问卡片",
-    close: "关闭并清空旁路提问",
+    close: "关闭面板（输入 /btw 或点底部按钮可重新打开）",
     thinking: "正在思考…",
     failed: "旁路提问失败",
     copyAnswer: "复制回答",
@@ -2063,6 +2063,12 @@ export const zhCN: TranslationResources = {
     sendFollowUp: "发送追问",
     pillPending: "BTW · 思考中…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "清空记录",
+    triggerLabel: "BTW",
+    triggerTooltip: "旁路提问 (/btw) · 共享缓存，不写入主对话",
+    askPlaceholder: "输入旁路问题…",
+    emptyHint: "基于当前对话上下文快速提问，不写入主对话记录，复用当前提示词缓存。",
+    continueInBranch: "转为新分支继续",
   },
   subagents: {
     parent: {

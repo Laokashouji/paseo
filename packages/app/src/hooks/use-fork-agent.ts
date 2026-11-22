@@ -11,7 +11,8 @@ import type { AgentScreenAgent } from "@/hooks/use-agent-screen-state-machine";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useHostFeature } from "@/runtime/host-features";
-import { generateDraftId } from "@/stores/draft-keys";
+import { buildDraftStoreKey, generateDraftId } from "@/stores/draft-keys";
+import { useDraftStore } from "@/stores/draft-store";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import {
@@ -65,6 +66,8 @@ export interface ForkAgentRequest {
   isInFlight?: boolean;
   /** Optional explicit title for the forked conversation (e.g. from `/branch <name>`). */
   title?: string;
+  /** Optional text prefilled into the newly opened branch tab's composer draft. */
+  initialDraftText?: string;
 }
 
 export interface UseForkAgentInput {
@@ -137,8 +140,18 @@ export function useForkAgent(
   const supportsAgentNativeFork = useHostFeature(serverId, "agentNativeFork") && !readOnly;
 
   return useStableEvent(
-    async ({ agentId, agent, workspaceId, target, boundary, isInFlight = false, title }) => {
+    async ({
+      agentId,
+      agent,
+      workspaceId,
+      target,
+      boundary,
+      isInFlight = false,
+      title,
+      initialDraftText,
+    }) => {
       try {
+        const trimmedInitialDraft = initialDraftText?.trim() ? initialDraftText : null;
         const canNativeFork =
           supportsAgentNativeFork &&
           agent.capabilities?.supportsNativeFork === true &&
@@ -190,6 +203,12 @@ export function useForkAgent(
                 agent: normalized,
               });
               getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
+              if (trimmedInitialDraft) {
+                useDraftStore.getState().replaceDraftText({
+                  draftKey: buildDraftStoreKey({ serverId, agentId: forkedSnapshot.id }),
+                  text: trimmedInitialDraft,
+                });
+              }
               navigateToWorkspace({
                 serverId,
                 workspaceId,
@@ -207,6 +226,12 @@ export function useForkAgent(
             }
           }
           const draftId = await prepareForkDraft();
+          if (trimmedInitialDraft) {
+            useDraftStore.getState().replaceDraftText({
+              draftKey: buildDraftStoreKey({ serverId, agentId: "", draftId }),
+              text: trimmedInitialDraft,
+            });
+          }
           navigateToWorkspace({
             serverId,
             workspaceId,

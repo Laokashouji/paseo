@@ -2,6 +2,8 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { create } from "zustand";
 import { toErrorMessage } from "@/utils/error-messages";
 
+export type SideQuestionDisplayMode = "open" | "minimized" | "closed";
+
 export interface SideQuestionTurnEntry {
   id: string;
   question: string;
@@ -14,11 +16,13 @@ export interface SideQuestionTurnEntry {
 
 export interface SideQuestionThreadState {
   turns: SideQuestionTurnEntry[];
-  isOpen: boolean;
+  displayMode: SideQuestionDisplayMode;
 }
 
 interface SideQuestionStoreState {
   threads: Record<string, SideQuestionThreadState>;
+  open: (serverId: string, agentId: string) => void;
+  toggle: (serverId: string, agentId: string) => void;
   askQuestion: (input: {
     serverId: string;
     agentId: string;
@@ -35,13 +39,38 @@ interface SideQuestionStoreState {
   }) => Promise<void>;
   minimize: (serverId: string, agentId: string) => void;
   reopen: (serverId: string, agentId: string) => void;
-  dismiss: (serverId: string, agentId: string) => void;
+  close: (serverId: string, agentId: string) => void;
+  clear: (serverId: string, agentId: string) => void;
 }
 
 let nextTurnSequence = 0;
 
 export function buildSideQuestionThreadKey(serverId: string, agentId: string): string {
   return `${serverId}:${agentId}`;
+}
+
+export function buildSideQuestionForkTitle(turn: Pick<SideQuestionTurnEntry, "question">): string | undefined {
+  const singleLine = turn.question.replace(/\s+/g, " ").trim();
+  if (!singleLine) return undefined;
+  return singleLine.length > 48 ? `${singleLine.slice(0, 47).trimEnd()}…` : singleLine;
+}
+
+export function buildSideQuestionForkDraft(
+  turn: Pick<SideQuestionTurnEntry, "question" | "response" | "status">,
+): string {
+  const question = turn.question.trim();
+  if (turn.status !== "done" || !turn.response?.trim()) {
+    return question;
+  }
+  const answer = turn.response.trim();
+  return [
+    `[BTW 旁路提问记录]`,
+    `Q: ${question}`,
+    ``,
+    `A: ${answer}`,
+    ``,
+    `请基于以上讨论继续处理：`,
+  ].join("\n");
 }
 
 function collectCompletedHistory(
@@ -62,6 +91,32 @@ function collectCompletedHistory(
 
 export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) => ({
   threads: {},
+
+  open: (serverId, agentId) => {
+    const key = buildSideQuestionThreadKey(serverId, agentId);
+    set((state) => {
+      const existing = state.threads[key];
+      return {
+        threads: {
+          ...state.threads,
+          [key]: {
+            turns: existing?.turns ?? [],
+            displayMode: "open",
+          },
+        },
+      };
+    });
+  },
+
+  toggle: (serverId, agentId) => {
+    const key = buildSideQuestionThreadKey(serverId, agentId);
+    const existing = get().threads[key];
+    if (existing?.displayMode === "open") {
+      get().close(serverId, agentId);
+      return;
+    }
+    get().open(serverId, agentId);
+  },
 
   askQuestion: async ({ serverId, agentId, question, client, disconnectedMessage }) => {
     const trimmed = question.trim();
@@ -85,7 +140,7 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
       threads: {
         ...state.threads,
         [key]: {
-          isOpen: true,
+          displayMode: "open",
           turns: [...(state.threads[key]?.turns ?? []), pendingEntry],
         },
       },
@@ -163,7 +218,7 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
           ...state.threads,
           [key]: {
             ...current,
-            isOpen: true,
+            displayMode: "open",
             turns: current.turns.map((turn) =>
               turn.id === turnId
                 ? {
@@ -238,33 +293,54 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
     set((state) => {
       const thread = state.threads[key];
       if (!thread) return state;
+      if (thread.turns.length === 0) {
+        const { [key]: _removed, ...threads } = state.threads;
+        return { threads };
+      }
       return {
         threads: {
           ...state.threads,
-          [key]: { ...thread, isOpen: false },
+          [key]: { ...thread, displayMode: "minimized" },
         },
       };
     });
   },
 
   reopen: (serverId, agentId) => {
+    get().open(serverId, agentId);
+  },
+
+  close: (serverId, agentId) => {
     const key = buildSideQuestionThreadKey(serverId, agentId);
     set((state) => {
       const thread = state.threads[key];
       if (!thread) return state;
+      if (thread.turns.length === 0) {
+        const { [key]: _removed, ...threads } = state.threads;
+        return { threads };
+      }
       return {
         threads: {
           ...state.threads,
-          [key]: { ...thread, isOpen: true },
+          [key]: { ...thread, displayMode: "closed" },
         },
       };
     });
   },
 
-  dismiss: (serverId, agentId) => {
+  clear: (serverId, agentId) => {
     const key = buildSideQuestionThreadKey(serverId, agentId);
     set((state) => {
-      if (!(key in state.threads)) return state;
+      const thread = state.threads[key];
+      if (!thread) return state;
+      if (thread.displayMode === "open") {
+        return {
+          threads: {
+            ...state.threads,
+            [key]: { turns: [], displayMode: "open" },
+          },
+        };
+      }
       const { [key]: _removed, ...threads } = state.threads;
       return { threads };
     });

@@ -65,11 +65,19 @@ describe("resolveClientSlashCommand", () => {
     ]);
   });
 
-  it("resolves /btw only when a question argument is provided", () => {
-    expect(resolveClientSlashCommandInvocation({ text: "/btw", hasAttachments: false })).toBeNull();
+  it("resolves /btw with or without a question argument", () => {
+    expect(
+      resolveClientSlashCommandInvocation({ text: "/btw", hasAttachments: false }),
+    ).toMatchObject({
+      command: { name: "btw", kind: "side-question" },
+      args: "",
+    });
     expect(
       resolveClientSlashCommandInvocation({ text: "/btw   ", hasAttachments: false }),
-    ).toBeNull();
+    ).toMatchObject({
+      command: { name: "btw", kind: "side-question" },
+      args: "",
+    });
     expect(
       resolveClientSlashCommandInvocation({
         text: "/btw 这个函数为什么返回 null？",

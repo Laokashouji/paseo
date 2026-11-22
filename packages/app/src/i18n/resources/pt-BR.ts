@@ -2110,7 +2110,7 @@ export const ptBR: TranslationResources = {
   sideQuestion: {
     ephemeralHint: "Cache compartilhado · não salvo no chat",
     minimize: "Minimizar painel BTW",
-    close: "Fechar e limpar painel BTW",
+    close: "Fechar painel BTW (digite /btw ou clique em BTW para reabrir)",
     thinking: "Pensando…",
     failed: "Falha na pergunta lateral",
     copyAnswer: "Copiar",
@@ -2120,6 +2120,12 @@ export const ptBR: TranslationResources = {
     sendFollowUp: "Enviar",
     pillPending: "BTW · Pensando…",
     pillCount: "BTW · {{count}}",
+    clearHistory: "Limpar histórico",
+    triggerLabel: "BTW",
+    triggerTooltip: "Pergunta paralela (/btw) · cache compartilhado, fora do chat",
+    askPlaceholder: "Faça uma pergunta paralela…",
+    emptyHint: "Pergunte sobre esta conversa sem adicionar ao histórico, reutilizando o cache ativo.",
+    continueInBranch: "Continuar em nova branch",
   },
   subagents: {
     parent: {
