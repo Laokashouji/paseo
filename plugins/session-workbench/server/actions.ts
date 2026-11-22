@@ -1,5 +1,5 @@
-import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
+import type { PaseoApi } from "./paseo-types.js";
 import type { ForkContextMode, ForkMode, SessionWorkbenchCard, TodoItem } from "../shared/schema.js";
 import {
   DEFAULT_WORKBENCH_SETTINGS,
