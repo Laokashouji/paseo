@@ -17,6 +17,7 @@ export const builtinPlugins = [
   "muse-provider",
   "opencode-go-usage-source",
   "openrouter-host-usage-source",
+  "session-archive",
   "session-workbench",
   "worktree-include",
   "zai-usage-source",

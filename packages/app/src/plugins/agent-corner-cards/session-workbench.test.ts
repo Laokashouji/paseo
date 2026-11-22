@@ -50,7 +50,6 @@ function createRuntime() {
 describe("session-workbench builtin client bundle", () => {
   it("uses only valid Lucide icon names", () => {
     const iconNames = [
-      "Archive",
       "ListTodo",
       "PanelRight",
       "PanelsTopLeft",
@@ -92,7 +91,7 @@ describe("session-workbench builtin client bundle", () => {
     });
     expect(bundles.clientBundle).toBeTruthy();
 
-    const { runtime, closeAgentTab, subscriptions } = createRuntime();
+    const { runtime, subscriptions } = createRuntime();
     const evaluated = runPluginClientBundle("session-workbench", bundles.clientBundle!, runtime);
     expect(evaluated.surfaces.map((item) => item.id)).toEqual(["overview"]);
     expect(evaluated.sidebarItems.header.map((item) => item.id)).toEqual(["overview"]);
@@ -104,10 +103,26 @@ describe("session-workbench builtin client bundle", () => {
       "open-agent-panel",
     ]);
     expect(evaluated.settingsScreens.map((item) => item.id)).toEqual(["settings"]);
+    expect(
+      subscriptions.some((entry) => entry.name === "workbench.session.archive_completed"),
+    ).toBe(false);
 
-    const archiveSub = subscriptions.find(
-      (entry) => entry.name === "workbench.session.archive_completed",
-    );
+    await evaluated.cleanup();
+    expect(evaluated.agentCornerCards).toEqual([]);
+  });
+
+  it("compiles and evaluates session-archive builtin bundle and closes agent tab on completion", async () => {
+    const pluginDir = path.join(repoRoot, "plugins", "session-archive");
+    const bundles = await compilePlugin({
+      server: path.join(pluginDir, "index.server.ts"),
+      client: path.join(pluginDir, "index.client.tsx"),
+    });
+    expect(bundles.clientBundle).toBeTruthy();
+
+    const { runtime, closeAgentTab, subscriptions } = createRuntime();
+    const evaluated = runPluginClientBundle("session-archive", bundles.clientBundle!, runtime);
+
+    const archiveSub = subscriptions.find((entry) => entry.name === "session.archive.completed");
     expect(archiveSub).toBeDefined();
     archiveSub?.onEvent({
       agentId: "agent-1",
@@ -119,7 +134,6 @@ describe("session-workbench builtin client bundle", () => {
 
     await evaluated.cleanup();
     expect(archiveSub?.unsubscribed).toBe(true);
-    expect(evaluated.agentCornerCards).toEqual([]);
   });
 
   it("closePluginAgentTab closes the agent tab and its agent panel while preserving sibling tabs", () => {

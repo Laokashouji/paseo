@@ -2093,6 +2093,43 @@ export const ar: TranslationResources = {
     emptyHint: "اسأل حول هذه المحادثة دون إضافتها للسجل مع إعادة استخدام الذاكرة المؤقتة.",
     continueInBranch: "المتابعة في فرع جديد",
   },
+  sessionArchive: {
+    tooltipIdle: "أرشفة المحادثة (تنظيف worktrees والملفات المؤقتة)",
+    tooltipQueued: "أمر الأرشفة في الانتظار · انقر للإلغاء",
+    tooltipRunning: "جاري تنفيذ تنظيف الأرشفة…",
+    tooltipPendingArchive: "اكتمل التنظيف، ستتم الأرشفة بعد انتهاء هذه الجولة…",
+    confirmTitle: "أرشفة هذه المحادثة؟",
+    confirmMessageAuto:
+      "سيتم إرسال أمر الأرشفة لينظف الذكاء الاصطناعي worktrees والملفات المؤقتة، ثم أرشفة التبويب وإغلاقه تلقائياً عند الأمان.",
+    confirmMessageManual:
+      "سيتم إرسال أمر الأرشفة لينظف الذكاء الاصطناعي worktrees والملفات المؤقتة ويقدم تقريراً.",
+    confirmMessageQueued:
+      "المحادثة قيد التشغيل حالياً. أكّد لإرسال أمر الأرشفة تلقائياً بعد انتهاء هذه الجولة.",
+    confirmAction: "أرشفة",
+    cancelQueueTitle: "إلغاء الأرشفة المجدولة؟",
+    cancelQueueMessage: "لن يتم إرسال أمر الأرشفة بعد انتهاء هذه الجولة.",
+    cancelQueueConfirm: "إلغاء الانتظار",
+    toasts: {
+      sent: "تم إرسال أمر الأرشفة",
+      queued: "تمت جدولة أمر الأرشفة لما بعد هذه الجولة",
+      canceled: "تم إلغاء الأرشفة المجدولة",
+      emptyCommand: "أمر الأرشفة فارغ. اضبطه من الإعدادات ← المحادثة.",
+      failed: "فشل إرسال أمر الأرشفة",
+    },
+    settings: {
+      sectionTitle: "أرشفة المحادثة",
+      autoArchiveLabel: "الأرشفة وإغلاق التبويب تلقائياً بعد التنظيف",
+      autoArchiveHint: "أرشفة المحادثة وإغلاق التبويب تلقائياً بعد استدعاء session_finish_archive.",
+      commandLabel: "أمر الأرشفة",
+      commandHint: "يُرسل إلى المحادثة الحالية بعد تأكيد زر الأرشفة في شريط الإدخال.",
+      commandPlaceholder: "أدخل أمر أو تعليمات الأرشفة…",
+      saveAction: "حفظ",
+      resetAction: "استعادة الافتراضي",
+      emptyError: "لا يمكن ترك أمر الأرشفة فارغاً",
+      savedToast: "تم حفظ أمر الأرشفة",
+      resetToast: "تمت استعادة أمر الأرشفة الافتراضي",
+    },
+  },
   subagents: {
     parent: {
       backToParent: "العودة إلى الوكيل الأصلي",

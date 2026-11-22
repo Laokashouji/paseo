@@ -2124,8 +2124,48 @@ export const ptBR: TranslationResources = {
     triggerLabel: "BTW",
     triggerTooltip: "Pergunta paralela (/btw) · cache compartilhado, fora do chat",
     askPlaceholder: "Faça uma pergunta paralela…",
-    emptyHint: "Pergunte sobre esta conversa sem adicionar ao histórico, reutilizando o cache ativo.",
+    emptyHint:
+      "Pergunte sobre esta conversa sem adicionar ao histórico, reutilizando o cache ativo.",
     continueInBranch: "Continuar em nova branch",
+  },
+  sessionArchive: {
+    tooltipIdle: "Arquivar conversa (limpar worktrees e arquivos temporários)",
+    tooltipQueued: "Comando de arquivamento na fila · clique para cancelar",
+    tooltipRunning: "Executando limpeza de arquivamento…",
+    tooltipPendingArchive: "Limpeza concluída, arquivando ao final deste turno…",
+    confirmTitle: "Arquivar esta conversa?",
+    confirmMessageAuto:
+      "Envia o comando de arquivamento para a IA limpar worktrees e arquivos temporários e, se estiver seguro, arquivar e fechar esta aba.",
+    confirmMessageManual:
+      "Envia o comando de arquivamento para a IA limpar worktrees e arquivos temporários e relatar o resultado.",
+    confirmMessageQueued:
+      "Esta conversa está em execução. Confirme para enviar o comando automaticamente ao final deste turno.",
+    confirmAction: "Arquivar",
+    cancelQueueTitle: "Cancelar arquivamento na fila?",
+    cancelQueueMessage: "O comando de arquivamento não será mais enviado após este turno.",
+    cancelQueueConfirm: "Cancelar fila",
+    toasts: {
+      sent: "Comando de arquivamento enviado",
+      queued: "Comando de arquivamento agendado para o fim deste turno",
+      canceled: "Arquivamento na fila cancelado",
+      emptyCommand: "O comando de arquivamento está vazio. Configure em Configurações → Chat.",
+      failed: "Falha ao enviar comando de arquivamento",
+    },
+    settings: {
+      sectionTitle: "Arquivamento de conversa",
+      autoArchiveLabel: "Arquivar e fechar aba automaticamente após limpeza",
+      autoArchiveHint:
+        "Arquiva e fecha a aba ao final do turno após a IA chamar session_finish_archive.",
+      commandLabel: "Comando de arquivamento",
+      commandHint:
+        "Enviado à conversa atual ao confirmar o botão de arquivar na barra do compositor.",
+      commandPlaceholder: "Digite o comando ou instrução de arquivamento…",
+      saveAction: "Salvar",
+      resetAction: "Restaurar padrão",
+      emptyError: "O comando de arquivamento não pode ficar vazio",
+      savedToast: "Comando de arquivamento salvo",
+      resetToast: "Comando de arquivamento padrão restaurado",
+    },
   },
   subagents: {
     parent: {

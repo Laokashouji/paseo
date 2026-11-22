@@ -2,7 +2,6 @@ import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 import {
   AdvancePolicySchema,
-  ArchiveCompletedEventSchema,
   BlockerKindSchema,
   ForkContextModeSchema,
   ForkModeSchema,
@@ -155,19 +154,6 @@ export const resolveExternalSignalRpc = defineRpc({
   }),
 });
 
-export const triggerArchiveRpc = defineRpc({
-  name: "workbench.session.archive",
-  input: z.object({
-    agentId: z.string().min(1),
-    workspaceId: z.string().nullable().optional(),
-    cancelQueue: z.boolean().optional(),
-  }),
-  output: z.object({
-    card: SessionWorkbenchCardSchema,
-    status: z.enum(["sent", "queued", "canceled"]),
-  }),
-});
-
 export const addBlockerRpc = defineRpc({
   name: "workbench.blocker.add",
   input: z.object({
@@ -224,10 +210,4 @@ export const overviewSubscription = defineSubscription({
     includeArchived: z.boolean().optional(),
   }),
   event: OverviewSnapshotSchema,
-});
-
-export const archiveCompletedSubscription = defineSubscription({
-  name: "workbench.session.archive_completed",
-  input: z.object({}),
-  event: ArchiveCompletedEventSchema,
 });

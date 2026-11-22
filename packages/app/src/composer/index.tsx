@@ -107,6 +107,7 @@ import { useVoiceOptional } from "@/contexts/voice-context";
 import { useToast } from "@/contexts/toast-context";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SideQuestionTriggerButton } from "@/side-questions";
+import { ArchiveConversationButton } from "@/session-archive/archive-button";
 import { Shortcut } from "@/components/ui/shortcut";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { AutocompletePopover } from "@/components/ui/autocomplete-popover";
@@ -2226,6 +2227,13 @@ function ComposerContentImpl({
       hasAgent ? (
         <View style={styles.rightControls}>
           {mode.showAgentControls && !readOnly ? (
+            <ArchiveConversationButton
+              serverId={serverId}
+              workspaceId={workspaceId}
+              agentId={agentId}
+            />
+          ) : null}
+          {mode.showAgentControls && !readOnly ? (
             <SideQuestionTriggerButton serverId={serverId} agentId={agentId} />
           ) : null}
           <View style={styles.contextWindowMeterSlot}>
@@ -2245,6 +2253,7 @@ function ComposerContentImpl({
       mode.showAgentControls,
       readOnly,
       serverId,
+      workspaceId,
       agentId,
       agentState.contextWindowMaxTokens,
       agentState.contextWindowUsedTokens,

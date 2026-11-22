@@ -29,6 +29,7 @@ import {
 import { z } from "zod";
 import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY } from "./keys";
 import { migrateAppSettings } from "./migrations";
+import { DEFAULT_ARCHIVE_COMMAND } from "@/session-archive/constants";
 
 export { APP_SETTINGS_KEY } from "./keys";
 export const APP_SETTINGS_QUERY_KEY = ["app-settings"];
@@ -110,6 +111,8 @@ export interface AppSettings {
   autoExpandReasoning: boolean;
   chatDisplay: ChatDisplay;
   chatOutlineEnabled: boolean;
+  archiveCommand: string;
+  autoArchiveAfterCleanup: boolean;
   vimKeybindings: boolean;
   sendShortcut: SendShortcut;
   filePanelAssociations: Record<string, string>;
@@ -168,6 +171,8 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   autoExpandReasoning: false,
   chatDisplay: "collapseTurns",
   chatOutlineEnabled: true,
+  archiveCommand: DEFAULT_ARCHIVE_COMMAND,
+  autoArchiveAfterCleanup: true,
   vimKeybindings: false,
   sendShortcut: "enter",
   filePanelAssociations: {},
@@ -276,6 +281,8 @@ const StoredAppSettingsSchema = z
     // COMPAT(compactToolCalls): migrated in v0.1.105, remove after 2027-01-12.
     compactToolCalls: z.boolean().optional().catch(undefined),
     chatOutlineEnabled: z.boolean().catch(true),
+    archiveCommand: z.string().catch(DEFAULT_ARCHIVE_COMMAND),
+    autoArchiveAfterCleanup: z.boolean().catch(true),
     vimKeybindings: z.boolean().catch(false),
     sendShortcut: z.enum(["enter", "mod-enter"]).catch("enter"),
     filePanelAssociations: z.record(z.string(), z.string()).catch({}),

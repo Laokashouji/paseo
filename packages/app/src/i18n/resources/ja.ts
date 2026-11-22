@@ -2114,6 +2114,44 @@ export const ja: TranslationResources = {
     emptyHint: "メイン会話に記録せず現在の文脈・キャッシュを使って質問できます。",
     continueInBranch: "新しいブランチで続ける",
   },
+  sessionArchive: {
+    tooltipIdle: "会話をアーカイブ（worktree と一時ファイルを整理）",
+    tooltipQueued: "アーカイブコマンド待機中 · クリックでキャンセル",
+    tooltipRunning: "アーカイブ整理を実行中…",
+    tooltipPendingArchive: "整理完了、このターン終了後に自動アーカイブ…",
+    confirmTitle: "この会話をアーカイブしますか？",
+    confirmMessageAuto:
+      "アーカイブコマンドを送信し、AI が残った worktree や一時ファイルを安全に整理した後、自動でアーカイブしてタブを閉じます。",
+    confirmMessageManual:
+      "アーカイブコマンドを送信し、AI が残った worktree や一時ファイルを整理して報告します。",
+    confirmMessageQueued:
+      "この会話は実行中です。確認するとこのターンの終了後にアーカイブコマンドを自動送信します。",
+    confirmAction: "アーカイブ",
+    cancelQueueTitle: "アーカイブ待機をキャンセルしますか？",
+    cancelQueueMessage: "キャンセルすると、このターン終了後にアーカイブコマンドは送信されません。",
+    cancelQueueConfirm: "待機をキャンセル",
+    toasts: {
+      sent: "アーカイブコマンドを送信しました",
+      queued: "このターン終了後にアーカイブコマンドを送信するよう予約しました",
+      canceled: "アーカイブ待機をキャンセルしました",
+      emptyCommand: "アーカイブコマンドが空です。「設定 → チャット」で設定してください。",
+      failed: "アーカイブコマンドの送信に失敗しました",
+    },
+    settings: {
+      sectionTitle: "会話のアーカイブ",
+      autoArchiveLabel: "整理完了後に自動アーカイブしてタブを閉じる",
+      autoArchiveHint:
+        "AI が session_finish_archive を呼び出した後、ターン終了時に自動でアーカイブしてタブを閉じます。",
+      commandLabel: "アーカイブコマンド",
+      commandHint: "入力欄下のアーカイブボタンを確認した際に会話へ送信されます。",
+      commandPlaceholder: "AI に送信するアーカイブコマンドまたは簡潔な指示を入力…",
+      saveAction: "保存",
+      resetAction: "デフォルトに戻す",
+      emptyError: "アーカイブコマンドは空にできません",
+      savedToast: "アーカイブコマンドを保存しました",
+      resetToast: "デフォルトのアーカイブコマンドに戻しました",
+    },
+  },
   subagents: {
     parent: {
       backToParent: "親に戻る",

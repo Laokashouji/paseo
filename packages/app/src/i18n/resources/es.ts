@@ -2142,6 +2142,45 @@ export const es: TranslationResources = {
     emptyHint: "Pregunta sobre esta conversación sin añadirla al historial, reutilizando la caché.",
     continueInBranch: "Continuar en nueva rama",
   },
+  sessionArchive: {
+    tooltipIdle: "Archivar conversación (limpiar worktrees y archivos temporales)",
+    tooltipQueued: "Comando de archivo en cola · clic para cancelar",
+    tooltipRunning: "Ejecutando limpieza de archivo…",
+    tooltipPendingArchive: "Limpieza lista, archivando al terminar este turno…",
+    confirmTitle: "¿Archivar esta conversación?",
+    confirmMessageAuto:
+      "Envía el comando de archivo para que la IA limpie worktrees y archivos temporales, y luego archive y cierre esta pestaña si es seguro.",
+    confirmMessageManual:
+      "Envía el comando de archivo para que la IA limpie worktrees y archivos temporales e informe el resultado.",
+    confirmMessageQueued:
+      "Esta conversación está en curso. Confirma para enviar el comando automáticamente cuando termine este turno.",
+    confirmAction: "Archivar",
+    cancelQueueTitle: "¿Cancelar archivo en cola?",
+    cancelQueueMessage: "No se enviará el comando de archivo al terminar este turno.",
+    cancelQueueConfirm: "Cancelar cola",
+    toasts: {
+      sent: "Comando de archivo enviado",
+      queued: "Comando de archivo en cola para el final de este turno",
+      canceled: "Archivo en cola cancelado",
+      emptyCommand: "El comando de archivo está vacío. Configúralo en Ajustes → Chat.",
+      failed: "No se pudo iniciar el comando de archivo",
+    },
+    settings: {
+      sectionTitle: "Archivo de conversación",
+      autoArchiveLabel: "Archivar y cerrar pestaña automáticamente tras limpiar",
+      autoArchiveHint:
+        "Archiva y cierra la pestaña al finalizar el turno tras llamar a session_finish_archive.",
+      commandLabel: "Comando de archivo",
+      commandHint:
+        "Se envía a la conversación actual al confirmar el botón de archivo en la barra inferior.",
+      commandPlaceholder: "Introduce el comando o instrucción de archivo…",
+      saveAction: "Guardar",
+      resetAction: "Restablecer",
+      emptyError: "El comando de archivo no puede estar vacío",
+      savedToast: "Comando de archivo guardado",
+      resetToast: "Comando de archivo predeterminado restaurado",
+    },
+  },
   subagents: {
     parent: {
       backToParent: "Volver al padre",

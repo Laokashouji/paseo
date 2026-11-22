@@ -1212,3 +1212,25 @@ describe("font family CSS safety", () => {
     },
   );
 });
+
+describe("session archive settings", () => {
+  it("defaults and persists archiveCommand and autoArchiveAfterCleanup", async () => {
+    const deps = makeDeps();
+    const queryClient = new QueryClient();
+    const initial = await loadAppSettingsFromStorage(deps);
+    expect(initial.archiveCommand).toBe(DEFAULT_CLIENT_SETTINGS.archiveCommand);
+    expect(initial.autoArchiveAfterCleanup).toBe(true);
+
+    await saveAppSettings({
+      queryClient,
+      deps,
+      updates: {
+        archiveCommand: "/archive-now",
+        autoArchiveAfterCleanup: false,
+      },
+    });
+    const saved = await loadAppSettingsFromStorage(deps);
+    expect(saved.archiveCommand).toBe("/archive-now");
+    expect(saved.autoArchiveAfterCleanup).toBe(false);
+  });
+});

@@ -12,8 +12,6 @@ import {
   SessionWorkbenchCardSchema,
   WORKBENCH_METADATA_KEY,
   type AdvancePolicy,
-  type ArchiveCompletedEvent,
-  type ArchiveState,
   type BlockerItem,
   type BlockerKind,
   type ForkMode,
@@ -78,8 +76,6 @@ export interface CardMetaPatch {
   lastSummarizedTurnId?: string | null;
   forkedFromAgentId?: string | null;
   forkedFromTodoId?: string | null;
-  archiveState?: ArchiveState;
-  archiveSummary?: string | null;
   archived?: boolean;
 }
 
@@ -97,7 +93,6 @@ export class WorkbenchStore {
   private readonly cards = new Map<string, SessionWorkbenchCard>();
   private readonly cardListeners = new Map<string, Set<(card: SessionWorkbenchCard) => void>>();
   private readonly overviewListeners = new Set<() => void>();
-  private readonly archiveCompletedListeners = new Set<(event: ArchiveCompletedEvent) => void>();
   private readonly metadataTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private loadPromise: Promise<void> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
@@ -123,14 +118,10 @@ export class WorkbenchStore {
       const parsed = PersistedStateSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) return;
       for (const [agentId, card] of Object.entries(parsed.data.cards)) {
-        // Recover transient summary/archive running states left over from a daemon crash.
+        // Recover transient summary running states left over from a daemon crash.
         this.cards.set(agentId, {
           ...card,
           summaryState: card.summaryState === "running" ? "idle" : card.summaryState,
-          archiveState:
-            card.archiveState === "running" || card.archiveState === "pending_archive"
-              ? "idle"
-              : card.archiveState,
         });
       }
     } catch {
@@ -174,7 +165,6 @@ export class WorkbenchStore {
     this.metadataTimers.clear();
     this.cardListeners.clear();
     this.overviewListeners.clear();
-    this.archiveCompletedListeners.clear();
   }
 
   getCardIfPresent(agentId: string): SessionWorkbenchCard | null {
@@ -316,8 +306,6 @@ export class WorkbenchStore {
         ? { forkedFromAgentId: patch.forkedFromAgentId }
         : {}),
       ...(patch.forkedFromTodoId !== undefined ? { forkedFromTodoId: patch.forkedFromTodoId } : {}),
-      ...(patch.archiveState !== undefined ? { archiveState: patch.archiveState } : {}),
-      ...(patch.archiveSummary !== undefined ? { archiveSummary: patch.archiveSummary } : {}),
       ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
       updatedAt: this.now(),
     };
@@ -570,7 +558,10 @@ export class WorkbenchStore {
     return { card: next, blocker };
   }
 
-  resolveBlocker(agentId: string, blockerId: string): { card: SessionWorkbenchCard; resolved: BlockerItem | null; allCleared: boolean } {
+  resolveBlocker(
+    agentId: string,
+    blockerId: string,
+  ): { card: SessionWorkbenchCard; resolved: BlockerItem | null; allCleared: boolean } {
     const base = this.getOrCreateCard({ agentId });
     const timestamp = this.now();
     let resolved: BlockerItem | null = null;
@@ -597,7 +588,9 @@ export class WorkbenchStore {
           : base.workflowStatus,
       statusNote: primary ? primary.title : allCleared ? "" : base.statusNote,
       ...(allCleared ? { waitCondition: null } : {}),
-      ...(resolved && allCleared ? { conditionMetNotice: `阻塞已解除：${(resolved as BlockerItem).title}` } : {}),
+      ...(resolved && allCleared
+        ? { conditionMetNotice: `阻塞已解除：${(resolved as BlockerItem).title}` }
+        : {}),
       updatedAt: timestamp,
     };
     this.commit(next, { syncMeta: true });
@@ -687,19 +680,6 @@ export class WorkbenchStore {
     return () => {
       this.overviewListeners.delete(listener);
     };
-  }
-
-  subscribeArchiveCompleted(listener: (event: ArchiveCompletedEvent) => void): () => void {
-    this.archiveCompletedListeners.add(listener);
-    return () => {
-      this.archiveCompletedListeners.delete(listener);
-    };
-  }
-
-  emitArchiveCompleted(event: ArchiveCompletedEvent): void {
-    for (const listener of this.archiveCompletedListeners) {
-      listener(event);
-    }
   }
 
   private commit(card: SessionWorkbenchCard, options: { syncMeta: boolean }): void {

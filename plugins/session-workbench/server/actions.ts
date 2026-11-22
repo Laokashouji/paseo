@@ -76,192 +76,15 @@ export async function runTodoAction(input: {
   return { card: input.store.getOrCreateCard({ agentId: input.agentId }), dispatched: "sent" };
 }
 
-export async function triggerArchiveAction(input: {
-  store: WorkbenchStore;
-  settings: PluginSettings<typeof workbenchSettingsSchema>;
-  paseo: PaseoApi;
-  agentId: string;
-  workspaceId?: string | null;
-  cancelQueue?: boolean;
-}): Promise<{ card: SessionWorkbenchCard; status: "sent" | "queued" | "canceled" }> {
-  const card = input.store.getOrCreateCard({
-    agentId: input.agentId,
-    workspaceId: input.workspaceId,
-  });
-
-  if (input.cancelQueue) {
-    if (card.archiveState !== "queued") {
-      return { card, status: "canceled" };
-    }
-    const updated = input.store.updateCard(input.agentId, {
-      archiveState: "idle",
-      statusNote: card.statusNote === "本轮结束后将自动发送归档命令" ? "" : card.statusNote,
-    });
-    return { card: updated, status: "canceled" };
-  }
-
-  if (card.archived) {
-    throw new Error("当前对话已归档");
-  }
-  if (card.archiveState === "running" || card.archiveState === "pending_archive") {
-    return { card, status: "sent" };
-  }
-
-  const config = await readSettings(input.settings);
-  const command = config.archiveCommand.trim();
-  if (!command) {
-    throw new Error("归档命令为空，请先在对话工作台设置中配置归档命令");
-  }
-
-  const handle = input.paseo.agents.ref(input.agentId);
-  const refreshed = await handle.refresh().catch(() => null);
-  if (refreshed) {
-    input.store.syncAgentSnapshot(refreshed.agent);
-    if (refreshed.agent.archivedAt) {
-      throw new Error("当前对话已归档");
-    }
-  }
-  const currentStatus = refreshed?.agent.status ?? card.runtimeStatus;
-  if (currentStatus === "running") {
-    const updated = input.store.updateCard(input.agentId, {
-      archiveState: "queued",
-      statusNote: "本轮结束后将自动发送归档命令",
-    });
-    return { card: updated, status: "queued" };
-  }
-
-  await handle.send(command);
-  const updated = input.store.updateCard(input.agentId, {
-    archiveState: "running",
-    archiveSummary: null,
-    workflowStatus: "active",
-    currentWork: "正在执行归档清理",
-    statusNote: "",
-    clearConditionNotice: true,
-  });
-  return { card: updated, status: "sent" };
-}
-
-async function handlePendingArchiveTurn(input: {
-  store: WorkbenchStore;
-  settings?: PluginSettings<typeof workbenchSettingsSchema>;
-  paseo: PaseoApi;
-  card: SessionWorkbenchCard;
-  outcomeKind: "completed" | "failed" | "canceled";
-}): Promise<{ archived: boolean; skipSummary: boolean }> {
-  const { store, settings, paseo, card, outcomeKind } = input;
-  const config = settings ? await readSettings(settings) : DEFAULT_WORKBENCH_SETTINGS;
-  if (outcomeKind === "completed" && config.autoArchiveAfterCleanup) {
-    try {
-      const result = await paseo.agents.ref(card.agentId).archive();
-      const archivedAt = result?.archivedAt || new Date().toISOString();
-      store.updateCard(card.agentId, {
-        archived: true,
-        archiveState: "idle",
-        workflowStatus: "done",
-        runtimeStatus: "closed",
-      });
-      store.emitArchiveCompleted({
-        agentId: card.agentId,
-        workspaceId: card.workspaceId ?? null,
-        archivedAt,
-        summary: card.archiveSummary ?? null,
-      });
-      return { archived: true, skipSummary: true };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      store.updateCard(card.agentId, {
-        archiveState: "idle",
-        workflowStatus: "waiting_me",
-        statusNote: `自动归档失败：${message.slice(0, 100)}`,
-      });
-      return { archived: false, skipSummary: true };
-    }
-  }
-
-  store.updateCard(card.agentId, {
-    archiveState: "idle",
-    workflowStatus: "waiting_me",
-    statusNote:
-      outcomeKind === "completed" ? "清理已完成，请确认后手动关闭" : "归档清理未正常结束，请检查",
-  });
-  return { archived: false, skipSummary: false };
-}
-
-async function dispatchQueuedArchiveCommand(input: {
-  store: WorkbenchStore;
-  settings?: PluginSettings<typeof workbenchSettingsSchema>;
-  paseo: PaseoApi;
-  agentId: string;
-}): Promise<{ archived: boolean; skipSummary: boolean }> {
-  const { store, settings, paseo, agentId } = input;
-  const config = settings ? await readSettings(settings) : DEFAULT_WORKBENCH_SETTINGS;
-  const command = config.archiveCommand.trim();
-  if (!command) {
-    store.updateCard(agentId, {
-      archiveState: "idle",
-      workflowStatus: "waiting_me",
-      statusNote: "归档命令为空，已取消自动发送",
-    });
-    return { archived: false, skipSummary: false };
-  }
-
-  const handle = paseo.agents.ref(agentId);
-  const latest = await handle.refresh().catch(() => null);
-  if (
-    latest &&
-    (latest.agent.status !== "idle" ||
-      latest.agent.pendingPermissions.length > 0 ||
-      latest.agent.lastError)
-  ) {
-    return { archived: false, skipSummary: false };
-  }
-
-  await handle.send(command);
-  store.updateCard(agentId, {
-    archiveState: "running",
-    archiveSummary: null,
-    workflowStatus: "active",
-    currentWork: "正在执行归档清理",
-    statusNote: "",
-    clearConditionNotice: true,
-  });
-  return { archived: false, skipSummary: true };
-}
-
 export async function handleTurnCompletedQueueAndTodos(input: {
   store: WorkbenchStore;
-  settings?: PluginSettings<typeof workbenchSettingsSchema>;
   paseo: PaseoApi;
   agentId: string;
   turnId: string | null;
   outcomeKind: "completed" | "failed" | "canceled";
-}): Promise<{ archived: boolean; skipSummary: boolean }> {
+}): Promise<void> {
   const card = input.store.getCardIfPresent(input.agentId);
-  if (!card) return { archived: false, skipSummary: false };
-
-  // Handle archive lifecycle transitions ahead of normal todo queue dispatch.
-  if (card.archiveState === "pending_archive") {
-    return handlePendingArchiveTurn({
-      store: input.store,
-      settings: input.settings,
-      paseo: input.paseo,
-      card,
-      outcomeKind: input.outcomeKind,
-    });
-  }
-
-  if (card.archiveState === "running") {
-    input.store.updateCard(input.agentId, {
-      archiveState: "idle",
-      workflowStatus: "waiting_me",
-      statusNote:
-        input.outcomeKind === "completed"
-          ? "归档清理待确认（未自动归档）"
-          : "归档命令执行中断，请检查后重试",
-    });
-    return { archived: false, skipSummary: false };
-  }
+  if (!card) return;
 
   // Mark the currently running workbench todo as done when the turn succeeded.
   if (input.outcomeKind === "completed") {
@@ -274,30 +97,21 @@ export async function handleTurnCompletedQueueAndTodos(input: {
     }
   }
 
-  if (input.outcomeKind !== "completed") return { archived: false, skipSummary: false };
+  if (input.outcomeKind !== "completed") return;
 
   const refreshedCard = input.store.getCardIfPresent(input.agentId);
-  if (refreshedCard?.archiveState === "queued") {
-    return dispatchQueuedArchiveCommand({
-      store: input.store,
-      settings: input.settings,
-      paseo: input.paseo,
-      agentId: input.agentId,
-    });
-  }
-
   const nextQueued = refreshedCard?.todos.find((item) => item.status === "queued");
-  if (!nextQueued) return { archived: false, skipSummary: false };
+  if (!nextQueued) return;
 
   const handle = input.paseo.agents.ref(input.agentId);
   const latest = await handle.refresh().catch(() => null);
-  if (!latest) return { archived: false, skipSummary: false };
+  if (!latest) return;
   if (
     latest.agent.status !== "idle" ||
     latest.agent.pendingPermissions.length > 0 ||
     latest.agent.lastError
   ) {
-    return { archived: false, skipSummary: false };
+    return;
   }
 
   await handle.send(resolveTodoPrompt(nextQueued));
@@ -306,7 +120,6 @@ export async function handleTurnCompletedQueueAndTodos(input: {
     currentWork: nextQueued.title,
     workflowStatus: "active",
   });
-  return { archived: false, skipSummary: false };
 }
 
 async function buildSummaryContextAttachment(input: {
@@ -552,7 +365,10 @@ export async function resolveBlockerAction(input: {
   if (!resolved || !allCleared) {
     return card;
   }
-  if (card.advancePolicy.mode === "auto_run_next_todo" || card.advancePolicy.mode === "auto_send_prompt") {
+  if (
+    card.advancePolicy.mode === "auto_run_next_todo" ||
+    card.advancePolicy.mode === "auto_send_prompt"
+  ) {
     const notice = `阻塞「${resolved.title}」已解除`;
     await applyConditionMetAdvance({
       store: input.store,
