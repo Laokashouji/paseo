@@ -4,6 +4,7 @@ import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import {
   forkTodoRpc,
+  resolveBlockerRpc,
   resolveExternalSignalRpc,
   runTodoRpc,
   updateCardMetaRpc,
@@ -11,8 +12,10 @@ import {
 import type { SessionWorkbenchCard, WorkflowStatus } from "../shared/schema.js";
 import { useWorkbenchOverview } from "./hooks.js";
 import {
+  getBlockerKindMeta,
   getRuntimeStatusLabel,
   getWorkflowStatusVisual,
+  withAlpha,
   WORKFLOW_STATUS_LIST,
 } from "./status-meta.js";
 
@@ -28,6 +31,7 @@ export function WorkbenchOverviewScreen({ theme, navigation }: PluginScreenProps
   const updateMeta = useRpc(updateCardMetaRpc);
   const runTodo = useRpc(runTodoRpc);
   const forkTodo = useRpc(forkTodoRpc);
+  const resolveBlocker = useRpc(resolveBlockerRpc);
   const resolveExternalSignal = useRpc(resolveExternalSignalRpc);
 
   const tabs = useMemo(
@@ -71,6 +75,7 @@ export function WorkbenchOverviewScreen({ theme, navigation }: PluginScreenProps
         card.agentTitle ?? "",
         card.currentWork,
         card.statusNote,
+        ...card.blockers.map((item) => item.title),
         ...card.todos.map((item) => item.title),
       ]
         .join(" ")
@@ -239,6 +244,7 @@ export function WorkbenchOverviewScreen({ theme, navigation }: PluginScreenProps
         ) : (
           filteredCards.map((card) => {
             const visual = getWorkflowStatusVisual(card.workflowStatus);
+            const openBlockers = card.blockers.filter((item) => item.status === "open");
             const openTodos = card.todos.filter(
               (item) => item.status === "open" || item.status === "queued" || item.status === "running",
             );
@@ -286,6 +292,11 @@ export function WorkbenchOverviewScreen({ theme, navigation }: PluginScreenProps
                     <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
                       {getRuntimeStatusLabel(card.runtimeStatus)}
                     </Text>
+                    {openBlockers.length > 0 ? (
+                      <Text style={{ fontSize: 11, color: theme.colors.statusWarning, fontWeight: "700" }}>
+                        {openBlockers.length} 条阻塞
+                      </Text>
+                    ) : null}
                     {openTodos.length > 0 ? (
                       <Text style={{ fontSize: 11, color: theme.colors.accent, fontWeight: "600" }}>
                         {openTodos.length} 条待办
@@ -346,15 +357,64 @@ export function WorkbenchOverviewScreen({ theme, navigation }: PluginScreenProps
                     </Text>
                   ) : null}
                   {card.conditionMetNotice ? (
-                    <Text style={{ fontSize: 12, color: theme.colors.statusWarning, fontWeight: "600" }}>
-                      条件已达成：{card.conditionMetNotice}
-                    </Text>
-                  ) : card.statusNote ? (
-                    <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
-                      说明：{card.statusNote}
+                    <Text style={{ fontSize: 12, color: theme.colors.statusSuccess, fontWeight: "600" }}>
+                      {card.conditionMetNotice}
                     </Text>
                   ) : null}
                 </Pressable>
+
+                {openBlockers.length > 0 ? (
+                  <View style={{ gap: 5 }}>
+                    {openBlockers.map((blocker) => {
+                      const kindMeta = getBlockerKindMeta(blocker.kind);
+                      const kindColor = kindMeta.color(theme);
+                      return (
+                        <View
+                          key={blocker.id}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 8,
+                            paddingHorizontal: 9,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            backgroundColor: withAlpha(kindColor, 0.1),
+                            borderWidth: 1,
+                            borderColor: withAlpha(kindColor, 0.3),
+                          }}
+                        >
+                          <Text style={{ flex: 1, fontSize: 12, color: theme.colors.foreground, lineHeight: 17 }}>
+                            [{kindMeta.label}] {blocker.title}
+                          </Text>
+                          <Pressable
+                            onPress={() =>
+                              void resolveBlocker({ agentId: card.agentId, blockerId: blocker.id })
+                                .then(() => toast.show("阻塞已解除", { variant: "success" }))
+                                .catch((error) =>
+                                  toast.error(error instanceof Error ? error.message : "操作失败"),
+                                )
+                            }
+                            style={{
+                              paddingHorizontal: 7,
+                              paddingVertical: 3,
+                              borderRadius: 6,
+                              backgroundColor: withAlpha(theme.colors.statusSuccess, 0.16),
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusSuccess }}>
+                              已解除
+                            </Text>
+                          </Pressable>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : card.statusNote ? (
+                  <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
+                    说明：{card.statusNote}
+                  </Text>
+                ) : null}
 
                 {isExpanded ? (
                   <View

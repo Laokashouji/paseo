@@ -104,6 +104,7 @@ export function useWorkbenchOverview(includeArchived = false) {
       done: 0,
       readyToAdvance: 0,
       openTodos: 0,
+      openBlockers: 0,
     },
   });
   const [loaded, setLoaded] = useState(false);

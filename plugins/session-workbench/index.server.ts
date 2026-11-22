@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi } from "./server/paseo-types.js";
 import {
+  addBlockerRpc,
   addTodoRpc,
   cardSubscription,
   forkTodoRpc,
@@ -8,7 +9,9 @@ import {
   getOverviewRpc,
   overviewSubscription,
   refreshSummaryRpc,
+  removeBlockerRpc,
   removeTodoRpc,
+  resolveBlockerRpc,
   resolveExternalSignalRpc,
   resolveSuggestedTodoRpc,
   runTodoRpc,
@@ -20,6 +23,7 @@ import {
   evaluateAgentSettledConditions,
   forkTodoAction,
   handleTurnCompletedQueueAndTodos,
+  resolveBlockerAction,
   resolveExternalSignalAction,
   runTodoAction,
 } from "./server/actions.js";
@@ -202,6 +206,37 @@ export default function contribute(server: PluginServerContext) {
       note: input.note,
     });
     return { card };
+  });
+
+  server.handle(addBlockerRpc, async (input, { paseo }) => {
+    await ensureReady(paseo);
+    const { card, blocker } = store.addBlocker({
+      agentId: input.agentId,
+      workspaceId: input.workspaceId,
+      title: input.title,
+      kind: input.kind,
+      author: input.author ?? "user",
+      targetAgentId: input.targetAgentId,
+      targetLabel: input.targetLabel,
+      expect: input.expect,
+    });
+    return { card, blockerId: blocker.id };
+  });
+
+  server.handle(resolveBlockerRpc, async (input, { paseo }) => {
+    await ensureReady(paseo);
+    const card = await resolveBlockerAction({
+      store,
+      paseo,
+      agentId: input.agentId,
+      blockerId: input.blockerId,
+    });
+    return { card };
+  });
+
+  server.handle(removeBlockerRpc, async (input, { paseo }) => {
+    await ensureReady(paseo);
+    return { card: store.removeBlocker(input.agentId, input.blockerId) };
   });
 
   // Live subscriptions must return void (not a settling Promise), because settling

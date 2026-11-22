@@ -12,6 +12,7 @@ import {
   evaluateAgentSettledConditions,
   forkTodoAction,
   handleTurnCompletedQueueAndTodos,
+  resolveBlockerAction,
   runTodoAction,
 } from "./actions.js";
 import { isHelperAgent, WorkbenchStore } from "./store.js";
@@ -604,5 +605,82 @@ describe("WaitCondition auto-advance and summary protection", () => {
       if (prevHome === undefined) delete process.env.PASEO_HOME;
       else process.env.PASEO_HOME = prevHome;
     }
+  });
+
+  test("manages structured blockers, syncs waiting status, and auto-resumes when cleared", async () => {
+    const dir = await createTempDir();
+    const store = new WorkbenchStore({ dataDir: dir });
+    await store.ensureLoaded();
+
+    const { blocker: b1 } = store.addBlocker({
+      agentId: "agent-blk",
+      workspaceId: "wks-1",
+      title: "等后端确认回调地址",
+      kind: "external",
+      author: "user",
+    });
+    expect(store.getCardIfPresent("agent-blk")?.workflowStatus).toBe("waiting_external");
+    expect(store.getOverview().counts.openBlockers).toBe(1);
+
+    const { blocker: b2 } = store.addBlocker({
+      agentId: "agent-blk",
+      workspaceId: "wks-1",
+      title: "等待联调会话完成",
+      kind: "dependency",
+      author: "agent",
+      targetAgentId: "agent-other",
+      targetLabel: "联调会话",
+      expect: "idle",
+    });
+    expect(store.getCardIfPresent("agent-blk")?.blockers.map((b) => b.id)).toEqual([b1.id, b2.id]);
+
+    const send = vi.fn(async () => {});
+    const mockPaseo = {
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { status: "idle", pendingPermissions: [] } }),
+          send,
+        }),
+      },
+    } as unknown as PaseoApi;
+
+    // Resolving b2 while b1 is still open keeps waiting_external.
+    await resolveBlockerAction({ store, paseo: mockPaseo, agentId: "agent-blk", blockerId: b2.id });
+    expect(store.getCardIfPresent("agent-blk")?.workflowStatus).toBe("waiting_external");
+    expect(store.getOverview().counts.openBlockers).toBe(1);
+
+    // Resolving the last open blocker restores active status cleanly.
+    await resolveBlockerAction({ store, paseo: mockPaseo, agentId: "agent-blk", blockerId: b1.id });
+    const finalCard = store.getCardIfPresent("agent-blk");
+    expect(finalCard?.workflowStatus).toBe("active");
+    expect(finalCard?.statusNote).toBe("");
+    expect(store.getOverview().counts.openBlockers).toBe(0);
+
+    // Agent tool workbench_add_blocker also records structured blockers and injects them into prompt.
+    const tools = createWorkbenchAgentTools(store);
+    const addBlockerTool = tools.find((item) => item.name === "workbench_add_blocker")!;
+    await addBlockerTool.execute(
+      { title: "待用户确认是否合并分支", kind: "decision" },
+      {
+        agent: {
+          id: "agent-blk",
+          workspaceId: "wks-1",
+          parentAgentId: null,
+          provider: "claude",
+          cwd: "/repo",
+          title: "阻塞测试",
+          background: false,
+          metadata: {},
+        },
+        paseo: mockPaseo,
+        signal: new AbortController().signal,
+      },
+    );
+    const updatedCard = store.getCardIfPresent("agent-blk");
+    expect(updatedCard?.workflowStatus).toBe("waiting_me");
+    expect(buildCardContextPrompt(updatedCard)).toContain("待用户确认是否合并分支");
+
+    await store.flush();
+    store.dispose();
   });
 });

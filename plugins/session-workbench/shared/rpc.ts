@@ -2,6 +2,7 @@ import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 import {
   AdvancePolicySchema,
+  BlockerKindSchema,
   ForkContextModeSchema,
   ForkModeSchema,
   OverviewSnapshotSchema,
@@ -147,6 +148,46 @@ export const resolveExternalSignalRpc = defineRpc({
   input: z.object({
     agentId: z.string().min(1),
     note: z.string().optional(),
+  }),
+  output: z.object({
+    card: SessionWorkbenchCardSchema,
+  }),
+});
+
+export const addBlockerRpc = defineRpc({
+  name: "workbench.blocker.add",
+  input: z.object({
+    agentId: z.string().min(1),
+    workspaceId: z.string().nullable().optional(),
+    title: z.string().trim().min(1).max(300),
+    kind: BlockerKindSchema.default("external"),
+    author: TodoAuthorSchema.optional(),
+    targetAgentId: z.string().min(1).optional(),
+    targetLabel: z.string().max(120).optional(),
+    expect: z.enum(["idle", "done"]).optional(),
+  }),
+  output: z.object({
+    card: SessionWorkbenchCardSchema,
+    blockerId: z.string(),
+  }),
+});
+
+export const resolveBlockerRpc = defineRpc({
+  name: "workbench.blocker.resolve",
+  input: z.object({
+    agentId: z.string().min(1),
+    blockerId: z.string().min(1),
+  }),
+  output: z.object({
+    card: SessionWorkbenchCardSchema,
+  }),
+});
+
+export const removeBlockerRpc = defineRpc({
+  name: "workbench.blocker.remove",
+  input: z.object({
+    agentId: z.string().min(1),
+    blockerId: z.string().min(1),
   }),
   output: z.object({
     card: SessionWorkbenchCardSchema,

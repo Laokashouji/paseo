@@ -4,19 +4,21 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useAgent, useComposers, useRpc } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import {
+  addBlockerRpc,
   addTodoRpc,
   forkTodoRpc,
   refreshSummaryRpc,
+  removeBlockerRpc,
   removeTodoRpc,
+  resolveBlockerRpc,
   resolveExternalSignalRpc,
   resolveSuggestedTodoRpc,
   runTodoRpc,
   updateCardMetaRpc,
-  updateTodoRpc,
 } from "../shared/rpc.js";
 import type {
   AdvancePolicy,
-  ForkMode,
+  BlockerItem,
   SessionWorkbenchCard,
   TodoItem,
   WaitCondition,
@@ -24,8 +26,8 @@ import type {
 } from "../shared/schema.js";
 import { useWorkbenchOverview } from "./hooks.js";
 import {
+  getBlockerKindMeta,
   getRuntimeStatusLabel,
-  getTodoStatusLabel,
   getWorkflowStatusVisual,
   withAlpha,
   WORKFLOW_STATUS_LIST,
@@ -60,22 +62,23 @@ export function WorkbenchCardBody({
 
   const updateMeta = useRpc(updateCardMetaRpc);
   const addTodo = useRpc(addTodoRpc);
-  const updateTodo = useRpc(updateTodoRpc);
   const removeTodo = useRpc(removeTodoRpc);
   const resolveSuggested = useRpc(resolveSuggestedTodoRpc);
   const runTodo = useRpc(runTodoRpc);
   const forkTodo = useRpc(forkTodoRpc);
   const refreshSummary = useRpc(refreshSummaryRpc);
   const resolveExternalSignal = useRpc(resolveExternalSignalRpc);
+  const addBlocker = useRpc(addBlockerRpc);
+  const resolveBlocker = useRpc(resolveBlockerRpc);
+  const removeBlocker = useRpc(removeBlockerRpc);
 
-  const [newTodoText, setNewTodoText] = useState("");
-  const [expandedTodoId, setExpandedTodoId] = useState<string | null>(null);
-  const [showDoneTodos, setShowDoneTodos] = useState(false);
+  const [inputMode, setInputMode] = useState<"todo" | "blocker">("todo");
+  const [draftText, setDraftText] = useState("");
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
   const [topicDraft, setTopicDraft] = useState("");
-  const [statusNoteDraft, setStatusNoteDraft] = useState("");
   const [busyTodoId, setBusyTodoId] = useState<string | null>(null);
+  const [busyBlockerId, setBusyBlockerId] = useState<string | null>(null);
   const [refreshingSummary, setRefreshingSummary] = useState(false);
 
   const effectiveRuntime = agentSnapshot?.status ?? card.runtimeStatus;
@@ -84,30 +87,57 @@ export function WorkbenchCardBody({
   const statusColor = statusVisual.color(theme);
   const isSummarizing = card.summaryState === "running" || refreshingSummary;
 
+  const openBlockers = useMemo(
+    () => card.blockers.filter((item) => item.status === "open"),
+    [card.blockers],
+  );
+
+  // Active todos strictly ordered: human-authored on top, AI-authored below.
   const activeTodos = useMemo(
     () => card.todos.filter((item) => item.status !== "done" && item.status !== "dismissed"),
     [card.todos],
   );
-  const completedTodos = useMemo(
-    () => card.todos.filter((item) => item.status === "done"),
-    [card.todos],
+  const humanTodos = useMemo(
+    () => activeTodos.filter((item) => item.author === "user"),
+    [activeTodos],
+  );
+  const aiTodos = useMemo(
+    () => activeTodos.filter((item) => item.author !== "user"),
+    [activeTodos],
   );
 
-  const handleAddTodo = useCallback(async () => {
-    const title = newTodoText.trim();
+  const hasLegacyWait =
+    openBlockers.length === 0 &&
+    (Boolean(card.statusNote) || card.waitCondition !== null) &&
+    (card.workflowStatus === "waiting_external" ||
+      card.workflowStatus === "waiting_dependency" ||
+      card.workflowStatus === "waiting_me");
+
+  const handleSubmitDraft = useCallback(async () => {
+    const title = draftText.trim();
     if (!title) return;
-    setNewTodoText("");
+    setDraftText("");
     try {
-      await addTodo({
-        agentId,
-        workspaceId,
-        title,
-        author: "user",
-      });
+      if (inputMode === "blocker") {
+        await addBlocker({
+          agentId,
+          workspaceId,
+          title,
+          kind: "external",
+          author: "user",
+        });
+      } else {
+        await addTodo({
+          agentId,
+          workspaceId,
+          title,
+          author: "user",
+        });
+      }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "添加待办失败");
+      toast.error(error instanceof Error ? error.message : inputMode === "blocker" ? "添加阻塞失败" : "添加待办失败");
     }
-  }, [addTodo, agentId, newTodoText, toast, workspaceId]);
+  }, [addBlocker, addTodo, agentId, draftText, inputMode, toast, workspaceId]);
 
   const handleSelectStatus = useCallback(
     async (status: WorkflowStatus) => {
@@ -116,7 +146,6 @@ export function WorkbenchCardBody({
           agentId,
           workspaceId,
           workflowStatus: status,
-          statusNote: statusNoteDraft.trim() || card.statusNote,
           ...(status !== "waiting_dependency" && status !== "waiting_external"
             ? { waitCondition: null }
             : {}),
@@ -126,22 +155,8 @@ export function WorkbenchCardBody({
         toast.error(error instanceof Error ? error.message : "更新状态失败");
       }
     },
-    [agentId, card.statusNote, statusNoteDraft, toast, updateMeta, workspaceId],
+    [agentId, toast, updateMeta, workspaceId],
   );
-
-  const handleSaveStatusNote = useCallback(async () => {
-    try {
-      await updateMeta({
-        agentId,
-        workspaceId,
-        statusNote: statusNoteDraft.trim(),
-      });
-      setStatusPickerOpen(false);
-      toast.show("已更新状态备注", { variant: "success" });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存备注失败");
-    }
-  }, [agentId, statusNoteDraft, toast, updateMeta, workspaceId]);
 
   const handleSaveTopic = useCallback(async () => {
     const trimmed = topicDraft.trim();
@@ -184,13 +199,17 @@ export function WorkbenchCardBody({
   }, [agentId, card.summaryState, refreshSummary, refreshingSummary, toast, workspaceId]);
 
   const handleRunTodo = useCallback(
-    async (todo: TodoItem, mode: "send_now" | "queue_next") => {
+    async (todo: TodoItem) => {
       setBusyTodoId(todo.id);
       try {
-        const result = await runTodo({ agentId, todoId: todo.id, mode });
+        const result = await runTodo({
+          agentId,
+          todoId: todo.id,
+          mode: isRunning ? "queue_next" : "send_now",
+        });
         toast.show(
           result.dispatched === "sent"
-            ? `已发送待办：${todo.title}`
+            ? `已进入执行：${todo.title}`
             : `已排入下一轮执行：${todo.title}`,
           { variant: "success" },
         );
@@ -200,7 +219,7 @@ export function WorkbenchCardBody({
         setBusyTodoId(null);
       }
     },
-    [agentId, runTodo, toast],
+    [agentId, isRunning, runTodo, toast],
   );
 
   const handleFillComposer = useCallback(
@@ -211,23 +230,21 @@ export function WorkbenchCardBody({
       }
       composer.setPrompt(todo.prompt?.trim() || todo.title);
       await composer.focus().catch(() => {});
+      toast.show("已填入输入框", { variant: "success" });
     },
     [composer, toast],
   );
 
   const handleForkTodo = useCallback(
-    async (todo: TodoItem, forkMode: ForkMode) => {
+    async (todo: TodoItem) => {
       setBusyTodoId(todo.id);
       try {
         const result = await forkTodo({
           agentId,
           todoId: todo.id,
-          forkMode,
+          forkMode: "same_workspace",
         });
-        toast.show(
-          forkMode === "new_worktree" ? "已 Fork 到新 Worktree 对话" : "已 Fork 到同工作区新对话",
-          { variant: "success" },
-        );
+        toast.show("已 Fork 新对话执行", { variant: "success" });
         onOpenAgent?.(result.newAgentId);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Fork 待办失败");
@@ -238,31 +255,41 @@ export function WorkbenchCardBody({
     [agentId, forkTodo, onOpenAgent, toast],
   );
 
-  const handleToggleDone = useCallback(
-    async (todo: TodoItem) => {
-      try {
-        await updateTodo({
-          agentId,
-          todoId: todo.id,
-          status: todo.status === "done" ? "open" : "done",
-        });
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "更新待办失败");
-      }
-    },
-    [agentId, toast, updateTodo],
-  );
-
   const handleRemoveTodo = useCallback(
     async (todoId: string) => {
       try {
         await removeTodo({ agentId, todoId });
-        if (expandedTodoId === todoId) setExpandedTodoId(null);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "删除待办失败");
+        toast.error(error instanceof Error ? error.message : "关闭待办失败");
       }
     },
-    [agentId, expandedTodoId, removeTodo, toast],
+    [agentId, removeTodo, toast],
+  );
+
+  const handleResolveBlocker = useCallback(
+    async (blockerId: string) => {
+      setBusyBlockerId(blockerId);
+      try {
+        await resolveBlocker({ agentId, blockerId });
+        toast.show("阻塞已解除", { variant: "success" });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "解除阻塞失败");
+      } finally {
+        setBusyBlockerId(null);
+      }
+    },
+    [agentId, resolveBlocker, toast],
+  );
+
+  const handleRemoveBlocker = useCallback(
+    async (blockerId: string) => {
+      try {
+        await removeBlocker({ agentId, blockerId });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "关闭阻塞失败");
+      }
+    },
+    [agentId, removeBlocker, toast],
   );
 
   const handleResolveSuggested = useCallback(
@@ -280,398 +307,549 @@ export function WorkbenchCardBody({
     await updateMeta({ agentId, workspaceId, clearConditionNotice: true }).catch(() => {});
   }, [agentId, updateMeta, workspaceId]);
 
-  const handleResolveSignal = useCallback(async () => {
+  const handleResolveLegacySignal = useCallback(async () => {
     try {
       await resolveExternalSignal({ agentId });
-      toast.show("已标记外部确认达成", { variant: "success" });
+      toast.show("阻塞已解除", { variant: "success" });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新失败");
     }
   }, [agentId, resolveExternalSignal, toast]);
 
-  return (
-    <View style={{ gap: 12 }}>
-      {/* Unified top bar: status pill + runtime indicator + compact toolbar */}
-      <View style={{ gap: 8 }}>
-        <View
+  const renderTodoRow = (todo: TodoItem) => {
+    const isBusy = busyTodoId === todo.id;
+    const isTodoRunning = todo.status === "running";
+    const isTodoQueued = todo.status === "queued";
+    const isTodoForked = todo.status === "forked";
+
+    const rowBg = isTodoRunning
+      ? withAlpha(theme.colors.statusSuccess, 0.14)
+      : isTodoQueued
+        ? withAlpha(theme.colors.statusWarning, 0.12)
+        : theme.colors.surface1;
+
+    const rowBorder = isTodoRunning
+      ? withAlpha(theme.colors.statusSuccess, 0.45)
+      : isTodoQueued
+        ? withAlpha(theme.colors.statusWarning, 0.4)
+        : theme.colors.border;
+
+    return (
+      <View
+        key={todo.id}
+        style={{
+          flexDirection: "row",
+          alignItems: "flex-start",
+          gap: 8,
+          paddingHorizontal: 10,
+          paddingVertical: 9,
+          borderRadius: 10,
+          backgroundColor: rowBg,
+          borderWidth: 1,
+          borderColor: rowBorder,
+          ...(isTodoRunning
+            ? { borderLeftWidth: 3, borderLeftColor: theme.colors.statusSuccess }
+            : isTodoQueued
+              ? { borderLeftWidth: 3, borderLeftColor: theme.colors.statusWarning }
+              : {}),
+        }}
+      >
+        {/* Left small × to close/dismiss todo */}
+        <Pressable
+          onPress={() => void handleRemoveTodo(todo.id)}
+          hitSlop={6}
+          accessibilityLabel="关闭待办"
+          style={{
+            marginTop: 2,
+            width: 18,
+            height: 18,
+            borderRadius: 999,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: withAlpha(theme.colors.foregroundMuted, 0.12),
+          }}
+        >
+          <Icon name="X" size={11} color={theme.colors.foregroundMuted} />
+        </Pressable>
+
+        {/* Todo text: wraps freely; click directly fills the composer input */}
+        <Pressable
+          onPress={() => void handleFillComposer(todo)}
+          style={{ flex: 1, flexShrink: 1, minWidth: 0, gap: 4 }}
+        >
+          <Text
+            style={{
+              fontSize: 13,
+              fontWeight: isTodoRunning ? "600" : "500",
+              color: theme.colors.foreground,
+              lineHeight: 19,
+            }}
+          >
+            {todo.title}
+          </Text>
+          {(isTodoRunning || isTodoQueued || isTodoForked) ? (
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+              {isTodoRunning ? (
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 4,
+                    paddingHorizontal: 6,
+                    paddingVertical: 1,
+                    borderRadius: 999,
+                    backgroundColor: withAlpha(theme.colors.statusSuccess, 0.18),
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 999,
+                      backgroundColor: theme.colors.statusSuccess,
+                    }}
+                  />
+                  <Text style={{ fontSize: 10, fontWeight: "700", color: theme.colors.statusSuccess }}>
+                    执行中 · 完成后自动归档
+                  </Text>
+                </View>
+              ) : null}
+              {isTodoQueued ? (
+                <Text style={{ fontSize: 10, fontWeight: "700", color: theme.colors.statusWarning }}>
+                  ● 已排入下一轮
+                </Text>
+              ) : null}
+              {isTodoForked ? (
+                <Text style={{ fontSize: 10, fontWeight: "600", color: theme.colors.statusSuccess }}>
+                  已 Fork 新对话
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </Pressable>
+
+        {/* Right actions: ONLY Continue/Queue + Fork New Conversation (no Edit, no Worktree) */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 0, marginTop: 1 }}>
+          {todo.forkedAgentId ? (
+            <Pressable
+              onPress={() => onOpenAgent?.(todo.forkedAgentId!)}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 3,
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: 7,
+                backgroundColor: withAlpha(theme.colors.statusSuccess, 0.14),
+                borderWidth: 1,
+                borderColor: withAlpha(theme.colors.statusSuccess, 0.35),
+              }}
+            >
+              <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusSuccess }}>
+                打开对话
+              </Text>
+              <Icon name="ArrowUpRight" size={11} color={theme.colors.statusSuccess} />
+            </Pressable>
+          ) : (
+            <>
+              {!isTodoRunning ? (
+                <Pressable
+                  onPress={() => void handleRunTodo(todo)}
+                  disabled={isBusy}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 4,
+                    paddingHorizontal: 8,
+                    paddingVertical: 4,
+                    borderRadius: 7,
+                    backgroundColor: statusVisual.tintBg(theme),
+                    borderWidth: 1,
+                    borderColor: statusVisual.tintBorder(theme),
+                    opacity: isBusy ? 0.5 : 1,
+                  }}
+                >
+                  <Icon name="Play" size={10} color={statusColor} />
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
+                    {isRunning ? "排队" : "继续"}
+                  </Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={() => void handleForkTodo(todo)}
+                disabled={isBusy}
+                accessibilityLabel="Fork 新对话运行"
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 3,
+                  paddingHorizontal: 7,
+                  paddingVertical: 4,
+                  borderRadius: 7,
+                  backgroundColor: theme.colors.surface2,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  opacity: isBusy ? 0.5 : 1,
+                }}
+              >
+                <Icon name="Split" size={11} color={theme.colors.foregroundMuted} />
+                <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foreground }}>
+                  Fork
+                </Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  const renderBlockerRow = (blocker: BlockerItem) => {
+    const kindMeta = getBlockerKindMeta(blocker.kind);
+    const kindColor = kindMeta.color(theme);
+    const isBusy = busyBlockerId === blocker.id;
+    return (
+      <View
+        key={blocker.id}
+        style={{
+          flexDirection: "row",
+          alignItems: "flex-start",
+          gap: 8,
+          paddingHorizontal: 10,
+          paddingVertical: 9,
+          borderRadius: 10,
+          backgroundColor: withAlpha(kindColor, 0.1),
+          borderWidth: 1,
+          borderColor: withAlpha(kindColor, 0.32),
+        }}
+      >
+        <Pressable
+          onPress={() => void handleRemoveBlocker(blocker.id)}
+          hitSlop={6}
+          accessibilityLabel="移除阻塞项"
+          style={{
+            marginTop: 2,
+            width: 18,
+            height: 18,
+            borderRadius: 999,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: withAlpha(kindColor, 0.16),
+          }}
+        >
+          <Icon name="X" size={11} color={kindColor} />
+        </Pressable>
+
+        <View style={{ flex: 1, flexShrink: 1, minWidth: 0, gap: 4 }}>
+          <Text
+            style={{
+              fontSize: 13,
+              fontWeight: "500",
+              color: theme.colors.foreground,
+              lineHeight: 19,
+            }}
+          >
+            {blocker.title}
+          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+            <View
+              style={{
+                paddingHorizontal: 6,
+                paddingVertical: 1,
+                borderRadius: 999,
+                backgroundColor: withAlpha(kindColor, 0.16),
+              }}
+            >
+              <Text style={{ fontSize: 10, fontWeight: "700", color: kindColor }}>
+                {kindMeta.label}
+              </Text>
+            </View>
+            <Text style={{ fontSize: 10, color: theme.colors.foregroundMuted }}>
+              {blocker.author === "user" ? "我记的" : "AI 识别"}
+            </Text>
+            {blocker.targetAgentId ? (
+              <Pressable
+                onPress={() => onOpenAgent?.(blocker.targetAgentId!)}
+                style={{ flexDirection: "row", alignItems: "center", gap: 2 }}
+              >
+                <Text style={{ fontSize: 10, fontWeight: "600", color: kindColor }}>
+                  查看关联对话
+                </Text>
+                <Icon name="ArrowUpRight" size={10} color={kindColor} />
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+
+        <Pressable
+          onPress={() => void handleResolveBlocker(blocker.id)}
+          disabled={isBusy}
           style={{
             flexDirection: "row",
             alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
+            gap: 3,
+            paddingHorizontal: 8,
+            paddingVertical: 4,
+            borderRadius: 7,
+            backgroundColor: withAlpha(theme.colors.statusSuccess, 0.16),
+            borderWidth: 1,
+            borderColor: withAlpha(theme.colors.statusSuccess, 0.42),
+            opacity: isBusy ? 0.5 : 1,
+            flexShrink: 0,
+            marginTop: 1,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 1 }}>
-            <Pressable
-              onPress={() => {
-                setStatusNoteDraft(card.statusNote);
-                setStatusPickerOpen((open) => !open);
-              }}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 6,
-                paddingHorizontal: 10,
-                paddingVertical: 5,
-                borderRadius: 999,
-                backgroundColor: statusVisual.tintBg(theme),
-                borderWidth: 1,
-                borderColor: statusVisual.tintBorder(theme),
-              }}
-            >
-              <View
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: 999,
-                  backgroundColor: statusColor,
-                }}
-              />
-              <Text style={{ fontSize: 12, fontWeight: "700", color: statusColor }}>
-                {statusVisual.label}
-              </Text>
-              <Icon
-                name={statusPickerOpen ? "ChevronRight" : "ChevronDown"}
-                size={12}
-                color={statusColor}
-              />
-            </Pressable>
+          <Icon name="CheckCircle2" size={11} color={theme.colors.statusSuccess} />
+          <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusSuccess }}>
+            已解除
+          </Text>
+        </Pressable>
+      </View>
+    );
+  };
 
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 4,
-                paddingHorizontal: 7,
-                paddingVertical: 3,
-                borderRadius: 999,
-                backgroundColor: isRunning
-                  ? withAlpha(theme.colors.statusSuccess, 0.14)
-                  : theme.colors.surface1,
-              }}
-            >
-              {isRunning ? (
-                <View
+  return (
+    <View style={{ padding: variant === "corner" ? 15 : 0, gap: 12 }}>
+      {/* Row 1: Primary Topic Headline + Status Pill (Zero redundant plugin title bar) */}
+      <View style={{ gap: 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+          <View style={{ flex: 1, flexShrink: 1, minWidth: 0 }}>
+            {editingTopic ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <TextInput
+                  value={topicDraft}
+                  onChangeText={setTopicDraft}
+                  autoFocus
+                  onSubmitEditing={() => void handleSaveTopic()}
+                  placeholder="输入对话主题工作"
+                  placeholderTextColor={theme.colors.foregroundMuted}
                   style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 999,
-                    backgroundColor: theme.colors.statusSuccess,
+                    flex: 1,
+                    fontSize: 15,
+                    fontWeight: "700",
+                    color: theme.colors.foreground,
+                    backgroundColor: theme.colors.surface1,
+                    borderWidth: 1,
+                    borderColor: statusColor,
+                    borderRadius: 8,
+                    paddingHorizontal: 9,
+                    paddingVertical: 5,
                   }}
                 />
-              ) : null}
-              <Text
-                style={{
-                  fontSize: 11,
-                  fontWeight: isRunning ? "600" : "500",
-                  color: isRunning ? theme.colors.statusSuccess : theme.colors.foregroundMuted,
-                }}
-              >
-                {getRuntimeStatusLabel(effectiveRuntime)}
-              </Text>
-            </View>
+                <Pressable
+                  onPress={() => void handleSaveTopic()}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 7,
+                    backgroundColor: theme.colors.accent,
+                  }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: theme.colors.accentForeground }}>
+                    确定
+                  </Text>
+                </Pressable>
+              </View>
+            ) : (
+              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 6 }}>
+                <Pressable
+                  onPress={() => {
+                    setTopicDraft(card.topic || card.agentTitle || "");
+                    setEditingTopic(true);
+                  }}
+                  style={{ flex: 1, flexShrink: 1, minWidth: 0 }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 17,
+                      fontWeight: "700",
+                      lineHeight: 23,
+                      color:
+                        card.topic || card.agentTitle
+                          ? theme.colors.foreground
+                          : theme.colors.foregroundMuted,
+                    }}
+                  >
+                    {card.topic || card.agentTitle || "待自动总结主题…"}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void handleToggleTopicLock()}
+                  hitSlop={6}
+                  accessibilityLabel={card.topicLocked ? "解锁主题允许 AI 更新" : "锁定主题禁止 AI 覆盖"}
+                  style={{ marginTop: 4 }}
+                >
+                  <Icon
+                    name={card.topicLocked ? "Pin" : "PinOff"}
+                    size={12}
+                    color={card.topicLocked ? statusColor : theme.colors.foregroundMuted}
+                  />
+                </Pressable>
+              </View>
+            )}
           </View>
 
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-            <ToolbarIconButton
-              theme={theme}
-              icon="RefreshCw"
-              accessibilityLabel="立即刷新 AI 摘要"
-              active={isSummarizing}
-              disabled={isSummarizing}
-              onPress={() => void handleRefreshSummary()}
+          <Pressable
+            onPress={() => setStatusPickerOpen((open) => !open)}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 999,
+              backgroundColor: statusVisual.tintBg(theme),
+              borderWidth: 1,
+              borderColor: statusVisual.tintBorder(theme),
+              flexShrink: 0,
+            }}
+          >
+            <View
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                backgroundColor: statusColor,
+              }}
             />
-            {onOpenOverview ? (
-              <ToolbarIconButton
-                theme={theme}
-                icon="PanelsTopLeft"
-                accessibilityLabel="打开全局状态总览"
-                onPress={onOpenOverview}
-              />
-            ) : null}
-            {onPinToPanel ? (
-              <ToolbarIconButton
-                theme={theme}
-                icon="PanelRight"
-                accessibilityLabel="固定到侧栏完整视图"
-                onPress={onPinToPanel}
-              />
-            ) : null}
-            {onCollapse ? (
-              <ToolbarIconButton
-                theme={theme}
-                icon="Minimize"
-                accessibilityLabel="收起工作台卡片"
-                onPress={onCollapse}
-              />
-            ) : null}
-          </View>
+            <Text style={{ fontSize: 12, fontWeight: "700", color: statusColor }}>
+              {statusVisual.label}
+            </Text>
+            <Icon
+              name={statusPickerOpen ? "ChevronRight" : "ChevronDown"}
+              size={12}
+              color={statusColor}
+            />
+          </Pressable>
         </View>
 
         {statusPickerOpen ? (
           <View
             style={{
-              padding: 10,
+              flexDirection: "row",
+              flexWrap: "wrap",
+              gap: 6,
+              padding: 9,
               borderRadius: 10,
               backgroundColor: theme.colors.surface1,
               borderWidth: 1,
               borderColor: theme.colors.border,
-              gap: 8,
             }}
           >
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-              {WORKFLOW_STATUS_LIST.map((item) => {
-                const selected = item.value === card.workflowStatus;
-                const itemColor = item.color(theme);
-                return (
-                  <Pressable
-                    key={item.value}
-                    onPress={() => void handleSelectStatus(item.value)}
+            {WORKFLOW_STATUS_LIST.map((item) => {
+              const selected = item.value === card.workflowStatus;
+              const itemColor = item.color(theme);
+              return (
+                <Pressable
+                  key={item.value}
+                  onPress={() => void handleSelectStatus(item.value)}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 5,
+                    paddingHorizontal: 9,
+                    paddingVertical: 5,
+                    borderRadius: 999,
+                    backgroundColor: selected ? item.tintBg(theme) : theme.colors.surface2,
+                    borderWidth: 1,
+                    borderColor: selected ? itemColor : theme.colors.border,
+                  }}
+                >
+                  <View
                     style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 5,
-                      paddingHorizontal: 9,
-                      paddingVertical: 5,
+                      width: 6,
+                      height: 6,
                       borderRadius: 999,
-                      backgroundColor: selected ? item.tintBg(theme) : theme.colors.surface2,
-                      borderWidth: 1,
-                      borderColor: selected ? itemColor : theme.colors.border,
+                      backgroundColor: itemColor,
+                    }}
+                  />
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: selected ? "700" : "500",
+                      color: selected ? itemColor : theme.colors.foreground,
                     }}
                   >
-                    <View
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: 999,
-                        backgroundColor: itemColor,
-                      }}
-                    />
-                    <Text
-                      style={{
-                        fontSize: 12,
-                        fontWeight: selected ? "700" : "500",
-                        color: selected ? itemColor : theme.colors.foreground,
-                      }}
-                    >
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <TextInput
-                value={statusNoteDraft}
-                onChangeText={setStatusNoteDraft}
-                placeholder="填写等待原因或状态备注…"
-                placeholderTextColor={theme.colors.foregroundMuted}
-                onSubmitEditing={() => void handleSaveStatusNote()}
-                style={{
-                  flex: 1,
-                  fontSize: 12,
-                  color: theme.colors.foreground,
-                  backgroundColor: theme.colors.surface0,
-                  borderWidth: 1,
-                  borderColor: theme.colors.border,
-                  borderRadius: 7,
-                  paddingHorizontal: 9,
-                  paddingVertical: 6,
-                }}
-              />
-              <Pressable
-                onPress={() => void handleSaveStatusNote()}
-                style={{
-                  paddingHorizontal: 10,
-                  paddingVertical: 6,
-                  borderRadius: 7,
-                  backgroundColor: theme.colors.accent,
-                }}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "600", color: theme.colors.accentForeground }}>
-                  保存
-                </Text>
-              </Pressable>
-            </View>
+                    {item.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
         ) : null}
       </View>
 
-      {/* Condition met highlight banner */}
-      {card.conditionMetNotice ? (
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-            paddingHorizontal: 11,
-            paddingVertical: 8,
-            borderRadius: 10,
-            backgroundColor: withAlpha(theme.colors.statusWarning, 0.14),
-            borderWidth: 1,
-            borderColor: withAlpha(theme.colors.statusWarning, 0.45),
-          }}
-        >
-          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 7 }}>
-            <Icon name="Sparkles" size={14} color={theme.colors.statusWarning} />
-            <Text style={{ flex: 1, fontSize: 12, fontWeight: "600", color: theme.colors.foreground }}>
-              {card.conditionMetNotice}
-            </Text>
-          </View>
-          <Pressable onPress={() => void handleClearNotice()} hitSlop={6}>
-            <Icon name="X" size={13} color={theme.colors.foregroundMuted} />
-          </Pressable>
-        </View>
-      ) : null}
-
-      {/* Hero Focus Card: Topic (primary headline) + Current Work (highlighted focus strip) */}
+      {/* Centerpiece Hero Block: Current Progress (Extra prominent focal point) */}
       <View
         style={{
-          padding: 12,
-          borderRadius: 11,
-          backgroundColor: theme.colors.surface1,
+          paddingHorizontal: 13,
+          paddingVertical: 12,
+          borderRadius: 12,
+          backgroundColor: withAlpha(statusColor, 0.13),
           borderWidth: 1,
-          borderColor: theme.colors.border,
-          borderLeftWidth: 3,
+          borderColor: withAlpha(statusColor, 0.38),
+          borderLeftWidth: 4,
           borderLeftColor: statusColor,
-          gap: 10,
+          gap: 7,
         }}
       >
-        {/* Primary headline: Topic */}
-        <View style={{ gap: 4 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-            <Text
-              style={{
-                fontSize: 11,
-                fontWeight: "600",
-                color: theme.colors.foregroundMuted,
-              }}
-            >
-              主题工作
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Icon name="Zap" size={13} color={statusColor} />
+            <Text style={{ fontSize: 11, fontWeight: "800", color: statusColor }}>
+              {isSummarizing ? "轻量模型总结中…" : isRunning ? "正在推进" : "当前进展"}
             </Text>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Pressable
-                onPress={() => void handleToggleTopicLock()}
-                hitSlop={6}
-                accessibilityLabel={card.topicLocked ? "解锁主题允许 AI 更新" : "锁定主题禁止 AI 覆盖"}
-              >
-                <Icon
-                  name={card.topicLocked ? "Pin" : "PinOff"}
-                  size={12}
-                  color={card.topicLocked ? statusColor : theme.colors.foregroundMuted}
-                />
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  setTopicDraft(card.topic || card.agentTitle || "");
-                  setEditingTopic((value) => !value);
-                }}
-                hitSlop={6}
-              >
-                <Icon name="Pencil" size={12} color={theme.colors.foregroundMuted} />
-              </Pressable>
-            </View>
           </View>
 
-          {editingTopic ? (
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <TextInput
-                value={topicDraft}
-                onChangeText={setTopicDraft}
-                autoFocus
-                onSubmitEditing={() => void handleSaveTopic()}
-                placeholder="输入本次对话的主题工作"
-                placeholderTextColor={theme.colors.foregroundMuted}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            {card.summaryModel ? (
+              <View
                 style={{
-                  flex: 1,
-                  fontSize: 14,
-                  fontWeight: "600",
-                  color: theme.colors.foreground,
-                  backgroundColor: theme.colors.surface0,
-                  borderWidth: 1,
-                  borderColor: statusColor,
-                  borderRadius: 7,
-                  paddingHorizontal: 9,
-                  paddingVertical: 6,
-                }}
-              />
-              <Pressable
-                onPress={() => void handleSaveTopic()}
-                style={{
-                  paddingHorizontal: 10,
-                  paddingVertical: 7,
-                  borderRadius: 7,
-                  backgroundColor: theme.colors.accent,
+                  paddingHorizontal: 6,
+                  paddingVertical: 2,
+                  borderRadius: 5,
+                  backgroundColor: withAlpha(theme.colors.surface0, 0.72),
                 }}
               >
-                <Text style={{ fontSize: 12, color: theme.colors.accentForeground, fontWeight: "600" }}>
-                  确定
+                <Text
+                  numberOfLines={1}
+                  style={{ fontSize: 10, color: theme.colors.foregroundMuted, maxWidth: 140 }}
+                >
+                  {card.summaryModel}
                 </Text>
-              </Pressable>
-            </View>
-          ) : (
-            <Text
-              numberOfLines={2}
+              </View>
+            ) : null}
+            <Pressable
+              onPress={() => void handleRefreshSummary()}
+              disabled={isSummarizing}
+              hitSlop={6}
+              accessibilityLabel="立即刷新摘要"
               style={{
-                fontSize: 15,
-                fontWeight: "700",
-                lineHeight: 21,
-                color: card.topic || card.agentTitle ? theme.colors.foreground : theme.colors.foregroundMuted,
+                padding: 4,
+                borderRadius: 6,
+                backgroundColor: withAlpha(theme.colors.surface0, 0.72),
               }}
             >
-              {card.topic || card.agentTitle || "待自动总结主题…"}
-            </Text>
-          )}
+              <Icon
+                name="RefreshCw"
+                size={12}
+                color={isSummarizing ? theme.colors.statusWarning : theme.colors.foregroundMuted}
+              />
+            </Pressable>
+          </View>
         </View>
 
-        {/* Secondary focal block: Current Work inset card */}
-        <View
+        <Text
           style={{
-            paddingHorizontal: 10,
-            paddingVertical: 9,
-            borderRadius: 8,
-            backgroundColor: theme.colors.surface2,
-            borderWidth: 1,
-            borderColor: withAlpha(theme.colors.border, 0.8),
-            gap: 5,
+            fontSize: 14,
+            lineHeight: 21,
+            fontWeight: card.currentWork ? "600" : "400",
+            color: card.currentWork ? theme.colors.foreground : theme.colors.foregroundMuted,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-              <Icon name="Zap" size={12} color={statusColor} />
-              <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
-                当前在做
-              </Text>
-            </View>
-            {isSummarizing ? (
-              <Text style={{ fontSize: 10, fontWeight: "600", color: theme.colors.statusWarning }}>
-                轻量模型总结中…
-              </Text>
-            ) : card.summaryModel ? (
-              <Text
-                numberOfLines={1}
-                style={{ fontSize: 10, color: theme.colors.foregroundMuted, maxWidth: 150 }}
-              >
-                {card.summaryModel}
-              </Text>
-            ) : null}
-          </View>
+          {card.currentWork || "完成首轮对话后自动由轻量模型总结当前进展"}
+        </Text>
 
-          <Text
-            numberOfLines={variant === "corner" ? 3 : 5}
-            style={{
-              fontSize: 13,
-              lineHeight: 19,
-              fontWeight: card.currentWork ? "500" : "400",
-              color: card.currentWork ? theme.colors.foreground : theme.colors.foregroundMuted,
-            }}
-          >
-            {card.currentWork || "完成首轮对话后自动由轻量模型总结当前进展"}
-          </Text>
-        </View>
-
-        {/* Readable summary error callout with inline retry */}
         {card.summaryError ? (
           <View
             style={{
@@ -681,16 +859,13 @@ export function WorkbenchCardBody({
               gap: 8,
               paddingHorizontal: 9,
               paddingVertical: 6,
-              borderRadius: 7,
-              backgroundColor: withAlpha(theme.colors.statusDanger, 0.12),
+              borderRadius: 8,
+              backgroundColor: withAlpha(theme.colors.statusDanger, 0.14),
               borderWidth: 1,
-              borderColor: withAlpha(theme.colors.statusDanger, 0.35),
+              borderColor: withAlpha(theme.colors.statusDanger, 0.36),
             }}
           >
-            <Text
-              numberOfLines={2}
-              style={{ flex: 1, fontSize: 11, lineHeight: 16, color: theme.colors.statusDanger }}
-            >
+            <Text style={{ flex: 1, fontSize: 11, lineHeight: 16, color: theme.colors.statusDanger }}>
               摘要失败：{card.summaryError}
             </Text>
             <Pressable
@@ -700,362 +875,188 @@ export function WorkbenchCardBody({
                 paddingHorizontal: 7,
                 paddingVertical: 3,
                 borderRadius: 5,
-                backgroundColor: withAlpha(theme.colors.statusDanger, 0.18),
+                backgroundColor: withAlpha(theme.colors.statusDanger, 0.2),
               }}
             >
-              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.statusDanger }}>
+              <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusDanger }}>
                 重试
               </Text>
             </Pressable>
           </View>
         ) : null}
+      </View>
 
-        {/* Status note / waiting dependency / fork lineage */}
-        {card.statusNote && !statusPickerOpen ? (
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              paddingHorizontal: 9,
-              paddingVertical: 6,
-              borderRadius: 7,
-              backgroundColor: statusVisual.tintBg(theme),
-              borderWidth: 1,
-              borderColor: statusVisual.tintBorder(theme),
-            }}
-          >
-            <Text
-              numberOfLines={2}
-              style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}
-            >
-              {card.statusNote}
+      {/* Condition met notification */}
+      {card.conditionMetNotice ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            paddingHorizontal: 10,
+            paddingVertical: 7,
+            borderRadius: 9,
+            backgroundColor: withAlpha(theme.colors.statusSuccess, 0.14),
+            borderWidth: 1,
+            borderColor: withAlpha(theme.colors.statusSuccess, 0.36),
+          }}
+        >
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Icon name="Sparkles" size={13} color={theme.colors.statusSuccess} />
+            <Text style={{ flex: 1, fontSize: 12, fontWeight: "600", color: theme.colors.foreground }}>
+              {card.conditionMetNotice}
             </Text>
-            {card.workflowStatus === "waiting_external" ? (
-              <Pressable
-                onPress={() => void handleResolveSignal()}
+          </View>
+          <Pressable onPress={() => void handleClearNotice()} hitSlop={6}>
+            <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* Scrollable middle workspace: Blockers + Todos + AI Suggestions */}
+      <ScrollView
+        style={variant === "corner" ? { maxHeight: 300 } : undefined}
+        contentContainerStyle={{ gap: 10 }}
+        nestedScrollEnabled
+      >
+        {/* Structured Blockers Section (styled sibling to Todos) */}
+        {(openBlockers.length > 0 || hasLegacyWait) ? (
+          <View style={{ gap: 6 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Icon name="History" size={12} color={theme.colors.statusWarning} />
+                <Text style={{ fontSize: 11, fontWeight: "800", color: theme.colors.statusWarning }}>
+                  阻塞中 · {openBlockers.length || 1}
+                </Text>
+              </View>
+              <Text style={{ fontSize: 10, color: theme.colors.foregroundMuted }}>
+                解除后自动恢复推进
+              </Text>
+            </View>
+
+            {openBlockers.map((blocker) => renderBlockerRow(blocker))}
+
+            {hasLegacyWait ? (
+              <View
                 style={{
-                  paddingHorizontal: 8,
-                  paddingVertical: 3,
-                  borderRadius: 6,
-                  backgroundColor: withAlpha(theme.colors.statusSuccess, 0.18),
+                  flexDirection: "row",
+                  alignItems: "flex-start",
+                  gap: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 9,
+                  borderRadius: 10,
+                  backgroundColor: withAlpha(theme.colors.statusWarning, 0.1),
                   borderWidth: 1,
-                  borderColor: withAlpha(theme.colors.statusSuccess, 0.45),
+                  borderColor: withAlpha(theme.colors.statusWarning, 0.32),
                 }}
               >
-                <Text style={{ fontSize: 11, color: theme.colors.statusSuccess, fontWeight: "700" }}>
-                  已确认
-                </Text>
-              </Pressable>
+                <View style={{ flex: 1, flexShrink: 1, minWidth: 0, gap: 4 }}>
+                  <Text style={{ fontSize: 13, fontWeight: "500", color: theme.colors.foreground, lineHeight: 19 }}>
+                    {card.statusNote ||
+                      (card.waitCondition?.kind === "agent_settled"
+                        ? `等待关联对话「${card.waitCondition.targetLabel || "目标对话"}」`
+                        : "等待外部确认")}
+                  </Text>
+                  {card.waitCondition?.kind === "agent_settled" ? (
+                    <Pressable
+                      onPress={() =>
+                        onOpenAgent?.(
+                          card.waitCondition!.kind === "agent_settled"
+                            ? card.waitCondition!.targetAgentId
+                            : "",
+                        )
+                      }
+                      style={{ flexDirection: "row", alignItems: "center", gap: 3 }}
+                    >
+                      <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.statusWarning }}>
+                        打开关联对话
+                      </Text>
+                      <Icon name="ArrowUpRight" size={11} color={theme.colors.statusWarning} />
+                    </Pressable>
+                  ) : null}
+                </View>
+                <Pressable
+                  onPress={() => void handleResolveLegacySignal()}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 3,
+                    paddingHorizontal: 8,
+                    paddingVertical: 4,
+                    borderRadius: 7,
+                    backgroundColor: withAlpha(theme.colors.statusSuccess, 0.16),
+                    borderWidth: 1,
+                    borderColor: withAlpha(theme.colors.statusSuccess, 0.42),
+                  }}
+                >
+                  <Icon name="CheckCircle2" size={11} color={theme.colors.statusSuccess} />
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusSuccess }}>
+                    已解除
+                  </Text>
+                </Pressable>
+              </View>
             ) : null}
           </View>
         ) : null}
 
-        {variant === "corner" && card.waitCondition?.kind === "agent_settled" ? (
-          <Pressable
-            onPress={() =>
-              onOpenAgent?.(
-                card.waitCondition!.kind === "agent_settled" ? card.waitCondition!.targetAgentId : "",
-              )
-            }
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 6,
-              paddingHorizontal: 9,
-              paddingVertical: 6,
-              borderRadius: 7,
-              backgroundColor: theme.colors.surface0,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-            }}
-          >
-            <Icon name="GitMerge" size={12} color={theme.colors.statusWarning} />
-            <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}>
-              等待关联对话：{card.waitCondition.targetLabel || "查看目标对话"}
+        {/* Todos Section: Human on top, AI below; click text = fill composer */}
+        <View style={{ gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.foregroundMuted }}>
+              待办 · {activeTodos.length}
             </Text>
-            <Icon name="ArrowUpRight" size={12} color={theme.colors.foregroundMuted} />
-          </Pressable>
-        ) : null}
-
-        {card.forkedFromAgentId ? (
-          <Pressable
-            onPress={() => onOpenAgent?.(card.forkedFromAgentId!)}
-            style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
-          >
-            <Icon name="Split" size={12} color={theme.colors.foregroundMuted} />
-            <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
-              查看来源对话
-            </Text>
-            <Icon name="ArrowUpRight" size={11} color={theme.colors.foregroundMuted} />
-          </Pressable>
-        ) : null}
-      </View>
-
-      {/* Todos workspace */}
-      <View style={{ gap: 8 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-            <Text style={{ fontSize: 12, fontWeight: "700", color: theme.colors.foreground }}>
-              待办
-            </Text>
-            <View
-              style={{
-                paddingHorizontal: 7,
-                paddingVertical: 1,
-                borderRadius: 999,
-                backgroundColor:
-                  activeTodos.length > 0
-                    ? statusVisual.tintBg(theme)
-                    : theme.colors.surface2,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: 11,
-                  fontWeight: "700",
-                  color: activeTodos.length > 0 ? statusColor : theme.colors.foregroundMuted,
-                }}
-              >
-                {activeTodos.length}
+            {activeTodos.length > 0 ? (
+              <Text style={{ fontSize: 10, color: theme.colors.foregroundMuted }}>
+                点文字填入输入框
               </Text>
-            </View>
+            ) : null}
           </View>
-          {completedTodos.length > 0 ? (
-            <Pressable onPress={() => setShowDoneTodos((value) => !value)}>
-              <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
-                {showDoneTodos ? "隐藏已完成" : `已完成 ${completedTodos.length}`}
-              </Text>
-            </Pressable>
-          ) : null}
-        </View>
 
-        <ScrollView
-          style={variant === "corner" ? { maxHeight: 256 } : undefined}
-          contentContainerStyle={{ gap: 7 }}
-          nestedScrollEnabled
-        >
           {activeTodos.length === 0 ? (
             <View
               style={{
                 paddingHorizontal: 11,
-                paddingVertical: 10,
+                paddingVertical: 9,
                 borderRadius: 9,
                 borderWidth: 1,
                 borderStyle: "dashed",
                 borderColor: theme.colors.border,
-                backgroundColor: withAlpha(theme.colors.surface1, 0.5),
               }}
             >
-              <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
-                暂无待办——想到下一步要做的事，直接在下方回车记下
+              <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted, lineHeight: 18 }}>
+                暂无待办——随时在下方记下下一步工作，或切换「阻塞」记下等待项
               </Text>
             </View>
           ) : (
-            activeTodos.map((todo) => {
-              const isExpanded = expandedTodoId === todo.id || variant === "panel";
-              const isBusy = busyTodoId === todo.id;
-              const isQueuedOrRunning = todo.status === "queued" || todo.status === "running";
-              return (
-                <View
-                  key={todo.id}
-                  style={{
-                    padding: 10,
-                    borderRadius: 9,
-                    backgroundColor: theme.colors.surface1,
-                    borderWidth: 1,
-                    borderColor: isQueuedOrRunning
-                      ? statusVisual.tintBorder(theme)
-                      : theme.colors.border,
-                    gap: 8,
-                  }}
-                >
-                  <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-                    <Pressable
-                      onPress={() => void handleToggleDone(todo)}
-                      hitSlop={6}
-                      style={{ marginTop: 2 }}
-                    >
-                      <Icon
-                        name={todo.status === "running" ? "RotateCw" : "Circle"}
-                        size={15}
-                        color={isQueuedOrRunning ? statusColor : theme.colors.foregroundMuted}
-                      />
-                    </Pressable>
+            <View style={{ gap: 6 }}>
+              {/* Human todos ALWAYS on top */}
+              {humanTodos.length > 0 && aiTodos.length > 0 ? (
+                <Text style={{ fontSize: 10, fontWeight: "700", color: theme.colors.foregroundMuted }}>
+                  我记的
+                </Text>
+              ) : null}
+              {humanTodos.map((todo) => renderTodoRow(todo))}
 
-                    <Pressable
-                      onPress={() =>
-                        setExpandedTodoId((current) => (current === todo.id ? null : todo.id))
-                      }
-                      style={{ flex: 1, gap: 4 }}
-                    >
-                      <Text
-                        numberOfLines={isExpanded ? 4 : 2}
-                        style={{
-                          fontSize: 13,
-                          fontWeight: "500",
-                          color: theme.colors.foreground,
-                          lineHeight: 18,
-                        }}
-                      >
-                        {todo.title}
-                      </Text>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                        <View
-                          style={{
-                            paddingHorizontal: 5,
-                            paddingVertical: 1,
-                            borderRadius: 4,
-                            backgroundColor: theme.colors.surface2,
-                          }}
-                        >
-                          <Text style={{ fontSize: 10, color: theme.colors.foregroundMuted }}>
-                            {todo.author === "user" ? "我" : "AI"}
-                          </Text>
-                        </View>
-                        {todo.status !== "open" ? (
-                          <Text
-                            style={{
-                              fontSize: 10,
-                              fontWeight: "700",
-                              color:
-                                todo.status === "forked"
-                                  ? theme.colors.statusSuccess
-                                  : statusColor,
-                            }}
-                          >
-                            {getTodoStatusLabel(todo.status)}
-                          </Text>
-                        ) : null}
-                      </View>
-                    </Pressable>
-
-                    {todo.forkedAgentId ? (
-                      <Pressable
-                        onPress={() => onOpenAgent?.(todo.forkedAgentId!)}
-                        style={{
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 3,
-                          paddingHorizontal: 7,
-                          paddingVertical: 4,
-                          borderRadius: 6,
-                          backgroundColor: withAlpha(theme.colors.statusSuccess, 0.14),
-                          borderWidth: 1,
-                          borderColor: withAlpha(theme.colors.statusSuccess, 0.35),
-                        }}
-                      >
-                        <Text style={{ fontSize: 11, color: theme.colors.statusSuccess, fontWeight: "600" }}>
-                          分支
-                        </Text>
-                        <Icon name="ArrowUpRight" size={11} color={theme.colors.statusSuccess} />
-                      </Pressable>
-                    ) : (
-                      <Pressable
-                        onPress={() => void handleRunTodo(todo, isRunning ? "queue_next" : "send_now")}
-                        disabled={isBusy}
-                        style={{
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 4,
-                          paddingHorizontal: 8,
-                          paddingVertical: 4,
-                          borderRadius: 6,
-                          backgroundColor: statusVisual.tintBg(theme),
-                          borderWidth: 1,
-                          borderColor: statusVisual.tintBorder(theme),
-                          opacity: isBusy ? 0.5 : 1,
-                        }}
-                      >
-                        <Icon name="Play" size={10} color={statusColor} />
-                        <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
-                          {isRunning ? "排队" : "继续"}
-                        </Text>
-                      </Pressable>
-                    )}
-                  </View>
-
-                  {isExpanded ? (
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingLeft: 23 }}>
-                      <ActionChip
-                        theme={theme}
-                        icon="SquarePen"
-                        label="填入输入框"
-                        disabled={isBusy}
-                        onPress={() => void handleFillComposer(todo)}
-                      />
-                      <ActionChip
-                        theme={theme}
-                        icon="Split"
-                        label="Fork 对话"
-                        disabled={isBusy}
-                        onPress={() => void handleForkTodo(todo, "same_workspace")}
-                      />
-                      <ActionChip
-                        theme={theme}
-                        icon="GitBranch"
-                        label="Fork 新分支"
-                        disabled={isBusy}
-                        onPress={() => void handleForkTodo(todo, "new_worktree")}
-                      />
-                      <ActionChip
-                        theme={theme}
-                        icon="Trash2"
-                        label="删除"
-                        disabled={isBusy}
-                        onPress={() => void handleRemoveTodo(todo.id)}
-                      />
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })
-          )}
-
-          {showDoneTodos
-            ? completedTodos.map((todo) => (
-                <View
-                  key={todo.id}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 8,
-                    paddingHorizontal: 10,
-                    paddingVertical: 7,
-                    borderRadius: 8,
-                    backgroundColor: theme.colors.surface1,
-                    opacity: 0.72,
-                  }}
-                >
-                  <Pressable onPress={() => void handleToggleDone(todo)} hitSlop={4}>
-                    <Icon name="CheckCircle2" size={14} color={theme.colors.statusSuccess} />
-                  </Pressable>
-                  <Text
-                    numberOfLines={1}
-                    style={{
-                      flex: 1,
-                      fontSize: 12,
-                      color: theme.colors.foregroundMuted,
-                      textDecorationLine: "line-through",
-                    }}
-                  >
-                    {todo.title}
+              {/* AI todos BELOW human todos */}
+              {aiTodos.length > 0 ? (
+                <View style={{ gap: 6, marginTop: humanTodos.length > 0 ? 4 : 0 }}>
+                  <Text style={{ fontSize: 10, fontWeight: "700", color: theme.colors.foregroundMuted }}>
+                    AI 记录
                   </Text>
-                  <Pressable onPress={() => void handleRemoveTodo(todo.id)} hitSlop={4}>
-                    <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
-                  </Pressable>
+                  {aiTodos.map((todo) => renderTodoRow(todo))}
                 </View>
-              ))
-            : null}
-        </ScrollView>
+              ) : null}
+            </View>
+          )}
+        </View>
 
-        {/* Suggested todos from summarizer */}
+        {/* AI Suggested Todos: full multi-line wrap */}
         {card.suggestedTodos.length > 0 ? (
-          <View style={{ gap: 5, paddingTop: 2 }}>
+          <View style={{ gap: 6 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
               <Icon name="Sparkles" size={11} color={theme.colors.foregroundMuted} />
-              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}>
+              <Text style={{ fontSize: 10, fontWeight: "700", color: theme.colors.foregroundMuted }}>
                 AI 建议待办
               </Text>
             </View>
@@ -1064,217 +1065,272 @@ export function WorkbenchCardBody({
                 key={sug.id}
                 style={{
                   flexDirection: "row",
-                  alignItems: "center",
+                  alignItems: "flex-start",
                   gap: 8,
                   paddingHorizontal: 10,
-                  paddingVertical: 7,
-                  borderRadius: 8,
+                  paddingVertical: 8,
+                  borderRadius: 9,
                   borderWidth: 1,
                   borderStyle: "dashed",
                   borderColor: theme.colors.border,
-                  backgroundColor: theme.colors.surface0,
+                  backgroundColor: theme.colors.surface1,
                 }}
               >
-                <Text numberOfLines={2} style={{ flex: 1, fontSize: 12, color: theme.colors.foregroundMuted }}>
-                  {sug.title}
-                </Text>
-                <Pressable
-                  onPress={() => void handleResolveSuggested(sug.id, "accept")}
-                  hitSlop={6}
+                <Text
                   style={{
-                    paddingHorizontal: 7,
-                    paddingVertical: 3,
-                    borderRadius: 5,
-                    backgroundColor: theme.colors.surface2,
+                    flex: 1,
+                    flexShrink: 1,
+                    minWidth: 0,
+                    fontSize: 12,
+                    lineHeight: 18,
+                    color: theme.colors.foregroundMuted,
                   }}
                 >
-                  <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foreground }}>
-                    + 收纳
-                  </Text>
-                </Pressable>
-                <Pressable onPress={() => void handleResolveSuggested(sug.id, "dismiss")} hitSlop={6}>
-                  <Icon name="X" size={13} color={theme.colors.foregroundMuted} />
-                </Pressable>
+                  {sug.title}
+                </Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 0 }}>
+                  <Pressable
+                    onPress={() => void handleResolveSuggested(sug.id, "accept")}
+                    hitSlop={4}
+                    style={{
+                      paddingHorizontal: 7,
+                      paddingVertical: 3,
+                      borderRadius: 6,
+                      backgroundColor: statusVisual.tintBg(theme),
+                      borderWidth: 1,
+                      borderColor: statusVisual.tintBorder(theme),
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
+                      + 收纳
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void handleResolveSuggested(sug.id, "dismiss")}
+                    hitSlop={4}
+                    style={{ padding: 3 }}
+                  >
+                    <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+                  </Pressable>
+                </View>
               </View>
             ))}
           </View>
         ) : null}
+      </ScrollView>
 
-        {/* Quick add todo input */}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginTop: 2 }}>
-          <TextInput
-            value={newTodoText}
-            onChangeText={setNewTodoText}
-            placeholder="记一条待办，回车添加…"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            returnKeyType="done"
-            onSubmitEditing={() => void handleAddTodo()}
-            style={{
-              flex: 1,
-              fontSize: 13,
-              color: theme.colors.foreground,
-              backgroundColor: theme.colors.surface1,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-              borderRadius: 9,
-              paddingHorizontal: 11,
-              paddingVertical: 8,
-            }}
-          />
+      {/* Bottom Quick-Add Input with Todo / Blocker toggle */}
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 6,
+          paddingHorizontal: 6,
+          paddingVertical: 5,
+          borderRadius: 11,
+          backgroundColor: theme.colors.surface1,
+          borderWidth: 1,
+          borderColor:
+            inputMode === "blocker"
+              ? withAlpha(theme.colors.statusWarning, 0.48)
+              : theme.colors.border,
+        }}
+      >
+        <View
+          style={{
+            flexDirection: "row",
+            borderRadius: 7,
+            backgroundColor: theme.colors.surface2,
+            padding: 2,
+          }}
+        >
           <Pressable
-            onPress={() => void handleAddTodo()}
-            disabled={!newTodoText.trim()}
+            onPress={() => setInputMode("todo")}
             style={{
-              width: 34,
-              height: 34,
-              borderRadius: 9,
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: newTodoText.trim() ? theme.colors.accent : theme.colors.surface2,
-              borderWidth: 1,
-              borderColor: newTodoText.trim() ? theme.colors.accent : theme.colors.border,
+              paddingHorizontal: 7,
+              paddingVertical: 4,
+              borderRadius: 5,
+              backgroundColor: inputMode === "todo" ? theme.colors.surface0 : "transparent",
             }}
           >
-            <Icon
-              name="Plus"
-              size={15}
-              color={newTodoText.trim() ? theme.colors.accentForeground : theme.colors.foregroundMuted}
-            />
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: "700",
+                color: inputMode === "todo" ? theme.colors.foreground : theme.colors.foregroundMuted,
+              }}
+            >
+              待办
+            </Text>
           </Pressable>
+          <Pressable
+            onPress={() => setInputMode("blocker")}
+            style={{
+              paddingHorizontal: 7,
+              paddingVertical: 4,
+              borderRadius: 5,
+              backgroundColor:
+                inputMode === "blocker"
+                  ? withAlpha(theme.colors.statusWarning, 0.2)
+                  : "transparent",
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: "700",
+                color:
+                  inputMode === "blocker"
+                    ? theme.colors.statusWarning
+                    : theme.colors.foregroundMuted,
+              }}
+            >
+              阻塞
+            </Text>
+          </Pressable>
+        </View>
+
+        <TextInput
+          value={draftText}
+          onChangeText={setDraftText}
+          placeholder={
+            inputMode === "blocker"
+              ? "记一条阻塞项，回车添加（如：等后端确认）…"
+              : "记一条待办，回车添加…"
+          }
+          placeholderTextColor={theme.colors.foregroundMuted}
+          returnKeyType="done"
+          onSubmitEditing={() => void handleSubmitDraft()}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 13,
+            color: theme.colors.foreground,
+            paddingHorizontal: 4,
+            paddingVertical: 4,
+          }}
+        />
+
+        <Pressable
+          onPress={() => void handleSubmitDraft()}
+          disabled={!draftText.trim()}
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: 7,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: draftText.trim()
+              ? inputMode === "blocker"
+                ? theme.colors.statusWarning
+                : theme.colors.accent
+              : theme.colors.surface2,
+          }}
+        >
+          <Icon
+            name="Plus"
+            size={14}
+            color={draftText.trim() ? theme.colors.accentForeground : theme.colors.foregroundMuted}
+          />
+        </Pressable>
+      </View>
+
+      {/* Clean minimal footer */}
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          paddingTop: 4,
+          borderTopWidth: 1,
+          borderTopColor: theme.colors.border,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+            <View
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 999,
+                backgroundColor: isRunning ? theme.colors.statusSuccess : theme.colors.foregroundMuted,
+              }}
+            />
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: isRunning ? "600" : "400",
+                color: isRunning ? theme.colors.statusSuccess : theme.colors.foregroundMuted,
+              }}
+            >
+              {getRuntimeStatusLabel(effectiveRuntime)}
+            </Text>
+          </View>
+          {card.forkedFromAgentId ? (
+            <Pressable
+              onPress={() => onOpenAgent?.(card.forkedFromAgentId!)}
+              style={{ flexDirection: "row", alignItems: "center", gap: 3 }}
+            >
+              <Icon name="Split" size={11} color={theme.colors.foregroundMuted} />
+              <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>来源对话</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          {onOpenOverview ? (
+            <Pressable onPress={onOpenOverview} hitSlop={6}>
+              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}>
+                总览
+              </Text>
+            </Pressable>
+          ) : null}
+          {onPinToPanel ? (
+            <Pressable onPress={onPinToPanel} hitSlop={6}>
+              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}>
+                侧栏
+              </Text>
+            </Pressable>
+          ) : null}
+          {onCollapse ? (
+            <Pressable onPress={onCollapse} hitSlop={6}>
+              <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.foregroundMuted }}>
+                收起
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       </View>
 
-      {/* Panel-only structured WaitCondition & AdvancePolicy editor (below todos, collapsed by default) */}
+      {/* Panel-only structured cross-conversation dependency binder (collapsed by default) */}
       {variant === "panel" ? (
-        <WaitConditionEditor
+        <WaitDependencyEditor
           agentId={agentId}
           workspaceId={workspaceId}
           card={card}
           theme={theme}
-          onOpenAgent={onOpenAgent}
         />
       ) : null}
     </View>
   );
 }
 
-function ToolbarIconButton({
-  theme,
-  icon,
-  accessibilityLabel,
-  active,
-  disabled,
-  onPress,
-}: {
-  theme: PluginTheme;
-  icon: string;
-  accessibilityLabel: string;
-  active?: boolean;
-  disabled?: boolean;
-  onPress(): void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      hitSlop={4}
-      accessibilityLabel={accessibilityLabel}
-      style={{
-        width: 26,
-        height: 26,
-        borderRadius: 7,
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: active ? withAlpha(theme.colors.statusWarning, 0.16) : theme.colors.surface1,
-        borderWidth: 1,
-        borderColor: active ? withAlpha(theme.colors.statusWarning, 0.4) : theme.colors.border,
-        opacity: disabled && !active ? 0.5 : 1,
-      }}
-    >
-      <Icon
-        name={icon}
-        size={13}
-        color={active ? theme.colors.statusWarning : theme.colors.foregroundMuted}
-      />
-    </Pressable>
-  );
-}
-
-function ActionChip({
-  theme,
-  icon,
-  label,
-  selected,
-  disabled,
-  onPress,
-}: {
-  theme: PluginTheme;
-  icon: string;
-  label: string;
-  selected?: boolean;
-  disabled?: boolean;
-  onPress(): void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 4,
-        paddingHorizontal: 8,
-        paddingVertical: 5,
-        borderRadius: 7,
-        backgroundColor: selected
-          ? withAlpha(theme.colors.statusSuccess, 0.16)
-          : theme.colors.surface2,
-        borderWidth: 1,
-        borderColor: selected
-          ? withAlpha(theme.colors.statusSuccess, 0.5)
-          : theme.colors.border,
-        opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      <Icon
-        name={icon}
-        size={11}
-        color={selected ? theme.colors.statusSuccess : theme.colors.foregroundMuted}
-      />
-      <Text
-        style={{
-          fontSize: 11,
-          fontWeight: selected ? "700" : "500",
-          color: selected ? theme.colors.statusSuccess : theme.colors.foreground,
-        }}
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function WaitConditionEditor({
+function WaitDependencyEditor({
   agentId,
   workspaceId,
   card,
   theme,
-  onOpenAgent,
 }: {
   agentId: string;
   workspaceId: string | null;
   card: SessionWorkbenchCard;
   theme: PluginTheme;
-  onOpenAgent?: (agentId: string) => void;
 }) {
   const toast = useToast();
   const updateMeta = useRpc(updateCardMetaRpc);
+  const addBlocker = useRpc(addBlockerRpc);
   const { snapshot } = useWorkbenchOverview(false);
-  const hasActiveWait =
-    card.waitCondition !== null ||
-    card.workflowStatus === "waiting_dependency" ||
-    card.workflowStatus === "waiting_external";
-  const [open, setOpen] = useState(hasActiveWait);
+  const [open, setOpen] = useState(false);
   const [selectedTargetId, setSelectedTargetId] = useState(
     card.waitCondition?.kind === "agent_settled" ? card.waitCondition.targetAgentId : "",
   );
@@ -1295,11 +1351,14 @@ function WaitConditionEditor({
       toast.error("请先选择一个关联对话");
       return;
     }
+    const targetLabel = target.topic || target.agentTitle || "关联对话";
+    const title = `等待「${targetLabel}」${expectMode === "idle" ? "完成本轮" : "标记完成"}`;
     const condition: WaitCondition = {
       kind: "agent_settled",
       targetAgentId: target.agentId,
-      targetLabel: target.topic || target.agentTitle || "未命名对话",
+      targetLabel,
       expect: expectMode,
+      reason: title,
     };
     const policy: AdvancePolicy = {
       mode: policyMode,
@@ -1311,36 +1370,25 @@ function WaitConditionEditor({
       await updateMeta({
         agentId,
         workspaceId,
-        workflowStatus: "waiting_dependency",
-        statusNote: `等待「${condition.targetLabel}」${expectMode === "idle" ? "完成本轮" : "标记完成"}`,
         waitCondition: condition,
         advancePolicy: policy,
       });
-      toast.show("已绑定等待依赖与自动推进策略", { variant: "success" });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存等待条件失败");
-    }
-  }, [agentId, autoPrompt, expectMode, otherCards, policyMode, selectedTargetId, toast, updateMeta, workspaceId]);
-
-  const handleClearDependency = useCallback(async () => {
-    try {
-      await updateMeta({
+      await addBlocker({
         agentId,
         workspaceId,
-        waitCondition: null,
-        workflowStatus: "active",
+        title,
+        kind: "dependency",
+        author: "user",
+        targetAgentId: target.agentId,
+        targetLabel,
+        expect: expectMode,
       });
+      setOpen(false);
+      toast.show("已添加跨对话阻塞依赖", { variant: "success" });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "清除失败");
+      toast.error(error instanceof Error ? error.message : "保存等待依赖失败");
     }
-  }, [agentId, toast, updateMeta, workspaceId]);
-
-  const summaryBadge =
-    card.waitCondition?.kind === "agent_settled"
-      ? `等待「${card.waitCondition.targetLabel || "关联对话"}」`
-      : card.waitCondition?.kind === "external_signal"
-        ? "等待外部确认"
-        : "未配置";
+  }, [addBlocker, agentId, autoPrompt, expectMode, otherCards, policyMode, selectedTargetId, toast, updateMeta, workspaceId]);
 
   return (
     <View
@@ -1357,55 +1405,17 @@ function WaitConditionEditor({
         onPress={() => setOpen((value) => !value)}
         style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           <Icon name="GitMerge" size={13} color={theme.colors.foregroundMuted} />
           <Text style={{ fontSize: 12, fontWeight: "700", color: theme.colors.foreground }}>
-            等待条件与自动推进
+            绑定跨对话阻塞与自动推进
           </Text>
         </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <Text numberOfLines={1} style={{ fontSize: 11, color: theme.colors.foregroundMuted, maxWidth: 140 }}>
-            {summaryBadge}
-          </Text>
-          <Icon name={open ? "ChevronDown" : "ChevronRight"} size={13} color={theme.colors.foregroundMuted} />
-        </View>
+        <Icon name={open ? "ChevronDown" : "ChevronRight"} size={13} color={theme.colors.foregroundMuted} />
       </Pressable>
 
       {open ? (
         <View style={{ gap: 9 }}>
-          {card.waitCondition ? (
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              {card.waitCondition.kind === "agent_settled" ? (
-                <Pressable
-                  onPress={() =>
-                    onOpenAgent?.(
-                      card.waitCondition!.kind === "agent_settled" ? card.waitCondition!.targetAgentId : "",
-                    )
-                  }
-                  style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 5 }}
-                >
-                  <Icon name="GitMerge" size={12} color={theme.colors.statusWarning} />
-                  <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, color: theme.colors.foreground }}>
-                    当前等待：{card.waitCondition.targetLabel || "查看目标对话"}
-                  </Text>
-                </Pressable>
-              ) : (
-                <Text style={{ flex: 1, fontSize: 12, color: theme.colors.foregroundMuted }}>
-                  {summaryBadge}
-                </Text>
-              )}
-              <Pressable onPress={() => void handleClearDependency()}>
-                <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.statusDanger }}>
-                  清除条件
-                </Text>
-              </Pressable>
-            </View>
-          ) : null}
-
-          <Text style={{ fontSize: 11, color: theme.colors.foregroundMuted }}>
-            选择要等待的关联对话（对方达成条件后自动通知或推进）：
-          </Text>
-
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
             {otherCards.slice(0, 12).map((item) => {
               const selected = selectedTargetId === item.agentId;
@@ -1449,18 +1459,41 @@ function WaitConditionEditor({
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {(
               [
-                { value: "idle", label: "对方完成本轮即触发" },
-                { value: "done", label: "对方标记完成后触发" },
+                { value: "idle", label: "对方完成本轮即解除" },
+                { value: "done", label: "对方标记完成后解除" },
               ] as const
             ).map((item) => (
-              <ActionChip
+              <Pressable
                 key={item.value}
-                theme={theme}
-                icon="History"
-                label={item.label}
-                selected={expectMode === item.value}
                 onPress={() => setExpectMode(item.value)}
-              />
+                style={{
+                  paddingHorizontal: 8,
+                  paddingVertical: 5,
+                  borderRadius: 7,
+                  backgroundColor:
+                    expectMode === item.value
+                      ? withAlpha(theme.colors.statusSuccess, 0.16)
+                      : theme.colors.surface2,
+                  borderWidth: 1,
+                  borderColor:
+                    expectMode === item.value
+                      ? withAlpha(theme.colors.statusSuccess, 0.5)
+                      : theme.colors.border,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: expectMode === item.value ? "700" : "500",
+                    color:
+                      expectMode === item.value
+                        ? theme.colors.statusSuccess
+                        : theme.colors.foreground,
+                  }}
+                >
+                  {item.label}
+                </Text>
+              </Pressable>
             ))}
           </View>
 
@@ -1473,14 +1506,37 @@ function WaitConditionEditor({
                 { value: "delegate_to_master", label: "交由主对话(预留)" },
               ] as const
             ).map((item) => (
-              <ActionChip
+              <Pressable
                 key={item.value}
-                theme={theme}
-                icon="Zap"
-                label={item.label}
-                selected={policyMode === item.value}
                 onPress={() => setPolicyMode(item.value)}
-              />
+                style={{
+                  paddingHorizontal: 8,
+                  paddingVertical: 5,
+                  borderRadius: 7,
+                  backgroundColor:
+                    policyMode === item.value
+                      ? withAlpha(theme.colors.statusSuccess, 0.16)
+                      : theme.colors.surface2,
+                  borderWidth: 1,
+                  borderColor:
+                    policyMode === item.value
+                      ? withAlpha(theme.colors.statusSuccess, 0.5)
+                      : theme.colors.border,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: policyMode === item.value ? "700" : "500",
+                    color:
+                      policyMode === item.value
+                        ? theme.colors.statusSuccess
+                        : theme.colors.foreground,
+                  }}
+                >
+                  {item.label}
+                </Text>
+              </Pressable>
             ))}
           </View>
 
@@ -1488,7 +1544,7 @@ function WaitConditionEditor({
             <TextInput
               value={autoPrompt}
               onChangeText={setAutoPrompt}
-              placeholder="条件达成后自动发送给当前对话的指令…"
+              placeholder="解除后自动发送给当前对话的指令…"
               placeholderTextColor={theme.colors.foregroundMuted}
               style={{
                 fontSize: 12,
@@ -1514,7 +1570,7 @@ function WaitConditionEditor({
             }}
           >
             <Text style={{ fontSize: 12, fontWeight: "600", color: theme.colors.accentForeground }}>
-              应用等待规则
+              添加跨对话阻塞
             </Text>
           </Pressable>
         </View>
