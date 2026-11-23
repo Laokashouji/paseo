@@ -3352,7 +3352,8 @@ export const zhCN: TranslationResources = {
         modeAuto: "自动轻量（推荐）",
         modeMain: "复用主对话模型",
         modeCustom: "自定义模型",
-        modeAutoHint: "优先使用 Paseo 内置轻量元数据模型（如 Haiku / Mini），大幅节省主力额度。",
+        modeAutoHint:
+          "仅使用 Paseo 轻量元数据模型（如 Haiku / Mini）；若均不可用则降级为本地规则分诊，不静默消耗主力模型额度。如需复用主模型请选「复用主对话模型」。",
         modeMainHint: "直接复用当前「对话管理」会话正在使用的 Provider 与模型。",
         modeCustomHint: "手动指定该主机上任意已启用的 Provider、具体模型与思考强度。",
         providerLabel: "Provider",

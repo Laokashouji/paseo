@@ -326,11 +326,13 @@ export async function resolveMainChatBackgroundProviders(input: {
       },
     ];
   }
+  // Auto mode uses lightweight metadata models only and never silently falls back to the main
+  // steward's high-quota model; when none are available/healthy, the supervisor falls back to
+  // zero-token deterministic rules. Users who want the main model can choose mode="main".
   return resolveStructuredGenerationProviders({
     cwd: input.cwd,
     providerSnapshotManager: input.providerSnapshotManager,
     daemonConfig: input.daemonConfig,
-    currentSelection: input.mainSelection ?? undefined,
   });
 }
 
@@ -384,5 +386,9 @@ export async function runMainChatSemanticTriage(
     maxRetries: 1,
     schemaName: "MainChatSemanticTriage",
     logger: input.logger,
+    agentConfigOverrides: {
+      title: "Main chat semantic triage",
+      internal: true,
+    },
   });
 }
