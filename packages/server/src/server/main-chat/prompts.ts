@@ -5,10 +5,12 @@ import {
   type MainChatPlanRecord,
   type MainChatPlannedTask,
   type MainChatSettings,
+  type MainChatSupervisionSignal,
   type MainChatTaskBrief,
   type MainChatTaskDecisionEntry,
 } from "@getpaseo/protocol/main-chat";
 import type { FleetSnapshotSummary } from "./context-snapshot.js";
+import { formatSupervisionDigest } from "./signal-queue.js";
 import { formatTaskDecisionsPromptSection } from "./task-ledger.js";
 
 /** Appends the native Main Chat system prompt when opening a `paseo.role=main` interactive session. */
@@ -113,7 +115,7 @@ export function buildMainChatPatrolWakeupPrompt(input: {
     : `后台巡检发现 ${input.signals.length} 条需要你跟进或向用户汇报的动态`;
 
   return [
-    `📋 主动巡检唤醒：${triggerReason}`,
+    `📋 督办 · 主动巡检唤醒：${triggerReason}`,
     `（这是 Paseo 后台巡检事件，不是用户手打消息。当前策略：${styleDesc}。）`,
     "",
     lines.length > 0
@@ -124,6 +126,46 @@ export function buildMainChatPatrolWakeupPrompt(input: {
     "",
     "处理要求：",
     "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。",
+    "- 若某会话需要用户做明确二选一/多选一，可调用 `task_ask_user` 生成拍板卡；若需要核实细节，先用 `get_agent_activity` 读取对应会话最后输出。",
+    "- 如果你是保守模式，对手动会话不要擅自调用发送消息工具；直接给用户清晰摘要和建议动作即可。",
+    "- 如果经核对所有信号均已解决或无需打扰用户，请直接只回复 `[SILENT]`。",
+  ].join("\n");
+}
+
+export function buildMainChatSupervisionWakeupPrompt(input: {
+  settings: MainChatSettings;
+  signals: readonly MainChatSupervisionSignal[];
+  digest?: string | null;
+  contextSnapshot: string;
+  manualTrigger?: boolean;
+  conversationLabel?: string | null;
+}): string {
+  const styleDesc =
+    input.settings.style === "proactive"
+      ? "激进模式（B）：允许你对低风险技术问题主动跟进，但红线操作和重要取舍仍须由用户拍板"
+      : "保守模式（A）：对用户手动开的会话只汇报和给建议，不擅自发送业务指令；对你派出去的任务照常执行复核与返工";
+
+  const triggerReason = input.manualTrigger
+    ? "用户点击了「立即巡检并汇报」"
+    : `后台督办聚拢并重验通过 ${input.signals.length} 条有效动态`;
+
+  const digestBlock =
+    input.signals.length > 0
+      ? (input.digest ??
+        formatSupervisionDigest(input.signals, { conversationLabel: input.conversationLabel }))
+      : "（当前无新增有效督办信号，请基于最新全局快照做一次简明态势汇报。）";
+
+  return [
+    `📋 督办 · 主动巡检唤醒：${triggerReason}`,
+    `（这是 Paseo 后台督办与巡检事件，不是用户手打消息。当前策略：${styleDesc}。）`,
+    "",
+    digestBlock,
+    "",
+    input.contextSnapshot,
+    "",
+    "处理要求：",
+    "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。",
+    "- 涉及对外发消息、删数据、git push/合入主分支、生产发布或修改凭据权限的红线操作，严禁擅自代答或放行，必须交给用户拍板。",
     "- 若某会话需要用户做明确二选一/多选一，可调用 `task_ask_user` 生成拍板卡；若需要核实细节，先用 `get_agent_activity` 读取对应会话最后输出。",
     "- 如果你是保守模式，对手动会话不要擅自调用发送消息工具；直接给用户清晰摘要和建议动作即可。",
     "- 如果经核对所有信号均已解决或无需打扰用户，请直接只回复 `[SILENT]`。",

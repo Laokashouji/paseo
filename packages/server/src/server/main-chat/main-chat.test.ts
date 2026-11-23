@@ -168,6 +168,11 @@ describe("main-chat service, tools, and session", () => {
       noProgressThresholdMs?: number;
       needsYouEscalateMs?: number;
       wakeupCooldownMs?: number;
+      superviseGatherMs?: number;
+      normalCooldownMs?: number;
+      urgentCooldownMs?: number;
+      allStoppedThresholdMs?: number;
+      now?: () => number;
       semanticTriageRunner?: (
         input: RunSemanticTriageInput,
       ) => Promise<SemanticTriageOutput | null>;
@@ -400,6 +405,11 @@ describe("main-chat service, tools, and session", () => {
       noProgressThresholdMs: harnessOptions.noProgressThresholdMs,
       needsYouEscalateMs: harnessOptions.needsYouEscalateMs,
       wakeupCooldownMs: harnessOptions.wakeupCooldownMs ?? 5,
+      superviseGatherMs: harnessOptions.superviseGatherMs,
+      normalCooldownMs: harnessOptions.normalCooldownMs,
+      urgentCooldownMs: harnessOptions.urgentCooldownMs,
+      allStoppedThresholdMs: harnessOptions.allStoppedThresholdMs,
+      now: harnessOptions.now,
       semanticTriageRunner: harnessOptions.semanticTriageRunner,
     });
 
@@ -1353,5 +1363,505 @@ describe("main-chat service, tools, and session", () => {
         thinkingOptionId: "xhigh",
       },
     ]);
+  });
+
+  it("handles M5 approval clarification, one-time proofToken, and standing authorization grant/revoke RPCs", async () => {
+    const { service } = makeHarness({ stalledCheckIntervalMs: 60_000 });
+    await service.start();
+    const { agentId: mainAgentId } = await service.ensureMainChat();
+
+    const plan = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "执行回归测试",
+          goal: "跑通后端单测",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["vitest 通过"],
+          quiet: true,
+        },
+      ],
+    });
+    const childId = plan.tasks[0]!.agentId!;
+    const childAgent = agents.get(childId)!;
+
+    // 1. Permission requested on quiet child -> triggers clarification flow
+    const perm1 = {
+      id: "perm_m5_1",
+      kind: "tool",
+      name: "Bash",
+      title: "Run unit tests",
+      input: { command: "npm test -- --run" },
+    } as unknown as AgentPermissionRequest;
+    childAgent.pendingPermissions.set(perm1.id, perm1);
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "permission_requested", provider: "claude", request: perm1 },
+    });
+
+    const rpcResponses: SessionOutboundMessage[] = [];
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.clarify_permission.request",
+        requestId: "req_clarify_1",
+        agentId: childId,
+        permissionRequestId: perm1.id,
+        question: "这条命令会不会修改文件？",
+      },
+      (msg) => rpcResponses.push(msg),
+    );
+    const clarifyResp = rpcResponses[0] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.clarify_permission.response" }
+    >;
+    expect(clarifyResp.type).toBe("main_chat.clarify_permission.response");
+    expect(clarifyResp.payload.error).toBeNull();
+    expect(clarifyResp.payload.clarification?.answer).toContain("npm test");
+    expect(clarifyResp.payload.clarification?.pausedDeadlineAt).toBeTruthy();
+    const issuedProofToken = clarifyResp.payload.clarification!.proofToken;
+    expect(issuedProofToken.startsWith("prf_")).toBe(true);
+
+    // One-time anti-replay proofToken works exactly once
+    expect(
+      service.consumeClarificationProofToken(issuedProofToken, {
+        agentId: childId,
+        permissionRequestId: perm1.id,
+      }),
+    ).toBe(true);
+    expect(
+      service.consumeClarificationProofToken(issuedProofToken, {
+        agentId: childId,
+        permissionRequestId: perm1.id,
+      }),
+    ).toBe(false);
+
+    const overviewDuringClarify = await service.getOverview(mainAgentId);
+    expect(overviewDuringClarify.pendingClarifications).toHaveLength(1);
+    expect(overviewDuringClarify.suppressedQuietBadgeCount).toBeGreaterThanOrEqual(1);
+    expect(overviewDuringClarify.pendingSignalCount).toBeGreaterThanOrEqual(1);
+
+    // 2. Reject red-line standing authorization grant
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.grant_standing_authorization.request",
+        requestId: "req_grant_redline",
+        scope: "permission",
+        toolName: "Bash",
+        commandPrefix: "git push",
+        cwd: repoDir,
+      },
+      (msg) => rpcResponses.push(msg),
+    );
+    const redLineResp = rpcResponses[1] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.grant_standing_authorization.response" }
+    >;
+    expect(redLineResp.payload.authorization).toBeNull();
+    expect(redLineResp.payload.error).toContain("红线");
+
+    // 3. Grant safe standing authorization -> auto-approves & tracks matchCount -> revoke immediately stops it
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.grant_standing_authorization.request",
+        requestId: "req_grant_safe",
+        scope: "permission",
+        toolName: "Bash",
+        commandPrefix: "npm test",
+        cwd: repoDir,
+      },
+      (msg) => rpcResponses.push(msg),
+    );
+    const grantResp = rpcResponses[2] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.grant_standing_authorization.response" }
+    >;
+    expect(grantResp.payload.error).toBeNull();
+    const authId = grantResp.payload.authorization!.id;
+
+    const perm3 = {
+      id: "perm_m5_3",
+      kind: "tool",
+      name: "Bash",
+      input: { command: "npm test -- --bail=1" },
+    } as unknown as AgentPermissionRequest;
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "permission_requested", provider: "claude", request: perm3 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(permissionResponses).toContainEqual({
+      agentId: childId,
+      requestId: perm3.id,
+      behavior: "allow",
+    });
+
+    const afterMatch = await service.listStandingAuthorizations();
+    expect(afterMatch.authorizations.find((a) => a.id === authId)?.matchCount).toBe(1);
+    expect(afterMatch.authorizations.find((a) => a.id === authId)?.lastMatchedAt).toBeTruthy();
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.revoke_standing_authorization.request",
+        requestId: "req_revoke",
+        authorizationId: authId,
+      },
+      (msg) => rpcResponses.push(msg),
+    );
+    const revokeResp = rpcResponses[3] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.revoke_standing_authorization.response" }
+    >;
+    expect(revokeResp.payload.revoked).toBe(true);
+    expect(revokeResp.payload.authorization?.revokedAt).toBeTruthy();
+
+    const responsesBeforeRevokedPerm = permissionResponses.length;
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: {
+        type: "permission_requested",
+        provider: "claude",
+        request: {
+          id: "perm_m5_4",
+          kind: "tool",
+          name: "Bash",
+          input: { command: "npm test -- --run" },
+        } as unknown as AgentPermissionRequest,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(permissionResponses).toHaveLength(responsesBeforeRevokedPerm);
+
+    service.stop();
+  });
+
+  it("handles progressive rule suggestion promotion, dismissal, and risky nextStepSuggestions via RPC", async () => {
+    const { service } = makeHarness({ stalledCheckIntervalMs: 60_000 });
+    await service.start();
+    const { agentId: mainAgentId } = await service.ensureMainChat();
+
+    const plan = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "执行只读核查",
+          goal: "检查模块依赖",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["检查完成"],
+          quiet: true,
+        },
+      ],
+    });
+    const childId = plan.tasks[0]!.agentId!;
+
+    function emitManualApproval(id: string, name: string, command?: string): void {
+      const request = {
+        id,
+        kind: "tool",
+        name,
+        ...(command ? { input: { command } } : {}),
+      } as unknown as AgentPermissionRequest;
+      subscriber?.({
+        type: "agent_stream",
+        agentId: childId,
+        event: { type: "permission_requested", provider: "claude", request },
+      });
+      subscriber?.({
+        type: "agent_stream",
+        agentId: childId,
+        event: {
+          type: "permission_resolved",
+          provider: "claude",
+          requestId: id,
+          resolution: { behavior: "allow" },
+        },
+      });
+    }
+
+    // 1. Two manual approvals of `npm test` -> emits rule suggestion -> promote via grant
+    emitManualApproval("perm_s1", "Bash", "npm test -- --run");
+    emitManualApproval("perm_s2", "Bash", "npm test -- src/a.test.ts");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const rpcResponses: SessionOutboundMessage[] = [];
+    await handleMainChatSessionMessage(
+      service,
+      { type: "main_chat.list_standing_authorizations.request", requestId: "req_list_sug" },
+      (msg) => rpcResponses.push(msg),
+    );
+    const listResp = rpcResponses[0] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.list_standing_authorizations.response" }
+    >;
+    expect(listResp.payload.suggestions).toHaveLength(1);
+    const npmSuggestion = listResp.payload.suggestions[0]!;
+    expect(npmSuggestion.commandPrefix).toBe("npm test");
+
+    await service.grantStandingAuthorization({
+      scope: "permission",
+      toolName: "Bash",
+      commandPrefix: "npm test",
+      cwd: repoDir,
+      suggestionId: npmSuggestion.id,
+    });
+    expect((await service.listStandingAuthorizations()).suggestions).toHaveLength(0);
+
+    // 2. Two manual approvals of `Read` -> dismiss via RPC -> 3rd approval never re-pops it
+    emitManualApproval("perm_r1", "Read");
+    emitManualApproval("perm_r2", "Read");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const readSuggestion = (await service.listStandingAuthorizations()).suggestions.find(
+      (s) => s.toolName === "Read",
+    );
+    expect(readSuggestion).toBeTruthy();
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.dismiss_rule_suggestion.request",
+        requestId: "req_dismiss",
+        suggestionId: readSuggestion!.id,
+      },
+      (msg) => rpcResponses.push(msg),
+    );
+    const dismissResp = rpcResponses[1] as Extract<
+      SessionOutboundMessage,
+      { type: "main_chat.dismiss_rule_suggestion.response" }
+    >;
+    expect(dismissResp.payload.dismissed).toBe(true);
+
+    emitManualApproval("perm_r3", "Read");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // 3. Open write plan yields risky nextStepSuggestion in overview
+    await service.createPlan(mainAgentId, {
+      summary: "修复上线脚本",
+      tasks: [
+        {
+          title: "修改发布脚本",
+          goal: "更新部署校验",
+          mode: "write",
+          cwd: repoDir,
+          doneWhen: ["校验通过"],
+        },
+      ],
+    });
+
+    const finalOverview = await service.getOverview(mainAgentId);
+    expect(finalOverview.ruleSuggestions?.some((s) => s.toolName === "Read")).toBe(false);
+    expect(finalOverview.pendingClarifications).toHaveLength(0);
+    expect(finalOverview.nextStepSuggestions?.some((item) => item.risky === true)).toBe(true);
+
+    service.stop();
+  });
+
+  it("drops stale supervision signals at dequeue time with zero model wakeups and detects 30m all_stopped tasks", async () => {
+    let nowMs = Date.parse("2026-11-23T10:00:00.000Z");
+    const { service } = makeHarness({
+      stalledCheckIntervalMs: 60_000,
+      triageSettleMs: 10,
+      superviseGatherMs: 40,
+      wakeupCooldownMs: 10,
+      allStoppedThresholdMs: 30 * 60_000,
+      now: () => nowMs,
+      semanticTriageRunner: async () => ({
+        phase: "done",
+        summary: "已修复完成",
+        waitReason: null,
+        needsUserDecision: false,
+        isLowRiskTechnicalQuestion: false,
+        riskyAction: false,
+        suggestedReply: null,
+      }),
+    });
+    await service.start();
+    const { agentId: mainAgentId } = await service.ensureMainChat();
+
+    const plan = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "快速修复",
+          goal: "修复边界问题",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["检查通过"],
+          quiet: true,
+        },
+      ],
+    });
+    const childId = plan.tasks[0]!.agentId!;
+    const taskId = plan.tasks[0]!.taskRecordId!;
+    sentPrompts.length = 0;
+
+    // Child finishes -> after 10ms triage queues `review` signal into 40ms gather window
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text: "已排查完成并输出结论。" },
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "turn_completed", provider: "claude" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const overviewQueued = await service.getOverview(mainAgentId);
+    expect(overviewQueued.pendingSignalCount).toBe(1);
+    expect(overviewQueued.suppressedQuietBadgeCount).toBeGreaterThanOrEqual(1);
+
+    // Accept the task BEFORE the 40ms gather window closes -> signal becomes stale!
+    await service.reviewTask({
+      taskId,
+      verdict: "accept",
+      summary: "已人工提前验收",
+    });
+
+    // Advance custom clock past 40ms gather window and let timer flush -> live revalidation drops stale signal, 0 wakeups sent!
+    nowMs += 60;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(sentPrompts.filter((entry) => entry.agentId === mainAgentId)).toHaveLength(0);
+    expect((await service.getOverview(mainAgentId)).pendingSignalCount).toBe(0);
+
+    // Create another task, advance clock by 35 minutes while child is idle -> detects `all_stopped`
+    const plan2 = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "停滞任务",
+          goal: "检查长任务",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["完成"],
+        },
+      ],
+    });
+    const child2 = agents.get(plan2.tasks[0]!.agentId!)!;
+    child2.updatedAt = new Date(nowMs);
+    nowMs += 35 * 60_000;
+
+    const patrol = await service.triggerPatrol({ mainAgentId, forceWakeup: true });
+    expect(patrol.wokeMainChat).toBe(true);
+    const lastMainPrompt = sentPrompts.findLast((entry) => entry.agentId === mainAgentId);
+    expect(String(lastMainPrompt?.prompt)).toContain("all_stopped");
+
+    service.stop();
+  });
+
+  it("blocks red-line auto-delegation even if triage falsely reports riskyAction=false and blocks 24h duplicate auto-delegations", async () => {
+    const responses: SemanticTriageOutput[] = [
+      // Falsely labeled safe by model, but hardcoded red-line guard MUST block!
+      {
+        phase: "blocked_user",
+        summary: "询问是否发飞书群消息",
+        waitReason: "要不要我直接发飞书群消息通知大家？",
+        needsUserDecision: true,
+        isLowRiskTechnicalQuestion: true,
+        riskyAction: false,
+        suggestedReply: "直接发飞书群通知大家。",
+      },
+      // Safe question #1 -> allowed
+      {
+        phase: "blocked_user",
+        summary: "确认单测超时值",
+        waitReason: "单测默认超时设 30s 还是 60s？",
+        needsUserDecision: true,
+        isLowRiskTechnicalQuestion: true,
+        riskyAction: false,
+        suggestedReply: "设为 30s。",
+      },
+      // Duplicate question #2 within 24h -> MUST be blocked from auto-delegation!
+      {
+        phase: "blocked_user",
+        summary: "再次确认单测超时值",
+        waitReason: "请问单测默认超时设 30s 还是 60s？",
+        needsUserDecision: true,
+        isLowRiskTechnicalQuestion: true,
+        riskyAction: false,
+        suggestedReply: "设为 30s。",
+      },
+    ];
+
+    const { service, agentManager } = makeHarness({
+      triageSettleMs: 10,
+      wakeupCooldownMs: 10,
+      stalledCheckIntervalMs: 60_000,
+      semanticTriageRunner: async () => responses.shift() ?? null,
+    });
+    await service.start();
+    await service.ensureMainChat();
+    await service.updateSettings({ applyPreset: "proactive" });
+
+    const manual = await agentManager.createAgent(
+      { provider: "claude", cwd: repoDir, title: "安全守卫验证" },
+      "manual_guard_1",
+      { workspaceId: "ws_guard_1" },
+    );
+    sentPrompts.length = 0;
+
+    // Turn 1: red-line message falsely flagged safe by model -> hardcoded guard blocks!
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text: "要不要我直接发飞书群消息通知大家？" },
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: { type: "turn_completed", provider: "claude" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(sentPrompts.filter((entry) => entry.agentId === manual.id)).toHaveLength(0);
+
+    // Turn 2: safe low-risk question -> auto-delegated once
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text: "单测默认超时设 30s 还是 60s？" },
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: { type: "turn_completed", provider: "claude" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(sentPrompts.filter((entry) => entry.agentId === manual.id)).toHaveLength(1);
+
+    // Turn 3: near-identical question within 24h -> blocked by 24h duplicate guard!
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text: "请问单测默认超时设 30s 还是 60s？" },
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: { type: "turn_completed", provider: "claude" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(sentPrompts.filter((entry) => entry.agentId === manual.id)).toHaveLength(1);
+
+    service.stop();
   });
 });

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
@@ -14,6 +15,7 @@ import {
   MAIN_CHAT_TASK_QUIET_LABEL,
   MAIN_CHAT_TASK_RECORD_ID_LABEL,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
+  extractMainChatPermissionRuleCandidate,
   getMainChatTaskMetaFromLabels,
   isMainChatLabels,
   type MainChatActivityEntry,
@@ -94,6 +96,16 @@ import {
   buildMainChatHandoffSummary,
   buildWorkerInitialPrompt,
 } from "./prompts.js";
+import {
+  buildDeterministicClarificationAnswer,
+  buildNextStepSuggestions,
+  buildStandingAuthorizationLabel,
+  checkRedLineGuard,
+  createApprovalClarificationRecord,
+  createClarificationProofStore,
+  recordManualApprovalObservation,
+  type BuildClarificationAnswerInput,
+} from "./safety.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
 import { createMainChatSupervisor } from "./supervisor.js";
 import {
@@ -105,6 +117,7 @@ import {
   createTaskRecordFromPlannedTask,
   estimateExpectedMinutes,
   formatTaskDecisionsPromptSection,
+  normalizeTrustCwd,
   resolveEffectiveTaskStatus,
   validateTaskBriefInput,
 } from "./task-ledger.js";
@@ -233,6 +246,18 @@ export interface MainChatServiceDependencies {
   noProgressThresholdMs?: number;
   needsYouEscalateMs?: number;
   wakeupCooldownMs?: number;
+  superviseGatherMs?: number;
+  normalCooldownMs?: number;
+  urgentCooldownMs?: number;
+  allStoppedThresholdMs?: number;
+  supervisorIdleEscalateMs?: number;
+  supervisorBusyMaxHoldMs?: number;
+  permissionHardDeadlineMs?: number;
+  maxTransientAutoRetries?: number;
+  ruleSuggestionThreshold?: number;
+  permissionClarifier?: (
+    input: BuildClarificationAnswerInput,
+  ) => Promise<string | null> | string | null;
   now?: () => number;
   snapshotCacheTtlMs?: number;
   snapshotForegroundTimeoutMs?: number;
@@ -399,18 +424,22 @@ export interface MainChatService {
     localServerId: string | null;
     hosts: MainChatFleetHostStatus[];
   }>;
-  // M5 Approval Clarification & Standing Authorizations contract (implemented by Wave 3 M5 backend)
-  clarifyPermission?(input: {
+  // M5 Approval Clarification & Standing Authorizations
+  clarifyPermission(input: {
     agentId: string;
     serverId?: string | null;
     permissionRequestId: string;
     question: string;
   }): Promise<MainChatApprovalClarification>;
-  listStandingAuthorizations?(options?: { includeRevoked?: boolean }): Promise<{
+  consumeClarificationProofToken(
+    proofToken: string,
+    expected?: { agentId?: string; permissionRequestId?: string },
+  ): boolean;
+  listStandingAuthorizations(options?: { includeRevoked?: boolean }): Promise<{
     authorizations: MainChatStandingAuthorization[];
     suggestions: MainChatRuleSuggestion[];
   }>;
-  grantStandingAuthorization?(input: {
+  grantStandingAuthorization(input: {
     scope: MainChatStandingAuthorizationScope;
     serverId?: string | null;
     cwd?: string | null;
@@ -423,11 +452,11 @@ export interface MainChatService {
     suggestionId?: string;
     expiresAt?: string | null;
   }): Promise<MainChatStandingAuthorization>;
-  revokeStandingAuthorization?(authorizationId: string): Promise<{
+  revokeStandingAuthorization(authorizationId: string): Promise<{
     revoked: boolean;
     authorization: MainChatStandingAuthorization | null;
   }>;
-  dismissRuleSuggestion?(suggestionId: string): Promise<boolean>;
+  dismissRuleSuggestion(suggestionId: string): Promise<boolean>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -458,7 +487,7 @@ function makeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function trimOptional(value: string | undefined): string | null {
+function trimOptional(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
 }
@@ -663,6 +692,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     },
   });
 
+  const clarificationProofs = createClarificationProofStore();
+
   const supervisor = createMainChatSupervisor({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
@@ -670,13 +701,27 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     contextSnapshots,
     turnQueue,
     logger,
+    serverId: deps.serverId,
+    now: getNowMs,
     providerSnapshotManager: deps.providerSnapshotManager,
     readDaemonConfig: deps.readDaemonConfig,
+    resolveConversationTarget: async (conversationId) => {
+      if (!conversationId) return null;
+      await conversationManager.load();
+      const conv = conversationManager.getConversation(conversationId);
+      if (!conv || conv.archivedAt !== null) return null;
+      return { agentId: conv.agentId, label: conv.title };
+    },
+    isLeaderConversationActive: (conversationId) => {
+      const conv = conversationManager.getConversation(conversationId);
+      return Boolean(conv && conv.kind === "leader" && conv.archivedAt === null);
+    },
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
     },
     semanticTriageRunner: deps.semanticTriageRunner,
     transientRetryDelayMs: deps.transientRetryDelayMs,
+    maxTransientAutoRetries: deps.maxTransientAutoRetries,
     usageLimitRetryDelayMs: deps.usageLimitRetryDelayMs,
     stalledThresholdMs: deps.stalledThresholdMs,
     stalledCheckIntervalMs: deps.stalledCheckIntervalMs,
@@ -684,6 +729,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     noProgressThresholdMs: deps.noProgressThresholdMs,
     needsYouEscalateMs: deps.needsYouEscalateMs,
     wakeupCooldownMs: deps.wakeupCooldownMs,
+    superviseGatherMs: deps.superviseGatherMs,
+    normalCooldownMs: deps.normalCooldownMs,
+    urgentCooldownMs: deps.urgentCooldownMs,
+    allStoppedThresholdMs: deps.allStoppedThresholdMs,
+    supervisorIdleEscalateMs: deps.supervisorIdleEscalateMs,
+    supervisorBusyMaxHoldMs: deps.supervisorBusyMaxHoldMs,
+    permissionHardDeadlineMs: deps.permissionHardDeadlineMs,
+    ruleSuggestionThreshold: deps.ruleSuggestionThreshold,
   });
   let ensureInFlight: Promise<EnsureMainChatResult> | null = null;
   let lifecycleLock: Promise<unknown> = Promise.resolve();
@@ -1617,6 +1670,19 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           lastActivityAt: nowIso,
         });
       }
+      supervisor.enqueueSignal({
+        kind: "failed",
+        urgency: "immediate",
+        taskId: continuedTask?.id ?? task.taskRecordId ?? null,
+        agentId: null,
+        serverId: task.serverId ?? deps.serverId,
+        conversationId: plan.conversationId ?? null,
+        title: task.title,
+        summary: `任务首次启动失败：${message.slice(0, 120)}`,
+        fingerprintSeed: `start_fail:${plan.id}:${task.id}:${message.slice(0, 40)}`,
+        quiet: task.quiet !== false,
+        escalatedToUser: true,
+      });
       return { ...task, startError: message };
     }
   }
@@ -2569,6 +2635,253 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  async function observeManualAutoStartApproval(task: MainChatPlannedTask): Promise<void> {
+    if (!task.cwd || task.mode !== "write") return;
+    const nowMs = getNowMs();
+    const nowIso = new Date(nowMs).toISOString();
+    const existingAuths = store.listStandingAuthorizations({ includeRevoked: false });
+    const existingSuggestions = store.listRuleSuggestions({ includeDismissed: true });
+
+    const preview = recordManualApprovalObservation({
+      scope: "auto_start",
+      serverId: task.serverId ?? deps.serverId,
+      localServerId: deps.serverId,
+      cwd: task.cwd,
+      mode: task.mode,
+      existingObservation: null,
+      existingAuthorizations: existingAuths,
+      existingSuggestions,
+      threshold: deps.ruleSuggestionThreshold,
+      nowIso,
+      nowMs,
+    });
+    if (!preview.eligible || !preview.observationKey) return;
+
+    const persisted = store.getManualApprovalObservation(preview.observationKey);
+    const evaluated = recordManualApprovalObservation({
+      scope: "auto_start",
+      serverId: task.serverId ?? deps.serverId,
+      localServerId: deps.serverId,
+      cwd: task.cwd,
+      mode: task.mode,
+      existingObservation: persisted,
+      existingAuthorizations: existingAuths,
+      existingSuggestions,
+      threshold: deps.ruleSuggestionThreshold,
+      nowIso,
+      nowMs,
+    });
+    if (evaluated.observation) {
+      await store.putManualApprovalObservation(evaluated.observation);
+    }
+    if (evaluated.suggestion) {
+      await store.putRuleSuggestion(evaluated.suggestion);
+    }
+  }
+
+  async function recordPlanStartPreferences(
+    plan: MainChatPlanRecord,
+    selected: ReadonlySet<string> | undefined,
+    rememberAutoStart: boolean,
+  ): Promise<void> {
+    if (rememberAutoStart) {
+      for (const task of plan.tasks) {
+        if (selected && !selected.has(task.id)) continue;
+        if (!task.cwd) continue;
+        await store.addTrustRule(task.cwd, task.mode, {
+          serverId: task.serverId ?? deps.serverId,
+          hostLabel: task.hostLabel ?? null,
+          allowSubdirectories: true,
+        });
+      }
+      return;
+    }
+    if (plan.status !== "open") return;
+    for (const task of plan.tasks) {
+      if (selected && !selected.has(task.id)) continue;
+      await observeManualAutoStartApproval(task);
+    }
+  }
+
+  interface ResolvedClarificationTarget {
+    toolName: string;
+    toolTitle: string | null;
+    description: string | null;
+    kind: string | null;
+    command: string | null;
+    inputSummary: string | null;
+    serverId: string | null;
+    recentAssistantText: string | null;
+  }
+
+  function formatPermissionInputSummary(input: Record<string, unknown> | null | undefined): {
+    command: string | null;
+    inputSummary: string | null;
+  } {
+    if (!input) return { command: null, inputSummary: null };
+    const rawCommand = input.command ?? input.cmd;
+    const command = typeof rawCommand === "string" && rawCommand.trim() ? rawCommand.trim() : null;
+    try {
+      const serialized = JSON.stringify(input);
+      return { command, inputSummary: serialized.length > 2 ? serialized.slice(0, 180) : null };
+    } catch {
+      return { command, inputSummary: null };
+    }
+  }
+
+  function extractRecentAssistantText(agentId: string): string | null {
+    const timeline = deps.agentManager.getTimeline(agentId);
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      const item = timeline[i];
+      if (item && item.type === "assistant_message" && item.text.trim()) {
+        return item.text.trim().slice(-240);
+      }
+    }
+    return null;
+  }
+
+  async function resolveClarificationTarget(input: {
+    agentId: string;
+    serverId?: string | null;
+    permissionRequestId: string;
+  }): Promise<ResolvedClarificationTarget> {
+    const live = deps.agentManager.getAgent(input.agentId);
+    const localPerm = live?.pendingPermissions.get(input.permissionRequestId);
+    if (localPerm) {
+      const { command, inputSummary } = formatPermissionInputSummary(localPerm.input ?? null);
+      return {
+        toolName: localPerm.name || localPerm.title || "待审批工具",
+        toolTitle: localPerm.title ?? null,
+        description: localPerm.description ?? null,
+        kind: localPerm.kind ?? null,
+        command,
+        inputSummary,
+        serverId: trimOptional(input.serverId) ?? deps.serverId,
+        recentAssistantText: extractRecentAssistantText(input.agentId),
+      };
+    }
+
+    const requestedServer = trimOptional(input.serverId);
+    if (requestedServer && requestedServer !== deps.serverId) {
+      const snapshot = await fleetAggregator.collectFleet().catch(() => null);
+      const remoteAgent = snapshot?.agents.find(
+        (entry) => entry.serverId === requestedServer && entry.agentId === input.agentId,
+      );
+      const remotePerm = remoteAgent?.pendingPermissions.find(
+        (perm) => perm.requestId === input.permissionRequestId,
+      );
+      if (remotePerm) {
+        return {
+          toolName: remotePerm.name || remotePerm.title || "待审批工具",
+          toolTitle: remotePerm.title,
+          description: remotePerm.description,
+          kind: remotePerm.kind ?? null,
+          command: null,
+          inputSummary: remotePerm.description,
+          serverId: requestedServer,
+          recentAssistantText: null,
+        };
+      }
+    }
+
+    throw new Error(
+      `找不到待审批权限请求：agent=${input.agentId}, permissionRequestId=${input.permissionRequestId}`,
+    );
+  }
+
+  function validateGrantStandingAuthorizationInput(input: {
+    scope: MainChatStandingAuthorizationScope;
+    serverId?: string | null;
+    cwd?: string | null;
+    allowSubdirectories?: boolean;
+    toolName?: string | null;
+    commandPrefix?: string | null;
+    mode?: MainChatTaskMode | null;
+    label?: string;
+    reason?: string | null;
+    expiresAt?: string | null;
+  }): Omit<
+    MainChatStandingAuthorization,
+    "id" | "createdAt" | "lastMatchedAt" | "matchCount" | "revokedAt"
+  > {
+    const serverId = trimOptional(input.serverId);
+    const rawCwd = trimOptional(input.cwd);
+    const cwd = rawCwd ? normalizeTrustCwd(rawCwd) : null;
+    const expiresAt = trimOptional(input.expiresAt);
+    if (expiresAt !== null && !Number.isFinite(Date.parse(expiresAt))) {
+      throw new Error(`无效的过期时间 expiresAt：${expiresAt}`);
+    }
+
+    if (input.scope === "auto_start") {
+      if (!cwd) {
+        throw new Error("自动开工常驻授权（auto_start）必须指定目标目录 cwd");
+      }
+      if (!input.mode) {
+        throw new Error("自动开工常驻授权（auto_start）必须指定任务模式 mode（readonly/write）");
+      }
+      return {
+        scope: "auto_start",
+        serverId,
+        cwd,
+        allowSubdirectories: input.allowSubdirectories ?? true,
+        toolName: null,
+        commandPrefix: null,
+        mode: input.mode,
+        label:
+          trimOptional(input.label) ??
+          buildStandingAuthorizationLabel({ scope: "auto_start", mode: input.mode, cwd }),
+        reason: trimOptional(input.reason),
+        expiresAt,
+      };
+    }
+
+    const toolName = trimOptional(input.toolName);
+    if (!toolName) {
+      throw new Error("工具权限常驻授权（permission）必须指定 toolName");
+    }
+    const rawPrefix = trimOptional(input.commandPrefix);
+    const redLine = checkRedLineGuard({
+      kind: "tool",
+      toolName,
+      command: rawPrefix,
+    });
+    if (redLine.blocked) {
+      throw new Error(redLine.reason ?? "命中安全红线，禁止创建该常驻授权");
+    }
+    let normalizedPrefix: string | null = null;
+    if (rawPrefix !== null) {
+      const candidate = extractMainChatPermissionRuleCandidate({
+        kind: "tool",
+        name: toolName,
+        input: { command: rawPrefix },
+      });
+      if (!candidate || !candidate.commandPrefix) {
+        throw new Error("包含复合连接符或高危命令前缀，禁止创建常驻授权");
+      }
+      normalizedPrefix = candidate.commandPrefix;
+    }
+
+    return {
+      scope: "permission",
+      serverId,
+      cwd,
+      allowSubdirectories: input.allowSubdirectories ?? false,
+      toolName,
+      commandPrefix: normalizedPrefix,
+      mode: null,
+      label:
+        trimOptional(input.label) ??
+        buildStandingAuthorizationLabel({
+          scope: "permission",
+          toolName,
+          commandPrefix: normalizedPrefix,
+          cwd,
+        }),
+      reason: trimOptional(input.reason),
+      expiresAt,
+    };
+  }
+
   return {
     async start() {
       await store.load();
@@ -2835,18 +3148,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           throw new Error("该任务计划已撤回，无法启动");
         }
         const selected = options?.taskIds?.length ? new Set(options.taskIds) : undefined;
-        if (options?.rememberAutoStart) {
-          for (const task of existing.tasks) {
-            if (selected && !selected.has(task.id)) continue;
-            if (task.cwd) {
-              await store.addTrustRule(task.cwd, task.mode, {
-                serverId: task.serverId ?? deps.serverId,
-                hostLabel: task.hostLabel ?? null,
-                allowSubdirectories: true,
-              });
-            }
-          }
-        }
+        await recordPlanStartPreferences(existing, selected, options?.rememberAutoStart === true);
         if (existing.status === "started" && existing.tasks.every((task) => task.agentId)) {
           return existing;
         }
@@ -3114,14 +3416,28 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         conversationManager.listConversations({ includeArchived: false }),
         fleetBridge.getFleetHosts().catch(() => ({ localServerId: deps.serverId, hosts: [] })),
       ]);
+      const plans = store.listPlans(resolvedMainAgentId);
+      const decisions = store.listDecisions(resolvedMainAgentId);
+      const triages = store.listTriages();
+      const standingAuthorizations = store.listStandingAuthorizations({ includeRevoked: false });
+      const ruleSuggestions = store.listRuleSuggestions({ includeDismissed: false });
+      const pendingClarifications = store.listPendingClarifications();
+      const nextStepSuggestions = buildNextStepSuggestions({
+        tasks,
+        plans,
+        decisions,
+        triages,
+        recentReceipts,
+        pendingClarifications,
+      });
       return {
-        plans: store.listPlans(resolvedMainAgentId),
-        decisions: store.listDecisions(resolvedMainAgentId),
+        plans,
+        decisions,
         autoStartRules: store.listTrustRules(),
         permissionRules: store.listPermissionRules(),
         metrics: store.getMetrics(),
         settings: store.getSettings(),
-        triages: store.listTriages(),
+        triages,
         lastPatrolAt: store.getLastPatrolAt(),
         lastWakeupAt: store.getLastWakeupAt(),
         compaction: buildCompactionState(resolvedMainAgentId ?? null),
@@ -3136,6 +3452,12 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         conversations,
         fleetHosts: fleetHostsResult.hosts,
         recentReceipts,
+        standingAuthorizations,
+        ruleSuggestions,
+        pendingClarifications,
+        nextStepSuggestions,
+        suppressedQuietBadgeCount: store.getSuppressedQuietBadgeCount(),
+        pendingSignalCount: supervisor.getPendingSignalCount(),
       };
     },
 
@@ -3503,6 +3825,158 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     async getFleetHosts(options) {
       return fleetBridge.getFleetHosts(options);
+    },
+
+    async clarifyPermission(input) {
+      await store.load();
+      const question = input.question.trim();
+      if (!question) {
+        throw new Error("澄清问题 question 不能为空");
+      }
+      const target = await resolveClarificationTarget({
+        agentId: input.agentId,
+        serverId: input.serverId,
+        permissionRequestId: input.permissionRequestId,
+      });
+      const linkedTask = store.findTaskByAgentId(input.agentId);
+      const { pausedDeadlineAt } = supervisor.pausePermissionForClarification({
+        agentId: input.agentId,
+        serverId: target.serverId,
+        permissionRequestId: input.permissionRequestId,
+        label: target.toolTitle ?? target.toolName,
+        taskId: linkedTask?.id ?? null,
+        conversationId: linkedTask?.conversationId ?? null,
+      });
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      const proofToken = clarificationProofs.issue({
+        agentId: input.agentId,
+        permissionRequestId: input.permissionRequestId,
+        nowIso,
+      });
+      const redLine = checkRedLineGuard({
+        kind: target.kind,
+        toolName: target.toolName,
+        command: target.command,
+        question: target.description,
+      });
+      const answerContext: BuildClarificationAnswerInput = {
+        question,
+        toolName: target.toolName,
+        toolTitle: target.toolTitle,
+        description: target.description,
+        command: target.command,
+        inputSummary: target.inputSummary,
+        task: linkedTask
+          ? { title: linkedTask.title, mode: linkedTask.mode, brief: linkedTask.brief }
+          : null,
+        recentAssistantText: target.recentAssistantText,
+        redLine,
+      };
+
+      let answer: string | null = null;
+      if (deps.permissionClarifier) {
+        try {
+          const customAnswer = await deps.permissionClarifier(answerContext);
+          if (customAnswer?.trim()) {
+            answer = customAnswer.trim();
+          }
+        } catch (error) {
+          logger.warn(
+            { err: error, agentId: input.agentId, permissionRequestId: input.permissionRequestId },
+            "Read-only permission clarifier failed; falling back to deterministic explanation",
+          );
+        }
+      }
+      if (!answer) {
+        answer = buildDeterministicClarificationAnswer(answerContext);
+      }
+
+      const record = createApprovalClarificationRecord({
+        agentId: input.agentId,
+        serverId: target.serverId,
+        permissionRequestId: input.permissionRequestId,
+        question,
+        answer,
+        proofToken,
+        pausedDeadlineAt,
+        nowIso,
+      });
+      await store.putClarification(record);
+      return record;
+    },
+
+    consumeClarificationProofToken(proofToken, expected) {
+      return clarificationProofs.consume(proofToken, expected);
+    },
+
+    async listStandingAuthorizations(options) {
+      await store.load();
+      return {
+        authorizations: store.listStandingAuthorizations(options),
+        suggestions: store.listRuleSuggestions({ includeDismissed: false }),
+      };
+    },
+
+    async grantStandingAuthorization(input) {
+      await store.load();
+      const validated = validateGrantStandingAuthorizationInput(input);
+      const nowIso = new Date(getNowMs()).toISOString();
+      const existing = store
+        .listStandingAuthorizations({ includeRevoked: false })
+        .find(
+          (entry) =>
+            entry.scope === validated.scope &&
+            entry.serverId === validated.serverId &&
+            entry.cwd === validated.cwd &&
+            (entry.toolName?.toLowerCase() ?? null) ===
+              (validated.toolName?.toLowerCase() ?? null) &&
+            (entry.commandPrefix?.toLowerCase() ?? null) ===
+              (validated.commandPrefix?.toLowerCase() ?? null) &&
+            entry.mode === validated.mode,
+        );
+
+      const auth: MainChatStandingAuthorization = existing
+        ? {
+            ...existing,
+            allowSubdirectories: validated.allowSubdirectories,
+            label: validated.label,
+            reason: validated.reason ?? existing.reason,
+            expiresAt: validated.expiresAt,
+            revokedAt: null,
+          }
+        : {
+            id: `auth_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
+            ...validated,
+            createdAt: nowIso,
+            lastMatchedAt: null,
+            matchCount: 0,
+            revokedAt: null,
+          };
+
+      const saved = await store.putStandingAuthorization(auth);
+      if (input.suggestionId?.trim()) {
+        await store.removeRuleSuggestion(input.suggestionId.trim());
+      }
+      contextSnapshots.invalidateCache();
+      return saved;
+    },
+
+    async revokeStandingAuthorization(authorizationId) {
+      await store.load();
+      const result = await store.revokeStandingAuthorization(
+        authorizationId,
+        new Date(getNowMs()).toISOString(),
+      );
+      if (result.revoked) {
+        contextSnapshots.invalidateCache();
+      }
+      return result;
+    },
+
+    async dismissRuleSuggestion(suggestionId) {
+      await store.load();
+      return store.dismissRuleSuggestion(suggestionId, new Date(getNowMs()).toISOString());
     },
   };
 }

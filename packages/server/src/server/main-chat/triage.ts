@@ -76,14 +76,47 @@ function clampUsageLimitDelay(ms: number): number {
   return Math.min(MAX_USAGE_LIMIT_DELAY_MS, Math.max(MIN_USAGE_LIMIT_DELAY_MS, ms));
 }
 
-/**
- * Extracts a reset countdown from provider usage-limit error text (e.g. "Resets in 2h 15m",
- * "retry in 45m", "30分钟后重置") and clamps it to a safe scheduling window.
- */
-export function parseUsageLimitResetDelayMs(
-  message: string,
-  fallbackMs: number = DEFAULT_USAGE_LIMIT_DELAY_MS,
-): number {
+export interface UsageLimitWakeSchedule {
+  wakeAtMs: number;
+  wakeAtIso: string;
+  delayMs: number;
+  parsedExplicitly: boolean;
+}
+
+const ISO_TIMESTAMP_RE =
+  /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})/;
+const CLOCK_TIME_RE =
+  /(?:resets?\s+at|until|wake[_ ]?at|将于|将在|重置于|到)\s*[:=]?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;
+
+function parseAbsoluteUsageLimitWakeMs(message: string, nowMs: number): number | null {
+  const isoMatch = ISO_TIMESTAMP_RE.exec(message);
+  if (isoMatch) {
+    const parsedMs = Date.parse(isoMatch[0]);
+    if (Number.isFinite(parsedMs) && parsedMs > nowMs) {
+      return parsedMs;
+    }
+  }
+
+  const clockMatch = CLOCK_TIME_RE.exec(message);
+  if (!clockMatch) return null;
+  let hour = Number(clockMatch[1]);
+  const minute = clockMatch[2] ? Number(clockMatch[2]) : 0;
+  const meridiem = clockMatch[3]?.toLowerCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute > 59) return null;
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (hour > 23) return null;
+
+  const target = new Date(nowMs);
+  target.setSeconds(0, 0);
+  target.setHours(hour, minute, 0, 0);
+  if (target.getTime() <= nowMs) {
+    target.setDate(target.getDate() + 1);
+  }
+  return target.getTime();
+}
+
+function parseRelativeUsageLimitDelayMs(message: string): number | null {
   const hourMatch = /(\d+)\s*(?:h|hr|hrs|hour|hours|小时)/i.exec(message);
   const minuteMatch = /(\d+)\s*(?:m|min|mins|minute|minutes|分钟|分)/i.exec(message);
   const secondMatch = /(\d+)\s*(?:s|sec|secs|second|seconds|秒)/i.exec(message);
@@ -93,10 +126,64 @@ export function parseUsageLimitResetDelayMs(
   const seconds = secondMatch ? Number(secondMatch[1]) : 0;
 
   const totalMs = (hours * 3600 + minutes * 60 + seconds) * 1000;
-  if (totalMs > 0) {
-    return clampUsageLimitDelay(totalMs);
+  return totalMs > 0 ? totalMs : null;
+}
+
+/**
+ * Parses provider usage-limit reset instructions into an exact `wake_at` timestamp and clamped
+ * delay. Supports ISO timestamps, `wake_at`, clock times ("Resets at 3:30 PM", "将于 18:00 重置"),
+ * and relative countdowns ("Resets in 2h 15m", "30分钟后重置").
+ */
+export function parseUsageLimitWakeAt(
+  message: string,
+  nowMs: number = Date.now(),
+  fallbackMs: number = DEFAULT_USAGE_LIMIT_DELAY_MS,
+): UsageLimitWakeSchedule {
+  const absoluteMs = parseAbsoluteUsageLimitWakeMs(message, nowMs);
+  if (absoluteMs !== null) {
+    const delayMs = clampUsageLimitDelay(absoluteMs - nowMs);
+    const wakeAtMs = nowMs + delayMs;
+    return {
+      wakeAtMs,
+      wakeAtIso: new Date(wakeAtMs).toISOString(),
+      delayMs,
+      parsedExplicitly: true,
+    };
   }
-  return clampUsageLimitDelay(fallbackMs);
+
+  const relativeMs = parseRelativeUsageLimitDelayMs(message);
+  if (relativeMs !== null) {
+    const delayMs = clampUsageLimitDelay(relativeMs);
+    const wakeAtMs = nowMs + delayMs;
+    return {
+      wakeAtMs,
+      wakeAtIso: new Date(wakeAtMs).toISOString(),
+      delayMs,
+      parsedExplicitly: true,
+    };
+  }
+
+  const delayMs = clampUsageLimitDelay(fallbackMs);
+  const wakeAtMs = nowMs + delayMs;
+  return {
+    wakeAtMs,
+    wakeAtIso: new Date(wakeAtMs).toISOString(),
+    delayMs,
+    parsedExplicitly: false,
+  };
+}
+
+/**
+ * Extracts a reset countdown from provider usage-limit error text (e.g. "Resets in 2h 15m",
+ * "retry in 45m", "30分钟后重置", "Resets at 2026-11-23T15:30:00Z") and clamps it to a safe
+ * scheduling window.
+ */
+export function parseUsageLimitResetDelayMs(
+  message: string,
+  fallbackMs: number = DEFAULT_USAGE_LIMIT_DELAY_MS,
+  nowMs: number = Date.now(),
+): number {
+  return parseUsageLimitWakeAt(message, nowMs, fallbackMs).delayMs;
 }
 
 // ============================================================================
