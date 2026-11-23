@@ -5,6 +5,7 @@ import {
   type MainChatActivityEntry,
 } from "@getpaseo/protocol/main-chat";
 import type { AgentManager, AgentManagerEvent } from "../agent/agent-manager.js";
+import type { AgentProvider, AgentUsage } from "../agent/agent-sdk-types.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import {
@@ -57,6 +58,13 @@ export interface MainChatTurnQueueDependencies {
   /** Subscribe directly to agentManager on start() (default: true). */
   autoSubscribe?: boolean;
   onCompactionObserved?: (mainAgentId: string) => void;
+  onMainAgentTurnCompleted?: (info: {
+    agentId: string;
+    kind: "foreground" | "background";
+    provider: AgentProvider;
+    model: string | null;
+    usage: AgentUsage;
+  }) => void;
 }
 
 export interface MainChatTurnQueue {
@@ -671,10 +679,23 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     mainAgentId: string,
     state: PerMainAgentState,
     now: number,
+    provider: AgentProvider,
+    usage: AgentUsage | undefined,
   ): void {
     const finished = state.activeTurn;
     state.activeTurn = null;
     state.lastIdleAtMs = now;
+
+    if (usage && deps.onMainAgentTurnCompleted) {
+      const live = deps.agentManager.getAgent(mainAgentId);
+      deps.onMainAgentTurnCompleted({
+        agentId: mainAgentId,
+        kind: finished?.kind === "background" ? "background" : "foreground",
+        provider,
+        model: live?.config.model ?? live?.runtimeInfo?.model ?? null,
+        usage,
+      });
+    }
 
     if (!finished) {
       scheduleDrain(mainAgentId);
@@ -738,7 +759,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     } else if (stream.type === "turn_failed") {
       handleTurnAbortedEvent(mainAgentId, state, "failed", stream.error, now);
     } else if (stream.type === "turn_completed") {
-      handleTurnCompletedEvent(mainAgentId, state, now);
+      handleTurnCompletedEvent(mainAgentId, state, now, stream.provider, stream.usage);
     }
   }
 

@@ -33,6 +33,8 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.grant_standing_authorization.request" }
   | { type: "main_chat.revoke_standing_authorization.request" }
   | { type: "main_chat.dismiss_rule_suggestion.request" }
+  | { type: "main_chat.get_usage.request" }
+  | { type: "main_chat.reset_usage.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -68,6 +70,8 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.grant_standing_authorization.request",
   "main_chat.revoke_standing_authorization.request",
   "main_chat.dismiss_rule_suggestion.request",
+  "main_chat.get_usage.request",
+  "main_chat.reset_usage.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -244,6 +248,14 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
   "main_chat.dismiss_rule_suggestion.request": (msg, error) => ({
     type: "main_chat.dismiss_rule_suggestion.response",
     payload: { requestId: msg.requestId, dismissed: false, error },
+  }),
+  "main_chat.get_usage.request": (msg, error) => ({
+    type: "main_chat.get_usage.response",
+    payload: { requestId: msg.requestId, usage: null, nightModeStatus: null, error },
+  }),
+  "main_chat.reset_usage.request": (msg, error) => ({
+    type: "main_chat.reset_usage.response",
+    payload: { requestId: msg.requestId, usage: null, error },
   }),
 };
 
@@ -443,9 +455,10 @@ async function handleStewardConfigMessages(
   if (msg.type === "main_chat.get_settings.request") {
     try {
       const settings = await service.getSettings();
+      const nightModeStatus = service.getNightModeStatus();
       send({
         type: "main_chat.get_settings.response",
-        payload: { requestId: msg.requestId, settings, error: null },
+        payload: { requestId: msg.requestId, settings, nightModeStatus, error: null },
       });
     } catch (error) {
       send({
@@ -459,9 +472,10 @@ async function handleStewardConfigMessages(
   if (msg.type === "main_chat.update_settings.request") {
     try {
       const settings = await service.updateSettings(msg.patch);
+      const nightModeStatus = service.getNightModeStatus();
       send({
         type: "main_chat.update_settings.response",
-        payload: { requestId: msg.requestId, settings, error: null },
+        payload: { requestId: msg.requestId, settings, nightModeStatus, error: null },
       });
     } catch (error) {
       send({
@@ -1152,6 +1166,50 @@ async function handleDismissRuleSuggestion(
   }
 }
 
+async function handleGetUsage(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.get_usage.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const usage = await service.getTokenUsage();
+    const nightModeStatus = service.getNightModeStatus();
+    send({
+      type: "main_chat.get_usage.response",
+      payload: { requestId: msg.requestId, usage, nightModeStatus, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.get_usage.response",
+      payload: {
+        requestId: msg.requestId,
+        usage: null,
+        nightModeStatus: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleResetUsage(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.reset_usage.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const usage = await service.resetTokenUsage();
+    send({
+      type: "main_chat.reset_usage.response",
+      payload: { requestId: msg.requestId, usage, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.reset_usage.response",
+      payload: { requestId: msg.requestId, usage: null, error: errorMessage(error) },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -1183,6 +1241,8 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.grant_standing_authorization.request": handleGrantStandingAuthorization,
   "main_chat.revoke_standing_authorization.request": handleRevokeStandingAuthorization,
   "main_chat.dismiss_rule_suggestion.request": handleDismissRuleSuggestion,
+  "main_chat.get_usage.request": handleGetUsage,
+  "main_chat.reset_usage.request": handleResetUsage,
 };
 
 export async function handleMainChatSessionMessage(

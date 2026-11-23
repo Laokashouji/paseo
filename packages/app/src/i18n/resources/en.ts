@@ -3406,6 +3406,7 @@ export const en = {
       openMainChat: "Open main chat",
     },
     hero: {
+      rolePill: "HQ",
       draftPreview: "Draft: {{text}}",
       needsYouBadge: "Needs you {{count}}",
       viewHistory: "History & background activity",
@@ -3538,6 +3539,10 @@ export const en = {
       openHostSettings: "Open settings",
       retryEnsure: "Retry",
       ensureErrorTitle: "Couldn't open Main Chat",
+      disabledTitle: "Main Chat is turned off",
+      disabledDescription:
+        "You disabled Main Chat and background supervision in Settings. Re-enable it anytime to restore the sidebar entry, directions tree, and fleet patrol.",
+      enableNowButton: "Enable Main Chat",
       conversationNotFoundTitle: "Conversation not found",
       conversationNotFoundDescription:
         "This conversation may not be synced yet, may be archived, or its host is offline.",
@@ -3809,8 +3814,22 @@ export const en = {
       savedToast: "Steward settings saved",
       saveFailed: "Failed to save steward settings",
       renamedToast: 'Renamed steward to "{{title}}"',
+      enabledToast: "Main Chat enabled",
+      disabledToast: "Main Chat turned off and background patrol paused",
       switchedConservativeToast: "Switched to Conservative preset (A)",
       switchedProactiveToast: "Switched to Proactive preset (B)",
+      master: {
+        title: "Master switch",
+        description:
+          "Completely turn off the Main Chat entry, directions tree, and all background patrol jobs. History and token stats are preserved.",
+        switchLabel: "Enable Main Chat",
+        enabledHint:
+          "Main Chat entry and background supervision are active across your connected hosts.",
+        disabledHint:
+          "Turned off: sidebar entry and directions tree are hidden; patrol, semantic triage, and proactive wakeups are paused.",
+        stateActive: "Active",
+        stateDisabled: "Off",
+      },
       identity: {
         title: "Identity & quick patrol",
         description:
@@ -3901,6 +3920,76 @@ export const en = {
         autoNudgeManualStalled: "Auto-nudge stalled/looping manual sessions",
         autoNudgeManualStalledHint:
           "Automatically nudge manual sessions that go silent or repeat wait/poll commands.",
+      },
+    },
+    nightMode: {
+      sectionTitle: "Night throttling & hibernation",
+      sectionDescription:
+        "Automatically reduce patrol frequency, skip background LLM triage, or hibernate completely overnight, then recover cleanly in the morning.",
+      enableTitle: "Enable night energy saving",
+      enableHint:
+        "Automatically lower background patrol cadence or hibernate during your configured night hours to save tokens and battery.",
+      windowActiveSummary: "Night saving scheduled for {{window}}; normal cadence during daytime.",
+      stateActive: "Active",
+      stateThrottled: "Night throttled",
+      stateHibernating: "Hibernating",
+      badgeThrottled: "Throttled",
+      badgeHibernating: "Sleeping",
+      behaviorLabel: "Night strategy",
+      behaviorThrottle: "Throttle (auto-hibernate when idle)",
+      behaviorHibernate: "Full hibernation",
+      behaviorThrottleHint:
+        "Slows down patrol cadence and skips background triage LLM calls; escalates automatically to hibernation when no fleet tasks run for the idle threshold.",
+      behaviorHibernateHint:
+        "Immediately pauses automatic patrol, semantic triage, and idle pre-compaction throughout the night window until wake hour (manual chat still responds immediately).",
+      windowLabel: "Night window (local 24h clock)",
+      windowHint: "Cross-midnight ranges are supported, e.g. 23:00 — 08:00.",
+      patrolIntervalSecLabel: "Throttled patrol interval",
+      patrolIntervalSecHint: "Patrol cadence while night-throttled (60–7200s, default 600s / 10m).",
+      autoHibernateIdleLabel: "Idle-to-hibernate threshold",
+      autoHibernateIdleHint:
+        "Minutes with no active fleet tasks before auto-hibernating overnight (0 disables auto-escalation, default 30m).",
+      invalidHourRange: "Hours must be integers between 0 and 23.",
+      saveScheduleButton: "Save night schedule",
+      disableTriageTitle: "Pause semantic triage model at night",
+      disableTriageHint:
+        "Use zero-token deterministic rules overnight to avoid spending background triage quota while asleep.",
+      deferWakeupsTitle: "Defer proactive briefings overnight",
+      deferWakeupsHint:
+        "Hold routine supervision signals in queue and deliver one revalidated summary in the morning.",
+      allowUrgentTitle: "Allow urgent redline wakeups overnight",
+      allowUrgentHint:
+        "When enabled, high-priority approval blocks can still wake Main Chat overnight; when off, all alerts wait until morning.",
+      enabledToast: "Night throttling / hibernation enabled",
+      disabledToast: "Night throttling / hibernation disabled",
+    },
+    usage: {
+      sectionTitle: "Token consumption",
+      sectionDescription:
+        "Tracks Main Chat foreground turns, background patrols/briefings, direction leaders, and semantic triage model usage.",
+      cardTitle: "Usage overview",
+      headerPill: "Today {{count}} tok",
+      refreshButton: "Refresh",
+      resetButton: "Reset stats",
+      confirmResetButton: "Confirm reset",
+      resetToast: "Main Chat token usage reset",
+      resetFailed: "Failed to reset token usage",
+      loadFailed: "Failed to load token usage",
+      todayLabel: "Today",
+      last7DaysLabel: "Last 7 days",
+      allTimeLabel: "All time",
+      turnsCount: "{{count}} turns",
+      ioBreakdown: "In {{input}} · Cache {{cached}} · Out {{output}}",
+      bySourceTitle: "Breakdown by source",
+      byModelTitle: "Breakdown by provider / model",
+      dailyTitle: "Last 7 days trend",
+      emptyHint:
+        "No Main Chat token usage recorded yet. Usage accumulates automatically as you chat or run patrols and triage.",
+      sources: {
+        foreground: "Foreground Main Chat",
+        background: "Background patrol / supervision / briefing",
+        direction: "Direction leaders & side threads",
+        triage: "Background semantic triage model",
       },
     },
     composer: {

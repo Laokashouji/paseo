@@ -31,6 +31,7 @@ import type {
   MainChatGetFleetHostsResponsePayload,
   MainChatGetOverviewResponsePayload,
   MainChatGetSettingsResponsePayload,
+  MainChatGetUsageResponsePayload,
   MainChatGrantStandingAuthorizationResponsePayload,
   MainChatListActivityResponsePayload,
   MainChatListConversationsResponsePayload,
@@ -42,6 +43,7 @@ import type {
   MainChatPlanTaskPatch,
   MainChatReceiptCheck,
   MainChatRemoveRuleResponsePayload,
+  MainChatResetUsageResponsePayload,
   MainChatReviewTaskResponsePayload,
   MainChatRevokeStandingAuthorizationResponsePayload,
   MainChatRuleKind,
@@ -5871,6 +5873,26 @@ export class DaemonClient {
         timeout: 30000,
       },
     );
+  }
+
+  async getMainChatUsage(requestId?: string): Promise<MainChatGetUsageResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.get_usage.response">({
+      requestId,
+      message: {
+        type: "main_chat.get_usage.request",
+      },
+      timeout: 30000,
+    });
+  }
+
+  async resetMainChatUsage(requestId?: string): Promise<MainChatResetUsageResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.reset_usage.response">({
+      requestId,
+      message: {
+        type: "main_chat.reset_usage.request",
+      },
+      timeout: 30000,
+    });
   }
 
   async checkoutGithubSetAutoMerge(

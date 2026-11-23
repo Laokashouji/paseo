@@ -8,6 +8,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { usePaneContext } from "@/panels/pane-context";
 import { useSettings } from "@/hooks/use-settings";
 import { PluginComposerPills } from "@/plugins";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import {
   useArchiveFinishedSubagents,
@@ -114,15 +115,23 @@ export const AgentTracks = memo(function AgentTracks({
   );
   const handleOpenProviderSubagent = useCallback(
     (ownerAgentId: string, subagentId: string) => {
-      openSubagentTarget({
+      const target: WorkspaceTabTarget = {
         kind: "provider_subagent",
         parentAgentId: ownerAgentId,
         subagentId,
-      });
+      };
+      if (mainChatShell.inMainChatShell && workspaceId) {
+        navigateToWorkspace({ serverId, workspaceId, target });
+        return;
+      }
+      openSubagentTarget(target);
     },
-    [openSubagentTarget],
+    [mainChatShell.inMainChatShell, openSubagentTarget, serverId, workspaceId],
   );
-  const sheetTabFor = useSubagentSheetTab(workspaceKey, tabId);
+  const sheetTabFor = useSubagentSheetTab(
+    mainChatShell.inMainChatShell ? null : workspaceKey,
+    tabId,
+  );
   const handleOpenChanges = useCallback(() => {
     if (!workspaceKey) {
       return;

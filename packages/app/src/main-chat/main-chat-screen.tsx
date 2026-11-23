@@ -1,7 +1,9 @@
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { isMainChatEnabled } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import equal from "fast-deep-equal";
-import { CircleAlert, RefreshCw, Settings, Sparkles } from "lucide-react-native";
+import { CircleAlert, Power, RefreshCw, Settings, Sparkles } from "lucide-react-native";
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -9,12 +11,17 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useToast } from "@/contexts/toast-context";
 import { useDirectoryDemand } from "@/hooks/use-directory-demand";
 import { useHostRuntimeConnectionStatus, useHosts } from "@/runtime/host-runtime";
 import { useLastWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
-import { buildMainChatRoute, buildSettingsRoute } from "@/utils/host-routes";
+import {
+  buildMainChatRoute,
+  buildSettingsRoute,
+  buildSettingsSectionRoute,
+} from "@/utils/host-routes";
 import { MainChatAgentHost } from "./agent-host";
 import { useMainChatConversationsStore } from "./conversations-store";
 import { HostSyncBanner } from "./host-sync-banner";
@@ -24,6 +31,7 @@ import { selectMainChatSidebarSummary, type MainChatAgentRef } from "./selectors
 import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedSparkles = withUnistyles(Sparkles);
+const ThemedPower = withUnistyles(Power);
 const ThemedCircleAlert = withUnistyles(CircleAlert);
 const ThemedRefreshCw = withUnistyles(RefreshCw);
 const ThemedSettings = withUnistyles(Settings);
@@ -74,23 +82,63 @@ function resolveEffectiveOverrideRef(
 }
 
 function MainChatScreenBody({
+  isDisabled,
+  enabling,
   resolvedRef,
   ensureState,
   isEnsuring,
   activePane,
   onFocusMainPane,
   onRetry,
+  onEnableMainChat,
   onOpenSettings,
+  onOpenMainChatSettings,
 }: {
+  isDisabled: boolean;
+  enabling: boolean;
   resolvedRef: MainChatAgentRef | null;
   ensureState: EnsureState;
   isEnsuring: boolean;
   activePane: "main" | "drawer";
   onFocusMainPane: () => void;
   onRetry: () => void;
+  onEnableMainChat: () => void;
   onOpenSettings: () => void;
+  onOpenMainChatSettings: () => void;
 }): ReactElement {
   const { t } = useTranslation();
+
+  if (isDisabled) {
+    return (
+      <View style={styles.centerState} testID="main-chat-disabled-state">
+        <ThemedPower size={28} uniProps={mutedIconMapping} />
+        <Text style={styles.stateTitle}>{t("mainChat.shell.disabledTitle")}</Text>
+        <Text style={styles.stateDescription}>{t("mainChat.shell.disabledDescription")}</Text>
+        <View style={styles.stateActions}>
+          <Button
+            variant="default"
+            size="sm"
+            leftIcon={ThemedPower}
+            loading={enabling}
+            disabled={enabling}
+            onPress={onEnableMainChat}
+            testID="main-chat-re-enable-button"
+          >
+            {t("mainChat.shell.enableNowButton")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            leftIcon={ThemedSettings}
+            onPress={onOpenMainChatSettings}
+            testID="main-chat-disabled-open-settings"
+          >
+            {t("mainChat.actions.openSettings")}
+          </Button>
+        </View>
+      </View>
+    );
+  }
 
   if (resolvedRef) {
     return (
@@ -150,78 +198,32 @@ function MainChatScreenBody({
   );
 }
 
-function MainChatScreenContent(): ReactElement {
+function useMainChatEnsureState(params: {
+  targetServerId: string | null;
+  client: DaemonClient | null;
+  existing: MainChatAgentRef | null;
+  supportsMainChat: boolean;
+  isDisabled: boolean;
+  retryCount: number;
+}): EnsureState {
+  const { targetServerId, client, existing, supportsMainChat, isDisabled, retryCount } = params;
   const { t } = useTranslation();
-  const hosts = useHosts();
-  const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
-
-  const summary = useStoreWithEqualityFn(
-    useSessionStore,
-    useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId),
-      [preferredServerId],
-    ),
-    equal,
-  );
-
-  const targetServerId = summary.targetServerId;
-  useDirectoryDemand(targetServerId);
-
-  const client = useSessionStore((state) =>
-    targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
-  );
-  const connectionStatus = useHostRuntimeConnectionStatus(targetServerId ?? "");
-  const configuredTitle = useMainChatSettingsStore((state) =>
-    targetServerId ? state.settingsByServerId[targetServerId]?.title : undefined,
-  );
-  const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
-  const activeAgentOverride = useMainChatOverviewStore((state) =>
-    targetServerId ? (state.activeAgentOverrideByServerId[targetServerId] ?? null) : null,
-  );
-  const clearActiveAgentOverride = useMainChatOverviewStore(
-    (state) => state.clearActiveAgentOverride,
-  );
-  const hydrateFromOverview = useMainChatConversationsStore((state) => state.hydrateFromOverview);
-  const refreshConversations = useMainChatConversationsStore((state) => state.refreshConversations);
-  const refreshFleetHosts = useMainChatConversationsStore((state) => state.refreshFleetHosts);
-
   const [ensureState, setEnsureState] = useState<EnsureState>({ kind: "idle" });
-  const [retryCount, setRetryCount] = useState(0);
-  const [activePane, setActivePane] = useState<"main" | "drawer">("main");
-
-  const effectiveOverrideRef = resolveEffectiveOverrideRef(activeAgentOverride, summary.existing);
 
   useEffect(() => {
-    if (
-      activeAgentOverride &&
-      summary.existing &&
-      summary.existing.agentId === activeAgentOverride.agentId
-    ) {
-      clearActiveAgentOverride(activeAgentOverride.serverId);
-    }
-  }, [activeAgentOverride, clearActiveAgentOverride, summary.existing]);
-
-  const resolvedRef: MainChatAgentRef | null =
-    effectiveOverrideRef ??
-    summary.existing ??
-    (ensureState.kind === "resolved" ? ensureState.ref : null);
-
-  useEffect(() => {
-    const existingRef = summary.existing;
-    if (existingRef) {
+    if (existing) {
       setEnsureState((current) =>
         current.kind === "resolved" &&
-        current.ref.serverId === existingRef.serverId &&
-        current.ref.agentId === existingRef.agentId &&
-        current.ref.workspaceId === existingRef.workspaceId
+        current.ref.serverId === existing.serverId &&
+        current.ref.agentId === existing.agentId &&
+        current.ref.workspaceId === existing.workspaceId
           ? current
-          : { kind: "resolved", ref: existingRef },
+          : { kind: "resolved", ref: existing },
       );
       return;
     }
 
-    if (!targetServerId || !client || !summary.supportsMainChat) {
+    if (!targetServerId || !client || !supportsMainChat || isDisabled) {
       return;
     }
 
@@ -262,36 +264,173 @@ function MainChatScreenContent(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [client, retryCount, summary.existing, summary.supportsMainChat, t, targetServerId]);
+  }, [client, existing, isDisabled, retryCount, supportsMainChat, t, targetServerId]);
+
+  return ensureState;
+}
+
+function useMainChatScreenDataSync(params: {
+  effectiveServerId: string | null;
+  resolvedRef: MainChatAgentRef | null;
+  client: DaemonClient | null;
+  isDisabled: boolean;
+}): void {
+  const { effectiveServerId, resolvedRef, client, isDisabled } = params;
+  const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
+  const hydrateFromOverview = useMainChatConversationsStore((state) => state.hydrateFromOverview);
+  const refreshConversations = useMainChatConversationsStore((state) => state.refreshConversations);
+  const refreshFleetHosts = useMainChatConversationsStore((state) => state.refreshFleetHosts);
 
   useEffect(() => {
-    if (!resolvedRef || !client) return;
+    if (!resolvedRef || !client || isDisabled) return;
     void loadOverview(resolvedRef.serverId, resolvedRef.agentId, client).then((overview) => {
       if (overview) {
         hydrateFromOverview(resolvedRef.serverId, overview);
       }
       return overview;
     });
-  }, [client, hydrateFromOverview, loadOverview, resolvedRef]);
-
-  const effectiveServerId = resolvedRef?.serverId ?? targetServerId;
+  }, [client, hydrateFromOverview, isDisabled, loadOverview, resolvedRef]);
 
   useEffect(() => {
-    if (!effectiveServerId || !client) return;
+    if (!effectiveServerId || !client || isDisabled) return;
     if (typeof client.listMainChatConversations === "function") {
       void refreshConversations(effectiveServerId, client).catch(() => undefined);
     }
     if (typeof client.getMainChatFleetHosts === "function") {
       void refreshFleetHosts(effectiveServerId, client).catch(() => undefined);
     }
-  }, [client, effectiveServerId, refreshConversations, refreshFleetHosts]);
+  }, [client, effectiveServerId, isDisabled, refreshConversations, refreshFleetHosts]);
+}
+
+function useMainChatTargetSession() {
+  const hosts = useHosts();
+  const lastWorkspace = useLastWorkspaceSelection();
+  const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+
+  const summary = useStoreWithEqualityFn(
+    useSessionStore,
+    useCallback(
+      (state) => selectMainChatSidebarSummary(state, preferredServerId),
+      [preferredServerId],
+    ),
+    equal,
+  );
+
+  const targetServerId = summary.targetServerId;
+  useDirectoryDemand(targetServerId);
+
+  const client = useSessionStore((state) =>
+    targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
+  );
+  const connectionStatus = useHostRuntimeConnectionStatus(targetServerId ?? "");
+  const settings = useMainChatSettingsStore((state) =>
+    targetServerId ? state.settingsByServerId[targetServerId] : undefined,
+  );
+  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+  const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
+  const activeAgentOverride = useMainChatOverviewStore((state) =>
+    targetServerId ? (state.activeAgentOverrideByServerId[targetServerId] ?? null) : null,
+  );
+  const clearActiveAgentOverride = useMainChatOverviewStore(
+    (state) => state.clearActiveAgentOverride,
+  );
+
+  useEffect(() => {
+    if (!targetServerId || !client || !summary.supportsMainChat || settings) return;
+    void loadSettings(targetServerId, client).catch(() => undefined);
+  }, [client, loadSettings, settings, summary.supportsMainChat, targetServerId]);
+
+  const effectiveOverrideRef = resolveEffectiveOverrideRef(activeAgentOverride, summary.existing);
+
+  useEffect(() => {
+    if (
+      activeAgentOverride &&
+      summary.existing &&
+      summary.existing.agentId === activeAgentOverride.agentId
+    ) {
+      clearActiveAgentOverride(activeAgentOverride.serverId);
+    }
+  }, [activeAgentOverride, clearActiveAgentOverride, summary.existing]);
+
+  return {
+    summary,
+    targetServerId,
+    client,
+    connectionStatus,
+    configuredTitle: settings?.title,
+    isDisabled: settings !== undefined && !isMainChatEnabled(settings),
+    effectiveOverrideRef,
+    updateSettings,
+  };
+}
+
+function MainChatScreenContent(): ReactElement {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const {
+    summary,
+    targetServerId,
+    client,
+    connectionStatus,
+    configuredTitle,
+    isDisabled,
+    effectiveOverrideRef,
+    updateSettings,
+  } = useMainChatTargetSession();
+
+  const [retryCount, setRetryCount] = useState(0);
+  const [enabling, setEnabling] = useState(false);
+  const [activePane, setActivePane] = useState<"main" | "drawer">("main");
+
+  const ensureState = useMainChatEnsureState({
+    targetServerId,
+    client,
+    existing: summary.existing,
+    supportsMainChat: summary.supportsMainChat,
+    isDisabled,
+    retryCount,
+  });
+
+  const resolvedRef: MainChatAgentRef | null =
+    effectiveOverrideRef ??
+    summary.existing ??
+    (ensureState.kind === "resolved" ? ensureState.ref : null);
+
+  const effectiveServerId = resolvedRef?.serverId ?? targetServerId;
+  useMainChatScreenDataSync({
+    effectiveServerId,
+    resolvedRef,
+    client,
+    isDisabled,
+  });
 
   const handleRetry = useCallback(() => {
     setRetryCount((count) => count + 1);
   }, []);
 
+  const handleEnableMainChat = useCallback(() => {
+    if (!targetServerId || !client || enabling) return;
+    setEnabling(true);
+    void updateSettings(targetServerId, { enabled: true }, client)
+      .then(() => {
+        setRetryCount((count) => count + 1);
+        toast.show(t("mainChat.settings.enabledToast"), { variant: "success" });
+        return true;
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : t("mainChat.settings.saveFailed"));
+      })
+      .finally(() => {
+        setEnabling(false);
+      });
+  }, [client, enabling, t, targetServerId, toast, updateSettings]);
+
   const handleOpenSettings = useCallback(() => {
     router.push(buildSettingsRoute());
+  }, []);
+
+  const handleOpenMainChatSettings = useCallback(() => {
+    router.push(buildSettingsSectionRoute("main-chat"));
   }, []);
 
   const handleFocusMainPane = useCallback(() => {
@@ -300,18 +439,23 @@ function MainChatScreenContent(): ReactElement {
 
   const displayTitle = configuredTitle?.trim() || summary.displayTitle;
   const isEnsuring =
-    ensureState.kind === "ensuring" ||
-    Boolean(targetServerId && (connectionStatus === "connecting" || summary.supportsMainChat));
+    !isDisabled &&
+    (ensureState.kind === "ensuring" ||
+      Boolean(targetServerId && (connectionStatus === "connecting" || summary.supportsMainChat)));
 
   const body = (
     <MainChatScreenBody
+      isDisabled={isDisabled}
+      enabling={enabling}
       resolvedRef={resolvedRef}
       ensureState={ensureState}
       isEnsuring={isEnsuring}
       activePane={activePane}
       onFocusMainPane={handleFocusMainPane}
       onRetry={handleRetry}
+      onEnableMainChat={handleEnableMainChat}
       onOpenSettings={handleOpenSettings}
+      onOpenMainChatSettings={handleOpenMainChatSettings}
     />
   );
 
@@ -322,13 +466,15 @@ function MainChatScreenContent(): ReactElement {
       serverId={effectiveServerId}
       mainAgentId={resolvedRef?.agentId ?? null}
       originRoute={buildMainChatRoute()}
-      isRunning={summary.isMainRunning}
-      needsYouCount={summary.needsYouCount}
-      runningCount={summary.runningCount}
+      isRunning={!isDisabled && summary.isMainRunning}
+      needsYouCount={isDisabled ? 0 : summary.needsYouCount}
+      runningCount={isDisabled ? 0 : summary.runningCount}
       activePane={activePane}
       onActivePaneChange={setActivePane}
     >
-      <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef?.agentId ?? null} />
+      {!isDisabled ? (
+        <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef?.agentId ?? null} />
+      ) : null}
       {body}
     </MainChatShell>
   );
@@ -345,6 +491,14 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     paddingHorizontal: theme.spacing[6],
     gap: theme.spacing[3],
+  },
+  stateActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: theme.spacing[2],
+    marginTop: theme.spacing[1],
   },
   stateTitle: {
     fontSize: theme.fontSize.base,

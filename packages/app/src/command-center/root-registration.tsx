@@ -150,12 +150,13 @@ export function CommandCenterRootActions() {
     ),
     equal,
   );
-  const configuredMainChatTitle = useMainChatSettingsStore((state) =>
+  const configuredMainChatSettings = useMainChatSettingsStore((state) =>
     mainChatSummary.targetServerId
-      ? state.settingsByServerId[mainChatSummary.targetServerId]?.title
+      ? state.settingsByServerId[mainChatSummary.targetServerId]
       : undefined,
   );
-  const mainChatTitle = configuredMainChatTitle?.trim() || mainChatSummary.displayTitle;
+  const mainChatEnabled = configuredMainChatSettings?.enabled !== false;
+  const mainChatTitle = configuredMainChatSettings?.title?.trim() || mainChatSummary.displayTitle;
   const browserHostLabel = getDesktopHost()?.browserHostLabel;
   const { overrides } = useKeyboardShortcutOverrides();
   const shortcutsAvailable = useHardwareKeyboardPresent();
@@ -292,7 +293,7 @@ export function CommandCenterRootActions() {
           icon: SchedulesIcon,
         },
       },
-      ...(mainChatSummary.supportsMainChat
+      ...(mainChatSummary.supportsMainChat && mainChatEnabled
         ? [
             {
               id: "open-main-chat",
@@ -433,6 +434,7 @@ export function CommandCenterRootActions() {
     groupMode,
     homeRoute,
     keyboardActionDispatcher,
+    mainChatEnabled,
     mainChatSummary.supportsMainChat,
     mainChatTitle,
     openAddProject,

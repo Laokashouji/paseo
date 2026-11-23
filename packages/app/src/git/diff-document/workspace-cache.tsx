@@ -164,6 +164,19 @@ function paletteKey(palette: DiffPalette): string {
 
 const WorkspaceCacheContext = createContext<DiffDocumentWorkspaceCache | null>(null);
 
+export function useDiffDocumentWorkspaceCacheBridgeIfAny() {
+  const cache = useContext(WorkspaceCacheContext);
+  return useCallback(
+    (children: ReactNode) =>
+      cache ? (
+        <WorkspaceCacheContext.Provider value={cache}>{children}</WorkspaceCacheContext.Provider>
+      ) : (
+        children
+      ),
+    [cache],
+  );
+}
+
 export function useDiffDocumentWorkspaceCacheBridge() {
   const cache = useDiffDocumentWorkspaceCache();
   return useCallback(

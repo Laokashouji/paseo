@@ -57,25 +57,34 @@ vi.mock("@/constants/layout", async (importOriginal) => {
 vi.mock("lucide-react-native", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const StubIcon = () => null;
-  return {
-    ...actual,
-    CalendarClock: actual.CalendarClock ?? StubIcon,
-    CircleDashed: actual.CircleDashed ?? StubIcon,
-    Copy: actual.Copy ?? StubIcon,
-    Folder: actual.Folder ?? StubIcon,
-    FolderPlus: actual.FolderPlus ?? StubIcon,
-    History: actual.History ?? StubIcon,
-    Home: actual.Home ?? StubIcon,
-    Import: actual.Import ?? StubIcon,
-    Keyboard: actual.Keyboard ?? StubIcon,
-    PanelLeft: actual.PanelLeft ?? StubIcon,
-    Plus: actual.Plus ?? StubIcon,
-    Radar: actual.Radar ?? StubIcon,
-    Settings: actual.Settings ?? StubIcon,
-    Shield: actual.Shield ?? StubIcon,
-    Sparkles: actual.Sparkles ?? StubIcon,
-    Zap: actual.Zap ?? StubIcon,
-  };
+  const fallbackIcons: Record<string, unknown> = { ...actual };
+  const requiredNames = [
+    "Activity",
+    "CalendarClock",
+    "CircleDashed",
+    "Copy",
+    "Folder",
+    "FolderPlus",
+    "History",
+    "Home",
+    "Import",
+    "Keyboard",
+    "Moon",
+    "PanelLeft",
+    "Plus",
+    "Power",
+    "Radar",
+    "RefreshCw",
+    "RotateCcw",
+    "Settings",
+    "Shield",
+    "Sparkles",
+    "Zap",
+  ];
+  for (const name of requiredNames) {
+    fallbackIcons[name] = actual[name] ?? StubIcon;
+  }
+  return fallbackIcons;
 });
 
 vi.mock("@/hooks/use-keyboard-shortcut-overrides", () => ({
