@@ -2143,18 +2143,10 @@ export const fr: TranslationResources = {
     continueInBranch: "Continuer dans une branche",
   },
   sessionArchive: {
-    tooltipIdle: "Archiver la conversation (nettoyer worktrees et fichiers temporaires)",
+    tooltipIdle: "Demander à l’IA d’archiver cette conversation",
     tooltipQueued: "Commande d’archivage en attente · cliquer pour annuler",
     tooltipRunning: "Nettoyage d’archivage en cours…",
     tooltipPendingArchive: "Nettoyage terminé, archivage à la fin de ce tour…",
-    confirmTitle: "Archiver cette conversation ?",
-    confirmMessageAuto:
-      "Envoie la commande d’archivage afin que l’IA nettoie les worktrees et fichiers temporaires, puis archive et ferme l’onglet si tout est sûr.",
-    confirmMessageManual:
-      "Envoie la commande d’archivage afin que l’IA nettoie les worktrees et fichiers temporaires et rende compte.",
-    confirmMessageQueued:
-      "La conversation est en cours. Confirmez pour envoyer la commande automatiquement à la fin de ce tour.",
-    confirmAction: "Archiver",
     cancelQueueTitle: "Annuler l’archivage en attente ?",
     cancelQueueMessage: "La commande d’archivage ne sera plus envoyée à la fin de ce tour.",
     cancelQueueConfirm: "Annuler l’attente",
@@ -2172,7 +2164,7 @@ export const fr: TranslationResources = {
         "Archive et ferme l’onglet à la fin du tour après l’appel de session_finish_archive.",
       commandLabel: "Commande d’archivage",
       commandHint:
-        "Envoyée à la conversation actuelle après confirmation sur le bouton d’archivage.",
+        "Envoyée directement à la conversation actuelle en cliquant sur le bouton d’archivage.",
       commandPlaceholder: "Saisissez la commande ou consigne d’archivage…",
       saveAction: "Enregistrer",
       resetAction: "Réinitialiser",

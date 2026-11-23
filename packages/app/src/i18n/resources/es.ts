@@ -2143,18 +2143,10 @@ export const es: TranslationResources = {
     continueInBranch: "Continuar en nueva rama",
   },
   sessionArchive: {
-    tooltipIdle: "Archivar conversación (limpiar worktrees y archivos temporales)",
+    tooltipIdle: "Pedir a la IA que archive esta conversación",
     tooltipQueued: "Comando de archivo en cola · clic para cancelar",
     tooltipRunning: "Ejecutando limpieza de archivo…",
     tooltipPendingArchive: "Limpieza lista, archivando al terminar este turno…",
-    confirmTitle: "¿Archivar esta conversación?",
-    confirmMessageAuto:
-      "Envía el comando de archivo para que la IA limpie worktrees y archivos temporales, y luego archive y cierre esta pestaña si es seguro.",
-    confirmMessageManual:
-      "Envía el comando de archivo para que la IA limpie worktrees y archivos temporales e informe el resultado.",
-    confirmMessageQueued:
-      "Esta conversación está en curso. Confirma para enviar el comando automáticamente cuando termine este turno.",
-    confirmAction: "Archivar",
     cancelQueueTitle: "¿Cancelar archivo en cola?",
     cancelQueueMessage: "No se enviará el comando de archivo al terminar este turno.",
     cancelQueueConfirm: "Cancelar cola",
@@ -2172,7 +2164,7 @@ export const es: TranslationResources = {
         "Archiva y cierra la pestaña al finalizar el turno tras llamar a session_finish_archive.",
       commandLabel: "Comando de archivo",
       commandHint:
-        "Se envía a la conversación actual al confirmar el botón de archivo en la barra inferior.",
+        "Se envía directamente a la conversación actual al hacer clic en el botón de archivo de la barra inferior.",
       commandPlaceholder: "Introduce el comando o instrucción de archivo…",
       saveAction: "Guardar",
       resetAction: "Restablecer",
