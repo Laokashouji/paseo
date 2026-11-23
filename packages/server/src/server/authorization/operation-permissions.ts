@@ -259,6 +259,16 @@ const INBOUND_PERMISSION = {
   "main_chat.clear.request": ["workspace.write", "hub.execute"],
   "main_chat.new_session.request": ["workspace.write", "hub.execute"],
   "main_chat.list_activity.request": "workspace.read",
+  "main_chat.update_plan_task.request": ["workspace.write", "hub.execute"],
+  "main_chat.withdraw_plan.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_tasks.request": "workspace.read",
+  "main_chat.update_task_scope.request": ["workspace.write", "hub.execute"],
+  "main_chat.park_task.request": ["workspace.write", "hub.execute"],
+  "main_chat.review_task.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_conversations.request": "workspace.read",
+  "main_chat.create_conversation.request": ["workspace.write", "hub.execute"],
+  "main_chat.update_conversation.request": ["workspace.write", "hub.execute"],
+  "main_chat.get_fleet_hosts.request": "workspace.read",
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -536,6 +546,16 @@ const OUTBOUND_PERMISSION = {
   "main_chat.clear.response": ["workspace.write", "hub.execute"],
   "main_chat.new_session.response": ["workspace.write", "hub.execute"],
   "main_chat.list_activity.response": "workspace.read",
+  "main_chat.update_plan_task.response": ["workspace.write", "hub.execute"],
+  "main_chat.withdraw_plan.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_tasks.response": "workspace.read",
+  "main_chat.update_task_scope.response": ["workspace.write", "hub.execute"],
+  "main_chat.park_task.response": ["workspace.write", "hub.execute"],
+  "main_chat.review_task.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_conversations.response": "workspace.read",
+  "main_chat.create_conversation.response": ["workspace.write", "hub.execute"],
+  "main_chat.update_conversation.response": ["workspace.write", "hub.execute"],
+  "main_chat.get_fleet_hosts.response": "workspace.read",
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

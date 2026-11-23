@@ -24,18 +24,31 @@ import type {
   MainChatClearResponsePayload,
   MainChatCompactionReason,
   MainChatCompactResponsePayload,
+  MainChatCreateConversationResponsePayload,
   MainChatEnsureResponsePayload,
+  MainChatGetFleetHostsResponsePayload,
   MainChatGetOverviewResponsePayload,
   MainChatGetSettingsResponsePayload,
   MainChatListActivityResponsePayload,
+  MainChatListConversationsResponsePayload,
   MainChatListPlansResponsePayload,
+  MainChatListTasksResponsePayload,
   MainChatNewSessionResponsePayload,
+  MainChatParkTaskResponsePayload,
+  MainChatPlanTaskPatch,
+  MainChatReceiptCheck,
   MainChatRemoveRuleResponsePayload,
+  MainChatReviewTaskResponsePayload,
   MainChatRuleKind,
   MainChatSettingsPatch,
   MainChatStartPlanResponsePayload,
+  MainChatTaskReviewVerdict,
   MainChatTriggerPatrolResponsePayload,
+  MainChatUpdateConversationResponsePayload,
+  MainChatUpdatePlanTaskResponsePayload,
   MainChatUpdateSettingsResponsePayload,
+  MainChatUpdateTaskScopeResponsePayload,
+  MainChatWithdrawPlanResponsePayload,
 } from "@getpaseo/protocol/main-chat";
 import type { PluginListingDetail, PluginListingIndex } from "@getpaseo/protocol/plugin-registry";
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
@@ -5514,6 +5527,226 @@ export class DaemonClient {
         ...(options?.limit !== undefined ? { limit: options.limit } : {}),
         ...(options?.includeSilent !== undefined ? { includeSilent: options.includeSilent } : {}),
         ...(options?.kind ? { kind: options.kind } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async updateMainChatPlanTask(
+    planId: string,
+    taskId: string,
+    patch: MainChatPlanTaskPatch,
+    requestId?: string,
+  ): Promise<MainChatUpdatePlanTaskResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.update_plan_task.response">({
+      requestId,
+      message: {
+        type: "main_chat.update_plan_task.request",
+        planId,
+        taskId,
+        patch,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async withdrawMainChatPlan(
+    planId: string,
+    reason: string,
+    requestId?: string,
+  ): Promise<MainChatWithdrawPlanResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.withdraw_plan.response">({
+      requestId,
+      message: {
+        type: "main_chat.withdraw_plan.request",
+        planId,
+        reason,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async listMainChatTasks(
+    options?: {
+      mainAgentId?: string;
+      conversationId?: string;
+      includeCompleted?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatListTasksResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_tasks.response">({
+      requestId,
+      message: {
+        type: "main_chat.list_tasks.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.conversationId ? { conversationId: options.conversationId } : {}),
+        ...(options?.includeCompleted !== undefined
+          ? { includeCompleted: options.includeCompleted }
+          : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async updateMainChatTaskScope(
+    input: {
+      taskId: string;
+      goal?: string;
+      doneWhen?: string[];
+      outOfBounds?: string[];
+      reason?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatUpdateTaskScopeResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.update_task_scope.response">({
+      requestId,
+      message: {
+        type: "main_chat.update_task_scope.request",
+        taskId: input.taskId,
+        ...(input.goal !== undefined ? { goal: input.goal } : {}),
+        ...(input.doneWhen !== undefined ? { doneWhen: input.doneWhen } : {}),
+        ...(input.outOfBounds !== undefined ? { outOfBounds: input.outOfBounds } : {}),
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async parkMainChatTask(
+    input: {
+      taskId: string;
+      parked: boolean;
+      reason?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatParkTaskResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.park_task.response">({
+      requestId,
+      message: {
+        type: "main_chat.park_task.request",
+        taskId: input.taskId,
+        parked: input.parked,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async reviewMainChatTask(
+    input: {
+      taskId: string;
+      verdict: MainChatTaskReviewVerdict;
+      summary?: string;
+      gaps?: string[];
+      checks?: MainChatReceiptCheck[];
+      nextSteps?: string[];
+      note?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatReviewTaskResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.review_task.response">({
+      requestId,
+      message: {
+        type: "main_chat.review_task.request",
+        taskId: input.taskId,
+        verdict: input.verdict,
+        ...(input.summary !== undefined ? { summary: input.summary } : {}),
+        ...(input.gaps !== undefined ? { gaps: input.gaps } : {}),
+        ...(input.checks !== undefined ? { checks: input.checks } : {}),
+        ...(input.nextSteps !== undefined ? { nextSteps: input.nextSteps } : {}),
+        ...(input.note !== undefined ? { note: input.note } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async listMainChatConversations(
+    options?: {
+      includeArchived?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatListConversationsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_conversations.response">({
+      requestId,
+      message: {
+        type: "main_chat.list_conversations.request",
+        ...(options?.includeArchived !== undefined
+          ? { includeArchived: options.includeArchived }
+          : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async createMainChatConversation(
+    input: {
+      kind: "side" | "leader";
+      title: string;
+      directionSummary?: string | null;
+      initialPrompt?: string;
+      provider?: string;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatCreateConversationResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.create_conversation.response">({
+      requestId,
+      message: {
+        type: "main_chat.create_conversation.request",
+        kind: input.kind,
+        title: input.title,
+        ...(input.directionSummary !== undefined
+          ? { directionSummary: input.directionSummary }
+          : {}),
+        ...(input.initialPrompt !== undefined ? { initialPrompt: input.initialPrompt } : {}),
+        ...(input.provider ? { provider: input.provider } : {}),
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.modeId ? { modeId: input.modeId } : {}),
+        ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async updateMainChatConversation(
+    input: {
+      conversationId: string;
+      title?: string;
+      directionSummary?: string | null;
+      kind?: "side" | "leader";
+      archived?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatUpdateConversationResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.update_conversation.response">({
+      requestId,
+      message: {
+        type: "main_chat.update_conversation.request",
+        conversationId: input.conversationId,
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.directionSummary !== undefined
+          ? { directionSummary: input.directionSummary }
+          : {}),
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(input.archived !== undefined ? { archived: input.archived } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async getMainChatFleetHosts(
+    options?: {
+      forceRefresh?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatGetFleetHostsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.get_fleet_hosts.response">({
+      requestId,
+      message: {
+        type: "main_chat.get_fleet_hosts.request",
+        ...(options?.forceRefresh !== undefined ? { forceRefresh: options.forceRefresh } : {}),
       },
       timeout: 30000,
     });

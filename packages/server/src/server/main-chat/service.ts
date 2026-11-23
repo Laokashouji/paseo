@@ -19,13 +19,17 @@ import {
   type MainChatCompactionState,
   type MainChatCompactionStatus,
   type MainChatCompactionStrategy,
+  type MainChatConversationRecord,
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
+  type MainChatFleetHostStatus,
   type MainChatOverview,
   type MainChatPatrolResult,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
+  type MainChatPlanTaskPatch,
   type MainChatPlannedTask,
+  type MainChatReceiptCheck,
   type MainChatReworkRecord,
   type MainChatRuleKind,
   type MainChatSettings,
@@ -33,6 +37,8 @@ import {
   type MainChatTaskIsolation,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
+  type MainChatTaskRecord,
+  type MainChatTaskReviewVerdict,
 } from "@getpaseo/protocol/main-chat";
 import {
   PARENT_AGENT_ID_LABEL,
@@ -290,6 +296,68 @@ export interface MainChatService {
   removeRule(kind: MainChatRuleKind, ruleId: string): Promise<boolean>;
   recordReceipt(receipt: MainChatTaskReceipt, mainAgentId?: string): Promise<MainChatTaskReceipt>;
   getMetrics(): MainChatMetrics;
+  // M3 Task Ledger & Inline Plan Editing contract (implemented by Wave 2 M3 backend)
+  updatePlanTask?(
+    planId: string,
+    taskId: string,
+    patch: MainChatPlanTaskPatch,
+  ): Promise<MainChatPlanRecord>;
+  withdrawPlan?(planId: string, reason: string): Promise<MainChatPlanRecord>;
+  listTaskRecords?(options?: {
+    mainAgentId?: string;
+    conversationId?: string;
+    includeCompleted?: boolean;
+  }): Promise<MainChatTaskRecord[]>;
+  updateTaskScope?(input: {
+    taskId: string;
+    goal?: string;
+    doneWhen?: string[];
+    outOfBounds?: string[];
+    reason?: string;
+  }): Promise<MainChatTaskRecord>;
+  parkTask?(input: {
+    taskId: string;
+    parked: boolean;
+    reason?: string;
+  }): Promise<MainChatTaskRecord>;
+  reviewTask?(input: {
+    taskId: string;
+    verdict: MainChatTaskReviewVerdict;
+    summary?: string;
+    gaps?: string[];
+    checks?: MainChatReceiptCheck[];
+    nextSteps?: string[];
+    note?: string;
+  }): Promise<{
+    task: MainChatTaskRecord;
+    receipt: MainChatTaskReceipt | null;
+    rework: MainChatReworkRecord | null;
+  }>;
+  // M4 Multi-Conversation & Cross-Host Fleet contract (implemented by Wave 2 M4 backend)
+  listConversations?(options?: {
+    includeArchived?: boolean;
+  }): Promise<MainChatConversationRecord[]>;
+  createConversation?(input: {
+    kind: "side" | "leader";
+    title: string;
+    directionSummary?: string | null;
+    initialPrompt?: string;
+    provider?: string;
+    model?: string;
+    modeId?: string;
+    thinkingOptionId?: string;
+  }): Promise<MainChatConversationRecord>;
+  updateConversation?(input: {
+    conversationId: string;
+    title?: string;
+    directionSummary?: string | null;
+    kind?: "side" | "leader";
+    archived?: boolean;
+  }): Promise<MainChatConversationRecord>;
+  getFleetHosts?(options?: { forceRefresh?: boolean }): Promise<{
+    localServerId: string | null;
+    hosts: MainChatFleetHostStatus[];
+  }>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {

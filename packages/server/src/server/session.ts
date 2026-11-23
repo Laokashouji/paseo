@@ -1,6 +1,6 @@
 import { DiffSession } from "./diff/index.js";
 import type { MainChatService } from "./main-chat/service.js";
-import { handleMainChatSessionMessage } from "./main-chat/session.js";
+import { handleMainChatSessionMessage, isMainChatSessionMessage } from "./main-chat/session.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory, type BackgroundVisibility } from "./agent/directory.js";
@@ -2731,28 +2731,12 @@ export class Session {
   }
 
   private dispatchMainChatMessage(msg: SessionInboundMessage): Promise<void> | undefined {
-    switch (msg.type) {
-      case "main_chat.ensure.request":
-      case "main_chat.list_plans.request":
-      case "main_chat.start_plan.request":
-      case "main_chat.cancel_plan.request":
-      case "main_chat.get_overview.request":
-      case "main_chat.answer_decision.request":
-      case "main_chat.add_permission_rule.request":
-      case "main_chat.remove_rule.request":
-      case "main_chat.get_settings.request":
-      case "main_chat.update_settings.request":
-      case "main_chat.trigger_patrol.request":
-      case "main_chat.compact.request":
-      case "main_chat.clear.request":
-      case "main_chat.new_session.request":
-      case "main_chat.list_activity.request":
-        return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
-          this.emit(response),
-        );
-      default:
-        return undefined;
+    if (!isMainChatSessionMessage(msg)) {
+      return undefined;
     }
+    return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
+      this.emit(response),
+    );
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
