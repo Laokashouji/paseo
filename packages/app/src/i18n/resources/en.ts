@@ -2124,18 +2124,10 @@ export const en = {
     continueInBranch: "Continue in branch",
   },
   sessionArchive: {
-    tooltipIdle: "Archive conversation (clean up worktrees and temporary files)",
+    tooltipIdle: "Ask AI to archive this conversation",
     tooltipQueued: "Archive command queued · click to cancel",
     tooltipRunning: "Running archive cleanup…",
     tooltipPendingArchive: "Cleanup done, archiving after this turn…",
-    confirmTitle: "Archive this conversation?",
-    confirmMessageAuto:
-      "Sends the archive command so AI cleans up leftover worktrees and temporary files, then archives and closes this tab when safe.",
-    confirmMessageManual:
-      "Sends the archive command so AI cleans up leftover worktrees and temporary files and reports back.",
-    confirmMessageQueued:
-      "This conversation is currently running. Confirm to send the archive command automatically once this turn finishes.",
-    confirmAction: "Archive",
     cancelQueueTitle: "Cancel queued archive?",
     cancelQueueMessage: "The archive command will no longer be sent after this turn finishes.",
     cancelQueueConfirm: "Cancel queue",
@@ -2153,7 +2145,7 @@ export const en = {
         "Automatically archive and close the tab when this turn finishes after AI calls session_finish_archive.",
       commandLabel: "Archive command",
       commandHint:
-        "Sent to the current conversation when you confirm the composer archive button. Can be concise instructions or a slash command / skill.",
+        "Sent directly to the current conversation when you click the composer archive button. Can be concise instructions or a slash command / skill.",
       commandPlaceholder: "Enter the archive command or prompt sent to AI…",
       saveAction: "Save",
       resetAction: "Reset default",

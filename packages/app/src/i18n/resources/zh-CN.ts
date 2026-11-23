@@ -2072,16 +2072,10 @@ export const zhCN: TranslationResources = {
     continueInBranch: "转为新分支继续",
   },
   sessionArchive: {
-    tooltipIdle: "归档当前对话（清理残留 worktree 与临时文件）",
+    tooltipIdle: "让AI归档当前对话",
     tooltipQueued: "归档命令已排队 · 点击可取消",
     tooltipRunning: "正在执行归档清理…",
     tooltipPendingArchive: "清理完成，本轮结束后自动归档…",
-    confirmTitle: "归档当前对话？",
-    confirmMessageAuto:
-      "将发送归档命令交由 AI 清理本对话残留的 worktree 与临时文件，确认无风险后自动归档并关闭标签页。",
-    confirmMessageManual: "将发送归档命令交由 AI 清理本对话残留的 worktree 与临时文件并汇报结果。",
-    confirmMessageQueued: "当前对话正在运行，确认后将在本轮结束后自动发送归档命令。",
-    confirmAction: "确认归档",
     cancelQueueTitle: "取消归档排队？",
     cancelQueueMessage: "取消后，本轮结束时将不再自动发送归档命令。",
     cancelQueueConfirm: "取消排队",
@@ -2099,7 +2093,7 @@ export const zhCN: TranslationResources = {
         "AI 确认无风险并调用 session_finish_archive 后，本轮结束自动归档对话并关闭当前标签页。",
       commandLabel: "归档命令",
       commandHint:
-        "点击输入框底部归档图标并确认后发送给当前对话，可写精简规则或单个斜杠命令 / Skill（如 /archive-session）。",
+        "点击输入框底部归档图标后直接发送给当前对话，可写精简规则或单个斜杠命令 / Skill（如 /archive-session）。",
       commandPlaceholder: "输入发送给 AI 的归档命令或精简提示词…",
       saveAction: "保存",
       resetAction: "恢复默认",

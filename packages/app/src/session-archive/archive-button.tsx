@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState, type ReactElement } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View, type PressableStateCallbackType } from "react-native";
 import { Archive } from "lucide-react-native";
@@ -24,12 +24,6 @@ function isValidArchiveState(value: unknown): value is SessionArchiveState {
   );
 }
 
-function getConfirmMessageKey(isAgentRunning: boolean, autoArchive: boolean) {
-  if (isAgentRunning) return "sessionArchive.confirmMessageQueued" as const;
-  if (autoArchive) return "sessionArchive.confirmMessageAuto" as const;
-  return "sessionArchive.confirmMessageManual" as const;
-}
-
 function getTooltipKey(
   archiveState: SessionArchiveState,
   isInProgress: boolean,
@@ -41,7 +35,7 @@ function getTooltipKey(
   return "sessionArchive.tooltipIdle" as const;
 }
 
-/** Light-red icon-only composer toolbar button that confirms and dispatches the archive command. */
+/** Light-red icon-only composer toolbar button that dispatches the archive command directly. */
 export const ArchiveConversationButton = memo(function ArchiveConversationButton({
   serverId,
   workspaceId,
@@ -66,11 +60,6 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
     return agent?.labels?.["paseo.role"] === "main";
   });
-  const agentStatus = useSessionStore((state) => {
-    const session = state.sessions[serverId];
-    const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-    return agent?.status ?? null;
-  });
   const agentWorkspaceId = useSessionStore((state) => {
     const session = state.sessions[serverId];
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
@@ -79,6 +68,7 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
 
   const [archiveState, setArchiveState] = useState<SessionArchiveState>("idle");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     setArchiveState("idle");
@@ -110,19 +100,19 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
   const isInProgress =
     submitting || archiveState === "running" || archiveState === "pending_archive";
   const isQueued = archiveState === "queued";
-  const isAgentRunning = agentStatus === "running";
   const resolvedWorkspaceId = workspaceId ?? agentWorkspaceId ?? null;
 
   const handleCancelQueued = useCallback(async () => {
-    if (!archivePlugin) return;
+    if (!archivePlugin || submittingRef.current) return;
     const confirmedCancel = await confirmDialog({
       title: t("sessionArchive.cancelQueueTitle"),
       message: t("sessionArchive.cancelQueueMessage"),
       confirmLabel: t("sessionArchive.cancelQueueConfirm"),
       cancelLabel: t("common.actions.cancel"),
     });
-    if (!confirmedCancel) return;
+    if (!confirmedCancel || submittingRef.current) return;
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await archivePlugin.invoke("session.archive.trigger", {
@@ -135,6 +125,7 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("sessionArchive.toasts.failed"));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }, [agentId, archivePlugin, resolvedWorkspaceId, t, toast]);
@@ -180,7 +171,7 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
   );
 
   const handlePress = useCallback(async () => {
-    if (isInProgress) return;
+    if (submittingRef.current || isInProgress) return;
     if (isQueued && archivePlugin) {
       await handleCancelQueued();
       return;
@@ -192,35 +183,23 @@ export const ArchiveConversationButton = memo(function ArchiveConversationButton
       return;
     }
 
-    const confirmMessage = t(
-      getConfirmMessageKey(isAgentRunning, settings.autoArchiveAfterCleanup),
-    );
-    const confirmed = await confirmDialog({
-      title: t("sessionArchive.confirmTitle"),
-      message: confirmMessage,
-      confirmLabel: t("sessionArchive.confirmAction"),
-      cancelLabel: t("common.actions.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await dispatchArchiveCommand(command);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("sessionArchive.toasts.failed"));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }, [
     archivePlugin,
     dispatchArchiveCommand,
     handleCancelQueued,
-    isAgentRunning,
     isInProgress,
     isQueued,
     settings.archiveCommand,
-    settings.autoArchiveAfterCleanup,
     t,
     toast,
   ]);

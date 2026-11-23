@@ -2096,18 +2096,10 @@ export const ar: TranslationResources = {
     continueInBranch: "المتابعة في فرع جديد",
   },
   sessionArchive: {
-    tooltipIdle: "أرشفة المحادثة (تنظيف worktrees والملفات المؤقتة)",
+    tooltipIdle: "اطلب من الذكاء الاصطناعي أرشفة هذه المحادثة",
     tooltipQueued: "أمر الأرشفة في الانتظار · انقر للإلغاء",
     tooltipRunning: "جاري تنفيذ تنظيف الأرشفة…",
     tooltipPendingArchive: "اكتمل التنظيف، ستتم الأرشفة بعد انتهاء هذه الجولة…",
-    confirmTitle: "أرشفة هذه المحادثة؟",
-    confirmMessageAuto:
-      "سيتم إرسال أمر الأرشفة لينظف الذكاء الاصطناعي worktrees والملفات المؤقتة، ثم أرشفة التبويب وإغلاقه تلقائياً عند الأمان.",
-    confirmMessageManual:
-      "سيتم إرسال أمر الأرشفة لينظف الذكاء الاصطناعي worktrees والملفات المؤقتة ويقدم تقريراً.",
-    confirmMessageQueued:
-      "المحادثة قيد التشغيل حالياً. أكّد لإرسال أمر الأرشفة تلقائياً بعد انتهاء هذه الجولة.",
-    confirmAction: "أرشفة",
     cancelQueueTitle: "إلغاء الأرشفة المجدولة؟",
     cancelQueueMessage: "لن يتم إرسال أمر الأرشفة بعد انتهاء هذه الجولة.",
     cancelQueueConfirm: "إلغاء الانتظار",
@@ -2123,7 +2115,7 @@ export const ar: TranslationResources = {
       autoArchiveLabel: "الأرشفة وإغلاق التبويب تلقائياً بعد التنظيف",
       autoArchiveHint: "أرشفة المحادثة وإغلاق التبويب تلقائياً بعد استدعاء session_finish_archive.",
       commandLabel: "أمر الأرشفة",
-      commandHint: "يُرسل إلى المحادثة الحالية بعد تأكيد زر الأرشفة في شريط الإدخال.",
+      commandHint: "يُرسل مباشرةً إلى المحادثة الحالية عند النقر على زر الأرشفة في شريط الإدخال.",
       commandPlaceholder: "أدخل أمر أو تعليمات الأرشفة…",
       saveAction: "حفظ",
       resetAction: "استعادة الافتراضي",

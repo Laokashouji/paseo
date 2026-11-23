@@ -2117,18 +2117,10 @@ export const ja: TranslationResources = {
     continueInBranch: "新しいブランチで続ける",
   },
   sessionArchive: {
-    tooltipIdle: "会話をアーカイブ（worktree と一時ファイルを整理）",
+    tooltipIdle: "AI にこの会話をアーカイブしてもらう",
     tooltipQueued: "アーカイブコマンド待機中 · クリックでキャンセル",
     tooltipRunning: "アーカイブ整理を実行中…",
     tooltipPendingArchive: "整理完了、このターン終了後に自動アーカイブ…",
-    confirmTitle: "この会話をアーカイブしますか？",
-    confirmMessageAuto:
-      "アーカイブコマンドを送信し、AI が残った worktree や一時ファイルを安全に整理した後、自動でアーカイブしてタブを閉じます。",
-    confirmMessageManual:
-      "アーカイブコマンドを送信し、AI が残った worktree や一時ファイルを整理して報告します。",
-    confirmMessageQueued:
-      "この会話は実行中です。確認するとこのターンの終了後にアーカイブコマンドを自動送信します。",
-    confirmAction: "アーカイブ",
     cancelQueueTitle: "アーカイブ待機をキャンセルしますか？",
     cancelQueueMessage: "キャンセルすると、このターン終了後にアーカイブコマンドは送信されません。",
     cancelQueueConfirm: "待機をキャンセル",
@@ -2145,7 +2137,7 @@ export const ja: TranslationResources = {
       autoArchiveHint:
         "AI が session_finish_archive を呼び出した後、ターン終了時に自動でアーカイブしてタブを閉じます。",
       commandLabel: "アーカイブコマンド",
-      commandHint: "入力欄下のアーカイブボタンを確認した際に会話へ送信されます。",
+      commandHint: "入力欄下のアーカイブボタンをクリックすると会話へ直接送信されます。",
       commandPlaceholder: "AI に送信するアーカイブコマンドまたは簡潔な指示を入力…",
       saveAction: "保存",
       resetAction: "デフォルトに戻す",

@@ -2131,18 +2131,10 @@ export const ptBR: TranslationResources = {
     continueInBranch: "Continuar em nova branch",
   },
   sessionArchive: {
-    tooltipIdle: "Arquivar conversa (limpar worktrees e arquivos temporários)",
+    tooltipIdle: "Pedir à IA para arquivar esta conversa",
     tooltipQueued: "Comando de arquivamento na fila · clique para cancelar",
     tooltipRunning: "Executando limpeza de arquivamento…",
     tooltipPendingArchive: "Limpeza concluída, arquivando ao final deste turno…",
-    confirmTitle: "Arquivar esta conversa?",
-    confirmMessageAuto:
-      "Envia o comando de arquivamento para a IA limpar worktrees e arquivos temporários e, se estiver seguro, arquivar e fechar esta aba.",
-    confirmMessageManual:
-      "Envia o comando de arquivamento para a IA limpar worktrees e arquivos temporários e relatar o resultado.",
-    confirmMessageQueued:
-      "Esta conversa está em execução. Confirme para enviar o comando automaticamente ao final deste turno.",
-    confirmAction: "Arquivar",
     cancelQueueTitle: "Cancelar arquivamento na fila?",
     cancelQueueMessage: "O comando de arquivamento não será mais enviado após este turno.",
     cancelQueueConfirm: "Cancelar fila",
@@ -2160,7 +2152,7 @@ export const ptBR: TranslationResources = {
         "Arquiva e fecha a aba ao final do turno após a IA chamar session_finish_archive.",
       commandLabel: "Comando de arquivamento",
       commandHint:
-        "Enviado à conversa atual ao confirmar o botão de arquivar na barra do compositor.",
+        "Enviado diretamente à conversa atual ao clicar no botão de arquivar na barra do compositor.",
       commandPlaceholder: "Digite o comando ou instrução de arquivamento…",
       saveAction: "Salvar",
       resetAction: "Restaurar padrão",

@@ -2107,18 +2107,10 @@ export const ko: TranslationResources = {
     continueInBranch: "새 브랜치에서 계속하기",
   },
   sessionArchive: {
-    tooltipIdle: "대화 아카이브 (남은 worktree 및 임시 파일 정리)",
+    tooltipIdle: "AI에게 이 대화 아카이브 요청",
     tooltipQueued: "아카이브 명령 대기 중 · 클릭하여 취소",
     tooltipRunning: "아카이브 정리 실행 중…",
     tooltipPendingArchive: "정리 완료, 현재 턴 종료 후 자동 아카이브…",
-    confirmTitle: "이 대화를 아카이브할까요?",
-    confirmMessageAuto:
-      "아카이브 명령을 전송해 AI가 남은 worktree와 임시 파일을 정리하고, 안전하면 자동으로 아카이브하고 탭을 닫습니다.",
-    confirmMessageManual:
-      "아카이브 명령을 전송해 AI가 남은 worktree와 임시 파일을 정리하고 보고합니다.",
-    confirmMessageQueued:
-      "대화가 실행 중입니다. 확인하면 현재 턴이 끝난 뒤 아카이브 명령을 자동으로 전송합니다.",
-    confirmAction: "아카이브",
     cancelQueueTitle: "대기 중인 아카이브를 취소할까요?",
     cancelQueueMessage: "취소하면 현재 턴이 끝난 뒤 아카이브 명령이 전송되지 않습니다.",
     cancelQueueConfirm: "대기 취소",
@@ -2135,7 +2127,7 @@ export const ko: TranslationResources = {
       autoArchiveHint:
         "AI가 session_finish_archive를 호출한 뒤 턴이 끝나면 자동으로 아카이브하고 탭을 닫습니다.",
       commandLabel: "아카이브 명령",
-      commandHint: "입력창 하단 아카이브 버튼을 확인했을 때 현재 대화로 전송됩니다.",
+      commandHint: "입력창 하단 아카이브 버튼을 클릭하면 현재 대화로 바로 전송됩니다.",
       commandPlaceholder: "AI에게 보낼 아카이브 명령이나 간결한 지침을 입력…",
       saveAction: "저장",
       resetAction: "기본값 복원",
