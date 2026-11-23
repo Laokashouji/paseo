@@ -17,13 +17,19 @@ import {
 import { messageTooLargeError } from "./daemon-client-transport-utils.js";
 import type { HostAdd, HostUpdate, HostDirectory } from "@getpaseo/protocol/hosts";
 import type {
+  MainChatActivityKind,
   MainChatAddPermissionRuleResponsePayload,
   MainChatAnswerDecisionResponsePayload,
   MainChatCancelPlanResponsePayload,
+  MainChatClearResponsePayload,
+  MainChatCompactionReason,
+  MainChatCompactResponsePayload,
   MainChatEnsureResponsePayload,
   MainChatGetOverviewResponsePayload,
   MainChatGetSettingsResponsePayload,
+  MainChatListActivityResponsePayload,
   MainChatListPlansResponsePayload,
+  MainChatNewSessionResponsePayload,
   MainChatRemoveRuleResponsePayload,
   MainChatRuleKind,
   MainChatSettingsPatch,
@@ -5430,6 +5436,86 @@ export class DaemonClient {
         ...(options?.forceWakeup !== undefined ? { forceWakeup: options.forceWakeup } : {}),
       },
       timeout: 60000,
+    });
+  }
+
+  async compactMainChat(
+    options?: {
+      mainAgentId?: string;
+      reason?: MainChatCompactionReason;
+      instructions?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatCompactResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.compact.response">({
+      requestId,
+      message: {
+        type: "main_chat.compact.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.reason ? { reason: options.reason } : {}),
+        ...(options?.instructions ? { instructions: options.instructions } : {}),
+      },
+      timeout: 120000,
+    });
+  }
+
+  async clearMainChat(
+    options?: {
+      mainAgentId?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatClearResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.clear.response">({
+      requestId,
+      message: {
+        type: "main_chat.clear.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async startNewMainChatSession(
+    options?: {
+      mainAgentId?: string;
+      carryHandoffSummary?: boolean;
+      title?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatNewSessionResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.new_session.response">({
+      requestId,
+      message: {
+        type: "main_chat.new_session.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.carryHandoffSummary !== undefined
+          ? { carryHandoffSummary: options.carryHandoffSummary }
+          : {}),
+        ...(options?.title ? { title: options.title } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async listMainChatActivity(
+    options?: {
+      mainAgentId?: string;
+      limit?: number;
+      includeSilent?: boolean;
+      kind?: MainChatActivityKind;
+    },
+    requestId?: string,
+  ): Promise<MainChatListActivityResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_activity.response">({
+      requestId,
+      message: {
+        type: "main_chat.list_activity.request",
+        ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+        ...(options?.includeSilent !== undefined ? { includeSilent: options.includeSilent } : {}),
+        ...(options?.kind ? { kind: options.kind } : {}),
+      },
+      timeout: 30000,
     });
   }
 

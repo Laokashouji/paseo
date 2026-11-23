@@ -2,6 +2,8 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
 import {
+  MAIN_CHAT_FORMER_ROLE_VALUE,
+  MAIN_CHAT_REPLACED_BY_LABEL,
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
   MAIN_CHAT_TASK_GOAL_LABEL,
@@ -11,6 +13,12 @@ import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   getMainChatTaskMetaFromLabels,
   isMainChatLabels,
+  type MainChatActivityEntry,
+  type MainChatActivityKind,
+  type MainChatCompactionReason,
+  type MainChatCompactionState,
+  type MainChatCompactionStatus,
+  type MainChatCompactionStrategy,
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
   type MainChatOverview,
@@ -34,8 +42,13 @@ import {
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { FinishSubscriptions } from "../agent/finish-subscriptions/index.js";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
-import { wrapMainChatContextBlock } from "../agent/agent-messages/index.js";
-import type { AgentPromptInput } from "../agent/agent-sdk-types.js";
+import {
+  formatSystemNotificationPrompt,
+  isSystemInjectedEnvelope,
+  stripMainChatContextBlock,
+  wrapMainChatContextBlock,
+} from "../agent/agent-messages/index.js";
+import type { AgentPromptInput, AgentTimelineItem } from "../agent/agent-sdk-types.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type { StructuredGenerationDaemonConfig } from "../agent/structured-generation-providers.js";
@@ -50,12 +63,21 @@ import {
   createMainChatContextSnapshotBuilder,
   type FleetSnapshotSummary,
 } from "./context-snapshot.js";
-import { buildWorkerInitialPrompt } from "./prompts.js";
+import {
+  buildMainChatCompactionCheckpointPrompt,
+  buildMainChatHandoffSummary,
+  buildWorkerInitialPrompt,
+} from "./prompts.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
 import { createMainChatSupervisor } from "./supervisor.js";
+import { createMainChatTurnQueue } from "./turn-queue.js";
 import type { RunSemanticTriageInput, SemanticTriageOutput } from "./triage.js";
 
 const MAX_REWORK_ROUNDS = 2;
+export const DEFAULT_MAIN_CHAT_COMPACT_THRESHOLD_TOKENS = 400_000;
+const IDLE_PRECOMPACT_RATIO = 0.75;
+const DEFAULT_IDLE_PRECOMPACT_MIN_IDLE_MS = 10 * 60 * 1_000;
+const DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS = 60 * 1_000;
 
 export interface CreateMainChatPlanTaskInput {
   title: string;
@@ -165,6 +187,53 @@ export interface MainChatServiceDependencies {
   noProgressThresholdMs?: number;
   needsYouEscalateMs?: number;
   wakeupCooldownMs?: number;
+  now?: () => number;
+  snapshotCacheTtlMs?: number;
+  snapshotForegroundTimeoutMs?: number;
+  turnQueueDrainDelayMs?: number;
+  compactThresholdTokens?: number;
+  idlePrecompactMinIdleMs?: number;
+  idlePrecompactCheckIntervalMs?: number;
+}
+
+export interface MainChatCompactOptions {
+  reason?: MainChatCompactionReason;
+  instructions?: string;
+}
+
+export interface MainChatCompactResult {
+  mainAgentId: string;
+  compaction: MainChatCompactionState;
+}
+
+export interface MainChatClearResult {
+  previousAgentId: string | null;
+  agentId: string;
+  workspaceId: string;
+  migratedPlans: number;
+  migratedDecisions: number;
+  migratedChildAgents: number;
+}
+
+export interface MainChatNewSessionOptions {
+  carryHandoffSummary?: boolean;
+  title?: string;
+}
+
+export interface MainChatNewSessionResult extends MainChatClearResult {
+  handoffSummary: string | null;
+}
+
+export interface MainChatListActivityOptions {
+  mainAgentId?: string;
+  limit?: number;
+  includeSilent?: boolean;
+  kind?: MainChatActivityKind;
+}
+
+export interface MainChatListActivityResult {
+  activities: MainChatActivityEntry[];
+  total: number;
 }
 
 export interface MainChatService {
@@ -178,10 +247,24 @@ export interface MainChatService {
     mainAgentId?: string;
     forceWakeup?: boolean;
   }): Promise<MainChatPatrolResult>;
+  beginForegroundUserSend(agentId: string): (() => void) | null;
+  abortForegroundUserSend(agentId: string): void;
   prepareUserPromptForMainChat(
     agentId: string,
     prompt: AgentPromptInput,
   ): Promise<AgentPromptInput>;
+  getCompactionState(mainAgentId?: string): Promise<MainChatCompactionState>;
+  compactMainChat(
+    mainAgentId?: string,
+    options?: MainChatCompactOptions,
+  ): Promise<MainChatCompactResult>;
+  checkIdlePrecompaction(mainAgentId?: string): Promise<boolean>;
+  clearMainChatContext(mainAgentId?: string): Promise<MainChatClearResult>;
+  startNewMainChatSession(
+    mainAgentId?: string,
+    options?: MainChatNewSessionOptions,
+  ): Promise<MainChatNewSessionResult>;
+  listActivity(options?: MainChatListActivityOptions): Promise<MainChatListActivityResult>;
   listFleetSessions(mainAgentId?: string): Promise<FleetSnapshotSummary>;
   createPlan(mainAgentId: string, input: CreateMainChatPlanInput): Promise<MainChatPlanRecord>;
   startPlan(
@@ -198,14 +281,14 @@ export interface MainChatService {
     input: MainChatAskUserInput,
   ): Promise<MainChatDecisionRecord>;
   answerDecision(input: MainChatAnswerDecisionInput): Promise<MainChatDecisionRecord>;
-  getOverview(mainAgentId: string): Promise<MainChatOverview>;
+  getOverview(mainAgentId?: string): Promise<MainChatOverview>;
   addPermissionRule(input: {
     toolName: string;
     commandPrefix?: string | null;
     cwd?: string | null;
   }): Promise<MainChatPermissionRule>;
   removeRule(kind: MainChatRuleKind, ruleId: string): Promise<boolean>;
-  recordReceipt(receipt: MainChatTaskReceipt): Promise<MainChatTaskReceipt>;
+  recordReceipt(receipt: MainChatTaskReceipt, mainAgentId?: string): Promise<MainChatTaskReceipt>;
   getMetrics(): MainChatMetrics;
 }
 
@@ -248,20 +331,63 @@ function trimList(values: readonly string[] | undefined): string[] {
 
 export function createMainChatService(deps: MainChatServiceDependencies): MainChatService {
   const logger = deps.logger.child({ module: "main-chat" });
+  const getNowMs = deps.now ?? (() => Date.now());
+  const configuredCompactThresholdTokens =
+    deps.compactThresholdTokens ?? DEFAULT_MAIN_CHAT_COMPACT_THRESHOLD_TOKENS;
+  const idlePrecompactMinIdleMs =
+    deps.idlePrecompactMinIdleMs ?? DEFAULT_IDLE_PRECOMPACT_MIN_IDLE_MS;
+  const idlePrecompactCheckIntervalMs =
+    deps.idlePrecompactCheckIntervalMs ?? DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS;
+
   const store: MainChatStore = createMainChatStore(deps.paseoHome);
   const contextSnapshots = createMainChatContextSnapshotBuilder({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     store,
+    now: getNowMs,
+    cacheTtlMs: deps.snapshotCacheTtlMs,
+    foregroundTimeoutMs: deps.snapshotForegroundTimeoutMs,
   });
+
+  const compactionStatusByAgent = new Map<string, MainChatCompactionStatus>();
+  const compactionInFlightByAgent = new Map<string, Promise<MainChatCompactResult>>();
+  const lastPrecompactWatermarkByAgent = new Map<string, number>();
+
+  const turnQueue = createMainChatTurnQueue({
+    agentManager: deps.agentManager,
+    agentStorage: deps.agentStorage,
+    store,
+    logger,
+    now: getNowMs,
+    drainDelayMs: deps.turnQueueDrainDelayMs,
+    autoSubscribe: false,
+    onCompactionObserved: (mainAgentId) => {
+      contextSnapshots.resetDelta(mainAgentId);
+      const nowIso = new Date(getNowMs()).toISOString();
+      const prev = store.getCompactionMeta(mainAgentId);
+      compactionStatusByAgent.set(mainAgentId, "succeeded");
+      void store
+        .setCompactionMeta(mainAgentId, {
+          ...prev,
+          lastCompactedAt: nowIso,
+          lastError: null,
+        })
+        .catch(() => undefined);
+    },
+  });
+
   const supervisor = createMainChatSupervisor({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     store,
     contextSnapshots,
+    turnQueue,
     logger,
     providerSnapshotManager: deps.providerSnapshotManager,
     readDaemonConfig: deps.readDaemonConfig,
+    onPatrolTick: async () => {
+      await checkIdlePrecompactionInternal();
+    },
     semanticTriageRunner: deps.semanticTriageRunner,
     transientRetryDelayMs: deps.transientRetryDelayMs,
     usageLimitRetryDelayMs: deps.usageLimitRetryDelayMs,
@@ -273,7 +399,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     wakeupCooldownMs: deps.wakeupCooldownMs,
   });
   let ensureInFlight: Promise<EnsureMainChatResult> | null = null;
+  let lifecycleLock: Promise<unknown> = Promise.resolve();
+  let idlePrecompactTimer: ReturnType<typeof setInterval> | null = null;
   const planLocks = new Map<string, Promise<unknown>>();
+
+  function runWithLifecycleLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = lifecycleLock.then(fn, fn);
+    lifecycleLock = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
   function runWithPlanLock<T>(planId: string, fn: () => Promise<T>): Promise<T> {
     const previous = planLocks.get(planId) ?? Promise.resolve();
@@ -742,14 +879,669 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  function estimateTimelineItemTokens(item: AgentTimelineItem): number {
+    if (
+      item.type === "user_message" ||
+      item.type === "assistant_message" ||
+      item.type === "reasoning"
+    ) {
+      return Math.ceil(item.text.length / 3);
+    }
+    if (item.type === "tool_call") {
+      const detail = item.detail ? JSON.stringify(item.detail).length : 0;
+      return Math.ceil((item.name.length + detail) / 3);
+    }
+    return 0;
+  }
+
+  function estimateContextTokens(mainAgentId: string): number {
+    const live = deps.agentManager.getAgent(mainAgentId);
+    const usage = live?.lastUsage;
+    if (usage) {
+      if (typeof usage.contextWindowUsedTokens === "number" && usage.contextWindowUsedTokens > 0) {
+        return Math.round(usage.contextWindowUsedTokens);
+      }
+      const summed =
+        (usage.inputTokens ?? 0) + (usage.cachedInputTokens ?? 0) + (usage.outputTokens ?? 0);
+      if (summed > 0) {
+        return Math.round(summed);
+      }
+    }
+    const timeline = deps.agentManager.getTimeline(mainAgentId);
+    let total = 0;
+    for (const item of timeline) {
+      total += estimateTimelineItemTokens(item);
+    }
+    return total;
+  }
+
+  function resolveCompactThresholdTokens(mainAgentId: string): number {
+    const live = deps.agentManager.getAgent(mainAgentId);
+    const maxTokens = live?.lastUsage?.contextWindowMaxTokens;
+    if (typeof maxTokens === "number" && maxTokens > 0) {
+      return Math.max(
+        1_000,
+        Math.min(configuredCompactThresholdTokens, Math.floor(maxTokens * 0.85)),
+      );
+    }
+    return Math.max(1_000, configuredCompactThresholdTokens);
+  }
+
+  function buildCompactionState(mainAgentId: string | null): MainChatCompactionState {
+    if (!mainAgentId) {
+      return {
+        status: "idle",
+        estimatedTokens: 0,
+        thresholdTokens: Math.max(1_000, configuredCompactThresholdTokens),
+        lastCompactedAt: null,
+        lastError: null,
+        summary: null,
+        reason: null,
+        strategy: null,
+      };
+    }
+    const persisted = store.getCompactionMeta(mainAgentId);
+    const liveStatus = compactionStatusByAgent.get(mainAgentId);
+    let derivedStatus: MainChatCompactionStatus = "idle";
+    if (liveStatus) {
+      derivedStatus = liveStatus;
+    } else if (persisted.lastError) {
+      derivedStatus = "failed";
+    } else if (persisted.lastCompactedAt) {
+      derivedStatus = "succeeded";
+    }
+    return {
+      status: derivedStatus,
+      estimatedTokens: estimateContextTokens(mainAgentId),
+      thresholdTokens: resolveCompactThresholdTokens(mainAgentId),
+      lastCompactedAt: persisted.lastCompactedAt,
+      lastError: persisted.lastError,
+      summary: persisted.summary,
+      reason: persisted.reason,
+      strategy: persisted.strategy,
+    };
+  }
+
+  function extractRecentTimelineMessages(
+    mainAgentId: string,
+  ): Array<{ role: "user" | "assistant"; text: string }> {
+    const timeline = deps.agentManager.getTimeline(mainAgentId);
+    const messages: Array<{ role: "user" | "assistant"; text: string }> = [];
+    for (const item of timeline) {
+      if (item.type === "user_message") {
+        const cleaned = stripMainChatContextBlock(item.text).trim();
+        if (!cleaned || isSystemInjectedEnvelope(cleaned)) continue;
+        messages.push({ role: "user", text: cleaned });
+      } else if (item.type === "assistant_message") {
+        const cleaned = item.text.trim();
+        if (!cleaned) continue;
+        messages.push({ role: "assistant", text: cleaned });
+      }
+    }
+    return messages.slice(-6);
+  }
+
+  async function supportsNativeCompactCommand(mainAgentId: string): Promise<boolean> {
+    const live = deps.agentManager.getAgent(mainAgentId);
+    if (!live) return false;
+    const session = (
+      live as {
+        session?: {
+          listCommands?: () => Promise<Array<{ name: string }>>;
+          tryHandleOutOfBand?: (prompt: string) => unknown;
+        };
+      }
+    ).session;
+    if (
+      typeof session?.tryHandleOutOfBand === "function" &&
+      session.tryHandleOutOfBand("/compact")
+    ) {
+      return true;
+    }
+    if (typeof session?.listCommands === "function") {
+      try {
+        const commands = await session.listCommands();
+        return commands.some(
+          (command) => command.name.trim().replace(/^\//, "").toLowerCase() === "compact",
+        );
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  async function resolveRequiredMainAgentId(requestedMainAgentId?: string): Promise<string> {
+    if (requestedMainAgentId?.trim()) {
+      return requestedMainAgentId.trim();
+    }
+    const existing = await findExistingMainChat();
+    if (!existing) {
+      throw new Error("当前尚未初始化主对话，请先确保主对话已就绪");
+    }
+    return existing.agentId;
+  }
+
+  async function runCompactionExecution(
+    mainAgentId: string,
+    options: {
+      reason: MainChatCompactionReason;
+      instructions?: string;
+      skipActivityLog?: boolean;
+      signal?: AbortSignal;
+    },
+  ): Promise<MainChatCompactResult> {
+    const { reason, instructions, skipActivityLog, signal } = options;
+    const existingInFlight = compactionInFlightByAgent.get(mainAgentId);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+
+    const execute = async (): Promise<MainChatCompactResult> => {
+      await store.load();
+      if (signal?.aborted) {
+        throw new Error("后台预压缩已因用户活跃让路取消");
+      }
+
+      const startedIso = new Date(getNowMs()).toISOString();
+      const activityId = skipActivityLog ? null : makeId("act");
+      compactionStatusByAgent.set(mainAgentId, "running");
+
+      if (activityId) {
+        await store.appendActivity({
+          id: activityId,
+          mainAgentId,
+          kind: "compaction",
+          trigger: reason,
+          summary: reason === "idle_precompact" ? "触发空闲预压缩" : "执行主对话上下文压缩",
+          silent: reason === "idle_precompact",
+          status: "running",
+          createdAt: startedIso,
+          completedAt: null,
+        });
+      }
+
+      let strategy: MainChatCompactionStrategy = "handoff_summary";
+      try {
+        const nativeSupported = await supportsNativeCompactCommand(mainAgentId);
+        if (signal?.aborted) {
+          throw new Error("后台预压缩已因用户活跃让路取消");
+        }
+
+        let summary: string;
+        if (nativeSupported) {
+          strategy = "native";
+          const command = instructions?.trim() ? `/compact ${instructions.trim()}` : "/compact";
+          const dispatch = await sendPromptToAgent({
+            agentId: mainAgentId,
+            prompt: command,
+            agentManager: deps.agentManager,
+            agentStorage: deps.agentStorage,
+            logger,
+            unarchive: false,
+          });
+          if (dispatch.disposition === "turn_started") {
+            await dispatch.started;
+          }
+          summary = instructions?.trim()
+            ? `已通过底层引擎原生 /compact 完成上下文压缩（${instructions.trim().slice(0, 80)}）`
+            : "已通过底层引擎原生 /compact 完成上下文压缩";
+        } else {
+          strategy = "handoff_summary";
+          const fleet = await contextSnapshots.collectFleet(mainAgentId, { bypassCache: true });
+          const plans = store.listPlans(mainAgentId);
+          const openDecisions = store
+            .listDecisions(mainAgentId)
+            .filter((decision) => !decision.answeredAt);
+          const recentMessages = extractRecentTimelineMessages(mainAgentId);
+          summary = buildMainChatHandoffSummary({
+            previousAgentId: mainAgentId,
+            fleet,
+            plans,
+            openDecisions,
+            recentMessages,
+            instructions,
+          });
+          const checkpointPrompt = buildMainChatCompactionCheckpointPrompt({
+            summary,
+            reason,
+            instructions,
+          });
+          const dispatch = await sendPromptToAgent({
+            agentId: mainAgentId,
+            prompt: formatSystemNotificationPrompt(checkpointPrompt),
+            agentManager: deps.agentManager,
+            agentStorage: deps.agentStorage,
+            logger,
+            unarchive: false,
+          });
+          if (dispatch.disposition === "turn_started") {
+            await dispatch.started;
+          }
+        }
+
+        const completedIso = new Date(getNowMs()).toISOString();
+        contextSnapshots.resetDelta(mainAgentId);
+        compactionStatusByAgent.set(mainAgentId, "succeeded");
+        lastPrecompactWatermarkByAgent.set(mainAgentId, turnQueue.getLastActivityAtMs(mainAgentId));
+        await store.setCompactionMeta(mainAgentId, {
+          lastCompactedAt: completedIso,
+          lastError: null,
+          summary,
+          reason,
+          strategy,
+        });
+        await store.incrementMetric("compactions");
+
+        if (activityId) {
+          await store.updateActivity(activityId, {
+            status: "completed",
+            completedAt: completedIso,
+            summary:
+              strategy === "native" ? "已完成原生上下文压缩" : "已完成结构化交接摘要上下文压缩",
+            detail: summary,
+          });
+        }
+
+        return {
+          mainAgentId,
+          compaction: buildCompactionState(mainAgentId),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const failedIso = new Date(getNowMs()).toISOString();
+        const prev = store.getCompactionMeta(mainAgentId);
+        compactionStatusByAgent.set(mainAgentId, "failed");
+        await store.setCompactionMeta(mainAgentId, {
+          ...prev,
+          lastError: message,
+          reason,
+          strategy,
+        });
+        if (activityId) {
+          await store.updateActivity(activityId, {
+            status: "failed",
+            completedAt: failedIso,
+            detail: message,
+          });
+        }
+        throw error;
+      }
+    };
+
+    const task = execute().finally(() => {
+      if (compactionInFlightByAgent.get(mainAgentId) === task) {
+        compactionInFlightByAgent.delete(mainAgentId);
+      }
+    });
+    compactionInFlightByAgent.set(mainAgentId, task);
+    return task;
+  }
+
+  async function checkIdlePrecompactionInternal(requestedMainAgentId?: string): Promise<boolean> {
+    await store.load();
+    const mainAgentId = requestedMainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
+    if (!mainAgentId) return false;
+    if (compactionInFlightByAgent.has(mainAgentId)) return false;
+    if (turnQueue.isForegroundActive(mainAgentId) || turnQueue.isBackgroundBusy(mainAgentId)) {
+      return false;
+    }
+    if (deps.agentManager.hasInFlightRun(mainAgentId)) {
+      return false;
+    }
+
+    const live = deps.agentManager.getAgent(mainAgentId);
+    if (!live || live.lifecycle === "running") return false;
+
+    const lastActivityAtMs = turnQueue.getLastActivityAtMs(mainAgentId);
+    const idleMs =
+      lastActivityAtMs > 0
+        ? turnQueue.getIdleDurationMs(mainAgentId)
+        : Math.max(0, getNowMs() - live.updatedAt.getTime());
+    if (idleMs < idlePrecompactMinIdleMs) {
+      return false;
+    }
+
+    const watermark = lastPrecompactWatermarkByAgent.get(mainAgentId);
+    if (watermark !== undefined && watermark === lastActivityAtMs) {
+      return false;
+    }
+
+    const estimated = estimateContextTokens(mainAgentId);
+    const threshold = resolveCompactThresholdTokens(mainAgentId);
+    if (estimated < Math.floor(threshold * IDLE_PRECOMPACT_RATIO)) {
+      return false;
+    }
+
+    const result = await turnQueue.enqueueBackground({
+      mainAgentId,
+      dedupeKey: "compaction:idle_precompact",
+      trigger: "idle_precompact",
+      priority: 1,
+      summary: `上下文估算已达 ${estimated}/${threshold} tokens，后台静默执行空闲预压缩`,
+      requeueOnPreempt: false,
+      customExecute: async (signal) => {
+        if (signal.aborted || turnQueue.isForegroundActive(mainAgentId)) {
+          return { summary: "用户恢复活跃，空闲预压缩已让路", silent: true };
+        }
+        const compacted = await runCompactionExecution(mainAgentId, {
+          reason: "idle_precompact",
+          skipActivityLog: true,
+          signal,
+        });
+        return {
+          summary: "空闲预压缩完成",
+          silent: true,
+          detail: compacted.compaction.summary,
+        };
+      },
+    });
+    return result.status === "dispatched" || result.status === "queued";
+  }
+
+  async function createCleanMainChatAgent(input: {
+    workspaceId: string;
+    cwd: string;
+    title: string;
+    provider: AgentProvider;
+    model?: string | null;
+    modeId?: string | null;
+    thinkingOptionId?: string | null;
+  }): Promise<{ agentId: string; workspaceId: string }> {
+    const { snapshot } = await createAgentCommand(
+      {
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        finishSubscriptions: deps.finishSubscriptions?.(),
+        logger,
+        paseoHome: deps.paseoHome,
+        worktreesRoot: deps.worktreesRoot,
+        terminalManager: deps.terminalManager,
+        providerSnapshotManager: deps.providerSnapshotManager,
+        createPaseoWorktree: deps.createPaseoWorktree,
+        ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
+      },
+      {
+        kind: "session",
+        config: {
+          provider: input.provider,
+          cwd: input.cwd,
+          title: input.title,
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.modeId ? { modeId: input.modeId } : {}),
+          ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+        },
+        workspaceId: input.workspaceId,
+        background: false,
+        labels: {
+          [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE,
+        },
+        provisionalTitle: input.title,
+        firstAgentContext: {},
+      },
+    );
+    return {
+      agentId: snapshot.id,
+      workspaceId: snapshot.workspaceId ?? input.workspaceId,
+    };
+  }
+
+  async function collectMigratableChildIds(
+    fromMainAgentId: string,
+    toMainAgentId: string,
+  ): Promise<Set<string>> {
+    const candidateChildIds = new Set<string>();
+    const isExcluded = (id: string) => id === fromMainAgentId || id === toMainAgentId;
+
+    for (const agent of deps.agentManager.listAgents()) {
+      if (!isExcluded(agent.id) && getParentAgentIdFromLabels(agent.labels) === fromMainAgentId) {
+        candidateChildIds.add(agent.id);
+      }
+    }
+
+    const storedActive = await deps.agentStorage.listActive();
+    for (const record of storedActive) {
+      if (
+        !record.archivedAt &&
+        !isExcluded(record.id) &&
+        getParentAgentIdFromLabels(record.labels) === fromMainAgentId
+      ) {
+        candidateChildIds.add(record.id);
+      }
+    }
+
+    for (const plan of store.listPlans(fromMainAgentId)) {
+      for (const task of plan.tasks) {
+        if (!task.agentId || isExcluded(task.agentId)) continue;
+        const live = deps.agentManager.getAgent(task.agentId);
+        const stored = live ? null : await deps.agentStorage.get(task.agentId);
+        if (stored?.archivedAt) continue;
+        if (getParentAgentIdFromLabels(live?.labels ?? stored?.labels) === fromMainAgentId) {
+          candidateChildIds.add(task.agentId);
+        }
+      }
+    }
+
+    return candidateChildIds;
+  }
+
+  async function reRegisterMigratedFinishSubscription(
+    finishSubscriptions: FinishSubscriptions | undefined,
+    toMainAgentId: string,
+    childId: string,
+  ): Promise<void> {
+    if (!finishSubscriptions) return;
+    const liveChild = deps.agentManager.getAgent(childId);
+    if (!liveChild || liveChild.background || liveChild.internal) return;
+    try {
+      const registration = await finishSubscriptions.register({
+        callerAgentId: toMainAgentId,
+        childAgentId: childId,
+        requireParentOwnership: true,
+      });
+      registration.accept();
+    } catch (error) {
+      logger.warn(
+        { err: error, childId, newMainAgentId: toMainAgentId },
+        "Failed to re-register finish subscription after main-chat migration",
+      );
+    }
+  }
+
+  async function migrateChildAgents(
+    fromMainAgentId: string,
+    toMainAgentId: string,
+  ): Promise<number> {
+    const candidateChildIds = await collectMigratableChildIds(fromMainAgentId, toMainAgentId);
+    const finishSubscriptions = deps.finishSubscriptions?.();
+    let migrated = 0;
+
+    for (const childId of candidateChildIds) {
+      await deps.agentManager.updateAgentMetadata(childId, {
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: toMainAgentId,
+        },
+      });
+      migrated += 1;
+      await reRegisterMigratedFinishSubscription(finishSubscriptions, toMainAgentId, childId);
+    }
+
+    return migrated;
+  }
+
+  async function archiveReplacedMainChatAgent(
+    oldMainAgentId: string,
+    newMainAgentId: string,
+  ): Promise<void> {
+    // Demote role label before archiving so archive guards and active-main lookups only see the
+    // replacement main chat, and children already reparented won't be cascade-archived.
+    await deps.agentManager.updateAgentMetadata(oldMainAgentId, {
+      labels: {
+        [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_FORMER_ROLE_VALUE,
+        [MAIN_CHAT_REPLACED_BY_LABEL]: newMainAgentId,
+      },
+    });
+
+    if (
+      typeof deps.agentManager.hasInFlightRun === "function" &&
+      deps.agentManager.hasInFlightRun(oldMainAgentId) &&
+      typeof deps.agentManager.cancelAgentRun === "function"
+    ) {
+      await deps.agentManager.cancelAgentRun(oldMainAgentId).catch(() => undefined);
+    }
+
+    if (typeof deps.agentManager.clearAgentAttention === "function") {
+      await deps.agentManager.clearAgentAttention(oldMainAgentId).catch(() => undefined);
+    }
+
+    const liveOld = deps.agentManager.getAgent(oldMainAgentId);
+    if (liveOld && typeof deps.agentManager.archiveAgent === "function") {
+      await deps.agentManager.archiveAgent(oldMainAgentId);
+      return;
+    }
+    if (typeof deps.agentManager.archiveSnapshot === "function") {
+      await deps.agentManager.archiveSnapshot(oldMainAgentId, new Date(getNowMs()).toISOString());
+    }
+  }
+
+  async function replaceMainChatSession(input: {
+    requestedMainAgentId?: string;
+    mode: "clear" | "handoff";
+    carryHandoffSummary: boolean;
+    title?: string;
+  }): Promise<MainChatNewSessionResult> {
+    return runWithLifecycleLock(async () => {
+      await store.load();
+      const existing = input.requestedMainAgentId?.trim()
+        ? {
+            agentId: input.requestedMainAgentId.trim(),
+            workspaceId:
+              deps.agentManager.getAgent(input.requestedMainAgentId.trim())?.workspaceId ??
+              (await deps.agentStorage.get(input.requestedMainAgentId.trim()))?.workspaceId ??
+              (await resolveMainChatWorkspace()).workspaceId,
+          }
+        : await findExistingMainChat();
+
+      if (!existing) {
+        const ensured = await ensureMainChatInternal();
+        return {
+          previousAgentId: null,
+          agentId: ensured.agentId,
+          workspaceId: ensured.workspaceId,
+          handoffSummary: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+        };
+      }
+
+      const oldMainAgentId = existing.agentId;
+      const oldSnapshot = await resolveMainAgentSnapshot(oldMainAgentId);
+      const workspace = await resolveMainChatWorkspace();
+      const nextTitle = input.title?.trim() || store.getSettings().title;
+
+      let handoffSummary: string | null = null;
+      if (input.mode === "handoff" && input.carryHandoffSummary) {
+        const fleet = await contextSnapshots.collectFleet(oldMainAgentId, { bypassCache: true });
+        const plans = store.listPlans(oldMainAgentId);
+        const openDecisions = store
+          .listDecisions(oldMainAgentId)
+          .filter((decision) => !decision.answeredAt);
+        const recentMessages = extractRecentTimelineMessages(oldMainAgentId);
+        handoffSummary = buildMainChatHandoffSummary({
+          previousAgentId: oldMainAgentId,
+          fleet,
+          plans,
+          openDecisions,
+          recentMessages,
+        });
+      }
+
+      // Create replacement main chat first so any creation failure leaves old main chat intact.
+      const created = await createCleanMainChatAgent({
+        workspaceId: existing.workspaceId || workspace.workspaceId,
+        cwd: oldSnapshot.cwd || workspace.cwd,
+        title: nextTitle,
+        provider: oldSnapshot.provider as AgentProvider,
+        model: oldSnapshot.model,
+        modeId: oldSnapshot.modeId,
+        thinkingOptionId: oldSnapshot.thinkingOptionId,
+      });
+
+      const migratedChildAgents = await migrateChildAgents(oldMainAgentId, created.agentId);
+      const storeMigration = await store.migrateMainAgent(oldMainAgentId, created.agentId);
+
+      if (handoffSummary) {
+        await store.setPendingHandoffSummary(created.agentId, handoffSummary);
+      }
+
+      turnQueue.clearAgentState(oldMainAgentId);
+      compactionStatusByAgent.delete(oldMainAgentId);
+      lastPrecompactWatermarkByAgent.delete(oldMainAgentId);
+      contextSnapshots.resetDelta(oldMainAgentId);
+      contextSnapshots.resetDelta(created.agentId);
+      contextSnapshots.invalidateCache();
+
+      await archiveReplacedMainChatAgent(oldMainAgentId, created.agentId);
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      let activityTrigger = "new_session";
+      let activitySummary = `已开启全新主对话并完成督办权转移（迁移 ${migratedChildAgents} 个子会话）`;
+      if (input.mode === "clear") {
+        activityTrigger = "user_clear";
+        activitySummary = `已原位清空上下文并归档旧会话，迁移 ${storeMigration.migratedPlans} 个计划、${storeMigration.migratedDecisions} 个决策与 ${migratedChildAgents} 个子会话`;
+      } else if (input.carryHandoffSummary) {
+        activityTrigger = "new_session_with_handoff";
+        activitySummary = `已开启新主对话并完成交接摘要与督办权转移（迁移 ${migratedChildAgents} 个子会话）`;
+      }
+      await store.appendActivity({
+        id: makeId("act"),
+        mainAgentId: created.agentId,
+        kind: input.mode === "clear" ? "clear" : "handoff",
+        trigger: activityTrigger,
+        summary: activitySummary,
+        silent: false,
+        status: "completed",
+        createdAt: nowIso,
+        completedAt: nowIso,
+        relatedAgentId: oldMainAgentId,
+        detail: handoffSummary,
+      });
+
+      return {
+        previousAgentId: oldMainAgentId,
+        agentId: created.agentId,
+        workspaceId: created.workspaceId,
+        handoffSummary,
+        migratedPlans: storeMigration.migratedPlans,
+        migratedDecisions: storeMigration.migratedDecisions,
+        migratedChildAgents,
+      };
+    });
+  }
+
   return {
     async start() {
       await store.load();
+      turnQueue.start();
       supervisor.start();
+      if (!idlePrecompactTimer && idlePrecompactCheckIntervalMs > 0) {
+        idlePrecompactTimer = setInterval(() => {
+          void checkIdlePrecompactionInternal().catch((error) => {
+            logger.warn({ err: error }, "Idle pre-compaction check failed");
+          });
+        }, idlePrecompactCheckIntervalMs);
+        idlePrecompactTimer.unref?.();
+      }
     },
 
     stop() {
+      if (idlePrecompactTimer) {
+        clearInterval(idlePrecompactTimer);
+        idlePrecompactTimer = null;
+      }
       supervisor.stop();
+      turnQueue.stop();
     },
 
     async ensureMainChat(input) {
@@ -826,6 +1618,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       });
     },
 
+    beginForegroundUserSend(agentId) {
+      const live = deps.agentManager.getAgent(agentId);
+      if (live && !isMainChatLabels(live.labels)) {
+        return null;
+      }
+      return turnQueue.beginForegroundDispatch(agentId);
+    },
+
+    abortForegroundUserSend(agentId) {
+      turnQueue.abortForegroundDispatch(agentId);
+    },
+
     async prepareUserPromptForMainChat(agentId, prompt) {
       const live = deps.agentManager.getAgent(agentId);
       const stored = live ? null : await deps.agentStorage.get(agentId);
@@ -834,12 +1638,67 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return prompt;
       }
       await store.load();
-      const snapshot = await contextSnapshots.buildTurnContext(agentId);
+      await turnQueue.preemptForForegroundUser(agentId);
+      const handoffSummary = await store.consumePendingHandoffSummary(agentId);
+      const snapshot = await contextSnapshots.buildTurnContext(agentId, {
+        foreground: true,
+        forceFull: Boolean(handoffSummary),
+        handoffSummary,
+      });
       const prefix = `${wrapMainChatContextBlock(snapshot)}\n\n`;
       if (typeof prompt === "string") {
         return `${prefix}${prompt}`;
       }
       return [{ type: "text", text: prefix }, ...prompt];
+    },
+
+    async getCompactionState(mainAgentId) {
+      await store.load();
+      const targetId = mainAgentId?.trim() || (await findExistingMainChat())?.agentId || null;
+      return buildCompactionState(targetId);
+    },
+
+    async compactMainChat(mainAgentId, options) {
+      await store.load();
+      const targetId = await resolveRequiredMainAgentId(mainAgentId);
+      return runCompactionExecution(targetId, {
+        reason: options?.reason ?? "manual",
+        instructions: options?.instructions,
+      });
+    },
+
+    async checkIdlePrecompaction(mainAgentId) {
+      return checkIdlePrecompactionInternal(mainAgentId);
+    },
+
+    async clearMainChatContext(mainAgentId) {
+      const result = await replaceMainChatSession({
+        requestedMainAgentId: mainAgentId,
+        mode: "clear",
+        carryHandoffSummary: false,
+      });
+      return {
+        previousAgentId: result.previousAgentId,
+        agentId: result.agentId,
+        workspaceId: result.workspaceId,
+        migratedPlans: result.migratedPlans,
+        migratedDecisions: result.migratedDecisions,
+        migratedChildAgents: result.migratedChildAgents,
+      };
+    },
+
+    async startNewMainChatSession(mainAgentId, options) {
+      return replaceMainChatSession({
+        requestedMainAgentId: mainAgentId,
+        mode: "handoff",
+        carryHandoffSummary: options?.carryHandoffSummary ?? true,
+        title: options?.title,
+      });
+    },
+
+    async listActivity(options) {
+      await store.load();
+      return store.listActivities(options);
     },
 
     async listFleetSessions(mainAgentId) {
@@ -877,10 +1736,12 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       };
       await store.putPlan(plan);
       await store.incrementMetric("plansCreated");
+      contextSnapshots.invalidateCache();
 
       if (allEligibleForAutoStart) {
         const started = await spawnTasksForPlan(plan);
         await store.incrementMetric("plansAutoStarted");
+        contextSnapshots.invalidateCache();
         return started;
       }
       return plan;
@@ -912,6 +1773,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         if (existing.status === "open") {
           await store.incrementMetric("plansStarted");
         }
+        contextSnapshots.invalidateCache();
         return started;
       });
     },
@@ -936,6 +1798,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         };
         await store.putPlan(cancelled);
         await store.incrementMetric("plansCancelled");
+        contextSnapshots.invalidateCache();
         return cancelled;
       });
     },
@@ -1076,6 +1939,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       };
       await store.putDecision(decision);
       await store.incrementMetric("interrupts");
+      contextSnapshots.invalidateCache();
       return decision;
     },
 
@@ -1100,6 +1964,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         answeredAt: new Date().toISOString(),
       };
       await store.putDecision(updated);
+      contextSnapshots.invalidateCache();
 
       const targetAgentId = updated.agentId ?? updated.mainAgentId;
       const prompt = [
@@ -1123,9 +1988,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     async getOverview(mainAgentId) {
       await store.load();
+      const resolvedMainAgentId =
+        mainAgentId?.trim() || (await findExistingMainChat())?.agentId || undefined;
+      const activityListing = store.listActivities({
+        mainAgentId: resolvedMainAgentId,
+        limit: 200,
+        includeSilent: true,
+      });
       return {
-        plans: store.listPlans(mainAgentId),
-        decisions: store.listDecisions(mainAgentId),
+        plans: store.listPlans(resolvedMainAgentId),
+        decisions: store.listDecisions(resolvedMainAgentId),
         autoStartRules: store.listTrustRules(),
         permissionRules: store.listPermissionRules(),
         metrics: store.getMetrics(),
@@ -1133,6 +2005,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         triages: store.listTriages(),
         lastPatrolAt: store.getLastPatrolAt(),
         lastWakeupAt: store.getLastWakeupAt(),
+        compaction: buildCompactionState(resolvedMainAgentId ?? null),
+        recentActivityCount: activityListing.total,
+        backgroundBusy: resolvedMainAgentId
+          ? turnQueue.isBackgroundBusy(resolvedMainAgentId)
+          : false,
+        queuedBackgroundCount: resolvedMainAgentId
+          ? turnQueue.getQueuedCount(resolvedMainAgentId)
+          : 0,
       };
     },
 
@@ -1149,8 +2029,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       return store.removePermissionRule(ruleId);
     },
 
-    async recordReceipt(receipt) {
+    async recordReceipt(receipt, mainAgentId) {
       await store.load();
+      const resolvedMainId = mainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
+      await store.addReceipt(receipt, resolvedMainId);
       await store.incrementMetric("receiptsRecorded");
       return receipt;
     },

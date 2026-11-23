@@ -3,16 +3,24 @@ import path from "node:path";
 import { z } from "zod";
 import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
+  MainChatActivityEntrySchema,
   MainChatAutoStartRuleSchema,
+  MainChatCompactionReasonSchema,
+  MainChatCompactionStrategySchema,
   MainChatDecisionRecordSchema,
   MainChatMetricsSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
   MainChatSessionTriageSchema,
   MainChatSettingsSchema,
+  MainChatTaskReceiptSchema,
   createDefaultMainChatSettings,
   mergeMainChatSettings,
+  type MainChatActivityEntry,
+  type MainChatActivityKind,
   type MainChatAutoStartRule,
+  type MainChatCompactionReason,
+  type MainChatCompactionStrategy,
   type MainChatDecisionRecord,
   type MainChatMetrics,
   type MainChatPermissionRule,
@@ -21,6 +29,7 @@ import {
   type MainChatSettings,
   type MainChatSettingsPatch,
   type MainChatTaskMode,
+  type MainChatTaskReceipt,
 } from "@getpaseo/protocol/main-chat";
 
 export type MainChatTrustRule = MainChatAutoStartRule;
@@ -35,11 +44,36 @@ const DelegatedQuestionEntrySchema = z.object({
 });
 export type DelegatedQuestionEntry = z.infer<typeof DelegatedQuestionEntrySchema>;
 
+const PersistedMainChatReceiptSchema = MainChatTaskReceiptSchema.extend({
+  mainAgentId: z.string().nullable().optional(),
+  recordedAt: z.string(),
+});
+export type PersistedMainChatReceipt = z.infer<typeof PersistedMainChatReceiptSchema>;
+
+const PersistedMainChatCompactionMetaSchema = z.object({
+  lastCompactedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  summary: z.string().nullable(),
+  reason: MainChatCompactionReasonSchema.nullable().optional(),
+  strategy: MainChatCompactionStrategySchema.nullable().optional(),
+});
+export interface PersistedMainChatCompactionMeta {
+  lastCompactedAt: string | null;
+  lastError: string | null;
+  summary: string | null;
+  reason: MainChatCompactionReason | null;
+  strategy: MainChatCompactionStrategy | null;
+}
+
 const PersistedMainChatStateSchema = z.object({
   version: z.literal(1),
   settings: MainChatSettingsSchema.optional(),
   plans: z.record(z.string(), MainChatPlanRecordSchema).optional(),
   decisions: z.record(z.string(), MainChatDecisionRecordSchema).optional(),
+  receipts: z.array(PersistedMainChatReceiptSchema).optional(),
+  activities: z.array(MainChatActivityEntrySchema).optional(),
+  compactionByMainAgent: z.record(z.string(), PersistedMainChatCompactionMetaSchema).optional(),
+  pendingHandoffByMainAgent: z.record(z.string(), z.string()).optional(),
   trustRules: z.array(MainChatAutoStartRuleSchema).optional(),
   permissionRules: z.array(MainChatPermissionRuleSchema).optional(),
   reworkRounds: z.record(z.string(), z.number().int().nonnegative()).optional(),
@@ -55,6 +89,10 @@ interface MainChatStateFile {
   settings: MainChatSettings;
   plans: Record<string, MainChatPlanRecord>;
   decisions: Record<string, MainChatDecisionRecord>;
+  receipts: PersistedMainChatReceipt[];
+  activities: MainChatActivityEntry[];
+  compactionByMainAgent: Record<string, PersistedMainChatCompactionMeta>;
+  pendingHandoffByMainAgent: Record<string, string>;
   trustRules: MainChatAutoStartRule[];
   permissionRules: MainChatPermissionRule[];
   reworkRounds: Record<string, number>;
@@ -65,10 +103,22 @@ interface MainChatStateFile {
   metrics: MainChatFullMetrics;
 }
 
+export const MAX_RETAINED_ACTIVITIES = 200;
 const MAX_RETAINED_PLANS = 200;
 const MAX_RETAINED_DECISIONS = 200;
+const MAX_RETAINED_RECEIPTS = 200;
 const MAX_RETAINED_TRIAGES = 200;
 const DELEGATED_QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function emptyCompactionMeta(): PersistedMainChatCompactionMeta {
+  return {
+    lastCompactedAt: null,
+    lastError: null,
+    summary: null,
+    reason: null,
+    strategy: null,
+  };
+}
 
 function emptyMetrics(): MainChatFullMetrics {
   return {
@@ -89,6 +139,10 @@ function emptyMetrics(): MainChatFullMetrics {
     proactiveWakeups: 0,
     autoDelegatedQuestions: 0,
     noProgressNudges: 0,
+    preemptedTurns: 0,
+    silentTurns: 0,
+    missingReplyRecoveries: 0,
+    compactions: 0,
   };
 }
 
@@ -98,6 +152,10 @@ function emptyState(): MainChatStateFile {
     settings: createDefaultMainChatSettings("conservative"),
     plans: {},
     decisions: {},
+    receipts: [],
+    activities: [],
+    compactionByMainAgent: {},
+    pendingHandoffByMainAgent: {},
     trustRules: [],
     permissionRules: [],
     reworkRounds: {},
@@ -163,6 +221,20 @@ export interface MainChatPermissionRuleLookup {
   cwd?: string | null;
 }
 
+export interface MainChatActivityListOptions {
+  mainAgentId?: string;
+  limit?: number;
+  includeSilent?: boolean;
+  kind?: MainChatActivityKind;
+}
+
+export interface MainChatMigrationCounts {
+  migratedPlans: number;
+  migratedDecisions: number;
+  migratedReceipts: number;
+  migratedActivities: number;
+}
+
 export interface MainChatStore {
   load(): Promise<void>;
   getSettings(): MainChatSettings;
@@ -173,6 +245,29 @@ export interface MainChatStore {
   getDecision(decisionId: string): MainChatDecisionRecord | null;
   listDecisions(mainAgentId?: string): MainChatDecisionRecord[];
   putDecision(decision: MainChatDecisionRecord): Promise<void>;
+  addReceipt(
+    receipt: MainChatTaskReceipt,
+    mainAgentId?: string | null,
+  ): Promise<PersistedMainChatReceipt>;
+  listReceipts(mainAgentId?: string): PersistedMainChatReceipt[];
+  appendActivity(entry: MainChatActivityEntry): Promise<MainChatActivityEntry>;
+  updateActivity(
+    id: string,
+    patch: Partial<Omit<MainChatActivityEntry, "id" | "mainAgentId" | "createdAt">>,
+  ): Promise<MainChatActivityEntry | null>;
+  listActivities(options?: MainChatActivityListOptions): {
+    activities: MainChatActivityEntry[];
+    total: number;
+  };
+  getCompactionMeta(mainAgentId: string): PersistedMainChatCompactionMeta;
+  setCompactionMeta(mainAgentId: string, meta: PersistedMainChatCompactionMeta): Promise<void>;
+  getPendingHandoffSummary(mainAgentId: string): string | null;
+  setPendingHandoffSummary(mainAgentId: string, summary: string | null): Promise<void>;
+  consumePendingHandoffSummary(mainAgentId: string): Promise<string | null>;
+  migrateMainAgent(
+    fromMainAgentId: string,
+    toMainAgentId: string,
+  ): Promise<MainChatMigrationCounts>;
   hasTrustRule(cwd: string, mode: MainChatTaskMode): boolean;
   addTrustRule(cwd: string, mode: MainChatTaskMode): Promise<MainChatAutoStartRule>;
   removeTrustRule(ruleId: string): Promise<boolean>;
@@ -201,6 +296,39 @@ export interface MainChatStore {
   incrementMetric(key: keyof MainChatFullMetrics): Promise<void>;
 }
 
+function hydratePersistedState(
+  data: z.infer<typeof PersistedMainChatStateSchema>,
+): MainChatStateFile {
+  const compactionByMainAgent: Record<string, PersistedMainChatCompactionMeta> = {};
+  for (const [key, value] of Object.entries(data.compactionByMainAgent ?? {})) {
+    compactionByMainAgent[key] = {
+      lastCompactedAt: value.lastCompactedAt,
+      lastError: value.lastError,
+      summary: value.summary,
+      reason: value.reason ?? null,
+      strategy: value.strategy ?? null,
+    };
+  }
+  return {
+    version: 1,
+    settings: data.settings ?? createDefaultMainChatSettings("conservative"),
+    plans: data.plans ?? {},
+    decisions: data.decisions ?? {},
+    receipts: data.receipts ?? [],
+    activities: data.activities ?? [],
+    compactionByMainAgent,
+    pendingHandoffByMainAgent: data.pendingHandoffByMainAgent ?? {},
+    trustRules: data.trustRules ?? [],
+    permissionRules: data.permissionRules ?? [],
+    reworkRounds: data.reworkRounds ?? {},
+    triages: data.triages ?? {},
+    delegatedQuestions: data.delegatedQuestions ?? {},
+    lastPatrolAt: data.lastPatrolAt ?? null,
+    lastWakeupAt: data.lastWakeupAt ?? null,
+    metrics: { ...emptyMetrics(), ...data.metrics },
+  };
+}
+
 export function createMainChatStore(paseoHome: string): MainChatStore {
   const dirPath = path.join(paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME);
   const filePath = path.join(dirPath, "state.json");
@@ -212,6 +340,12 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
     pruneMapByTimestamp(state.plans, MAX_RETAINED_PLANS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.decisions, MAX_RETAINED_DECISIONS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.triages, MAX_RETAINED_TRIAGES, (entry) => entry.updatedAt);
+    if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
+      state.receipts = state.receipts.slice(-MAX_RETAINED_RECEIPTS);
+    }
+    if (state.activities.length > MAX_RETAINED_ACTIVITIES) {
+      state.activities = state.activities.slice(-MAX_RETAINED_ACTIVITIES);
+    }
     pruneDelegatedQuestions(state.delegatedQuestions, Date.now());
     const snapshot = JSON.stringify(state, null, 2);
     const task = writeChain.then(async () => {
@@ -236,20 +370,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
         const raw = await readFile(filePath, "utf8");
         const parsed = PersistedMainChatStateSchema.safeParse(JSON.parse(raw));
         if (parsed.success) {
-          state = {
-            version: 1,
-            settings: parsed.data.settings ?? createDefaultMainChatSettings("conservative"),
-            plans: parsed.data.plans ?? {},
-            decisions: parsed.data.decisions ?? {},
-            trustRules: parsed.data.trustRules ?? [],
-            permissionRules: parsed.data.permissionRules ?? [],
-            reworkRounds: parsed.data.reworkRounds ?? {},
-            triages: parsed.data.triages ?? {},
-            delegatedQuestions: parsed.data.delegatedQuestions ?? {},
-            lastPatrolAt: parsed.data.lastPatrolAt ?? null,
-            lastWakeupAt: parsed.data.lastWakeupAt ?? null,
-            metrics: { ...emptyMetrics(), ...parsed.data.metrics },
-          };
+          state = hydratePersistedState(parsed.data);
         }
       } catch {
         // Missing or unreadable state starts clean.
@@ -303,6 +424,144 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
     async putDecision(decision) {
       state.decisions[decision.id] = decision;
       await persist();
+    },
+
+    async addReceipt(receipt, mainAgentId = null) {
+      const entry: PersistedMainChatReceipt = {
+        ...receipt,
+        mainAgentId,
+        recordedAt: new Date().toISOString(),
+      };
+      state.receipts.push(entry);
+      if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
+        state.receipts = state.receipts.slice(-MAX_RETAINED_RECEIPTS);
+      }
+      await persist();
+      return entry;
+    },
+
+    listReceipts(mainAgentId) {
+      return state.receipts
+        .filter((entry) => !mainAgentId || entry.mainAgentId === mainAgentId)
+        .toReversed();
+    },
+
+    async appendActivity(entry) {
+      state.activities.push(entry);
+      if (state.activities.length > MAX_RETAINED_ACTIVITIES) {
+        state.activities = state.activities.slice(-MAX_RETAINED_ACTIVITIES);
+      }
+      await persist();
+      return entry;
+    },
+
+    async updateActivity(id, patch) {
+      const index = state.activities.findIndex((entry) => entry.id === id);
+      if (index < 0) return null;
+      const updated: MainChatActivityEntry = {
+        ...state.activities[index]!,
+        ...patch,
+      };
+      state.activities[index] = updated;
+      await persist();
+      return updated;
+    },
+
+    listActivities(options) {
+      const includeSilent = options?.includeSilent ?? true;
+      const filtered = state.activities
+        .filter((entry) => {
+          if (options?.mainAgentId && entry.mainAgentId !== options.mainAgentId) return false;
+          if (!includeSilent && entry.silent) return false;
+          if (options?.kind && entry.kind !== options.kind) return false;
+          return true;
+        })
+        .toReversed();
+      const total = filtered.length;
+      const limit = options?.limit
+        ? Math.max(1, Math.min(MAX_RETAINED_ACTIVITIES, options.limit))
+        : 50;
+      return {
+        activities: filtered.slice(0, limit),
+        total,
+      };
+    },
+
+    getCompactionMeta(mainAgentId) {
+      const existing = state.compactionByMainAgent[mainAgentId];
+      if (!existing) return emptyCompactionMeta();
+      return { ...existing };
+    },
+
+    async setCompactionMeta(mainAgentId, meta) {
+      state.compactionByMainAgent[mainAgentId] = { ...meta };
+      await persist();
+    },
+
+    getPendingHandoffSummary(mainAgentId) {
+      return state.pendingHandoffByMainAgent[mainAgentId] ?? null;
+    },
+
+    async setPendingHandoffSummary(mainAgentId, summary) {
+      const trimmed = summary?.trim();
+      if (trimmed) {
+        state.pendingHandoffByMainAgent[mainAgentId] = trimmed;
+      } else {
+        delete state.pendingHandoffByMainAgent[mainAgentId];
+      }
+      await persist();
+    },
+
+    async consumePendingHandoffSummary(mainAgentId) {
+      const existing = state.pendingHandoffByMainAgent[mainAgentId];
+      if (!existing) return null;
+      delete state.pendingHandoffByMainAgent[mainAgentId];
+      await persist();
+      return existing;
+    },
+
+    async migrateMainAgent(fromMainAgentId, toMainAgentId) {
+      let migratedPlans = 0;
+      let migratedDecisions = 0;
+      let migratedReceipts = 0;
+      let migratedActivities = 0;
+
+      for (const [planId, plan] of Object.entries(state.plans)) {
+        if (plan.mainAgentId === fromMainAgentId) {
+          state.plans[planId] = { ...plan, mainAgentId: toMainAgentId };
+          migratedPlans += 1;
+        }
+      }
+      for (const [decisionId, decision] of Object.entries(state.decisions)) {
+        if (decision.mainAgentId === fromMainAgentId) {
+          state.decisions[decisionId] = { ...decision, mainAgentId: toMainAgentId };
+          migratedDecisions += 1;
+        }
+      }
+      state.receipts = state.receipts.map((receipt) => {
+        if (receipt.mainAgentId === fromMainAgentId) {
+          migratedReceipts += 1;
+          return { ...receipt, mainAgentId: toMainAgentId };
+        }
+        return receipt;
+      });
+      state.activities = state.activities.map((activity) => {
+        if (activity.mainAgentId === fromMainAgentId) {
+          migratedActivities += 1;
+          return { ...activity, mainAgentId: toMainAgentId };
+        }
+        return activity;
+      });
+      delete state.compactionByMainAgent[fromMainAgentId];
+      delete state.pendingHandoffByMainAgent[fromMainAgentId];
+
+      await persist();
+      return {
+        migratedPlans,
+        migratedDecisions,
+        migratedReceipts,
+        migratedActivities,
+      };
     },
 
     hasTrustRule(cwd, mode) {

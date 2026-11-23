@@ -10,7 +10,6 @@ import {
 } from "@getpaseo/protocol/main-chat";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
-import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import type { AgentProvider, AgentTimelineItem } from "../agent/agent-sdk-types.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
@@ -23,6 +22,7 @@ import {
   type MainChatPatrolSignalItem,
 } from "./prompts.js";
 import type { MainChatStore } from "./store.js";
+import type { MainChatTurnQueue } from "./turn-queue.js";
 import {
   classifyMainChatTurnError,
   heuristicTriageAssistantReply,
@@ -45,10 +45,12 @@ export interface MainChatSupervisorDependencies {
   agentStorage: AgentStorage;
   store: MainChatStore;
   contextSnapshots: MainChatContextSnapshotBuilder;
+  turnQueue: MainChatTurnQueue;
   logger: Logger;
   providerSnapshotManager?: Pick<ProviderSnapshotManager, "listProviders">;
   readDaemonConfig?: () => StructuredGenerationDaemonConfig | null;
   resolveMainAgentId?: () => Promise<string | null>;
+  onPatrolTick?: () => Promise<void> | void;
   semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
   transientRetryDelayMs?: number;
   usageLimitRetryDelayMs?: number;
@@ -803,8 +805,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   }
 
   function handleManagerEvent(event: AgentManagerEvent): void {
+    deps.turnQueue.handleEvent(event);
     if (event.type === "agent_removed") {
       clearAgentState(event.agentId);
+      deps.contextSnapshots.invalidateCache();
       return;
     }
     if (event.type === "agent_state") {
@@ -855,17 +859,20 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       transientRetriesByAgent.delete(event.agentId);
       usageLimitRetriedAgents.delete(event.agentId);
       toolLoopByAgent.delete(event.agentId);
+      deps.contextSnapshots.invalidateCache();
       scheduleCompletedTurnTriage(event.agentId);
       return;
     }
 
     if (event.event.type === "turn_failed") {
       clearTimerMapEntry(pendingTriageTimers, event.agentId);
+      deps.contextSnapshots.invalidateCache();
       handleTurnFailed(agent, event.event.error);
       return;
     }
 
     if (event.event.type === "permission_requested") {
+      deps.contextSnapshots.invalidateCache();
       handlePermissionRequested(agent, event.event.request);
     }
   }
@@ -900,42 +907,62 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const mainAgentId = options?.mainAgentId ?? (await resolveMainAgentId());
     if (!mainAgentId) return false;
 
-    const liveMain = deps.agentManager.getAgent(mainAgentId);
-    if (liveMain && liveMain.lifecycle === "running" && !force) {
-      return false;
-    }
-
     wakeupInFlight = true;
     try {
-      const entries = Array.from(pendingSignals.entries());
-      const signals = entries.map(([, entry]) => entry.signal);
-      const contextSnapshot = await deps.contextSnapshots.buildTurnContext(mainAgentId, {
-        forceFull: options?.manualTrigger === true,
-      });
-      const body = buildMainChatPatrolWakeupPrompt({
-        settings,
-        signals,
-        contextSnapshot,
-        manualTrigger: options?.manualTrigger,
-      });
-
-      await sendPromptToAgent({
-        agentId: mainAgentId,
-        prompt: formatSystemNotificationPrompt(body),
-        agentManager: deps.agentManager,
-        agentStorage: deps.agentStorage,
-        logger: deps.logger,
-        unarchive: false,
-      });
-
-      for (const [key, entry] of entries) {
-        lastReportedFingerprintByKey.set(key, entry.fingerprint);
-        pendingSignals.delete(key);
+      let capturedEntries: Array<
+        [string, { fingerprint: string; signal: MainChatPatrolSignalItem }]
+      > = [];
+      let trigger = "patrol_wakeup";
+      if (options?.manualTrigger) {
+        trigger = "manual_patrol";
+      } else if (options?.urgent) {
+        trigger = "urgent_patrol";
       }
-      lastWakeupAtMs = Date.now();
-      await deps.store.setLastWakeupAt(new Date(lastWakeupAtMs).toISOString());
-      await deps.store.incrementMetric("proactiveWakeups");
-      return true;
+      const initialSignalCount = pendingSignals.size;
+      const summary = options?.manualTrigger
+        ? `手动巡检并汇报（${initialSignalCount} 条动态）`
+        : `后台巡检唤醒（${initialSignalCount} 条动态）`;
+
+      const queued = await deps.turnQueue.enqueueBackground({
+        mainAgentId,
+        dedupeKey: "patrol:wakeup",
+        trigger,
+        priority: options?.manualTrigger || options?.urgent ? 20 : 10,
+        summary,
+        requeueOnPreempt: true,
+        buildPrompt: async () => {
+          const latestSettings = deps.store.getSettings();
+          capturedEntries = Array.from(pendingSignals.entries());
+          if (!force && capturedEntries.length === 0) {
+            return null;
+          }
+          const signals = capturedEntries.map(([, entry]) => entry.signal);
+          const contextSnapshot = await deps.contextSnapshots.buildTurnContext(mainAgentId, {
+            forceFull: options?.manualTrigger === true,
+          });
+          return buildMainChatPatrolWakeupPrompt({
+            settings: latestSettings,
+            signals,
+            contextSnapshot,
+            manualTrigger: options?.manualTrigger,
+          });
+        },
+        onDispatched: async () => {
+          lastWakeupAtMs = Date.now();
+          await deps.store.setLastWakeupAt(new Date(lastWakeupAtMs).toISOString());
+          await deps.store.incrementMetric("proactiveWakeups");
+        },
+        onCompleted: () => {
+          for (const [key, entry] of capturedEntries) {
+            lastReportedFingerprintByKey.set(key, entry.fingerprint);
+            const current = pendingSignals.get(key);
+            if (current && current.fingerprint === entry.fingerprint) {
+              pendingSignals.delete(key);
+            }
+          }
+        },
+      });
+      return queued.status === "dispatched";
     } catch (error) {
       deps.logger.warn({ err: error, mainAgentId }, "Proactive main-chat wakeup failed");
       return false;
@@ -1175,6 +1202,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     forceWakeup?: boolean;
     manualTrigger?: boolean;
   }): Promise<MainChatPatrolResult> {
+    deps.contextSnapshots.invalidateCache();
     const { scannedSessions } = await scanFleetAndBuildSignals();
     const signalsFound = pendingSignals.size;
     const patrolledAt = new Date().toISOString();
@@ -1186,6 +1214,12 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       forceWakeup: options?.forceWakeup,
       manualTrigger: options?.manualTrigger,
     });
+
+    if (deps.onPatrolTick) {
+      await Promise.resolve(deps.onPatrolTick()).catch((error) => {
+        deps.logger.warn({ err: error }, "Patrol tick maintenance hook failed");
+      });
+    }
 
     return {
       scannedSessions,
@@ -1251,22 +1285,32 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       }
       initialBriefingSentAgents.add(mainAgentId);
       try {
-        const contextSnapshot = await deps.contextSnapshots.buildTurnContext(mainAgentId, {
-          forceFull: true,
+        const queued = await deps.turnQueue.enqueueBackground({
+          mainAgentId,
+          dedupeKey: "initial:briefing",
+          trigger: "initial_briefing",
+          priority: 8,
+          summary: "首次就绪简报",
+          requeueOnPreempt: false,
+          buildPrompt: async () => {
+            if (deps.agentManager.getTimeline(mainAgentId).length > 0) {
+              return null;
+            }
+            const contextSnapshot = await deps.contextSnapshots.buildTurnContext(mainAgentId, {
+              forceFull: true,
+            });
+            return buildMainChatInitialBriefingPrompt({
+              settings: deps.store.getSettings(),
+              contextSnapshot,
+            });
+          },
+          onDispatched: async () => {
+            lastWakeupAtMs = Date.now();
+            await deps.store.setLastWakeupAt(new Date(lastWakeupAtMs).toISOString());
+            await deps.store.incrementMetric("proactiveWakeups");
+          },
         });
-        const prompt = buildMainChatInitialBriefingPrompt({ settings, contextSnapshot });
-        await sendPromptToAgent({
-          agentId: mainAgentId,
-          prompt: formatSystemNotificationPrompt(prompt),
-          agentManager: deps.agentManager,
-          agentStorage: deps.agentStorage,
-          logger: deps.logger,
-          unarchive: false,
-        });
-        lastWakeupAtMs = Date.now();
-        await deps.store.setLastWakeupAt(new Date(lastWakeupAtMs).toISOString());
-        await deps.store.incrementMetric("proactiveWakeups");
-        return true;
+        return queued.status === "dispatched";
       } catch (error) {
         deps.logger.warn({ err: error, mainAgentId }, "Initial main-chat briefing failed");
         return false;

@@ -14,6 +14,10 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.get_settings.request" }
   | { type: "main_chat.update_settings.request" }
   | { type: "main_chat.trigger_patrol.request" }
+  | { type: "main_chat.compact.request" }
+  | { type: "main_chat.clear.request" }
+  | { type: "main_chat.new_session.request" }
+  | { type: "main_chat.list_activity.request" }
 >;
 
 type SendFn = (response: SessionOutboundMessage) => void;
@@ -95,6 +99,59 @@ function sendUnconfiguredError(msg: MainChatSessionMessage, send: SendFn): void 
       send({
         type: "main_chat.trigger_patrol.response",
         payload: { requestId: msg.requestId, result: null, error },
+      });
+      return;
+    case "main_chat.compact.request":
+      send({
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: msg.requestId,
+          mainAgentId: msg.mainAgentId ?? null,
+          compaction: null,
+          error,
+        },
+      });
+      return;
+    case "main_chat.clear.request":
+      send({
+        type: "main_chat.clear.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error,
+        },
+      });
+      return;
+    case "main_chat.new_session.request":
+      send({
+        type: "main_chat.new_session.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          handoffSummary: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error,
+        },
+      });
+      return;
+    case "main_chat.list_activity.request":
+      send({
+        type: "main_chat.list_activity.response",
+        payload: {
+          requestId: msg.requestId,
+          activities: [],
+          total: 0,
+          error,
+        },
       });
       return;
   }
@@ -333,6 +390,149 @@ async function handleStewardConfigMessages(
   }
 }
 
+async function handleLifecycleMessages(
+  service: MainChatService,
+  msg: Extract<
+    MainChatSessionMessage,
+    | { type: "main_chat.compact.request" }
+    | { type: "main_chat.clear.request" }
+    | { type: "main_chat.new_session.request" }
+    | { type: "main_chat.list_activity.request" }
+  >,
+  send: SendFn,
+): Promise<void> {
+  if (msg.type === "main_chat.compact.request") {
+    try {
+      const result = await service.compactMainChat(msg.mainAgentId, {
+        reason: msg.reason,
+        instructions: msg.instructions,
+      });
+      send({
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: msg.requestId,
+          mainAgentId: result.mainAgentId,
+          compaction: result.compaction,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const compaction = await service.getCompactionState(msg.mainAgentId).catch(() => null);
+      send({
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: msg.requestId,
+          mainAgentId: msg.mainAgentId ?? null,
+          compaction,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.clear.request") {
+    try {
+      const result = await service.clearMainChatContext(msg.mainAgentId);
+      send({
+        type: "main_chat.clear.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: result.previousAgentId,
+          agentId: result.agentId,
+          workspaceId: result.workspaceId,
+          migratedPlans: result.migratedPlans,
+          migratedDecisions: result.migratedDecisions,
+          migratedChildAgents: result.migratedChildAgents,
+          error: null,
+        },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.clear.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.new_session.request") {
+    try {
+      const result = await service.startNewMainChatSession(msg.mainAgentId, {
+        carryHandoffSummary: msg.carryHandoffSummary,
+        title: msg.title,
+      });
+      send({
+        type: "main_chat.new_session.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: result.previousAgentId,
+          agentId: result.agentId,
+          workspaceId: result.workspaceId,
+          handoffSummary: result.handoffSummary,
+          migratedPlans: result.migratedPlans,
+          migratedDecisions: result.migratedDecisions,
+          migratedChildAgents: result.migratedChildAgents,
+          error: null,
+        },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.new_session.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          handoffSummary: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  try {
+    const result = await service.listActivity({
+      mainAgentId: msg.mainAgentId,
+      limit: msg.limit,
+      includeSilent: msg.includeSilent,
+      kind: msg.kind,
+    });
+    send({
+      type: "main_chat.list_activity.response",
+      payload: {
+        requestId: msg.requestId,
+        activities: result.activities,
+        total: result.total,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_activity.response",
+      payload: {
+        requestId: msg.requestId,
+        activities: [],
+        total: 0,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 export async function handleMainChatSessionMessage(
   service: MainChatService | null,
   msg: MainChatSessionMessage,
@@ -360,6 +560,12 @@ export async function handleMainChatSessionMessage(
     case "main_chat.update_settings.request":
     case "main_chat.trigger_patrol.request":
       await handleStewardConfigMessages(service, msg, send);
+      return;
+    case "main_chat.compact.request":
+    case "main_chat.clear.request":
+    case "main_chat.new_session.request":
+    case "main_chat.list_activity.request":
+      await handleLifecycleMessages(service, msg, send);
       return;
   }
 }

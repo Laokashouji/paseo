@@ -1,9 +1,12 @@
 import {
   MAIN_CHAT_DEFAULT_TITLE,
   isMainChatLabels,
+  type MainChatDecisionRecord,
+  type MainChatPlanRecord,
   type MainChatPlannedTask,
   type MainChatSettings,
 } from "@getpaseo/protocol/main-chat";
+import type { FleetSnapshotSummary } from "./context-snapshot.js";
 
 /** Appends the native Main Chat system prompt when opening a `paseo.role=main` interactive session. */
 export function appendMainChatSystemPrompt(
@@ -40,7 +43,7 @@ export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): s
 - 当你收到 \`<paseo-system>\` 主动巡检/督办消息时，那是后台自动唤醒你处理全机变化：
   - 先核实真正值得用户知道的信息，用结论先行、短列表的方式主动汇报；
   - 若有需要用户做选择的卡点，优先调 \`task_ask_user\` 给出 2-4 个明确选项和你的推荐；
-  - 若巡检信号已经过时或并无实质需要打扰用户的事项，只需一句极简记录即可，避免刷屏。
+  - 若巡检信号已经过时或并无实质需要打扰用户的事项，请直接只回复 \`[SILENT]\`，系统会将其收纳进后台活动审计且不产生前台未读提醒。
 
 ## 角色边界与全机纳管策略
 - 你自己不直接修改业务代码仓库，也不把大段实现细节堆进主对话。
@@ -117,6 +120,7 @@ export function buildMainChatPatrolWakeupPrompt(input: {
     "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。",
     "- 若某会话需要用户做明确二选一/多选一，可调用 `task_ask_user` 生成拍板卡；若需要核实细节，先用 `get_agent_activity` 读取对应会话最后输出。",
     "- 如果你是保守模式，对手动会话不要擅自调用发送消息工具；直接给用户清晰摘要和建议动作即可。",
+    "- 如果经核对所有信号均已解决或无需打扰用户，请直接只回复 `[SILENT]`。",
   ].join("\n");
 }
 
@@ -167,5 +171,104 @@ export function buildWorkerInitialPrompt(task: MainChatPlannedTask): string {
     "完成后请给出简洁结论，并逐条列出你验证过的真实证据（命令输出、文件位置或运行结果）。若遇到需要用户拍板的产品/架构分叉或高风险操作，请明确列出选项与推荐项并等待指示。",
   );
 
+  return lines.join("\n");
+}
+
+function clipSummaryLine(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+export interface MainChatHandoffSummaryInput {
+  previousAgentId: string;
+  fleet: FleetSnapshotSummary;
+  plans: readonly MainChatPlanRecord[];
+  openDecisions: readonly MainChatDecisionRecord[];
+  recentMessages: ReadonlyArray<{ role: "user" | "assistant"; text: string }>;
+  instructions?: string | null;
+}
+
+export function buildMainChatHandoffSummary(input: MainChatHandoffSummaryInput): string {
+  const lines: string[] = [
+    `交接来源：旧主对话 ${input.previousAgentId}（交接时间 ${new Date().toISOString()}）`,
+    `当前全机态势：活跃 ${input.fleet.totalActive} 个会话（待拍板 ${input.fleet.needsYou.length}，异常 ${input.fleet.problematic.length}，运行中 ${input.fleet.running.length}，待查收 ${input.fleet.attentionDone.length}）。`,
+  ];
+
+  if (input.instructions?.trim()) {
+    lines.push(`交接侧重点：${clipSummaryLine(input.instructions, 160)}`);
+  }
+
+  if (input.openDecisions.length > 0) {
+    lines.push("待拍板决策卡：");
+    for (const decision of input.openDecisions.slice(0, 5)) {
+      lines.push(
+        `- 「${clipSummaryLine(decision.title, 40)}」：${clipSummaryLine(decision.question, 90)}`,
+      );
+    }
+  }
+
+  if (input.fleet.needsYou.length > 0 || input.fleet.problematic.length > 0) {
+    lines.push("需优先关注会话：");
+    for (const item of [...input.fleet.needsYou, ...input.fleet.problematic].slice(0, 6)) {
+      const detail =
+        item.pendingPermissionLabels[0] ??
+        item.triage?.summary ??
+        item.lastError ??
+        item.attentionReason ??
+        item.lifecycle;
+      lines.push(
+        `- 「${clipSummaryLine(item.title, 36)}」[${item.projectName} · id=${item.agentId}]：${clipSummaryLine(detail, 90)}`,
+      );
+    }
+  }
+
+  const activePlans = input.plans.filter((plan) => plan.status !== "cancelled").slice(0, 5);
+  if (activePlans.length > 0) {
+    lines.push("近期任务计划进展：");
+    for (const plan of activePlans) {
+      const titles = plan.tasks.map((task) => clipSummaryLine(task.title, 24)).join("、");
+      const statusLabel = plan.status === "open" ? "待开始" : "进行中";
+      lines.push(`- [${statusLabel}] ${plan.id}：${titles}`);
+    }
+  }
+
+  const trimmedHistory = input.recentMessages
+    .map((entry) => ({ role: entry.role, text: clipSummaryLine(entry.text, 120) }))
+    .filter((entry) => entry.text.length > 0)
+    .slice(-4);
+  if (trimmedHistory.length > 0) {
+    lines.push("最近对话要点：");
+    for (const entry of trimmedHistory) {
+      const speaker = entry.role === "user" ? "用户" : "管家";
+      lines.push(`- ${speaker}：${entry.text}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function buildMainChatCompactionCheckpointPrompt(input: {
+  summary: string;
+  reason: "manual" | "idle_precompact";
+  instructions?: string | null;
+}): string {
+  const heading =
+    input.reason === "idle_precompact" ? "【后台空闲预压缩检查点】" : "【主对话上下文压缩检查点】";
+  const lines = [
+    heading,
+    "以下是最新的结构化上下文交接摘要，请以它作为后续推进的权威基线，不再依赖早期的冗长工具细节：",
+    "",
+    input.summary,
+  ];
+  if (input.instructions?.trim()) {
+    lines.push("", `压缩指令：${input.instructions.trim()}`);
+  }
+  lines.push(
+    "",
+    input.reason === "idle_precompact"
+      ? "请确认已接管上述压缩基线，直接只回复 `[SILENT]` 结束本轮（不要调用工具）。"
+      : "请确认已接管上述压缩基线，用 1 句简短中文确认即可（不要调用工具）。",
+  );
   return lines.join("\n");
 }

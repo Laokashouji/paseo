@@ -255,6 +255,10 @@ const INBOUND_PERMISSION = {
   "main_chat.get_settings.request": "workspace.read",
   "main_chat.update_settings.request": ["workspace.write", "hub.execute"],
   "main_chat.trigger_patrol.request": ["workspace.write", "hub.execute"],
+  "main_chat.compact.request": ["workspace.write", "hub.execute"],
+  "main_chat.clear.request": ["workspace.write", "hub.execute"],
+  "main_chat.new_session.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_activity.request": "workspace.read",
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -528,6 +532,10 @@ const OUTBOUND_PERMISSION = {
   "main_chat.get_settings.response": "workspace.read",
   "main_chat.update_settings.response": ["workspace.write", "hub.execute"],
   "main_chat.trigger_patrol.response": ["workspace.write", "hub.execute"],
+  "main_chat.compact.response": ["workspace.write", "hub.execute"],
+  "main_chat.clear.response": ["workspace.write", "hub.execute"],
+  "main_chat.new_session.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_activity.response": "workspace.read",
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

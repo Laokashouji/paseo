@@ -613,3 +613,77 @@ export async function generateStructuredAgentResponseWithFallback<T>(
 
   throw new StructuredAgentFallbackError(attempts);
 }
+
+const EXPLICIT_SILENT_SENTINEL_RE =
+  /^(?:`*(?:\[silent\]|silent|no_action|\[no_action\]|<silent\s*\/>|<silent>\s*<\/silent>)`*)[.。!！\s]*$/i;
+
+const PLACEHOLDER_EMPTY_REPLY_RE =
+  /^(?:\(no content\)|no content|no response requested|no response needed|no_response|\[no_response\])[.。!！\s]*$/i;
+
+export function isExplicitSilentSentinel(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  return EXPLICIT_SILENT_SENTINEL_RE.test(trimmed);
+}
+
+export function isPlaceholderEmptyReply(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return true;
+  return PLACEHOLDER_EMPTY_REPLY_RE.test(trimmed);
+}
+
+export interface SilentBackgroundReplyCheckInput {
+  assistantTexts: readonly string[];
+  hadUserFacingCardTool: boolean;
+}
+
+export function isSilentBackgroundReply(input: SilentBackgroundReplyCheckInput): boolean {
+  if (input.hadUserFacingCardTool) return false;
+  const combined = input.assistantTexts
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (combined.length === 0) return true;
+  return isExplicitSilentSentinel(combined) || isPlaceholderEmptyReply(combined);
+}
+
+export interface MissingFinalReplyCheckInput {
+  hadToolCalls: boolean;
+  assistantTexts: readonly string[];
+  canceled: boolean;
+  failed: boolean;
+  isBackground: boolean;
+  isSilent: boolean;
+  alreadyRecovered: boolean;
+}
+
+export function shouldRecoverMissingFinalReply(input: MissingFinalReplyCheckInput): boolean {
+  if (
+    !input.hadToolCalls ||
+    input.canceled ||
+    input.failed ||
+    input.isBackground ||
+    input.isSilent ||
+    input.alreadyRecovered
+  ) {
+    return false;
+  }
+  const combined = input.assistantTexts
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (isExplicitSilentSentinel(combined)) {
+    return false;
+  }
+  return isPlaceholderEmptyReply(combined);
+}
+
+export function buildMissingReplyRecoveryPrompt(): string {
+  return [
+    "【系统自动补答提醒】",
+    "上一轮你在响应用户消息时调用了工具，但最终没有向用户输出任何可见自然语言回复。",
+    "请**不要再调用任何工具**，直接基于已有工具结果，用简洁清晰的中文向用户给出结论与下一步建议。",
+  ].join("\n");
+}

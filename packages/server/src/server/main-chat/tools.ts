@@ -301,15 +301,18 @@ export function registerMainChatTools(options: {
         checks?: Array<z.infer<typeof MainChatReceiptCheckSchema>>;
         nextSteps?: string[];
       };
-      const receipt = await mainChatService.recordReceipt({
-        title: input.title,
-        summary: input.summary,
-        agentId: input.agentId ?? null,
-        planId: input.planId ?? null,
-        taskId: input.taskId ?? null,
-        checks: input.checks ?? [],
-        nextSteps: input.nextSteps ?? [],
-      });
+      const receipt = await mainChatService.recordReceipt(
+        {
+          title: input.title,
+          summary: input.summary,
+          agentId: input.agentId ?? null,
+          planId: input.planId ?? null,
+          taskId: input.taskId ?? null,
+          checks: input.checks ?? [],
+          nextSteps: input.nextSteps ?? [],
+        },
+        callerAgentId,
+      );
       return addModelVisibleStructuredContent({
         content: [],
         structuredContent: ensureValidJson({ receipt }),

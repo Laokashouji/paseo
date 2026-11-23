@@ -2743,6 +2743,10 @@ export class Session {
       case "main_chat.get_settings.request":
       case "main_chat.update_settings.request":
       case "main_chat.trigger_patrol.request":
+      case "main_chat.compact.request":
+      case "main_chat.clear.request":
+      case "main_chat.new_session.request":
+      case "main_chat.list_activity.request":
         return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
           this.emit(response),
         );
@@ -9082,28 +9086,37 @@ export class Session {
           await receipt.dispatched;
           return;
         }
-        const effectivePrompt = this.mainChatService
-          ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
-          : prompt;
-        const result = await sendPromptToAgent({
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          agentId,
-          prompt: effectivePrompt,
-          messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
-          sessionMode: msg.sessionMode,
-          clearPendingPermissions: true,
-          beforeDispatch,
-          logger: this.sessionLogger,
-        });
-        if (result.disposition === "turn_started") {
-          await waitForAgentRunStartWithTimeout(
-            this.agentManager,
+        const releaseForeground = this.mainChatService?.beginForegroundUserSend(agentId) ?? null;
+        try {
+          const effectivePrompt = this.mainChatService
+            ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
+            : prompt;
+          const result = await sendPromptToAgent({
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
             agentId,
-            result.started,
-            this.delivery.requestSignal,
-          );
+            prompt: effectivePrompt,
+            messageId: msg.messageId,
+            activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+            sessionMode: msg.sessionMode,
+            clearPendingPermissions: true,
+            beforeDispatch,
+            logger: this.sessionLogger,
+          });
+          if (result.disposition === "turn_started") {
+            await waitForAgentRunStartWithTimeout(
+              this.agentManager,
+              agentId,
+              result.started,
+              this.delivery.requestSignal,
+            );
+          }
+        } catch (error) {
+          releaseForeground?.();
+          this.mainChatService?.abortForegroundUserSend(agentId);
+          throw error;
+        } finally {
+          releaseForeground?.();
         }
       };
       const sent = msg.messageId

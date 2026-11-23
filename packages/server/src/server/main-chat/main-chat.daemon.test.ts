@@ -236,4 +236,76 @@ describe("main-chat real daemon E2E", () => {
     expect(removed.error).toBeNull();
     expect(removed.removed).toBe(true);
   }, 60_000);
+
+  it("executes compact, /clear, new_session handoff, and list_activity over real WebSocket RPC without losing child agents", async () => {
+    const ensured = await ctx.client.ensureMainChat({ provider: "codex" });
+    const mainAgentId = ensured.agentId!;
+    const mainLaunch = capturedLaunches.find((entry) => entry.context?.agentId === mainAgentId);
+    const runtimeMcp = mainLaunch?.config.mcpServers?.paseo as RuntimeMcpConfig;
+
+    const planResult = await callDaemonMcpTool(runtimeMcp, "task_plan", {
+      summary: "跨清空存活测试",
+      tasks: [
+        {
+          title: "查结构",
+          goal: "检查源码目录",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["输出目录列表"],
+        },
+      ],
+    });
+    const plan = parseTaskPlanToolOutput(planResult);
+    const childId = plan!.tasks[0]!.agentId!;
+
+    const compacted = await ctx.client.compactMainChat({
+      mainAgentId,
+      reason: "manual",
+      instructions: "保留目录检查任务",
+    });
+    expect(compacted.error).toBeNull();
+    expect(compacted.compaction?.status).toBe("succeeded");
+
+    const cleared = await ctx.client.clearMainChat({ mainAgentId });
+    expect(cleared.error).toBeNull();
+    expect(cleared.previousAgentId).toBe(mainAgentId);
+    expect(cleared.agentId).toBeTruthy();
+    expect(cleared.agentId).not.toBe(mainAgentId);
+    expect(cleared.migratedPlans).toBe(1);
+    expect(cleared.migratedChildAgents).toBe(1);
+
+    // Child agent MUST still be unarchived and reparented to the new main chat!
+    const fetchedChildAfterClear = await ctx.client.fetchAgent(childId);
+    expect(fetchedChildAfterClear?.agent.archivedAt ?? null).toBeNull();
+    expect(fetchedChildAfterClear?.agent.labels?.[PARENT_AGENT_ID_LABEL]).toBe(cleared.agentId);
+
+    const handedOff = await ctx.client.startNewMainChatSession({
+      mainAgentId: cleared.agentId!,
+      carryHandoffSummary: true,
+      title: "交接后总控",
+    });
+    expect(handedOff.error).toBeNull();
+    expect(handedOff.previousAgentId).toBe(cleared.agentId);
+    expect(handedOff.agentId).toBeTruthy();
+    expect(handedOff.handoffSummary).toContain("查结构");
+    expect(handedOff.migratedChildAgents).toBe(1);
+
+    const fetchedChildAfterHandoff = await ctx.client.fetchAgent(childId);
+    expect(fetchedChildAfterHandoff?.agent.archivedAt ?? null).toBeNull();
+    expect(fetchedChildAfterHandoff?.agent.labels?.[PARENT_AGENT_ID_LABEL]).toBe(handedOff.agentId);
+
+    const activities = await ctx.client.listMainChatActivity({
+      mainAgentId: handedOff.agentId!,
+      limit: 20,
+    });
+    expect(activities.error).toBeNull();
+    expect(activities.activities.map((entry) => entry.kind)).toEqual(
+      expect.arrayContaining(["compaction", "clear", "handoff"]),
+    );
+
+    const overview = await ctx.client.getMainChatOverview(handedOff.agentId!);
+    expect(overview.error).toBeNull();
+    expect(overview.overview?.plans.map((p) => p.id)).toContain(plan!.id);
+    expect(overview.overview?.recentActivityCount).toBeGreaterThanOrEqual(3);
+  }, 60_000);
 });
