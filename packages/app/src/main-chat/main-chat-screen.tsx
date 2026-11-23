@@ -16,6 +16,8 @@ import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute, buildSettingsRoute } from "@/utils/host-routes";
 import { MainChatAgentHost } from "./agent-host";
+import { useMainChatConversationsStore } from "./conversations-store";
+import { HostSyncBanner } from "./host-sync-banner";
 import { MainChatShell } from "./main-chat-shell";
 import { useMainChatOverviewStore } from "./overview-store";
 import { selectMainChatSidebarSummary, type MainChatAgentRef } from "./selectors";
@@ -180,6 +182,9 @@ function MainChatScreenContent(): ReactElement {
   const clearActiveAgentOverride = useMainChatOverviewStore(
     (state) => state.clearActiveAgentOverride,
   );
+  const hydrateFromOverview = useMainChatConversationsStore((state) => state.hydrateFromOverview);
+  const refreshConversations = useMainChatConversationsStore((state) => state.refreshConversations);
+  const refreshFleetHosts = useMainChatConversationsStore((state) => state.refreshFleetHosts);
 
   const [ensureState, setEnsureState] = useState<EnsureState>({ kind: "idle" });
   const [retryCount, setRetryCount] = useState(0);
@@ -261,8 +266,25 @@ function MainChatScreenContent(): ReactElement {
 
   useEffect(() => {
     if (!resolvedRef || !client) return;
-    void loadOverview(resolvedRef.serverId, resolvedRef.agentId, client);
-  }, [client, loadOverview, resolvedRef]);
+    void loadOverview(resolvedRef.serverId, resolvedRef.agentId, client).then((overview) => {
+      if (overview) {
+        hydrateFromOverview(resolvedRef.serverId, overview);
+      }
+      return overview;
+    });
+  }, [client, hydrateFromOverview, loadOverview, resolvedRef]);
+
+  const effectiveServerId = resolvedRef?.serverId ?? targetServerId;
+
+  useEffect(() => {
+    if (!effectiveServerId || !client) return;
+    if (typeof client.listMainChatConversations === "function") {
+      void refreshConversations(effectiveServerId, client).catch(() => undefined);
+    }
+    if (typeof client.getMainChatFleetHosts === "function") {
+      void refreshFleetHosts(effectiveServerId, client).catch(() => undefined);
+    }
+  }, [client, effectiveServerId, refreshConversations, refreshFleetHosts]);
 
   const handleRetry = useCallback(() => {
     setRetryCount((count) => count + 1);
@@ -297,7 +319,7 @@ function MainChatScreenContent(): ReactElement {
     <MainChatShell
       variant="main"
       title={displayTitle}
-      serverId={resolvedRef?.serverId ?? targetServerId}
+      serverId={effectiveServerId}
       mainAgentId={resolvedRef?.agentId ?? null}
       originRoute={buildMainChatRoute()}
       isRunning={summary.isMainRunning}
@@ -306,6 +328,7 @@ function MainChatScreenContent(): ReactElement {
       activePane={activePane}
       onActivePaneChange={setActivePane}
     >
+      <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef?.agentId ?? null} />
       {body}
     </MainChatShell>
   );

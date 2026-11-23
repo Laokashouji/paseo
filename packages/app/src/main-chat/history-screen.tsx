@@ -6,6 +6,7 @@ import {
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatActivityStatus,
+  type MainChatConversationRecord,
   type MainChatOverview,
   type MainChatPatrolResult,
   type MainChatSessionTriage,
@@ -14,11 +15,18 @@ import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import equal from "fast-deep-equal";
 import {
+  Archive,
   ArrowLeft,
   ArrowUpRight,
   ChevronDown,
   ChevronRight,
+  Compass,
+  MessageSquare,
+  Pin,
+  PinOff,
+  Plus,
   Radar,
+  RefreshCcw,
   RefreshCw,
   Sparkles,
 } from "lucide-react-native";
@@ -51,6 +59,12 @@ import {
   buildMainChatHistoryRoute,
   buildMainChatRoute,
 } from "@/utils/host-routes";
+import {
+  EMPTY_CONVERSATIONS,
+  sortConversationsByActivity,
+  useMainChatConversationsStore,
+} from "./conversations-store";
+import { CreateConversationModal } from "./directions-tree";
 import { openMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import {
@@ -60,11 +74,18 @@ import {
 } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 
+const ThemedArchive = withUnistyles(Archive);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const ThemedArrowUpRight = withUnistyles(ArrowUpRight);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
+const ThemedCompass = withUnistyles(Compass);
+const ThemedMessageSquare = withUnistyles(MessageSquare);
+const ThemedPin = withUnistyles(Pin);
+const ThemedPinOff = withUnistyles(PinOff);
+const ThemedPlus = withUnistyles(Plus);
 const ThemedRadar = withUnistyles(Radar);
+const ThemedRefreshCcw = withUnistyles(RefreshCcw);
 const ThemedRefreshCw = withUnistyles(RefreshCw);
 const ThemedSparkles = withUnistyles(Sparkles);
 
@@ -406,22 +427,186 @@ const ManagedTaskCard = memo(function ManagedTaskCard({
   );
 });
 
+const ManagedConversationCard = memo(function ManagedConversationCard({
+  record,
+  canMutate,
+  busy,
+  onOpen,
+  onToggleLeader,
+  onToggleArchive,
+}: {
+  record: MainChatConversationRecord;
+  canMutate: boolean;
+  busy: boolean;
+  onOpen: (record: MainChatConversationRecord) => void;
+  onToggleLeader: (record: MainChatConversationRecord) => void;
+  onToggleArchive: (record: MainChatConversationRecord) => void;
+}) {
+  const { t } = useTranslation();
+  const handleOpen = useCallback(() => onOpen(record), [onOpen, record]);
+  const handleToggleLeader = useCallback(() => onToggleLeader(record), [onToggleLeader, record]);
+  const handleToggleArchive = useCallback(() => onToggleArchive(record), [onToggleArchive, record]);
+
+  const isLeader = record.kind === "leader";
+  const isArchived = record.archivedAt !== null;
+  const updatedMs = Date.parse(record.lastMessageAt ?? record.updatedAt) || 0;
+
+  return (
+    <View style={styles.managedCard} testID={`main-chat-history-managed-${record.id}`}>
+      <PressHighlight
+        onPress={handleOpen}
+        style={styles.managedCardMain}
+        highlightStyle={styles.itemCardPressed}
+        accessibilityRole="button"
+        accessibilityLabel={record.title}
+        testID={`main-chat-history-managed-open-${record.id}`}
+      >
+        <View style={styles.itemLeading}>
+          {isLeader ? (
+            <ThemedCompass size={15} uniProps={primaryIconMapping} />
+          ) : (
+            <ThemedMessageSquare size={15} uniProps={mutedIconMapping} />
+          )}
+        </View>
+        <View style={styles.itemBody}>
+          <View style={styles.itemTitleRow}>
+            <Text style={styles.itemTitle} numberOfLines={1}>
+              {record.title}
+            </Text>
+            <StatusBadge
+              size="xs"
+              variant={isLeader ? "success" : "muted"}
+              label={
+                isLeader
+                  ? t("mainChat.directions.roleLeaderBadge")
+                  : t("mainChat.directions.roleSideBadge")
+              }
+            />
+            {isArchived ? (
+              <StatusBadge
+                size="xs"
+                variant="warning"
+                label={t("mainChat.directions.roleArchivedBadge")}
+              />
+            ) : null}
+          </View>
+          {record.directionSummary ? (
+            <Text style={styles.managedSummary} numberOfLines={2}>
+              {record.directionSummary}
+            </Text>
+          ) : null}
+          <Text style={styles.itemMeta} numberOfLines={1}>
+            {formatUpdatedTime(updatedMs)}
+          </Text>
+        </View>
+        <ThemedArrowUpRight size={14} uniProps={mutedIconMapping} />
+      </PressHighlight>
+
+      {canMutate ? (
+        <View style={styles.managedCardActions}>
+          {!isArchived ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={isLeader ? ThemedPinOff : ThemedPin}
+              disabled={busy}
+              onPress={handleToggleLeader}
+              testID={`main-chat-history-toggle-leader-${record.id}`}
+            >
+              {isLeader
+                ? t("mainChat.directions.historySection.demoteShort")
+                : t("mainChat.directions.historySection.promoteShort")}
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={isArchived ? ThemedRefreshCcw : ThemedArchive}
+            disabled={busy}
+            onPress={handleToggleArchive}
+            testID={`main-chat-history-archive-${record.id}`}
+          >
+            {isArchived
+              ? t("mainChat.directions.historySection.unarchiveShort")
+              : t("mainChat.directions.historySection.archiveShort")}
+          </Button>
+        </View>
+      ) : null}
+    </View>
+  );
+});
+
 const HistoryConversationsTab = memo(function HistoryConversationsTab({
+  managedConversations,
   conversations,
   dockTasks,
   hostLabelByServerId,
+  canCreateConversation,
+  canMutateConversation,
+  busyConversationId,
+  onOpenCreateModal,
+  onOpenManagedConversation,
+  onToggleManagedLeader,
+  onToggleManagedArchive,
   onOpenConversation,
   onOpenTask,
 }: {
+  managedConversations: readonly MainChatConversationRecord[];
   conversations: readonly AssistantConversationListItem[];
   dockTasks: readonly MainChatDockTaskItem[];
   hostLabelByServerId: ReadonlyMap<string, string>;
+  canCreateConversation: boolean;
+  canMutateConversation: boolean;
+  busyConversationId: string | null;
+  onOpenCreateModal: () => void;
+  onOpenManagedConversation: (record: MainChatConversationRecord) => void;
+  onToggleManagedLeader: (record: MainChatConversationRecord) => void;
+  onToggleManagedArchive: (record: MainChatConversationRecord) => void;
   onOpenConversation: (item: AssistantConversationListItem) => void;
   onOpenTask: (task: MainChatDockTaskItem) => void;
 }) {
   const { t } = useTranslation();
   return (
     <View style={styles.sectionStack} testID="main-chat-history-conversations">
+      <View style={styles.sectionBlock} testID="main-chat-history-managed-conversations">
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>
+            {t("mainChat.directions.historySection.managedHeading")}
+          </Text>
+          {canCreateConversation ? (
+            <Button
+              variant="outline"
+              size="sm"
+              leftIcon={ThemedPlus}
+              onPress={onOpenCreateModal}
+              testID="main-chat-history-create-conversation"
+            >
+              {t("mainChat.directions.actions.createNew")}
+            </Button>
+          ) : null}
+        </View>
+
+        {managedConversations.length > 0 ? (
+          <View style={styles.cardList}>
+            {managedConversations.map((record) => (
+              <ManagedConversationCard
+                key={record.id}
+                record={record}
+                canMutate={canMutateConversation}
+                busy={busyConversationId === record.id}
+                onOpen={onOpenManagedConversation}
+                onToggleLeader={onToggleManagedLeader}
+                onToggleArchive={onToggleManagedArchive}
+              />
+            ))}
+          </View>
+        ) : (
+          <Text style={styles.emptyText}>
+            {t("mainChat.directions.historySection.emptyManaged")}
+          </Text>
+        )}
+      </View>
+
       <View style={styles.sectionBlock}>
         <Text style={styles.sectionTitle}>{t("mainChat.history.conversationsHeading")}</Text>
         {conversations.length > 0 ? (
@@ -832,6 +1017,8 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
   const [activeTab, setActiveTab] = useState<HistoryTab>("conversations");
   const [activityFilter, setActivityFilter] = useState<MainChatActivityFilter>("all");
   const [isPatrolling, setIsPatrolling] = useState(false);
+  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [busyConversationId, setBusyConversationId] = useState<string | null>(null);
 
   const summary = useStoreWithEqualityFn(
     useSessionStore,
@@ -877,11 +1064,37 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
   const lastPatrol = useMainChatSettingsStore((state) =>
     targetServerId ? (state.lastPatrolByServerId[targetServerId] ?? null) : null,
   );
+  const storeConversations = useMainChatConversationsStore((state) =>
+    targetServerId ? (state.conversationsByServerId[targetServerId] ?? null) : null,
+  );
+  const hydrateFromOverview = useMainChatConversationsStore((state) => state.hydrateFromOverview);
+  const refreshConversations = useMainChatConversationsStore((state) => state.refreshConversations);
+  const createConversation = useMainChatConversationsStore((state) => state.createConversation);
+  const promoteToLeader = useMainChatConversationsStore((state) => state.promoteToLeader);
+  const demoteToSide = useMainChatConversationsStore((state) => state.demoteToSide);
+  const archiveConversation = useMainChatConversationsStore((state) => state.archiveConversation);
 
   useEffect(() => {
     if (!activeMainRef || !client) return;
-    void loadOverview(activeMainRef.serverId, activeMainRef.agentId, client);
-  }, [activeMainRef, client, loadOverview]);
+    void loadOverview(activeMainRef.serverId, activeMainRef.agentId, client).then((loaded) => {
+      if (loaded) hydrateFromOverview(activeMainRef.serverId, loaded);
+      return loaded;
+    });
+  }, [activeMainRef, client, hydrateFromOverview, loadOverview]);
+
+  useEffect(() => {
+    if (!targetServerId || !client || typeof client.listMainChatConversations !== "function") {
+      return;
+    }
+    void refreshConversations(targetServerId, client, { includeArchived: true }).catch(
+      () => undefined,
+    );
+  }, [client, refreshConversations, targetServerId]);
+
+  const managedConversations = useMemo(() => {
+    const raw = storeConversations ?? overview?.conversations ?? EMPTY_CONVERSATIONS;
+    return sortConversationsByActivity(raw.filter((record) => record.kind !== "main"));
+  }, [overview?.conversations, storeConversations]);
 
   const audit = useMainChatActivityAudit({
     client,
@@ -1028,6 +1241,89 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     void audit.refresh();
   }, [audit]);
 
+  const handleOpenCreateModal = useCallback(() => {
+    setCreateModalVisible(true);
+  }, []);
+
+  const handleCloseCreateModal = useCallback(() => {
+    setCreateModalVisible(false);
+  }, []);
+
+  const handleConversationCreated = useCallback(
+    (created: MainChatConversationRecord) => {
+      setCreateModalVisible(false);
+      toast.show(t("mainChat.directions.toasts.created", { title: created.title }), {
+        variant: "success",
+      });
+      router.push(buildMainChatConversationRoute(created.id));
+    },
+    [t, toast],
+  );
+
+  const handleOpenManagedConversation = useCallback((record: MainChatConversationRecord) => {
+    router.push(buildMainChatConversationRoute(record.id));
+  }, []);
+
+  const handleToggleManagedLeader = useCallback(
+    (record: MainChatConversationRecord) => {
+      if (!targetServerId || !client || busyConversationId) return;
+      const promoting = record.kind !== "leader";
+      setBusyConversationId(record.id);
+      const task = promoting
+        ? promoteToLeader(targetServerId, record.id, client)
+        : demoteToSide(targetServerId, record.id, client);
+      void task
+        .then(() => {
+          toast.show(
+            promoting
+              ? t("mainChat.directions.toasts.promoted")
+              : t("mainChat.directions.toasts.demoted"),
+            { variant: "success" },
+          );
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.directions.toasts.actionFailed"),
+          );
+        })
+        .finally(() => setBusyConversationId(null));
+    },
+    [busyConversationId, client, demoteToSide, promoteToLeader, t, targetServerId, toast],
+  );
+
+  const handleToggleManagedArchive = useCallback(
+    (record: MainChatConversationRecord) => {
+      if (!targetServerId || !client || busyConversationId) return;
+      const archiving = record.archivedAt === null;
+      setBusyConversationId(record.id);
+      void archiveConversation(targetServerId, record.id, client, archiving)
+        .then(() => {
+          toast.show(
+            archiving
+              ? t("mainChat.directions.toasts.archived")
+              : t("mainChat.directions.toasts.unarchived"),
+            { variant: "success" },
+          );
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.directions.toasts.actionFailed"),
+          );
+        })
+        .finally(() => setBusyConversationId(null));
+    },
+    [archiveConversation, busyConversationId, client, t, targetServerId, toast],
+  );
+
+  const canCreateConversation = Boolean(
+    targetServerId && client && typeof client.createMainChatConversation === "function",
+  );
+  const canMutateConversation = Boolean(
+    targetServerId && client && typeof client.updateMainChatConversation === "function",
+  );
+
   return (
     <View style={styles.root} testID="main-chat-history-screen">
       <HistoryHeader
@@ -1056,9 +1352,17 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
 
           {activeTab === "conversations" ? (
             <HistoryConversationsTab
+              managedConversations={managedConversations}
               conversations={conversations}
               dockTasks={dockTasks}
               hostLabelByServerId={hostLabelByServerId}
+              canCreateConversation={canCreateConversation}
+              canMutateConversation={canMutateConversation}
+              busyConversationId={busyConversationId}
+              onOpenCreateModal={handleOpenCreateModal}
+              onOpenManagedConversation={handleOpenManagedConversation}
+              onToggleManagedLeader={handleToggleManagedLeader}
+              onToggleManagedArchive={handleToggleManagedArchive}
               onOpenConversation={handleOpenConversation}
               onOpenTask={handleOpenTask}
             />
@@ -1077,6 +1381,15 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
           )}
         </View>
       </ScrollView>
+
+      <CreateConversationModal
+        visible={createModalVisible}
+        serverId={targetServerId}
+        client={client}
+        onCreate={createConversation}
+        onCreated={handleConversationCreated}
+        onClose={handleCloseCreateModal}
+      />
     </View>
   );
 });
@@ -1205,6 +1518,12 @@ const styles = StyleSheet.create((theme) => ({
   cardList: {
     gap: theme.spacing[2],
   },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing[2],
+  },
   itemCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -1218,6 +1537,36 @@ const styles = StyleSheet.create((theme) => ({
   },
   itemCardPressed: {
     backgroundColor: theme.colors.surface2,
+  },
+  managedCard: {
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+    overflow: "hidden",
+  },
+  managedCardMain: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+  },
+  managedSummary: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    lineHeight: 18,
+  },
+  managedCardActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: theme.spacing[1.5],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderTopWidth: theme.borderWidth[1],
+    borderTopColor: theme.colors.border,
+    backgroundColor: theme.colors.surface0,
   },
   auditCard: {
     borderRadius: theme.borderRadius.lg,
