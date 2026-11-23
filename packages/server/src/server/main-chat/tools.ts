@@ -18,6 +18,8 @@ import { isPaseoToolEnabled } from "../agent/paseo-tool-policy.js";
 import { ensureValidJson } from "../json-utils.js";
 import { addModelVisibleStructuredContent } from "../agent/tools/paseo-tool-serialization.js";
 import type { PaseoToolDefinition } from "../agent/tools/types.js";
+import { getMainChatConversationMetaFromLabels } from "./conversations.js";
+import { formatEscalatedDecisionReason, registerLeaderConversationTools } from "./leader-tools.js";
 import type { MainChatService } from "./service.js";
 
 const TaskPlanItemInputSchema = z.object({
@@ -102,7 +104,39 @@ export function registerMainChatTools(options: {
   if (!mainChatService || scope !== "agent" || !callerAgentId) return;
 
   const caller = agentManager.getAgent(callerAgentId);
-  if (!caller || !isMainChatLabels(caller.labels)) return;
+  if (!caller) return;
+
+  const conversationManager = mainChatService.getConversationManager();
+  registerLeaderConversationTools({
+    agentManager,
+    conversationManager,
+    callerAgentId,
+    scope,
+    tools,
+    builtinNames,
+    policy,
+    reportLeaderProgress: (input) => mainChatService.reportLeaderProgress(input),
+    escalateDecisionToMain: async (input) => {
+      const mainEnsure = await mainChatService.ensureMainChat();
+      return mainChatService.askUserDecision(mainEnsure.agentId, {
+        title: input.title,
+        question: input.question,
+        options: input.options,
+        recommendedOptionId: input.recommendedOptionId,
+        reason: formatEscalatedDecisionReason({
+          fromConversationTitle: input.fromConversationTitle,
+          background: input.background,
+          whyUserMustDecide: input.whyUserMustDecide,
+        }),
+        taskId: input.taskId,
+        agentId: input.agentId,
+      });
+    },
+  });
+
+  const conversationMeta = getMainChatConversationMetaFromLabels(caller.labels);
+  const isLeaderCaller = conversationMeta?.kind === "leader";
+  if (!isMainChatLabels(caller.labels) && !isLeaderCaller) return;
 
   const register = (def: PaseoToolDefinition) => {
     builtinNames.add(def.name);

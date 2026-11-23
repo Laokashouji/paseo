@@ -1575,6 +1575,8 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     serverId,
+    hostLabel: getHostName(),
+    connectedHosts: () => wsServer?.getConnectedHosts() ?? null,
     agentManager,
     agentStorage,
     providerSnapshotManager,

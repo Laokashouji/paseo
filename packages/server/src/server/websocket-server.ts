@@ -596,6 +596,10 @@ export class VoiceAssistantWebSocketServer {
   toolHosts() {
     return createToolHosts(this.connectedHosts);
   }
+
+  public getConnectedHosts(): ConnectedHosts {
+    return this.connectedHosts;
+  }
   private readonly passwordHash: string | undefined;
   private readonly credentialSource: DaemonAuthConfig | undefined;
   private readonly worktreesRoot: string | undefined;

@@ -768,6 +768,9 @@ describe("main-chat service, tools, and session", () => {
       builtinNames: new Set(),
     });
     expect(Array.from(mainTools.keys()).sort()).toEqual([
+      "conversation_new",
+      "conversation_read",
+      "conversation_send",
       "task_ask_user",
       "task_complete",
       "task_list",

@@ -75,6 +75,17 @@ import {
   type FleetSnapshotSummary,
 } from "./context-snapshot.js";
 import {
+  createMainChatConversationManager,
+  type MainChatConversationManager,
+} from "./conversations.js";
+import { createMainChatFleetAggregator, type FleetConnectedHosts } from "./fleet-aggregator.js";
+import { createMainChatFleetBridge, type MainChatFleetBridge } from "./fleet-bridge.js";
+import {
+  formatLeaderProgressMessage,
+  type LeaderProgressReportInput,
+  type LeaderProgressReportResult,
+} from "./leader-tools.js";
+import {
   buildMainChatCompactionCheckpointPrompt,
   buildMainChatHandoffSummary,
   buildWorkerInitialPrompt,
@@ -189,6 +200,8 @@ export interface MainChatServiceDependencies {
   paseoHome: string;
   worktreesRoot?: string;
   serverId: string;
+  hostLabel?: string;
+  connectedHosts?: () => FleetConnectedHosts | null;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   providerSnapshotManager: ProviderSnapshotManager;
@@ -356,11 +369,12 @@ export interface MainChatService {
     receipt: MainChatTaskReceipt | null;
     rework: MainChatReworkRecord | null;
   }>;
-  // M4 Multi-Conversation & Cross-Host Fleet contract (implemented by Wave 2 M4 backend)
-  listConversations?(options?: {
-    includeArchived?: boolean;
-  }): Promise<MainChatConversationRecord[]>;
-  createConversation?(input: {
+  // M4 Multi-Conversation & Cross-Host Fleet contract
+  getConversationManager(): MainChatConversationManager;
+  getFleetBridge(): MainChatFleetBridge;
+  reportLeaderProgress(input: LeaderProgressReportInput): Promise<LeaderProgressReportResult>;
+  listConversations(options?: { includeArchived?: boolean }): Promise<MainChatConversationRecord[]>;
+  createConversation(input: {
     kind: "side" | "leader";
     title: string;
     directionSummary?: string | null;
@@ -370,14 +384,14 @@ export interface MainChatService {
     modeId?: string;
     thinkingOptionId?: string;
   }): Promise<MainChatConversationRecord>;
-  updateConversation?(input: {
+  updateConversation(input: {
     conversationId: string;
     title?: string;
     directionSummary?: string | null;
     kind?: "side" | "leader";
     archived?: boolean;
   }): Promise<MainChatConversationRecord>;
-  getFleetHosts?(options?: { forceRefresh?: boolean }): Promise<{
+  getFleetHosts(options?: { forceRefresh?: boolean }): Promise<{
     localServerId: string | null;
     hosts: MainChatFleetHostStatus[];
   }>;
@@ -431,10 +445,159 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     deps.idlePrecompactCheckIntervalMs ?? DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS;
 
   const store: MainChatStore = createMainChatStore(deps.paseoHome, { now: getNowMs });
+
+  const localHostLabel = deps.hostLabel?.trim() || deps.serverId;
+  const connectedHostsProxy: FleetConnectedHosts | undefined = deps.connectedHosts
+    ? {
+        getSelfHost: () =>
+          deps.connectedHosts?.()?.getSelfHost() ?? {
+            serverId: deps.serverId,
+            label: localHostLabel,
+          },
+        listKnownHosts: () => deps.connectedHosts?.()?.listKnownHosts() ?? [],
+        listAcceptedHosts: () => deps.connectedHosts?.()?.listAcceptedHosts() ?? [],
+        getAcceptedClient: (targetServerId) =>
+          deps.connectedHosts?.()?.getAcceptedClient(targetServerId) ?? null,
+        subscribeHostChanges: (listener) => {
+          const target = deps.connectedHosts?.();
+          if (target) {
+            return target.subscribeHostChanges(listener);
+          }
+          return () => {};
+        },
+      }
+    : undefined;
+
+  const fleetAggregator = createMainChatFleetAggregator({
+    localServerId: deps.serverId,
+    localLabel: localHostLabel,
+    agentManager: deps.agentManager,
+    agentStorage: deps.agentStorage,
+    connectedHosts: connectedHostsProxy,
+    logger,
+  });
+
+  const conversationManager = createMainChatConversationManager({
+    homeDir: deps.paseoHome,
+    defaultServerId: deps.serverId,
+    now: getNowMs,
+    logger,
+    createConversationAgent: async (input) => {
+      const workspace = await resolveMainChatWorkspace();
+      const providerConfig = await resolveDefaultMainChatProviderConfig(workspace.cwd, {
+        provider: input.provider,
+        model: input.model,
+        modeId: input.modeId,
+        thinkingOptionId: input.thinkingOptionId,
+      });
+      const { snapshot } = await createAgentCommand(
+        {
+          agentManager: deps.agentManager,
+          agentStorage: deps.agentStorage,
+          finishSubscriptions: deps.finishSubscriptions?.(),
+          logger,
+          paseoHome: deps.paseoHome,
+          worktreesRoot: deps.worktreesRoot,
+          terminalManager: deps.terminalManager,
+          providerSnapshotManager: deps.providerSnapshotManager,
+          createPaseoWorktree: deps.createPaseoWorktree,
+          ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
+        },
+        {
+          kind: "session",
+          config: {
+            provider: providerConfig.provider,
+            cwd: workspace.cwd,
+            title: input.title,
+            systemPrompt: input.systemPrompt,
+            ...(providerConfig.model ? { model: providerConfig.model } : {}),
+            ...(providerConfig.modeId ? { modeId: providerConfig.modeId } : {}),
+            ...(providerConfig.thinkingOptionId
+              ? { thinkingOptionId: providerConfig.thinkingOptionId }
+              : {}),
+          },
+          workspaceId: workspace.workspaceId,
+          background: false,
+          labels: input.labels,
+          provisionalTitle: input.title,
+          firstAgentContext: {},
+        },
+      );
+      return {
+        agentId: snapshot.id,
+        workspaceId: snapshot.workspaceId ?? workspace.workspaceId,
+        serverId: deps.serverId,
+      };
+    },
+    sendPromptToAgent: async ({ conversation, prompt }) => {
+      await sendPromptToAgent({
+        agentId: conversation.agentId,
+        prompt,
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        logger,
+        unarchive: false,
+      });
+    },
+    readAgentTail: async ({ conversation, limit }) => {
+      const live = deps.agentManager.getAgent(conversation.agentId);
+      const messages = await fleetAggregator.readHostAgentTail(
+        deps.serverId,
+        conversation.agentId,
+        {
+          limit,
+        },
+      );
+      return {
+        lifecycle: live?.lifecycle ?? "idle",
+        messages,
+      };
+    },
+    syncConversationAgent: async ({ conversation, labels }) => {
+      try {
+        await deps.agentManager.updateAgentMetadata(conversation.agentId, {
+          title: conversation.title,
+          labels,
+        });
+      } catch (error) {
+        logger.debug(
+          { err: error, conversationId: conversation.id },
+          "Conversation agent metadata sync skipped",
+        );
+      }
+    },
+    archiveConversationAgent: async (conversation) => {
+      try {
+        await deps.agentManager.archiveAgent(conversation.agentId);
+      } catch (error) {
+        logger.debug(
+          { err: error, conversationId: conversation.id },
+          "Conversation agent archive skipped",
+        );
+      }
+    },
+  });
+
+  const fleetBridge = createMainChatFleetBridge({
+    localServerId: deps.serverId,
+    fleetAggregator,
+    listExcludedAgentIds: () =>
+      conversationManager.listConversationAgentIds({ includeArchived: true }),
+    getTriage: (agentId) => store.getTriage(agentId),
+  });
+
+  let unsubscribeFleetEvents: (() => void) | null = null;
+
   const contextSnapshots = createMainChatContextSnapshotBuilder({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     store,
+    collectMultiHostFleet: async (mainAgentId) => {
+      const known = connectedHostsProxy?.listKnownHosts() ?? [];
+      if (known.length === 0) return null;
+      const collection = await fleetBridge.collectMultiHostFleet({ mainAgentId });
+      return collection.summary;
+    },
     now: getNowMs,
     cacheTtlMs: deps.snapshotCacheTtlMs,
     foregroundTimeoutMs: deps.snapshotForegroundTimeoutMs,
@@ -952,7 +1115,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   ): Promise<EnsureMainChatResult> {
     await store.load();
     const existing = await findExistingMainChat();
-    if (existing) return existing;
+    if (existing) {
+      await conversationManager.load();
+      await conversationManager.ensureMainConversationRecord({
+        agentId: existing.agentId,
+        workspaceId: existing.workspaceId,
+        title: store.getSettings().title,
+        serverId: deps.serverId,
+      });
+      return existing;
+    }
 
     const workspace = await resolveMainChatWorkspace();
     const currentSettings = store.getSettings();
@@ -1006,6 +1178,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           logger.warn({ err: error, agentId: snapshot.id }, "Initial briefing dispatch failed");
         });
     }
+
+    await conversationManager.load();
+    await conversationManager.ensureMainConversationRecord({
+      agentId: snapshot.id,
+      workspaceId: snapshot.workspaceId ?? workspace.workspaceId,
+      title: stewardTitle,
+      serverId: deps.serverId,
+    });
 
     return {
       agentId: snapshot.id,
@@ -1138,7 +1318,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     preExistingDecisions: MainChatTaskDecisionEntry[];
     agentId: string;
     cwd: string;
-    workspaceId: string;
+    workspaceId: string | null;
     nowIso: string;
   }): Promise<void> {
     const targetToAttach = input.continuedTask ?? input.existingRecord;
@@ -1224,6 +1404,113 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  async function dispatchRemotePlannedTask(input: {
+    serverId: string;
+    providerSpec: string;
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    prepared: ReturnType<typeof prepareSpawnTaskPromptAndLabels>;
+    mainAgent: {
+      modeId: string | null;
+      thinkingOptionId: string | null;
+    };
+  }): Promise<{ agentId: string; workspaceId: string | null; cwd: string }> {
+    const { serverId, providerSpec, plan, task, continuedTask, prepared, mainAgent } = input;
+    const parsedRemoteProvider = parseProviderSpec(providerSpec);
+    const remoteResult = await fleetBridge.dispatchTaskToTargetHost({
+      serverId,
+      cwd: task.cwd?.trim() || ".",
+      title: prepared.title,
+      provider: parsedRemoteProvider.provider,
+      model: parsedRemoteProvider.model ?? null,
+      modeId: task.modeId ?? mainAgent.modeId ?? null,
+      thinkingOptionId: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? null,
+      initialPrompt: prepared.initialPrompt,
+      workspaceId: task.workspaceId ?? undefined,
+      isolation: task.isolation,
+      baseBranch: task.baseBranch ?? undefined,
+      branchName: task.branchName ?? undefined,
+      mainAgentId: plan.mainAgentId,
+      planId: plan.id,
+      taskId: task.id,
+      taskRecordId: prepared.resolvedTaskRecordId,
+      mode: task.mode,
+      goal: continuedTask ? continuedTask.brief.goal : task.goal,
+      quiet: task.quiet,
+      labels: prepared.labels,
+    });
+    return {
+      agentId: remoteResult.agentId,
+      workspaceId: remoteResult.workspaceId,
+      cwd: remoteResult.cwd,
+    };
+  }
+
+  async function dispatchPreparedPlannedTask(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    prepared: ReturnType<typeof prepareSpawnTaskPromptAndLabels>;
+    mainAgent: {
+      provider: string;
+      model: string | null;
+      modeId: string | null;
+      thinkingOptionId: string | null;
+    };
+  }): Promise<{ agentId: string; workspaceId: string | null; cwd: string }> {
+    const { plan, task, continuedTask, prepared, mainAgent } = input;
+    const providerSpec = task.provider ?? formatProviderModel(mainAgent.provider, mainAgent.model);
+    if (task.serverId && task.serverId !== deps.serverId) {
+      return dispatchRemotePlannedTask({
+        serverId: task.serverId,
+        providerSpec,
+        plan,
+        task,
+        continuedTask,
+        prepared,
+        mainAgent,
+      });
+    }
+
+    const target = await resolveTaskWorkspaceTarget(task);
+    const { snapshot } = await createAgentCommand(
+      {
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        finishSubscriptions: deps.finishSubscriptions?.(),
+        logger,
+        paseoHome: deps.paseoHome,
+        worktreesRoot: deps.worktreesRoot,
+        terminalManager: deps.terminalManager,
+        providerSnapshotManager: deps.providerSnapshotManager,
+        createPaseoWorktree: deps.createPaseoWorktree,
+        ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
+      },
+      {
+        kind: "mcp",
+        provider: providerSpec,
+        title: prepared.title,
+        initialPrompt: prepared.initialPrompt,
+        cwd: target.cwd,
+        workspaceId: target.workspaceId,
+        thinking: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? undefined,
+        mode: task.modeId ?? mainAgent.modeId ?? undefined,
+        labels: prepared.labels,
+        promptFailure: "throw",
+        notifyOnFinish: true,
+        background: false,
+        detached: false,
+        callerAgentId: plan.mainAgentId,
+      },
+    );
+    return {
+      agentId: snapshot.id,
+      workspaceId: snapshot.workspaceId ?? target.workspaceId,
+      cwd: target.cwd,
+    };
+  }
+
   async function spawnSinglePlannedTask(input: {
     plan: MainChatPlanRecord;
     task: MainChatPlannedTask;
@@ -1249,48 +1536,20 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         stoppedPreviousAgent = true;
       }
 
-      const target = await resolveTaskWorkspaceTarget(task);
       const prepared = prepareSpawnTaskPromptAndLabels({
         plan,
         task,
         continuedTask,
         previousAgentId,
       });
-      const providerSpec =
-        task.provider ?? formatProviderModel(mainAgent.provider, mainAgent.model);
+      const dispatched = await dispatchPreparedPlannedTask({
+        plan,
+        task,
+        continuedTask,
+        prepared,
+        mainAgent,
+      });
 
-      const { snapshot } = await createAgentCommand(
-        {
-          agentManager: deps.agentManager,
-          agentStorage: deps.agentStorage,
-          finishSubscriptions: deps.finishSubscriptions?.(),
-          logger,
-          paseoHome: deps.paseoHome,
-          worktreesRoot: deps.worktreesRoot,
-          terminalManager: deps.terminalManager,
-          providerSnapshotManager: deps.providerSnapshotManager,
-          createPaseoWorktree: deps.createPaseoWorktree,
-          ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
-        },
-        {
-          kind: "mcp",
-          provider: providerSpec,
-          title: prepared.title,
-          initialPrompt: prepared.initialPrompt,
-          cwd: target.cwd,
-          workspaceId: target.workspaceId,
-          thinking: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? undefined,
-          mode: task.modeId ?? mainAgent.modeId ?? undefined,
-          labels: prepared.labels,
-          promptFailure: "throw",
-          notifyOnFinish: true,
-          background: false,
-          detached: false,
-          callerAgentId: plan.mainAgentId,
-        },
-      );
-
-      const resolvedWorkspaceId = snapshot.workspaceId ?? target.workspaceId;
       await persistSpawnedTaskRecord({
         plan,
         task,
@@ -1298,17 +1557,17 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         existingRecord: prepared.existingRecord,
         resolvedTaskRecordId: prepared.resolvedTaskRecordId,
         preExistingDecisions: prepared.preExistingDecisions,
-        agentId: snapshot.id,
-        cwd: target.cwd,
-        workspaceId: resolvedWorkspaceId,
+        agentId: dispatched.agentId,
+        cwd: dispatched.cwd,
+        workspaceId: dispatched.workspaceId,
         nowIso,
       });
 
       return {
         ...task,
-        cwd: target.cwd,
-        workspaceId: resolvedWorkspaceId,
-        agentId: snapshot.id,
+        cwd: dispatched.cwd,
+        workspaceId: dispatched.workspaceId,
+        agentId: dispatched.agentId,
         startedAt: nowIso,
         startError: null,
         taskRecordId: prepared.resolvedTaskRecordId,
@@ -2113,6 +2372,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
       const migratedChildAgents = await migrateChildAgents(oldMainAgentId, created.agentId);
       const storeMigration = await store.migrateMainAgent(oldMainAgentId, created.agentId);
+      await conversationManager.load();
+      await conversationManager.rebindMainConversationAgent(created.agentId, created.workspaceId);
 
       if (handoffSummary) {
         await store.setPendingHandoffSummary(created.agentId, handoffSummary);
@@ -2278,6 +2539,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   return {
     async start() {
       await store.load();
+      await conversationManager.load();
+      fleetAggregator.start();
+      if (!unsubscribeFleetEvents) {
+        unsubscribeFleetEvents = fleetBridge.subscribeFleetEvents({
+          onInvalidateSnapshot: () => {
+            contextSnapshots.invalidateCache();
+          },
+        });
+      }
       turnQueue.start();
       supervisor.start();
       if (!idlePrecompactTimer && idlePrecompactCheckIntervalMs > 0) {
@@ -2295,6 +2565,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         clearInterval(idlePrecompactTimer);
         idlePrecompactTimer = null;
       }
+      unsubscribeFleetEvents?.();
+      unsubscribeFleetEvents = null;
+      fleetAggregator.stop();
       supervisor.stop();
       turnQueue.stop();
     },
@@ -2804,6 +3077,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           checks: entry.checks,
           nextSteps: entry.nextSteps,
         }));
+      const [conversations, fleetHostsResult] = await Promise.all([
+        conversationManager.listConversations({ includeArchived: false }),
+        fleetBridge.getFleetHosts().catch(() => ({ localServerId: deps.serverId, hosts: [] })),
+      ]);
       return {
         plans: store.listPlans(resolvedMainAgentId),
         decisions: store.listDecisions(resolvedMainAgentId),
@@ -2823,6 +3100,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           ? turnQueue.getQueuedCount(resolvedMainAgentId)
           : 0,
         tasks,
+        conversations,
+        fleetHosts: fleetHostsResult.hosts,
         recentReceipts,
       };
     },
@@ -3127,6 +3406,70 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         receipt: null,
         rework,
       };
+    },
+
+    getConversationManager() {
+      return conversationManager;
+    },
+
+    getFleetBridge() {
+      return fleetBridge;
+    },
+
+    async reportLeaderProgress(input) {
+      await store.load();
+      const existingMain = await findExistingMainChat();
+      if (!existingMain) {
+        return { delivered: false, notice: "主对话尚未初始化，进度回报已跳过" };
+      }
+      const message = formatLeaderProgressMessage(input);
+      const result = await turnQueue.enqueueBackground({
+        mainAgentId: existingMain.agentId,
+        dedupeKey: `leader-progress:${input.conversationId}`,
+        trigger: "leader_progress",
+        summary: `方向「${input.conversationTitle}」进度汇报：${input.summary.slice(0, 80)}`,
+        priority: input.blockedItems.length > 0 ? 70 : 30,
+        buildPrompt: () => message,
+      });
+      return {
+        delivered: result.status !== "skipped",
+        reportId: result.activityId,
+      };
+    },
+
+    async listConversations(options) {
+      await store.load();
+      await conversationManager.load();
+      const existingMain = await findExistingMainChat();
+      if (existingMain) {
+        await conversationManager.ensureMainConversationRecord({
+          agentId: existingMain.agentId,
+          workspaceId: existingMain.workspaceId,
+          title: store.getSettings().title,
+          serverId: deps.serverId,
+        });
+      }
+      return conversationManager.listConversations(options);
+    },
+
+    async createConversation(input) {
+      await store.load();
+      await conversationManager.load();
+      const created = await conversationManager.createConversation(input);
+      contextSnapshots.invalidateCache();
+      return created;
+    },
+
+    async updateConversation(input) {
+      await store.load();
+      await conversationManager.load();
+      const updated = await conversationManager.updateConversation(input);
+      contextSnapshots.invalidateCache();
+      return updated;
+    },
+
+    async getFleetHosts(options) {
+      return fleetBridge.getFleetHosts(options);
     },
   };
 }

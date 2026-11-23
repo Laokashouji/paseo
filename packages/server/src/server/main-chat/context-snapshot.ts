@@ -10,6 +10,7 @@ import {
 } from "@getpaseo/protocol/main-chat";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "../agent/agent-storage.js";
+import { isMainChatConversationLabels } from "./conversations.js";
 import type { MainChatStore } from "./store.js";
 
 export const MAX_SNAPSHOT_CHARS = 6_000;
@@ -322,6 +323,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   store: MainChatStore;
+  collectMultiHostFleet?: (mainAgentId?: string | null) => Promise<FleetSnapshotSummary | null>;
   now?: () => number;
   cacheTtlMs?: number;
   foregroundTimeoutMs?: number;
@@ -424,10 +426,24 @@ export function createMainChatContextSnapshotBuilder(deps: {
   }
 
   async function scanFleetUncached(mainAgentId?: string | null): Promise<FleetSnapshotSummary> {
+    if (deps.collectMultiHostFleet) {
+      const multiHost = await deps.collectMultiHostFleet(mainAgentId);
+      if (multiHost) {
+        return multiHost;
+      }
+    }
+
     const byId = new Map<string, FleetSessionSnapshotItem>();
 
     for (const agent of deps.agentManager.listAgents()) {
-      if (agent.internal || agent.background || isMainChatLabels(agent.labels)) continue;
+      if (
+        agent.internal ||
+        agent.background ||
+        isMainChatLabels(agent.labels) ||
+        isMainChatConversationLabels(agent.labels)
+      ) {
+        continue;
+      }
       byId.set(agent.id, toLiveItem(agent, mainAgentId));
     }
 
@@ -437,7 +453,8 @@ export function createMainChatContextSnapshotBuilder(deps: {
         record.archivedAt ||
         record.internal ||
         record.background ||
-        isMainChatLabels(record.labels)
+        isMainChatLabels(record.labels) ||
+        isMainChatConversationLabels(record.labels)
       ) {
         continue;
       }
