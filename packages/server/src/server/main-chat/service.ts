@@ -18,6 +18,7 @@ import {
   isMainChatLabels,
   type MainChatActivityEntry,
   type MainChatActivityKind,
+  type MainChatApprovalClarification,
   type MainChatCompactionReason,
   type MainChatCompactionState,
   type MainChatCompactionStatus,
@@ -35,8 +36,11 @@ import {
   type MainChatReceiptCheck,
   type MainChatReworkRecord,
   type MainChatRuleKind,
+  type MainChatRuleSuggestion,
   type MainChatSettings,
   type MainChatSettingsPatch,
+  type MainChatStandingAuthorization,
+  type MainChatStandingAuthorizationScope,
   type MainChatTaskDecisionActor,
   type MainChatTaskDecisionEntry,
   type MainChatTaskIsolation,
@@ -395,6 +399,35 @@ export interface MainChatService {
     localServerId: string | null;
     hosts: MainChatFleetHostStatus[];
   }>;
+  // M5 Approval Clarification & Standing Authorizations contract (implemented by Wave 3 M5 backend)
+  clarifyPermission?(input: {
+    agentId: string;
+    serverId?: string | null;
+    permissionRequestId: string;
+    question: string;
+  }): Promise<MainChatApprovalClarification>;
+  listStandingAuthorizations?(options?: { includeRevoked?: boolean }): Promise<{
+    authorizations: MainChatStandingAuthorization[];
+    suggestions: MainChatRuleSuggestion[];
+  }>;
+  grantStandingAuthorization?(input: {
+    scope: MainChatStandingAuthorizationScope;
+    serverId?: string | null;
+    cwd?: string | null;
+    allowSubdirectories?: boolean;
+    toolName?: string | null;
+    commandPrefix?: string | null;
+    mode?: MainChatTaskMode | null;
+    label?: string;
+    reason?: string | null;
+    suggestionId?: string;
+    expiresAt?: string | null;
+  }): Promise<MainChatStandingAuthorization>;
+  revokeStandingAuthorization?(authorizationId: string): Promise<{
+    revoked: boolean;
+    authorization: MainChatStandingAuthorization | null;
+  }>;
+  dismissRuleSuggestion?(suggestionId: string): Promise<boolean>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {

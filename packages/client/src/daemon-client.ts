@@ -21,17 +21,21 @@ import type {
   MainChatAddPermissionRuleResponsePayload,
   MainChatAnswerDecisionResponsePayload,
   MainChatCancelPlanResponsePayload,
+  MainChatClarifyPermissionResponsePayload,
   MainChatClearResponsePayload,
   MainChatCompactionReason,
   MainChatCompactResponsePayload,
   MainChatCreateConversationResponsePayload,
+  MainChatDismissRuleSuggestionResponsePayload,
   MainChatEnsureResponsePayload,
   MainChatGetFleetHostsResponsePayload,
   MainChatGetOverviewResponsePayload,
   MainChatGetSettingsResponsePayload,
+  MainChatGrantStandingAuthorizationResponsePayload,
   MainChatListActivityResponsePayload,
   MainChatListConversationsResponsePayload,
   MainChatListPlansResponsePayload,
+  MainChatListStandingAuthorizationsResponsePayload,
   MainChatListTasksResponsePayload,
   MainChatNewSessionResponsePayload,
   MainChatParkTaskResponsePayload,
@@ -39,9 +43,12 @@ import type {
   MainChatReceiptCheck,
   MainChatRemoveRuleResponsePayload,
   MainChatReviewTaskResponsePayload,
+  MainChatRevokeStandingAuthorizationResponsePayload,
   MainChatRuleKind,
   MainChatSettingsPatch,
+  MainChatStandingAuthorizationScope,
   MainChatStartPlanResponsePayload,
+  MainChatTaskMode,
   MainChatTaskReviewVerdict,
   MainChatTriggerPatrolResponsePayload,
   MainChatUpdateConversationResponsePayload,
@@ -5750,6 +5757,120 @@ export class DaemonClient {
       },
       timeout: 30000,
     });
+  }
+
+  async clarifyMainChatPermission(
+    input: {
+      agentId: string;
+      serverId?: string | null;
+      permissionRequestId: string;
+      question: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatClarifyPermissionResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.clarify_permission.response">({
+      requestId,
+      message: {
+        type: "main_chat.clarify_permission.request",
+        agentId: input.agentId,
+        ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+        permissionRequestId: input.permissionRequestId,
+        question: input.question,
+      },
+      timeout: 60000,
+    });
+  }
+
+  async listMainChatStandingAuthorizations(
+    options?: {
+      includeRevoked?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatListStandingAuthorizationsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_standing_authorizations.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.list_standing_authorizations.request",
+          ...(options?.includeRevoked !== undefined
+            ? { includeRevoked: options.includeRevoked }
+            : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async grantMainChatStandingAuthorization(
+    input: {
+      scope: MainChatStandingAuthorizationScope;
+      serverId?: string | null;
+      cwd?: string | null;
+      allowSubdirectories?: boolean;
+      toolName?: string | null;
+      commandPrefix?: string | null;
+      mode?: MainChatTaskMode | null;
+      label?: string;
+      reason?: string | null;
+      suggestionId?: string;
+      expiresAt?: string | null;
+    },
+    requestId?: string,
+  ): Promise<MainChatGrantStandingAuthorizationResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.grant_standing_authorization.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.grant_standing_authorization.request",
+          scope: input.scope,
+          ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+          ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+          ...(input.allowSubdirectories !== undefined
+            ? { allowSubdirectories: input.allowSubdirectories }
+            : {}),
+          ...(input.toolName !== undefined ? { toolName: input.toolName } : {}),
+          ...(input.commandPrefix !== undefined ? { commandPrefix: input.commandPrefix } : {}),
+          ...(input.mode !== undefined ? { mode: input.mode } : {}),
+          ...(input.label !== undefined ? { label: input.label } : {}),
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.suggestionId !== undefined ? { suggestionId: input.suggestionId } : {}),
+          ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async revokeMainChatStandingAuthorization(
+    authorizationId: string,
+    requestId?: string,
+  ): Promise<MainChatRevokeStandingAuthorizationResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.revoke_standing_authorization.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.revoke_standing_authorization.request",
+          authorizationId,
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async dismissMainChatRuleSuggestion(
+    suggestionId: string,
+    requestId?: string,
+  ): Promise<MainChatDismissRuleSuggestionResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.dismiss_rule_suggestion.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.dismiss_rule_suggestion.request",
+          suggestionId,
+        },
+        timeout: 30000,
+      },
+    );
   }
 
   async checkoutGithubSetAutoMerge(

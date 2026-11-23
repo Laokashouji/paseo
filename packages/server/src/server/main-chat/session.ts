@@ -28,6 +28,11 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.create_conversation.request" }
   | { type: "main_chat.update_conversation.request" }
   | { type: "main_chat.get_fleet_hosts.request" }
+  | { type: "main_chat.clarify_permission.request" }
+  | { type: "main_chat.list_standing_authorizations.request" }
+  | { type: "main_chat.grant_standing_authorization.request" }
+  | { type: "main_chat.revoke_standing_authorization.request" }
+  | { type: "main_chat.dismiss_rule_suggestion.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -58,6 +63,11 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.create_conversation.request",
   "main_chat.update_conversation.request",
   "main_chat.get_fleet_hosts.request",
+  "main_chat.clarify_permission.request",
+  "main_chat.list_standing_authorizations.request",
+  "main_chat.grant_standing_authorization.request",
+  "main_chat.revoke_standing_authorization.request",
+  "main_chat.dismiss_rule_suggestion.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -214,6 +224,26 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
   "main_chat.get_fleet_hosts.request": (msg, error) => ({
     type: "main_chat.get_fleet_hosts.response",
     payload: { requestId: msg.requestId, localServerId: null, hosts: [], error },
+  }),
+  "main_chat.clarify_permission.request": (msg, error) => ({
+    type: "main_chat.clarify_permission.response",
+    payload: { requestId: msg.requestId, clarification: null, error },
+  }),
+  "main_chat.list_standing_authorizations.request": (msg, error) => ({
+    type: "main_chat.list_standing_authorizations.response",
+    payload: { requestId: msg.requestId, authorizations: [], suggestions: [], error },
+  }),
+  "main_chat.grant_standing_authorization.request": (msg, error) => ({
+    type: "main_chat.grant_standing_authorization.response",
+    payload: { requestId: msg.requestId, authorization: null, error },
+  }),
+  "main_chat.revoke_standing_authorization.request": (msg, error) => ({
+    type: "main_chat.revoke_standing_authorization.response",
+    payload: { requestId: msg.requestId, revoked: false, authorization: null, error },
+  }),
+  "main_chat.dismiss_rule_suggestion.request": (msg, error) => ({
+    type: "main_chat.dismiss_rule_suggestion.response",
+    payload: { requestId: msg.requestId, dismissed: false, error },
   }),
 };
 
@@ -931,6 +961,197 @@ type SessionHandlerMap = {
   ) => Promise<void>;
 };
 
+async function handleClarifyPermission(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.clarify_permission.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.clarifyPermission) {
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: {
+        requestId: msg.requestId,
+        clarification: null,
+        error: "Permission clarification is not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const clarification = await service.clarifyPermission({
+      agentId: msg.agentId,
+      serverId: msg.serverId,
+      permissionRequestId: msg.permissionRequestId,
+      question: msg.question,
+    });
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: { requestId: msg.requestId, clarification, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: { requestId: msg.requestId, clarification: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleListStandingAuthorizations(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.list_standing_authorizations.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.listStandingAuthorizations) {
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: [],
+        suggestions: [],
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const result = await service.listStandingAuthorizations({
+      includeRevoked: msg.includeRevoked,
+    });
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: result.authorizations,
+        suggestions: result.suggestions,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: [],
+        suggestions: [],
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleGrantStandingAuthorization(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.grant_standing_authorization.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.grantStandingAuthorization) {
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        authorization: null,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const authorization = await service.grantStandingAuthorization({
+      scope: msg.scope,
+      serverId: msg.serverId,
+      cwd: msg.cwd,
+      allowSubdirectories: msg.allowSubdirectories,
+      toolName: msg.toolName,
+      commandPrefix: msg.commandPrefix,
+      mode: msg.mode,
+      label: msg.label,
+      reason: msg.reason,
+      suggestionId: msg.suggestionId,
+      expiresAt: msg.expiresAt,
+    });
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: { requestId: msg.requestId, authorization, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: { requestId: msg.requestId, authorization: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRevokeStandingAuthorization(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.revoke_standing_authorization.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.revokeStandingAuthorization) {
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: false,
+        authorization: null,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const result = await service.revokeStandingAuthorization(msg.authorizationId);
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: result.revoked,
+        authorization: result.authorization,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: false,
+        authorization: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleDismissRuleSuggestion(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.dismiss_rule_suggestion.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.dismissRuleSuggestion) {
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: {
+        requestId: msg.requestId,
+        dismissed: false,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const dismissed = await service.dismissRuleSuggestion(msg.suggestionId);
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: { requestId: msg.requestId, dismissed, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: { requestId: msg.requestId, dismissed: false, error: errorMessage(error) },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -957,6 +1178,11 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.create_conversation.request": handleMultiConversationAndFleetMessages,
   "main_chat.update_conversation.request": handleMultiConversationAndFleetMessages,
   "main_chat.get_fleet_hosts.request": handleMultiConversationAndFleetMessages,
+  "main_chat.clarify_permission.request": handleClarifyPermission,
+  "main_chat.list_standing_authorizations.request": handleListStandingAuthorizations,
+  "main_chat.grant_standing_authorization.request": handleGrantStandingAuthorization,
+  "main_chat.revoke_standing_authorization.request": handleRevokeStandingAuthorization,
+  "main_chat.dismiss_rule_suggestion.request": handleDismissRuleSuggestion,
 };
 
 export async function handleMainChatSessionMessage(
