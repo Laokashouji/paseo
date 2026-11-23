@@ -5,6 +5,7 @@ export interface MainChatDrawerTarget {
   agentId: string;
   workspaceId: string | null;
   title: string | null;
+  taskId?: string | null;
 }
 
 export interface OpenMainChatDrawerInput {
@@ -12,6 +13,7 @@ export interface OpenMainChatDrawerInput {
   agentId: string;
   workspaceId?: string | null;
   title?: string | null;
+  taskId?: string | null;
 }
 
 interface MainChatDrawerStoreState {
@@ -29,7 +31,14 @@ function normalizeDrawerTarget(input: OpenMainChatDrawerInput): MainChatDrawerTa
   if (!serverId || !agentId) return null;
   const workspaceId = input.workspaceId?.trim() || null;
   const title = input.title?.trim() || null;
-  return { serverId, agentId, workspaceId, title };
+  const taskId = input.taskId?.trim() || null;
+  return {
+    serverId,
+    agentId,
+    workspaceId,
+    title,
+    ...(taskId ? { taskId } : {}),
+  };
 }
 
 export const useMainChatDrawerStore = create<MainChatDrawerStoreState>((set) => ({

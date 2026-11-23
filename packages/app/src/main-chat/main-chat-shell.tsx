@@ -54,7 +54,13 @@ import {
   buildSettingsSectionRoute,
 } from "@/utils/host-routes";
 import { useMainChatCameFromStore } from "./came-from-store";
+import { MainChatCompactionBanner } from "./compaction-banner";
 import { useMainChatDrawerStore } from "./drawer-store";
+import {
+  MainChatLifecycleConfirmModal,
+  MainChatLifecycleMenuItems,
+  useMainChatLifecycleActions,
+} from "./lifecycle-actions";
 import { selectMainChatDockTasks } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
@@ -170,24 +176,34 @@ const ShellHeaderLeft = memo(function ShellHeaderLeft({
 });
 
 const ShellOverflowMenu = memo(function ShellOverflowMenu({
+  variant,
   title,
   isCompact,
   canPatrol,
+  canRunLifecycle,
   showRightDrawer,
   extraMenuItems,
   onTriggerPatrol,
   onToggleTaskDrawer,
   onOpenHistory,
+  onCompact,
+  onClear,
+  onNewSession,
   onOpenSettings,
 }: {
+  variant: "main" | "conversation";
   title: string;
   isCompact: boolean;
   canPatrol: boolean;
+  canRunLifecycle: boolean;
   showRightDrawer: boolean;
   extraMenuItems?: ReactNode;
   onTriggerPatrol: () => void;
   onToggleTaskDrawer: () => void;
   onOpenHistory: () => void;
+  onCompact: () => void;
+  onClear: () => void;
+  onNewSession: () => void;
   onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
@@ -202,7 +218,7 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
       >
         <ThemedEllipsis size={16} uniProps={mutedIconMapping} />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" width={236} sheetTitle={title}>
+      <DropdownMenuContent align="end" width={248} sheetTitle={title}>
         <DropdownMenuItem
           leading={patrolMenuIcon}
           onSelect={onTriggerPatrol}
@@ -229,6 +245,18 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
         >
           {t("mainChat.hero.viewHistory")}
         </DropdownMenuItem>
+        {variant === "main" ? (
+          <>
+            <DropdownMenuSeparator />
+            <MainChatLifecycleMenuItems
+              testIdPrefix="main-chat-header"
+              disabled={!canRunLifecycle}
+              onCompact={onCompact}
+              onClear={onClear}
+              onNewSession={onNewSession}
+            />
+          </>
+        ) : null}
         {extraMenuItems ? (
           <>
             <DropdownMenuSeparator />
@@ -249,32 +277,42 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
 });
 
 const ShellHeaderRight = memo(function ShellHeaderRight({
+  variant,
   title,
   isCompact,
   canToggleStyle,
   isTogglingStyle,
   currentStyle,
   canPatrol,
+  canRunLifecycle,
   showRightDrawer,
   extraMenuItems,
   onToggleStyle,
   onOpenHistory,
   onTriggerPatrol,
   onToggleTaskDrawer,
+  onCompact,
+  onClear,
+  onNewSession,
   onOpenSettings,
 }: {
+  variant: "main" | "conversation";
   title: string;
   isCompact: boolean;
   canToggleStyle: boolean;
   isTogglingStyle: boolean;
   currentStyle: "conservative" | "proactive";
   canPatrol: boolean;
+  canRunLifecycle: boolean;
   showRightDrawer: boolean;
   extraMenuItems?: ReactNode;
   onToggleStyle: () => void;
   onOpenHistory: () => void;
   onTriggerPatrol: () => void;
   onToggleTaskDrawer: () => void;
+  onCompact: () => void;
+  onClear: () => void;
+  onNewSession: () => void;
   onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
@@ -324,14 +362,19 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
       </PressHighlight>
 
       <ShellOverflowMenu
+        variant={variant}
         title={title}
         isCompact={isCompact}
         canPatrol={canPatrol}
+        canRunLifecycle={canRunLifecycle}
         showRightDrawer={showRightDrawer}
         extraMenuItems={extraMenuItems}
         onTriggerPatrol={onTriggerPatrol}
         onToggleTaskDrawer={onToggleTaskDrawer}
         onOpenHistory={onOpenHistory}
+        onCompact={onCompact}
+        onClear={onClear}
+        onNewSession={onNewSession}
         onOpenSettings={onOpenSettings}
       />
     </View>
@@ -497,6 +540,11 @@ export const MainChatShell = memo(function MainChatShell({
     currentStyle,
     onActivePaneChange,
   });
+  const lifecycle = useMainChatLifecycleActions({
+    serverId,
+    client,
+    mainAgentId,
+  });
 
   const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
   const handleOpenHistory = useCallback(() => router.push(buildMainChatHistoryRoute()), []);
@@ -555,18 +603,23 @@ export const MainChatShell = memo(function MainChatShell({
                 onBackToMain={handleBackToMain}
               />
               <ShellHeaderRight
+                variant={variant}
                 title={title}
                 isCompact={isCompact}
                 canToggleStyle={Boolean(serverId && client)}
                 isTogglingStyle={actions.isTogglingStyle}
                 currentStyle={currentStyle}
                 canPatrol={Boolean(serverId && client && !actions.isPatrolling)}
+                canRunLifecycle={lifecycle.canRunLifecycle}
                 showRightDrawer={showRightDrawer}
                 extraMenuItems={extraMenuItems}
                 onToggleStyle={actions.toggleStyle}
                 onOpenHistory={handleOpenHistory}
                 onTriggerPatrol={actions.runPatrol}
                 onToggleTaskDrawer={actions.toggleTaskDrawer}
+                onCompact={lifecycle.triggerCompact}
+                onClear={lifecycle.requestClear}
+                onNewSession={lifecycle.requestNewSession}
                 onOpenSettings={handleOpenSettings}
               />
             </WindowChromeSafeArea>
@@ -579,18 +632,30 @@ export const MainChatShell = memo(function MainChatShell({
             onStartShouldSetResponderCapture={handleMainColumnResponderCapture}
             testID="main-chat-main-column"
           >
+            {variant === "main" ? (
+              <MainChatCompactionBanner serverId={serverId} mainAgentId={mainAgentId} />
+            ) : null}
             {children}
           </View>
 
           {showRightDrawer && actions.activeDrawerTarget ? (
             <TaskPanelDrawer
               target={actions.activeDrawerTarget}
+              mainServerId={serverId}
+              mainAgentId={mainAgentId ?? null}
               isFocused={activePane === "drawer"}
               onFocus={handleFocusDrawerPane}
             />
           ) : null}
         </View>
       </View>
+
+      <MainChatLifecycleConfirmModal
+        confirmKind={lifecycle.confirmKind}
+        busy={lifecycle.busyAction !== null}
+        onCancel={lifecycle.cancelConfirm}
+        onConfirm={lifecycle.confirmPendingAction}
+      />
     </MainChatShellProvider>
   );
 });

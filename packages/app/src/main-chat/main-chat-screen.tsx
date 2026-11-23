@@ -51,6 +51,103 @@ export function MainChatScreen(): ReactElement {
   return <MainChatScreenContent />;
 }
 
+function resolveEffectiveOverrideRef(
+  activeAgentOverride: {
+    serverId: string;
+    agentId: string;
+    workspaceId: string;
+    previousAgentId: string | null;
+  } | null,
+  existing: MainChatAgentRef | null,
+): MainChatAgentRef | null {
+  if (!activeAgentOverride) return null;
+  if (existing && existing.agentId !== activeAgentOverride.previousAgentId) {
+    return null;
+  }
+  return {
+    serverId: activeAgentOverride.serverId,
+    agentId: activeAgentOverride.agentId,
+    workspaceId: activeAgentOverride.workspaceId || existing?.workspaceId || "",
+  };
+}
+
+function MainChatScreenBody({
+  resolvedRef,
+  ensureState,
+  isEnsuring,
+  activePane,
+  onFocusMainPane,
+  onRetry,
+  onOpenSettings,
+}: {
+  resolvedRef: MainChatAgentRef | null;
+  ensureState: EnsureState;
+  isEnsuring: boolean;
+  activePane: "main" | "drawer";
+  onFocusMainPane: () => void;
+  onRetry: () => void;
+  onOpenSettings: () => void;
+}): ReactElement {
+  const { t } = useTranslation();
+
+  if (resolvedRef) {
+    return (
+      <MainChatAgentHost
+        key={`${resolvedRef.serverId}:${resolvedRef.agentId}`}
+        sourceId={`main-chat:${resolvedRef.serverId}:${resolvedRef.agentId}`}
+        serverId={resolvedRef.serverId}
+        workspaceId={resolvedRef.workspaceId}
+        agentId={resolvedRef.agentId}
+        isFocused={activePane === "main"}
+        onFocusPane={onFocusMainPane}
+      />
+    );
+  }
+  if (ensureState.kind === "error") {
+    return (
+      <View style={styles.centerState} testID="main-chat-ensure-error">
+        <ThemedCircleAlert size={28} uniProps={dangerIconMapping} />
+        <Text style={styles.stateTitle}>{t("mainChat.shell.ensureErrorTitle")}</Text>
+        <Text style={styles.stateDescription}>{ensureState.message}</Text>
+        <Button
+          variant="secondary"
+          size="sm"
+          leftIcon={ThemedRefreshCw}
+          onPress={onRetry}
+          testID="main-chat-ensure-retry"
+        >
+          {t("mainChat.shell.retryEnsure")}
+        </Button>
+      </View>
+    );
+  }
+  if (isEnsuring) {
+    return (
+      <View style={styles.centerState} testID="main-chat-ensuring">
+        <ThemedLoadingSpinner size="large" uniProps={mutedIconMapping} />
+        <Text style={styles.stateTitle}>{t("mainChat.shell.loadingTitle")}</Text>
+        <Text style={styles.stateDescription}>{t("mainChat.shell.loadingSubtitle")}</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.centerState} testID="main-chat-no-host">
+      <ThemedSparkles size={28} uniProps={mutedIconMapping} />
+      <Text style={styles.stateTitle}>{t("mainChat.shell.noHostTitle")}</Text>
+      <Text style={styles.stateDescription}>{t("mainChat.shell.noHostDescription")}</Text>
+      <Button
+        variant="outline"
+        size="sm"
+        leftIcon={ThemedSettings}
+        onPress={onOpenSettings}
+        testID="main-chat-open-host-settings"
+      >
+        {t("mainChat.shell.openHostSettings")}
+      </Button>
+    </View>
+  );
+}
+
 function MainChatScreenContent(): ReactElement {
   const { t } = useTranslation();
   const hosts = useHosts();
@@ -77,13 +174,33 @@ function MainChatScreenContent(): ReactElement {
     targetServerId ? state.settingsByServerId[targetServerId]?.title : undefined,
   );
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
+  const activeAgentOverride = useMainChatOverviewStore((state) =>
+    targetServerId ? (state.activeAgentOverrideByServerId[targetServerId] ?? null) : null,
+  );
+  const clearActiveAgentOverride = useMainChatOverviewStore(
+    (state) => state.clearActiveAgentOverride,
+  );
 
   const [ensureState, setEnsureState] = useState<EnsureState>({ kind: "idle" });
   const [retryCount, setRetryCount] = useState(0);
   const [activePane, setActivePane] = useState<"main" | "drawer">("main");
 
+  const effectiveOverrideRef = resolveEffectiveOverrideRef(activeAgentOverride, summary.existing);
+
+  useEffect(() => {
+    if (
+      activeAgentOverride &&
+      summary.existing &&
+      summary.existing.agentId === activeAgentOverride.agentId
+    ) {
+      clearActiveAgentOverride(activeAgentOverride.serverId);
+    }
+  }, [activeAgentOverride, clearActiveAgentOverride, summary.existing]);
+
   const resolvedRef: MainChatAgentRef | null =
-    summary.existing ?? (ensureState.kind === "resolved" ? ensureState.ref : null);
+    effectiveOverrideRef ??
+    summary.existing ??
+    (ensureState.kind === "resolved" ? ensureState.ref : null);
 
   useEffect(() => {
     const existingRef = summary.existing;
@@ -160,66 +277,21 @@ function MainChatScreenContent(): ReactElement {
   }, []);
 
   const displayTitle = configuredTitle?.trim() || summary.displayTitle;
-
-  let body: ReactElement;
-  if (resolvedRef) {
-    body = (
-      <MainChatAgentHost
-        key={`${resolvedRef.serverId}:${resolvedRef.agentId}`}
-        sourceId={`main-chat:${resolvedRef.serverId}:${resolvedRef.agentId}`}
-        serverId={resolvedRef.serverId}
-        workspaceId={resolvedRef.workspaceId}
-        agentId={resolvedRef.agentId}
-        isFocused={activePane === "main"}
-        onFocusPane={handleFocusMainPane}
-      />
-    );
-  } else if (ensureState.kind === "error") {
-    body = (
-      <View style={styles.centerState} testID="main-chat-ensure-error">
-        <ThemedCircleAlert size={28} uniProps={dangerIconMapping} />
-        <Text style={styles.stateTitle}>{t("mainChat.shell.ensureErrorTitle")}</Text>
-        <Text style={styles.stateDescription}>{ensureState.message}</Text>
-        <Button
-          variant="secondary"
-          size="sm"
-          leftIcon={ThemedRefreshCw}
-          onPress={handleRetry}
-          testID="main-chat-ensure-retry"
-        >
-          {t("mainChat.shell.retryEnsure")}
-        </Button>
-      </View>
-    );
-  } else if (
+  const isEnsuring =
     ensureState.kind === "ensuring" ||
-    (targetServerId && (connectionStatus === "connecting" || summary.supportsMainChat))
-  ) {
-    body = (
-      <View style={styles.centerState} testID="main-chat-ensuring">
-        <ThemedLoadingSpinner size="large" uniProps={mutedIconMapping} />
-        <Text style={styles.stateTitle}>{t("mainChat.shell.loadingTitle")}</Text>
-        <Text style={styles.stateDescription}>{t("mainChat.shell.loadingSubtitle")}</Text>
-      </View>
-    );
-  } else {
-    body = (
-      <View style={styles.centerState} testID="main-chat-no-host">
-        <ThemedSparkles size={28} uniProps={mutedIconMapping} />
-        <Text style={styles.stateTitle}>{t("mainChat.shell.noHostTitle")}</Text>
-        <Text style={styles.stateDescription}>{t("mainChat.shell.noHostDescription")}</Text>
-        <Button
-          variant="outline"
-          size="sm"
-          leftIcon={ThemedSettings}
-          onPress={handleOpenSettings}
-          testID="main-chat-open-host-settings"
-        >
-          {t("mainChat.shell.openHostSettings")}
-        </Button>
-      </View>
-    );
-  }
+    Boolean(targetServerId && (connectionStatus === "connecting" || summary.supportsMainChat));
+
+  const body = (
+    <MainChatScreenBody
+      resolvedRef={resolvedRef}
+      ensureState={ensureState}
+      isEnsuring={isEnsuring}
+      activePane={activePane}
+      onFocusMainPane={handleFocusMainPane}
+      onRetry={handleRetry}
+      onOpenSettings={handleOpenSettings}
+    />
+  );
 
   return (
     <MainChatShell

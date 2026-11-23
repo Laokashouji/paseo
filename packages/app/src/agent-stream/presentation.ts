@@ -23,6 +23,8 @@ interface PresentationInput {
   expandedTurnHostIds: ReadonlySet<string>;
   isTurnActive: boolean;
   activeTurnId?: string | null;
+  /** Collapse system-injected Main Chat background turns and suppress completed silent rounds. */
+  collapseBackgroundTurns?: boolean;
 }
 
 export interface StreamPresentation extends ToolCallDetailProjection {
@@ -83,6 +85,8 @@ export function createStreamPresentation() {
   let collapsedSource: StreamItem[] | undefined;
   let collapsedIsLatestTurnOpen = false;
   let collapsedExpandedHostIds: ReadonlySet<string> | undefined;
+  let collapsedNormalTurns = false;
+  let collapsedBackgroundTurns = false;
   let collapsed: TurnCollapse | undefined;
 
   function presentRows(item: StreamItem): StreamItem[] {
@@ -105,15 +109,10 @@ export function createStreamPresentation() {
     return [item.kind === "user_message" ? presentUserMessage(item) : item];
   }
 
-  function collapse(
+  function resolveIsLatestTurnOpen(
     projection: ToolCallDetailProjection,
     input: PresentationInput,
-  ): Omit<StreamPresentation, "readingRowReplacements"> {
-    if (input.display !== "collapseTurns") {
-      return { ...projection, turns: NO_COLLAPSED_TURNS };
-    }
-    // Live text updates reach the head only, so the folded history is reused until the
-    // retained rows, the latest turn's liveness, or the reader's expanded turns change.
+  ): boolean {
     const last = projection.tail.at(-1) ?? null;
     const first = projection.head[0] ?? null;
     const activeTurnIsAnother = Boolean(
@@ -121,15 +120,32 @@ export function createStreamPresentation() {
     );
     // Without head rows, the latest retained turn is live only while the active run is that
     // turn. A run that has not opened yet carries no id and belongs to the next turn.
-    const isLatestTurnOpen = first
-      ? !isTurnBoundary(last, first) && !activeTurnIsAnother
-      : input.isTurnActive && (last?.turnId === undefined || input.activeTurnId === last.turnId);
-    if (
+    if (first) {
+      return !isTurnBoundary(last, first) && !activeTurnIsAnother;
+    }
+    return input.isTurnActive && (last?.turnId === undefined || input.activeTurnId === last.turnId);
+  }
+
+  function collapse(
+    projection: ToolCallDetailProjection,
+    input: PresentationInput,
+  ): Omit<StreamPresentation, "readingRowReplacements"> {
+    const collapseNormalTurns = input.display === "collapseTurns";
+    const collapseBackgroundTurns = input.collapseBackgroundTurns === true;
+    if (!collapseNormalTurns && !collapseBackgroundTurns) {
+      return { ...projection, turns: NO_COLLAPSED_TURNS };
+    }
+    // Live text updates reach the head only, so the folded history is reused until the
+    // retained rows, the latest turn's liveness, or the reader's expanded turns change.
+    const isLatestTurnOpen = resolveIsLatestTurnOpen(projection, input);
+    const cacheStale =
       !collapsed ||
       collapsedSource !== projection.tail ||
       collapsedIsLatestTurnOpen !== isLatestTurnOpen ||
-      collapsedExpandedHostIds !== input.expandedTurnHostIds
-    ) {
+      collapsedExpandedHostIds !== input.expandedTurnHostIds ||
+      collapsedNormalTurns !== collapseNormalTurns ||
+      collapsedBackgroundTurns !== collapseBackgroundTurns;
+    if (cacheStale) {
       collapsed = collapseTurns({
         tail: projection.tail,
         isLatestTurnOpen,
@@ -137,12 +153,20 @@ export function createStreamPresentation() {
         getGroupedCalls: (itemId) => projection.groupsByHostId.get(itemId)?.run.calls,
         previousSummaryRowsByHostId:
           collapsed?.summaryRowsByHostId ?? NO_COLLAPSED_TURNS.summaryRowsByHostId,
+        collapseNormalTurns,
+        collapseBackgroundTurns,
       });
       collapsedSource = projection.tail;
       collapsedIsLatestTurnOpen = isLatestTurnOpen;
       collapsedExpandedHostIds = input.expandedTurnHostIds;
+      collapsedNormalTurns = collapseNormalTurns;
+      collapsedBackgroundTurns = collapseBackgroundTurns;
     }
-    const { tail, ...turns } = collapsed;
+    const currentCollapsed = collapsed;
+    if (!currentCollapsed) {
+      return { ...projection, turns: NO_COLLAPSED_TURNS };
+    }
+    const { tail, ...turns } = currentCollapsed;
     if (turns.nestedItemIds.size === 0) return { ...projection, tail, turns };
     // Opening a turn reveals its raw calls; those rows must not become group hosts again.
     const withoutExpandedRows = (groups: StreamPresentation["groupsByHostId"]) => ({

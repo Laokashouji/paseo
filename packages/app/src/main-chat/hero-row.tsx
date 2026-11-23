@@ -60,6 +60,11 @@ import {
   buildSettingsSectionRoute,
   isMainChatPathname,
 } from "@/utils/host-routes";
+import {
+  MainChatLifecycleConfirmModal,
+  MainChatLifecycleMenuItems,
+  useMainChatLifecycleActions,
+} from "./lifecycle-actions";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 
@@ -209,10 +214,14 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
   onOpenChange,
   displayTitle,
   currentStyle,
+  canRunLifecycle,
   onTriggerPatrol,
   onOpenHistory,
   onBeginRename,
   onToggleStyle,
+  onCompact,
+  onClear,
+  onNewSession,
   onOpenSettings,
   extraMenuItems,
 }: {
@@ -221,10 +230,14 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
   onOpenChange: (open: boolean) => void;
   displayTitle: string;
   currentStyle: "conservative" | "proactive";
+  canRunLifecycle: boolean;
   onTriggerPatrol: () => void;
   onOpenHistory: () => void;
   onBeginRename: () => void;
   onToggleStyle: () => void;
+  onCompact: () => void;
+  onClear: () => void;
+  onNewSession: () => void;
   onOpenSettings: () => void;
   extraMenuItems?: ReactNode;
 }) {
@@ -241,7 +254,7 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
         >
           <ThemedEllipsis size={14} uniProps={mutedIconMapping} />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" width={232} sheetTitle={displayTitle}>
+        <DropdownMenuContent align="end" width={248} sheetTitle={displayTitle}>
           <DropdownMenuItem
             leading={patrolIcon}
             onSelect={onTriggerPatrol}
@@ -272,6 +285,14 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
               ? t("mainChat.actions.switchToProactive")
               : t("mainChat.actions.switchToConservative")}
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <MainChatLifecycleMenuItems
+            testIdPrefix="sidebar-main-chat-hero"
+            disabled={!canRunLifecycle}
+            onCompact={onCompact}
+            onClear={onClear}
+            onNewSession={onNewSession}
+          />
           {extraMenuItems ? (
             <>
               <DropdownMenuSeparator />
@@ -562,6 +583,13 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
     displayTitle,
     currentStyle,
   });
+  const lifecycle = useMainChatLifecycleActions({
+    serverId: targetServerId,
+    client,
+    mainAgentId: summaryBase.existing?.agentId,
+    navigateToMainOnSwitch: !isSelected,
+    onBeforeNavigate,
+  });
 
   useKeyboardActionHandler({
     handlerId: "main-chat-archive-guard",
@@ -661,10 +689,14 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
                 onOpenChange={menuProps.onOpenChange}
                 displayTitle={displayTitle}
                 currentStyle={currentStyle}
+                canRunLifecycle={lifecycle.canRunLifecycle}
                 onTriggerPatrol={actions.runPatrol}
                 onOpenHistory={handleOpenHistory}
                 onBeginRename={actions.beginRename}
                 onToggleStyle={actions.toggleStyle}
+                onCompact={lifecycle.triggerCompact}
+                onClear={lifecycle.requestClear}
+                onNewSession={lifecycle.requestNewSession}
                 onOpenSettings={handleOpenSettings}
                 extraMenuItems={extraMenuItems}
               />
@@ -683,6 +715,13 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
         onChangeDraft={actions.setRenameDraft}
         onClose={actions.closeRenameModal}
         onConfirm={actions.confirmRename}
+      />
+
+      <MainChatLifecycleConfirmModal
+        confirmKind={lifecycle.confirmKind}
+        busy={lifecycle.busyAction !== null}
+        onCancel={lifecycle.cancelConfirm}
+        onConfirm={lifecycle.confirmPendingAction}
       />
     </>
   );

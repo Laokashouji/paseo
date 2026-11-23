@@ -14,6 +14,7 @@ export interface OpenMainChatTaskTargetInput {
   agentId: string;
   workspaceId?: string | null;
   title?: string | null;
+  taskId?: string | null;
   isCompact: boolean;
   forceFullPage?: boolean;
   inMainChatRoute?: boolean;
@@ -58,6 +59,7 @@ export function openMainChatTaskTarget(input: OpenMainChatTaskTargetInput): Open
       agentId,
       workspaceId,
       title,
+      taskId: input.taskId ?? null,
     });
     return "drawer";
   }
@@ -95,6 +97,7 @@ export function useOpenMainChatTaskTarget() {
       agentId: string;
       workspaceId?: string | null;
       title?: string | null;
+      taskId?: string | null;
       forceFullPage?: boolean;
     }): OpenMainChatTaskResult => {
       const inMainChatRoute = shellContext.inMainChatShell || isMainChatPathname(pathname);
@@ -103,6 +106,7 @@ export function useOpenMainChatTaskTarget() {
         agentId: input.agentId,
         workspaceId: input.workspaceId,
         title: input.title,
+        taskId: input.taskId,
         isCompact,
         forceFullPage: input.forceFullPage,
         inMainChatRoute,

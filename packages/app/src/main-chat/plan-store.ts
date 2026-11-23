@@ -1,5 +1,5 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { MainChatPlanRecord } from "@getpaseo/protocol/main-chat";
+import type { MainChatPlanRecord, MainChatPlanTaskPatch } from "@getpaseo/protocol/main-chat";
 import { create } from "zustand";
 
 interface MainChatPlanStoreState {
@@ -13,6 +13,19 @@ interface MainChatPlanStoreState {
     planId: string,
     client: DaemonClient,
     options?: { taskIds?: string[]; rememberAutoStart?: boolean },
+  ) => Promise<MainChatPlanRecord>;
+  updatePlanTask: (
+    serverId: string,
+    planId: string,
+    taskId: string,
+    patch: MainChatPlanTaskPatch,
+    client: DaemonClient,
+  ) => Promise<MainChatPlanRecord>;
+  withdrawPlan: (
+    serverId: string,
+    planId: string,
+    reason: string,
+    client: DaemonClient,
   ) => Promise<MainChatPlanRecord>;
   cancelPlan: (
     serverId: string,
@@ -85,6 +98,36 @@ export const useMainChatPlanStore = create<MainChatPlanStoreState>((set) => ({
     const result = await client.startMainChatPlan(planId, options);
     if (result.error || !result.plan) {
       throw new Error(result.error ?? "启动计划失败");
+    }
+    const plan = result.plan;
+    set((state) => ({
+      plansByKey: {
+        ...state.plansByKey,
+        [planStoreKey(serverId, plan.id)]: plan,
+      },
+    }));
+    return plan;
+  },
+
+  async updatePlanTask(serverId, planId, taskId, patch, client) {
+    const result = await client.updateMainChatPlanTask(planId, taskId, patch);
+    if (result.error || !result.plan) {
+      throw new Error(result.error ?? "更新任务计划失败");
+    }
+    const plan = result.plan;
+    set((state) => ({
+      plansByKey: {
+        ...state.plansByKey,
+        [planStoreKey(serverId, plan.id)]: plan,
+      },
+    }));
+    return plan;
+  },
+
+  async withdrawPlan(serverId, planId, reason, client) {
+    const result = await client.withdrawMainChatPlan(planId, reason);
+    if (result.error || !result.plan) {
+      throw new Error(result.error ?? "撤回计划失败");
     }
     const plan = result.plan;
     set((state) => ({

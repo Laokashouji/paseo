@@ -1,5 +1,11 @@
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
+  MAIN_CHAT_CONVERSATION_KIND_LABEL,
+  isFormerMainChatLabels,
   isMainChatAgent,
+  type MainChatActivityEntry,
+  type MainChatActivityKind,
+  type MainChatActivityStatus,
   type MainChatOverview,
   type MainChatPatrolResult,
   type MainChatSessionTriage,
@@ -7,7 +13,15 @@ import {
 import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import equal from "fast-deep-equal";
-import { ArrowLeft, ArrowUpRight, Radar, Sparkles } from "lucide-react-native";
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  ChevronDown,
+  ChevronRight,
+  Radar,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, Text, View } from "react-native";
@@ -19,7 +33,7 @@ import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 import { Button } from "@/components/ui/button";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import {
   HEADER_INNER_HEIGHT,
   HEADER_INNER_HEIGHT_MOBILE,
@@ -48,7 +62,10 @@ import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const ThemedArrowUpRight = withUnistyles(ArrowUpRight);
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedRadar = withUnistyles(Radar);
+const ThemedRefreshCw = withUnistyles(RefreshCw);
 const ThemedSparkles = withUnistyles(Sparkles);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -56,13 +73,58 @@ const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 
 type HistoryTab = "conversations" | "activity";
 
+export type MainChatActivityFilter =
+  | "all"
+  | "silent"
+  | "preempted"
+  | "compaction_handoff"
+  | "missing_reply_recovery";
+
+const ACTIVITY_FILTERS: readonly MainChatActivityFilter[] = [
+  "all",
+  "silent",
+  "preempted",
+  "compaction_handoff",
+  "missing_reply_recovery",
+];
+
+export function filterMainChatActivityEntries(
+  entries: readonly MainChatActivityEntry[],
+  filter: MainChatActivityFilter,
+): MainChatActivityEntry[] {
+  if (filter === "all") return [...entries];
+  return entries.filter((entry) => {
+    switch (filter) {
+      case "silent":
+        return entry.kind === "silent_turn" || entry.silent;
+      case "preempted":
+        return (
+          entry.kind === "preempted" ||
+          entry.status === "preempted" ||
+          entry.preemptedByUser === true
+        );
+      case "compaction_handoff":
+        return entry.kind === "compaction" || entry.kind === "clear" || entry.kind === "handoff";
+      case "missing_reply_recovery":
+        return entry.kind === "missing_reply_recovery";
+    }
+  });
+}
+
 interface AssistantConversationListItem {
   serverId: string;
   agentId: string;
   title: string;
   archived: boolean;
   isActiveMain: boolean;
+  isFormerMain: boolean;
   updatedAtMs: number;
+}
+
+function isAssistantConversationAgent(agent: { labels: Record<string, unknown> }): boolean {
+  if (isMainChatAgent(agent) || isFormerMainChatLabels(agent.labels)) return true;
+  const kind = agent.labels[MAIN_CHAT_CONVERSATION_KIND_LABEL];
+  return kind === "main" || kind === "leader" || kind === "side";
 }
 
 function selectAssistantConversations(
@@ -76,18 +138,21 @@ function selectAssistantConversations(
     const candidates = [...session.agents.values(), ...session.agentDetails.values()];
     for (const agent of candidates) {
       const key = `${serverId}:${agent.id}`;
-      if (seen.has(key) || !isMainChatAgent(agent)) continue;
+      if (seen.has(key) || !isAssistantConversationAgent(agent)) continue;
       seen.add(key);
+      const isFormerMain = isFormerMainChatLabels(agent.labels);
       items.push({
         serverId,
         agentId: agent.id,
         title: agent.title?.trim() || agent.id,
-        archived: agent.archivedAt !== null,
+        archived: agent.archivedAt !== null || isFormerMain,
         isActiveMain:
           activeMain !== null &&
           activeMain.serverId === serverId &&
           activeMain.agentId === agent.id &&
-          agent.archivedAt === null,
+          agent.archivedAt === null &&
+          !isFormerMain,
+        isFormerMain,
         updatedAtMs: agent.updatedAt.getTime(),
       });
     }
@@ -95,6 +160,7 @@ function selectAssistantConversations(
 
   items.sort((left, right) => {
     if (left.isActiveMain !== right.isActiveMain) return left.isActiveMain ? -1 : 1;
+    if (left.archived !== right.archived) return left.archived ? 1 : -1;
     return right.updatedAtMs - left.updatedAtMs;
   });
   return items;
@@ -105,6 +171,79 @@ function formatUpdatedTime(timestampMs: number): string {
     return new Date(timestampMs).toLocaleString();
   } catch {
     return "";
+  }
+}
+
+function formatIsoTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return iso;
+  return formatUpdatedTime(ms);
+}
+
+function resolveActivityStatusVariant(status: MainChatActivityStatus): StatusBadgeVariant {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "running":
+    case "queued":
+    case "preempted":
+      return "warning";
+    case "failed":
+      return "error";
+    case "skipped":
+      return "muted";
+  }
+}
+
+function resolveActivityKindKey(kind: MainChatActivityKind): string {
+  switch (kind) {
+    case "background_turn":
+      return "mainChat.history.activityKind.backgroundTurn";
+    case "silent_turn":
+      return "mainChat.history.activityKind.silentTurn";
+    case "preempted":
+      return "mainChat.history.activityKind.preempted";
+    case "compaction":
+      return "mainChat.history.activityKind.compaction";
+    case "clear":
+      return "mainChat.history.activityKind.clear";
+    case "handoff":
+      return "mainChat.history.activityKind.handoff";
+    case "missing_reply_recovery":
+      return "mainChat.history.activityKind.missingReplyRecovery";
+  }
+}
+
+function resolveActivityStatusKey(status: MainChatActivityStatus): string {
+  switch (status) {
+    case "queued":
+      return "mainChat.history.activityStatus.queued";
+    case "running":
+      return "mainChat.history.activityStatus.running";
+    case "completed":
+      return "mainChat.history.activityStatus.completed";
+    case "preempted":
+      return "mainChat.history.activityStatus.preempted";
+    case "failed":
+      return "mainChat.history.activityStatus.failed";
+    case "skipped":
+      return "mainChat.history.activityStatus.skipped";
+  }
+}
+
+function resolveActivityFilterKey(filter: MainChatActivityFilter): string {
+  switch (filter) {
+    case "all":
+      return "mainChat.history.filters.all";
+    case "silent":
+      return "mainChat.history.filters.silent";
+    case "preempted":
+      return "mainChat.history.filters.preempted";
+    case "compaction_handoff":
+      return "mainChat.history.filters.compactionHandoff";
+    case "missing_reply_recovery":
+      return "mainChat.history.filters.missingReplyRecovery";
   }
 }
 
@@ -320,6 +459,137 @@ const HistoryConversationsTab = memo(function HistoryConversationsTab({
   );
 });
 
+const ActivityFilterPill = memo(function ActivityFilterPill({
+  filter,
+  count,
+  selected,
+  onSelect,
+}: {
+  filter: MainChatActivityFilter;
+  count: number;
+  selected: boolean;
+  onSelect: (filter: MainChatActivityFilter) => void;
+}) {
+  const { t } = useTranslation();
+  const handlePress = useCallback(() => onSelect(filter), [filter, onSelect]);
+  const pillStyle = useMemo(
+    () => [styles.filterPill, selected && styles.filterPillSelected],
+    [selected],
+  );
+  const labelStyle = useMemo(
+    () => [styles.filterPillLabel, selected && styles.filterPillLabelSelected],
+    [selected],
+  );
+
+  return (
+    <PressHighlight
+      onPress={handlePress}
+      style={pillStyle}
+      highlightStyle={styles.itemCardPressed}
+      accessibilityRole="button"
+      accessibilityLabel={t(resolveActivityFilterKey(filter))}
+      testID={`main-chat-activity-filter-${filter}`}
+    >
+      <Text style={labelStyle} numberOfLines={1}>
+        {t(resolveActivityFilterKey(filter))} ({count})
+      </Text>
+    </PressHighlight>
+  );
+});
+
+const ActivityAuditCard = memo(function ActivityAuditCard({
+  entry,
+  expanded,
+  onToggleExpand,
+  onOpenRelatedAgent,
+}: {
+  entry: MainChatActivityEntry;
+  expanded: boolean;
+  onToggleExpand: (entryId: string) => void;
+  onOpenRelatedAgent?: (agentId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const handleToggle = useCallback(() => onToggleExpand(entry.id), [entry.id, onToggleExpand]);
+  const handleOpenRelated = useCallback(() => {
+    if (entry.relatedAgentId) onOpenRelatedAgent?.(entry.relatedAgentId);
+  }, [entry.relatedAgentId, onOpenRelatedAgent]);
+
+  const hasDetail = Boolean(entry.detail?.trim() || entry.completedAt || entry.relatedAgentId);
+  const timestamp = formatIsoTime(entry.createdAt);
+
+  return (
+    <View style={styles.auditCard} testID={`main-chat-activity-entry-${entry.id}`}>
+      <PressHighlight
+        onPress={handleToggle}
+        style={styles.auditHeaderRow}
+        highlightStyle={styles.itemCardPressed}
+        accessibilityRole="button"
+        accessibilityLabel={entry.summary}
+        testID={`main-chat-activity-toggle-${entry.id}`}
+      >
+        <View style={styles.auditChevron}>
+          {expanded ? (
+            <ThemedChevronDown size={14} uniProps={mutedIconMapping} />
+          ) : (
+            <ThemedChevronRight size={14} uniProps={mutedIconMapping} />
+          )}
+        </View>
+        <View style={styles.itemBody}>
+          <View style={styles.itemTitleRow}>
+            <StatusBadge size="xs" variant="muted" label={t(resolveActivityKindKey(entry.kind))} />
+            <StatusBadge
+              size="xs"
+              variant={resolveActivityStatusVariant(entry.status)}
+              label={t(resolveActivityStatusKey(entry.status))}
+            />
+            {entry.silent ? (
+              <StatusBadge size="xs" variant="muted" label={t("mainChat.history.silentBadge")} />
+            ) : null}
+            {entry.preemptedByUser ? (
+              <StatusBadge
+                size="xs"
+                variant="warning"
+                label={t("mainChat.history.preemptedByUserBadge")}
+              />
+            ) : null}
+          </View>
+          <Text style={styles.itemTitle} numberOfLines={expanded ? undefined : 2}>
+            {entry.summary}
+          </Text>
+          <Text style={styles.itemMeta} numberOfLines={1}>
+            {t("mainChat.history.triggerMeta", { trigger: entry.trigger })}
+            {timestamp ? ` · ${timestamp}` : ""}
+          </Text>
+        </View>
+      </PressHighlight>
+
+      {expanded && hasDetail ? (
+        <View style={styles.auditDetailBox} testID={`main-chat-activity-detail-${entry.id}`}>
+          {entry.detail?.trim() ? <Text style={styles.auditDetailText}>{entry.detail}</Text> : null}
+          {entry.completedAt ? (
+            <Text style={styles.itemMeta}>
+              {t("mainChat.history.completedAtMeta", { time: formatIsoTime(entry.completedAt) })}
+            </Text>
+          ) : null}
+          {entry.relatedAgentId && onOpenRelatedAgent ? (
+            <PressHighlight
+              onPress={handleOpenRelated}
+              style={styles.relatedLink}
+              highlightStyle={styles.itemCardPressed}
+              accessibilityRole="button"
+              accessibilityLabel={t("mainChat.openChildAgent")}
+              testID={`main-chat-activity-open-agent-${entry.id}`}
+            >
+              <Text style={styles.relatedLinkText}>{t("mainChat.openChildAgent")}</Text>
+              <ThemedArrowUpRight size={12} uniProps={mutedIconMapping} />
+            </PressHighlight>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+});
+
 const TriageCard = memo(function TriageCard({ triage }: { triage: MainChatSessionTriage }) {
   return (
     <View style={styles.infoCard} testID={`main-chat-history-triage-${triage.agentId}`}>
@@ -338,16 +608,116 @@ const TriageCard = memo(function TriageCard({ triage }: { triage: MainChatSessio
 const HistoryActivityTab = memo(function HistoryActivityTab({
   overview,
   lastPatrol,
+  activities,
+  isLoadingActivities,
+  activitiesError,
+  activeFilter,
+  onSelectFilter,
+  onRefreshActivities,
+  onOpenRelatedAgent,
 }: {
   overview: MainChatOverview | null;
   lastPatrol: MainChatPatrolResult | null;
+  activities: readonly MainChatActivityEntry[];
+  isLoadingActivities: boolean;
+  activitiesError: string | null;
+  activeFilter: MainChatActivityFilter;
+  onSelectFilter: (filter: MainChatActivityFilter) => void;
+  onRefreshActivities: () => void;
+  onOpenRelatedAgent?: (agentId: string) => void;
 }) {
   const { t } = useTranslation();
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set());
+
+  const handleToggleExpand = useCallback((entryId: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
+  }, []);
+
+  const filteredActivities = useMemo(
+    () => filterMainChatActivityEntries(activities, activeFilter),
+    [activities, activeFilter],
+  );
+
+  const countsByFilter = useMemo(() => {
+    const map: Record<MainChatActivityFilter, number> = {
+      all: activities.length,
+      silent: 0,
+      preempted: 0,
+      compaction_handoff: 0,
+      missing_reply_recovery: 0,
+    };
+    for (const filter of ACTIVITY_FILTERS) {
+      if (filter === "all") continue;
+      map[filter] = filterMainChatActivityEntries(activities, filter).length;
+    }
+    return map;
+  }, [activities]);
+
   const metrics = overview?.metrics ?? null;
   const triages = overview?.triages ?? [];
 
   return (
     <View style={styles.sectionStack} testID="main-chat-history-activity">
+      <View style={styles.sectionBlock}>
+        <View style={styles.auditHeaderBar}>
+          <Text style={styles.sectionTitle}>{t("mainChat.history.auditHeading")}</Text>
+          <Button
+            variant="outline"
+            size="sm"
+            leftIcon={ThemedRefreshCw}
+            loading={isLoadingActivities}
+            onPress={onRefreshActivities}
+            testID="main-chat-activity-refresh"
+          >
+            {t("mainChat.history.refreshActivity")}
+          </Button>
+        </View>
+
+        <View style={styles.filterRow} testID="main-chat-activity-filters">
+          {ACTIVITY_FILTERS.map((filter) => (
+            <ActivityFilterPill
+              key={filter}
+              filter={filter}
+              count={countsByFilter[filter]}
+              selected={activeFilter === filter}
+              onSelect={onSelectFilter}
+            />
+          ))}
+        </View>
+
+        {activitiesError ? (
+          <View style={styles.infoCard} testID="main-chat-activity-error">
+            <Text style={styles.errorText}>{activitiesError}</Text>
+          </View>
+        ) : null}
+
+        {filteredActivities.length > 0 ? (
+          <View style={styles.cardList} testID="main-chat-activity-list">
+            {filteredActivities.map((entry) => (
+              <ActivityAuditCard
+                key={entry.id}
+                entry={entry}
+                expanded={expandedIds.has(entry.id)}
+                onToggleExpand={handleToggleExpand}
+                onOpenRelatedAgent={onOpenRelatedAgent}
+              />
+            ))}
+          </View>
+        ) : null}
+        {filteredActivities.length === 0 && !isLoadingActivities ? (
+          <Text style={styles.emptyText} testID="main-chat-activity-empty">
+            {activities.length === 0
+              ? t("mainChat.history.emptyAuditLog")
+              : t("mainChat.history.emptyFilteredAuditLog")}
+          </Text>
+        ) : null}
+      </View>
+
       <View style={styles.sectionBlock}>
         <Text style={styles.sectionTitle}>{t("mainChat.history.activityHeading")}</Text>
 
@@ -383,7 +753,7 @@ const HistoryActivityTab = memo(function HistoryActivityTab({
           </View>
         ) : null}
 
-        {triages.length === 0 && !lastPatrol && !metrics ? (
+        {triages.length === 0 && !lastPatrol && !metrics && activities.length === 0 ? (
           <Text style={styles.emptyText}>{t("mainChat.history.emptyActivity")}</Text>
         ) : null}
       </View>
@@ -391,10 +761,55 @@ const HistoryActivityTab = memo(function HistoryActivityTab({
   );
 });
 
+function useMainChatActivityAudit(input: {
+  client: DaemonClient | null;
+  mainAgentId: string | undefined;
+  enabled: boolean;
+}) {
+  const { client, mainAgentId, enabled } = input;
+  const { t } = useTranslation();
+  const [activities, setActivities] = useState<MainChatActivityEntry[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loadFailedMessage = t("mainChat.history.loadAuditFailed");
+
+  const load = useCallback(async () => {
+    if (!client) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await client.listMainChatActivity({
+        ...(mainAgentId ? { mainAgentId } : {}),
+        includeSilent: true,
+        limit: 100,
+      });
+      if (response.error) {
+        setError(response.error);
+        return;
+      }
+      setActivities(response.activities);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : loadFailedMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [client, loadFailedMessage, mainAgentId]);
+
+  useEffect(() => {
+    if (!enabled || !client) return;
+    void load();
+  }, [client, enabled, load]);
+
+  return {
+    activities,
+    isLoading,
+    error,
+    refresh: load,
+  };
+}
+
 /**
- * `/main/history` — Assistant conversation history and background activity view.
- * Structured with segmented tabs (`conversations` | `activity`) so M2 background-turn logs and M4
- * direction/side conversation management plug straight in.
+ * `/main/history` — Assistant conversation history and M2 background activity audit view.
  */
 export function MainChatHistoryScreen(): ReactElement {
   const isFocused = useIsFocused();
@@ -415,6 +830,7 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
   const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("conversations");
+  const [activityFilter, setActivityFilter] = useState<MainChatActivityFilter>("all");
   const [isPatrolling, setIsPatrolling] = useState(false);
 
   const summary = useStoreWithEqualityFn(
@@ -432,7 +848,7 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
   );
 
-  const conversations = useStoreWithEqualityFn(
+  const conversationsFromStore = useStoreWithEqualityFn(
     useSessionStore,
     useCallback((state) => selectAssistantConversations(state, activeMainRef), [activeMainRef]),
     equal,
@@ -467,6 +883,42 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     void loadOverview(activeMainRef.serverId, activeMainRef.agentId, client);
   }, [activeMainRef, client, loadOverview]);
 
+  const audit = useMainChatActivityAudit({
+    client,
+    mainAgentId: activeMainRef?.agentId,
+    enabled: activeTab === "activity",
+  });
+
+  const conversations = useMemo(() => {
+    if (!overview?.conversations || overview.conversations.length === 0) {
+      return conversationsFromStore;
+    }
+    const existingKeys = new Set(
+      conversationsFromStore.map((item) => `${item.serverId}:${item.agentId}`),
+    );
+    const merged = [...conversationsFromStore];
+    for (const conv of overview.conversations) {
+      const srvId = conv.serverId ?? targetServerId ?? "";
+      if (!srvId) continue;
+      const key = `${srvId}:${conv.agentId}`;
+      if (existingKeys.has(key)) continue;
+      existingKeys.add(key);
+      merged.push({
+        serverId: srvId,
+        agentId: conv.agentId,
+        title: conv.title,
+        archived: conv.archivedAt !== null,
+        isActiveMain:
+          conv.kind === "main" &&
+          conv.archivedAt === null &&
+          activeMainRef?.agentId === conv.agentId,
+        isFormerMain: conv.kind === "main" && conv.archivedAt !== null,
+        updatedAtMs: Date.parse(conv.updatedAt) || 0,
+      });
+    }
+    return merged;
+  }, [activeMainRef?.agentId, conversationsFromStore, overview?.conversations, targetServerId]);
+
   const hostLabelByServerId = useMemo(
     () => new Map(hosts.map((host) => [host.serverId, host.label])),
     [hosts],
@@ -499,10 +951,14 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     })
       .then((result) => {
         toast.show(result.summary, { variant: "success" });
+        const tasks: Promise<unknown>[] = [];
         if (activeMainRef) {
-          return loadOverview(activeMainRef.serverId, activeMainRef.agentId, client);
+          tasks.push(loadOverview(activeMainRef.serverId, activeMainRef.agentId, client));
         }
-        return null;
+        if (activeTab === "activity") {
+          tasks.push(audit.refresh());
+        }
+        return Promise.all(tasks);
       })
       .catch((error) => {
         toast.error(error instanceof Error ? error.message : t("mainChat.patrolFailed"));
@@ -510,7 +966,18 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
       .finally(() => {
         setIsPatrolling(false);
       });
-  }, [activeMainRef, client, isPatrolling, loadOverview, t, targetServerId, toast, triggerPatrol]);
+  }, [
+    activeMainRef,
+    activeTab,
+    audit,
+    client,
+    isPatrolling,
+    loadOverview,
+    t,
+    targetServerId,
+    toast,
+    triggerPatrol,
+  ]);
 
   const handleOpenConversation = useCallback((item: AssistantConversationListItem) => {
     if (item.isActiveMain) {
@@ -538,6 +1005,28 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     },
     [isCompact, t],
   );
+
+  const handleOpenRelatedAgent = useCallback(
+    (agentId: string) => {
+      if (!targetServerId) return;
+      const mode = openMainChatTaskTarget({
+        serverId: targetServerId,
+        agentId,
+        isCompact,
+        inMainChatRoute: true,
+        originRoute: buildMainChatHistoryRoute(),
+        originTitle: t("mainChat.history.title"),
+      });
+      if (mode === "drawer") {
+        router.push(buildMainChatRoute());
+      }
+    },
+    [isCompact, t, targetServerId],
+  );
+
+  const handleRefreshActivities = useCallback(() => {
+    void audit.refresh();
+  }, [audit]);
 
   return (
     <View style={styles.root} testID="main-chat-history-screen">
@@ -574,7 +1063,17 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
               onOpenTask={handleOpenTask}
             />
           ) : (
-            <HistoryActivityTab overview={overview} lastPatrol={lastPatrol} />
+            <HistoryActivityTab
+              overview={overview}
+              lastPatrol={lastPatrol}
+              activities={audit.activities}
+              isLoadingActivities={audit.isLoading}
+              activitiesError={audit.error}
+              activeFilter={activityFilter}
+              onSelectFilter={setActivityFilter}
+              onRefreshActivities={handleRefreshActivities}
+              onOpenRelatedAgent={targetServerId ? handleOpenRelatedAgent : undefined}
+            />
           )}
         </View>
       </ScrollView>
@@ -671,6 +1170,38 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,
   },
+  auditHeaderBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing[2],
+  },
+  filterRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
+  },
+  filterPill: {
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.full,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+  },
+  filterPillSelected: {
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.surface2,
+  },
+  filterPillLabel: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+  },
+  filterPillLabelSelected: {
+    color: theme.colors.foreground,
+    fontWeight: theme.fontWeight.medium,
+  },
   cardList: {
     gap: theme.spacing[2],
   },
@@ -687,6 +1218,52 @@ const styles = StyleSheet.create((theme) => ({
   },
   itemCardPressed: {
     backgroundColor: theme.colors.surface2,
+  },
+  auditCard: {
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+    overflow: "hidden",
+  },
+  auditHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+  },
+  auditChevron: {
+    paddingTop: 2,
+    flexShrink: 0,
+  },
+  auditDetailBox: {
+    borderTopWidth: theme.borderWidth[1],
+    borderTopColor: theme.colors.border,
+    backgroundColor: theme.colors.surface0,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    gap: theme.spacing[1.5],
+  },
+  auditDetailText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foreground,
+    lineHeight: 19,
+  },
+  relatedLink: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+  },
+  relatedLinkText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
   },
   itemLeading: {
     width: 28,
@@ -705,7 +1282,7 @@ const styles = StyleSheet.create((theme) => ({
   itemTitleRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
+    gap: theme.spacing[1.5],
     flexWrap: "wrap",
   },
   itemTitle: {
@@ -735,6 +1312,10 @@ const styles = StyleSheet.create((theme) => ({
   infoCardLine: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
+  },
+  errorText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.statusDanger,
   },
   emptyText: {
     fontSize: theme.fontSize.sm,

@@ -21,7 +21,6 @@ import { SubagentsTrack } from "@/subagents/track";
 import { MainChatBoardPill } from "@/main-chat/board-pill";
 import { useOpenMainChatTaskTarget } from "@/main-chat/open-task-target";
 import { useMainChatShellContext } from "@/main-chat/shell-context";
-import { MainChatTaskDock } from "@/main-chat/task-dock";
 import type { TodoEntry } from "@/types/stream";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTabTarget } from "@/workspace-tabs/model";
@@ -145,7 +144,6 @@ export const AgentTracks = memo(function AgentTracks({
         agentId={agentId}
         onOpenSubagent={handleOpenSubagent}
       />
-      <MainChatTaskDock serverId={serverId} agentId={agentId} onOpenSubagent={handleOpenSubagent} />
       <SubagentsTrack
         serverId={serverId}
         rows={subagentRows}

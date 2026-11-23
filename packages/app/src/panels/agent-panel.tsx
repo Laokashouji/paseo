@@ -31,6 +31,7 @@ import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
 import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useToast } from "@/contexts/toast-context";
+import { MainChatActionBar } from "@/main-chat/action-bar";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1729,6 +1730,7 @@ function ActiveAgentComposer({
 
   return (
     <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
+      <MainChatActionBar serverId={serverId} agentId={agentId} />
       <MainChatRouteBanner
         target={mainChatDirectRoute.target}
         onClear={mainChatDirectRoute.clearTarget}
