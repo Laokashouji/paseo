@@ -61,8 +61,11 @@ vi.mock("lucide-react-native", async (importOriginal) => {
   const requiredNames = [
     "Activity",
     "CalendarClock",
+    "ChevronDown",
+    "ChevronUp",
     "CircleDashed",
     "Copy",
+    "Ellipsis",
     "Folder",
     "FolderPlus",
     "History",
@@ -71,14 +74,18 @@ vi.mock("lucide-react-native", async (importOriginal) => {
     "Keyboard",
     "Moon",
     "PanelLeft",
+    "Pencil",
     "Plus",
     "Power",
     "Radar",
     "RefreshCw",
     "RotateCcw",
+    "Save",
     "Settings",
     "Shield",
+    "SlidersHorizontal",
     "Sparkles",
+    "Trash2",
     "Zap",
   ];
   for (const name of requiredNames) {
@@ -102,6 +109,7 @@ vi.mock("@/hooks/use-keyboard-shortcut-overrides", () => ({
 vi.mock("@/keyboard", () => ({
   usesDesktopBindings: true,
   useHardwareKeyboardPresent: () => true,
+  useOverlayRegistration: () => () => undefined,
 }));
 
 vi.mock("@/hooks/use-open-add-project", () => ({

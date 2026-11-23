@@ -1,8 +1,9 @@
 import { en, type TranslationResources } from "./en";
+import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 
 export const fr: TranslationResources = {
-  mainChat: en.mainChat,
+  mainChat: mergeMainChatStyleLocale(en.mainChat, "fr"),
   pluginCombobox: {
     searching: "Recherche…",
     empty: "Aucun résultat",

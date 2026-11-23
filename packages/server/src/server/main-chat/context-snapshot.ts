@@ -3,6 +3,7 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import {
   getMainChatTaskMetaFromLabels,
   isMainChatLabels,
+  resolveActiveMainChatStylePreset,
   type MainChatDecisionRecord,
   type MainChatPlanRecord,
   type MainChatSessionTriage,
@@ -170,10 +171,15 @@ function formatCompactWorkingRow(item: FleetSessionSnapshotItem): SnapshotRow {
 }
 
 function formatStyleSummary(settings: MainChatSettings): string {
-  const styleLabel =
+  const activePreset = resolveActiveMainChatStylePreset(settings);
+  const baseLabel =
     settings.style === "proactive"
       ? "激进模式（B · 主动代答与催促）"
       : "保守模式（A · 仅汇报建议）";
+  const styleLabel =
+    activePreset.kind === "custom" && activePreset.name
+      ? `自定义预设「${activePreset.name}」（基于${settings.style === "proactive" ? "激进" : "保守"}）`
+      : baseLabel;
   const extras: string[] = [];
   if (settings.capabilities.autoContinueManualErrors) extras.push("瞬时报错自动续跑");
   if (settings.capabilities.autoDelegateManualQuestions) extras.push("允许低风险技术问题代答");

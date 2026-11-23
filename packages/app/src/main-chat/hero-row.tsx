@@ -1,5 +1,9 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { isMainChatEnabled, type MainChatNightModeStatus } from "@getpaseo/protocol/main-chat";
+import {
+  isMainChatEnabled,
+  type MainChatNightModeStatus,
+  type MainChatSettings,
+} from "@getpaseo/protocol/main-chat";
 import { router, usePathname } from "expo-router";
 import equal from "fast-deep-equal";
 import {
@@ -35,8 +39,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
+  type MenuPageDefinition,
 } from "@/components/ui/dropdown-menu";
 import { FormTextInput } from "@/components/ui/form-field";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -70,6 +77,12 @@ import {
 } from "./lifecycle-actions";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
+import {
+  buildMainChatStylePresetItems,
+  findActiveMainChatStylePresetItem,
+  formatSwitchedMainChatPresetToast,
+  type MainChatStylePresetListItem,
+} from "./style-presets";
 
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedChevronRight = withUnistyles(ChevronRight);
@@ -298,17 +311,47 @@ const HeroTitleBadge = memo(function HeroTitleBadge({
   );
 });
 
+const HeroStylePresetMenuItem = memo(function HeroStylePresetMenuItem({
+  preset,
+  selected,
+  showDescription,
+  onSelectPreset,
+}: {
+  preset: MainChatStylePresetListItem;
+  selected: boolean;
+  showDescription: boolean;
+  onSelectPreset: (presetId: string, presetName: string) => void;
+}): ReactElement {
+  const handleSelect = useCallback(() => {
+    onSelectPreset(preset.id, preset.name);
+  }, [onSelectPreset, preset.id, preset.name]);
+
+  return (
+    <DropdownMenuItem
+      selected={selected}
+      showSelectedCheck
+      description={showDescription ? preset.description : undefined}
+      onSelect={handleSelect}
+      testID={`sidebar-main-chat-hero-style-${preset.id}`}
+    >
+      {preset.name}
+    </DropdownMenuItem>
+  );
+});
+
+const STYLE_PRESETS_PAGE_ID = "main-chat-style-presets";
+
 const MainChatHeroMenu = memo(function MainChatHeroMenu({
   visible,
   open,
   onOpenChange,
   displayTitle,
-  currentStyle,
+  settings,
   canRunLifecycle,
   onTriggerPatrol,
   onOpenHistory,
   onBeginRename,
-  onToggleStyle,
+  onSelectPreset,
   onCompact,
   onClear,
   onNewSession,
@@ -319,12 +362,12 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   displayTitle: string;
-  currentStyle: "conservative" | "proactive";
+  settings: MainChatSettings | undefined;
   canRunLifecycle: boolean;
   onTriggerPatrol: () => void;
   onOpenHistory: () => void;
   onBeginRename: () => void;
-  onToggleStyle: () => void;
+  onSelectPreset: (presetId: string, presetName: string) => void;
   onCompact: () => void;
   onClear: () => void;
   onNewSession: () => void;
@@ -332,6 +375,76 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
   extraMenuItems?: ReactNode;
 }) {
   const { t } = useTranslation();
+  const allPresets = useMemo(() => buildMainChatStylePresetItems(settings, t), [settings, t]);
+  const activePreset = useMemo(() => findActiveMainChatStylePresetItem(settings, t), [settings, t]);
+  const builtinPresets = useMemo(
+    () => allPresets.filter((item) => item.kind === "builtin"),
+    [allPresets],
+  );
+  const customPresets = useMemo(
+    () => allPresets.filter((item) => item.kind === "custom"),
+    [allPresets],
+  );
+  const currentStyle = settings?.style ?? "conservative";
+  const hasCustomPresets = customPresets.length > 0;
+
+  const handleQuickToggleBuiltIn = useCallback(() => {
+    const nextId = currentStyle === "conservative" ? "proactive" : "conservative";
+    const nextItem = allPresets.find((entry) => entry.id === nextId);
+    onSelectPreset(nextId, nextItem?.name ?? nextId);
+  }, [allPresets, currentStyle, onSelectPreset]);
+
+  const pages = useMemo<MenuPageDefinition[] | undefined>(() => {
+    if (!hasCustomPresets) return undefined;
+    return [
+      {
+        id: STYLE_PRESETS_PAGE_ID,
+        title: t("mainChat.actions.switchStyle"),
+        content: (
+          <>
+            <DropdownMenuLabel>{t("mainChat.settings.style.builtinGroupLabel")}</DropdownMenuLabel>
+            {builtinPresets.map((preset) => (
+              <HeroStylePresetMenuItem
+                key={preset.id}
+                preset={preset}
+                selected={preset.id === activePreset.id}
+                showDescription={false}
+                onSelectPreset={onSelectPreset}
+              />
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>{t("mainChat.settings.style.customGroupLabel")}</DropdownMenuLabel>
+            {customPresets.map((preset) => (
+              <HeroStylePresetMenuItem
+                key={preset.id}
+                preset={preset}
+                selected={preset.id === activePreset.id}
+                showDescription
+                onSelectPreset={onSelectPreset}
+              />
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              leading={settingsIcon}
+              onSelect={onOpenSettings}
+              testID="sidebar-main-chat-hero-style-manage"
+            >
+              {t("mainChat.actions.manageStylePresets")}
+            </DropdownMenuItem>
+          </>
+        ),
+      },
+    ];
+  }, [
+    activePreset.id,
+    builtinPresets,
+    customPresets,
+    hasCustomPresets,
+    onOpenSettings,
+    onSelectPreset,
+    t,
+  ]);
+
   return (
     <View style={[styles.menuSlot, !visible && styles.menuSlotHidden]}>
       <DropdownMenu compactMode="sheet" open={open} onOpenChange={onOpenChange}>
@@ -344,7 +457,7 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
         >
           <ThemedEllipsis size={14} uniProps={mutedIconMapping} />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" width={248} sheetTitle={displayTitle}>
+        <DropdownMenuContent align="end" width={248} sheetTitle={displayTitle} pages={pages}>
           <DropdownMenuItem
             leading={patrolIcon}
             onSelect={onTriggerPatrol}
@@ -366,15 +479,26 @@ const MainChatHeroMenu = memo(function MainChatHeroMenu({
           >
             {t("sidebar.workspace.actions.rename")}
           </DropdownMenuItem>
-          <DropdownMenuItem
-            leading={currentStyle === "conservative" ? proactiveIcon : conservativeIcon}
-            onSelect={onToggleStyle}
-            testID="sidebar-main-chat-hero-toggle-style"
-          >
-            {currentStyle === "conservative"
-              ? t("mainChat.actions.switchToProactive")
-              : t("mainChat.actions.switchToConservative")}
-          </DropdownMenuItem>
+          {hasCustomPresets ? (
+            <DropdownMenuSubTrigger
+              id={STYLE_PRESETS_PAGE_ID}
+              leading={currentStyle === "proactive" ? proactiveIcon : conservativeIcon}
+              value={activePreset.shortName}
+              testID="sidebar-main-chat-hero-style-submenu"
+            >
+              {t("mainChat.actions.switchStyle")}
+            </DropdownMenuSubTrigger>
+          ) : (
+            <DropdownMenuItem
+              leading={currentStyle === "conservative" ? proactiveIcon : conservativeIcon}
+              onSelect={handleQuickToggleBuiltIn}
+              testID="sidebar-main-chat-hero-toggle-style"
+            >
+              {currentStyle === "conservative"
+                ? t("mainChat.actions.switchToProactive")
+                : t("mainChat.actions.switchToConservative")}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <MainChatLifecycleMenuItems
             testIdPrefix="sidebar-main-chat-hero"
@@ -496,9 +620,8 @@ function useMainChatHeroActions(input: {
   client: DaemonClient | null;
   existingAgentId: string | undefined;
   displayTitle: string;
-  currentStyle: "conservative" | "proactive";
 }) {
-  const { targetServerId, client, existingAgentId, displayTitle, currentStyle } = input;
+  const { targetServerId, client, existingAgentId, displayTitle } = input;
   const { t } = useTranslation();
   const toast = useToast();
   const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
@@ -561,23 +684,22 @@ function useMainChatHeroActions(input: {
     })();
   }, [client, existingAgentId, isPatrolling, t, targetServerId, toast, triggerPatrol]);
 
-  const toggleStyle = useCallback(() => {
-    if (!targetServerId || !client) return;
-    const nextStyle = currentStyle === "conservative" ? "proactive" : "conservative";
-    void updateSettings(targetServerId, { applyPreset: nextStyle }, client)
-      .then(() => {
-        toast.show(
-          nextStyle === "proactive"
-            ? t("mainChat.settings.switchedProactiveToast")
-            : t("mainChat.settings.switchedConservativeToast"),
-          { variant: "success" },
-        );
-        return nextStyle;
-      })
-      .catch((error) => {
-        toast.error(error instanceof Error ? error.message : t("mainChat.settings.saveFailed"));
-      });
-  }, [client, currentStyle, t, targetServerId, toast, updateSettings]);
+  const selectPreset = useCallback(
+    (presetId: string, presetName: string) => {
+      if (!targetServerId || !client) return;
+      void updateSettings(targetServerId, { applyPresetId: presetId }, client)
+        .then(() => {
+          toast.show(formatSwitchedMainChatPresetToast(presetId, presetName, t), {
+            variant: "success",
+          });
+          return presetId;
+        })
+        .catch((error) => {
+          toast.error(error instanceof Error ? error.message : t("mainChat.settings.saveFailed"));
+        });
+    },
+    [client, t, targetServerId, toast, updateSettings],
+  );
 
   return {
     isPatrolling,
@@ -589,7 +711,7 @@ function useMainChatHeroActions(input: {
     closeRenameModal,
     confirmRename,
     runPatrol,
-    toggleStyle,
+    selectPreset,
   };
 }
 
@@ -641,11 +763,11 @@ function useMainChatHeroData() {
     summaryBase,
     targetServerId,
     client,
+    settings,
     unsentDraftText,
     enabled: isMainChatEnabled(settings),
     nightPowerState: nightModeStatus?.state,
     displayTitle: settings?.title?.trim() || summaryBase.displayTitle,
-    currentStyle: settings?.style ?? ("conservative" as const),
   };
 }
 
@@ -671,11 +793,11 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
     summaryBase,
     targetServerId,
     client,
+    settings,
     unsentDraftText,
     enabled,
     nightPowerState,
     displayTitle,
-    currentStyle,
   } = useMainChatHeroData();
   const isSelected = isMainChatPathname(pathname);
 
@@ -684,7 +806,6 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
     client,
     existingAgentId: summaryBase.existing?.agentId,
     displayTitle,
-    currentStyle,
   });
   const lifecycle = useMainChatLifecycleActions({
     serverId: targetServerId,
@@ -795,12 +916,12 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
                 open={menuProps.open}
                 onOpenChange={menuProps.onOpenChange}
                 displayTitle={displayTitle}
-                currentStyle={currentStyle}
+                settings={settings}
                 canRunLifecycle={lifecycle.canRunLifecycle}
                 onTriggerPatrol={actions.runPatrol}
                 onOpenHistory={handleOpenHistory}
                 onBeginRename={actions.beginRename}
-                onToggleStyle={actions.toggleStyle}
+                onSelectPreset={actions.selectPreset}
                 onCompact={lifecycle.triggerCompact}
                 onClear={lifecycle.requestClear}
                 onNewSession={lifecycle.requestNewSession}

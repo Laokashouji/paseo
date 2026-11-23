@@ -1,6 +1,7 @@
 import {
   MAIN_CHAT_DEFAULT_TITLE,
   isMainChatLabels,
+  resolveActiveMainChatStylePreset,
   type MainChatDecisionRecord,
   type MainChatPlanRecord,
   type MainChatPlannedTask,
@@ -25,18 +26,56 @@ export function appendMainChatSystemPrompt(
   return [buildMainChatSystemPrompt(settings), ...(existing ?? [])];
 }
 
+function formatStylePolicyDescription(settings?: MainChatSettings | null): {
+  label: string;
+  briefingLabel: string;
+  isProactive: boolean;
+  customGuidance: string | null;
+} {
+  const activePreset = resolveActiveMainChatStylePreset(settings);
+  const isProactive = (settings?.style ?? activePreset.baseStyle) === "proactive";
+  const baseDetail = isProactive
+    ? "激进模式（B）：允许你对低风险技术问题主动跟进，但红线操作和重要取舍仍须由用户拍板"
+    : "保守模式（A）：对用户手动开的会话只汇报和给建议，不擅自发送业务指令；对你派出去的任务照常执行复核与返工";
+  if (activePreset.kind === "custom" && activePreset.name) {
+    return {
+      label: `自定义预设「${activePreset.name}」（基于${baseDetail}）`,
+      briefingLabel: `自定义预设「${activePreset.name}」`,
+      isProactive,
+      customGuidance: activePreset.customGuidance?.trim() || null,
+    };
+  }
+  return {
+    label: baseDetail,
+    briefingLabel: isProactive ? "激进模式" : "保守模式",
+    isProactive,
+    customGuidance: null,
+  };
+}
+
 /**
  * System prompt appended natively by the daemon whenever an agent carries
  * `paseo.role=main`.
  */
 export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): string {
   const title = settings?.title?.trim() || MAIN_CHAT_DEFAULT_TITLE;
-  const style = settings?.style ?? "conservative";
+  const activePreset = resolveActiveMainChatStylePreset(settings);
+  const style = settings?.style ?? activePreset.baseStyle;
   const isProactive = style === "proactive";
+  let presetIntro = isProactive ? "激进风格（B）" : "保守风格（A）";
+  if (activePreset.kind === "custom" && activePreset.name) {
+    const baseLabel = isProactive ? "激进风格 B" : "保守风格 A";
+    presetIntro = `自定义预设「${activePreset.name}」（基于${baseLabel}）`;
+  }
 
   const manualSessionPolicy = isProactive
-    ? `- **当前为激进风格（B）**：除了你通过 \`task_plan\` 派出去的任务，你也主动看管用户手动开启的全部工作区会话。遇到手动会话停在无副作用的技术细节提问、或者空转/停滞时，可以主动介入协助推进并告知用户；但**涉及 git push、发布、删除、合并 PR/MR、对外发消息、或产品方向取舍等红线动作，绝不越权代答**，必须通过 \`task_ask_user\` 或直接汇报交由用户拍板。`
-    : `- **当前为保守风格（A）**：你全局感知用户手动开启的全部工作区会话，主动跟踪进展、发现卡点/空转/报错/完成堆积并及时向用户汇报和给出清晰建议；**但对用户手动开的会话，不要在未经用户点头的情况下擅自发送业务指令或替用户拍板**（瞬时网络报错/额度重置可由后台自动续跑）。对你自己通过 \`task_plan\` 派出去的子任务，继续严格执行独立复核与返工闭环。`;
+    ? `- **当前为${presetIntro}**：除了你通过 \`task_plan\` 派出去的任务，你也主动看管用户手动开启的全部工作区会话。遇到手动会话停在无副作用的技术细节提问、或者空转/停滞时，可以主动介入协助推进并告知用户；但**涉及 git push、发布、删除、合并 PR/MR、对外发消息、或产品方向取舍等红线动作，绝不越权代答**，必须通过 \`task_ask_user\` 或直接汇报交由用户拍板。`
+    : `- **当前为${presetIntro}**：你全局感知用户手动开启的全部工作区会话，主动跟踪进展、发现卡点/空转/报错/完成堆积并及时向用户汇报和给出清晰建议；**但对用户手动开的会话，不要在未经用户点头的情况下擅自发送业务指令或替用户拍板**（瞬时网络报错/额度重置可由后台自动续跑）。对你自己通过 \`task_plan\` 派出去的子任务，继续严格执行独立复核与返工闭环。`;
+
+  const customGuidanceSection =
+    activePreset.kind === "custom" && activePreset.customGuidance?.trim()
+      ? `\n- **自定义风格补充指引（${activePreset.name ?? activePreset.id}）**：${activePreset.customGuidance.trim()}（在不突破上述红线安全边界的前提下优先遵守）。`
+      : "";
 
   return `# 你是 Paseo 的「${title}」（常驻主动对话管家）
 
@@ -53,7 +92,7 @@ export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): s
 ## 角色边界与全机纳管策略
 - 你自己不直接修改业务代码仓库，也不把大段实现细节堆进主对话。
 - 派出去的任务就是 Paseo 里普通的子 Agent 会话，用户可以在输入框上方的任务胶囊、任务板或对应工作区里随时点开查看。
-${manualSessionPolicy}
+${manualSessionPolicy}${customGuidanceSection}
 
 ## 三档开工原则
 1. **即时回答 / 态势汇报**：简单问答、查全机进度（先看 \`<paseo-main-context>\`，不够再调 \`task_list\` / \`get_agent_activity\`）、讨论方案，直接结论先行回复，不创建子任务。
@@ -99,10 +138,7 @@ export function buildMainChatPatrolWakeupPrompt(input: {
   contextSnapshot: string;
   manualTrigger?: boolean;
 }): string {
-  const styleDesc =
-    input.settings.style === "proactive"
-      ? "激进模式（B）：允许你对低风险技术问题主动跟进，但红线操作和重要取舍仍须由用户拍板"
-      : "保守模式（A）：对用户手动开的会话只汇报和给建议，不擅自发送业务指令；对你派出去的任务照常执行复核与返工";
+  const styleMeta = formatStylePolicyDescription(input.settings);
 
   const lines = input.signals.map((signal, index) => {
     const scope = signal.managedByMainChat ? "管家任务" : "手动会话";
@@ -116,7 +152,8 @@ export function buildMainChatPatrolWakeupPrompt(input: {
 
   return [
     `📋 督办 · 主动巡检唤醒：${triggerReason}`,
-    `（这是 Paseo 后台巡检事件，不是用户手打消息。当前策略：${styleDesc}。）`,
+    `（这是 Paseo 后台巡检事件，不是用户手打消息。当前策略：${styleMeta.label}。）`,
+    ...(styleMeta.customGuidance ? [`补充风格指引：${styleMeta.customGuidance}`] : []),
     "",
     lines.length > 0
       ? lines.join("\n")
@@ -140,10 +177,7 @@ export function buildMainChatSupervisionWakeupPrompt(input: {
   manualTrigger?: boolean;
   conversationLabel?: string | null;
 }): string {
-  const styleDesc =
-    input.settings.style === "proactive"
-      ? "激进模式（B）：允许你对低风险技术问题主动跟进，但红线操作和重要取舍仍须由用户拍板"
-      : "保守模式（A）：对用户手动开的会话只汇报和给建议，不擅自发送业务指令；对你派出去的任务照常执行复核与返工";
+  const styleMeta = formatStylePolicyDescription(input.settings);
 
   const triggerReason = input.manualTrigger
     ? "用户点击了「立即巡检并汇报」"
@@ -157,7 +191,8 @@ export function buildMainChatSupervisionWakeupPrompt(input: {
 
   return [
     `📋 督办 · 主动巡检唤醒：${triggerReason}`,
-    `（这是 Paseo 后台督办与巡检事件，不是用户手打消息。当前策略：${styleDesc}。）`,
+    `（这是 Paseo 后台督办与巡检事件，不是用户手打消息。当前策略：${styleMeta.label}。）`,
+    ...(styleMeta.customGuidance ? [`补充风格指引：${styleMeta.customGuidance}`] : []),
     "",
     digestBlock,
     "",
@@ -176,6 +211,7 @@ export function buildMainChatInitialBriefingPrompt(input: {
   settings: MainChatSettings;
   contextSnapshot: string;
 }): string {
+  const styleMeta = formatStylePolicyDescription(input.settings);
   return [
     `👋 首次就绪简报：你是「${input.settings.title}」，刚刚作为置顶常驻对话管家启动。`,
     "（这是 Paseo 自动触发的首次态势简报，请直接向用户输出一份极简、可读的开场全局播报，不超过 6 行。）",
@@ -183,9 +219,8 @@ export function buildMainChatInitialBriefingPrompt(input: {
     input.contextSnapshot,
     "",
     "汇报要求：",
-    "- 直接告诉用户你已经就位（当前为" +
-      (input.settings.style === "proactive" ? "激进模式" : "保守模式") +
-      "，可随时在设置里切换或重命名），并用 2-4 条要点列出当前最需要关注的会话（待拍板 / 异常 / 运行中 / 刚完成）。",
+    `- 直接告诉用户你已经就位（当前为${styleMeta.briefingLabel}，可随时在设置里切换或重命名），并用 2-4 条要点列出当前最需要关注的会话（待拍板 / 异常 / 运行中 / 刚完成）。`,
+    ...(styleMeta.customGuidance ? [`- 遵守当前自定义风格指引：${styleMeta.customGuidance}`] : []),
     "- 如果当前没有其他活跃会话，用两句话说明你负责的事（统一派活、全局盯盘、防卡顿防报错、只在关键节点找你）即可，不要啰嗦。",
   ].join("\n");
 }

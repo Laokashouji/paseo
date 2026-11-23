@@ -145,3 +145,6 @@ export const RotateCcw = StubIcon;
 export const Compass = StubIcon;
 export const Radar = StubIcon;
 export const Pause = StubIcon;
+export const ChevronUp = StubIcon;
+export const Save = StubIcon;
+export const SlidersHorizontal = StubIcon;
