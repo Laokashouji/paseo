@@ -4,7 +4,10 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import {
   MAIN_CHAT_TASK_QUIET_LABEL,
   getMainChatTaskMetaFromLabels,
+  isMainChatEnabled,
   isMainChatLabels,
+  resolveMainChatNightMode,
+  type MainChatNightModeStatus,
   type MainChatPatrolResult,
   type MainChatSessionTriage,
   type MainChatSupervisionSignal,
@@ -18,6 +21,7 @@ import type { AgentStorage } from "../agent/agent-storage.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type { StructuredGenerationDaemonConfig } from "../agent/structured-generation-providers.js";
 import type { MainChatContextSnapshotBuilder } from "./context-snapshot.js";
+import { evaluateMainChatNightMode, type MainChatNightModeEvaluation } from "./night-mode.js";
 import {
   buildMainChatInitialBriefingPrompt,
   buildMainChatSupervisionWakeupPrompt,
@@ -87,6 +91,7 @@ export interface MainChatSupervisorDependencies {
   ) => Promise<SupervisionConversationTarget | null>;
   isLeaderConversationActive?: (conversationId: string) => boolean;
   onPatrolTick?: () => Promise<void> | void;
+  onAgentEvent?: (event: AgentManagerEvent) => void;
   semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
   transientRetryDelayMs?: number;
   maxTransientAutoRetries?: number;
@@ -111,6 +116,8 @@ export interface MainChatSupervisor {
   start(): void;
   stop(): void;
   refreshSchedule(): void;
+  getNightModeStatus(): MainChatNightModeStatus;
+  notifyUserForegroundActivity(atMs?: number): void;
   runPatrol(options?: {
     mainAgentId?: string | null;
     forceWakeup?: boolean;
@@ -386,8 +393,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   const initialBriefingSentAgents = new Set<string>();
 
   let unsubscribeEvents: (() => void) | null = null;
-  let patrolTimer: ReturnType<typeof setInterval> | null = null;
-  let currentPatrolIntervalMs: number | null = null;
+  let patrolTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastFleetOrUserActivityAtMs = getNowMs();
+  let lastUserForegroundAtMs: number | null = null;
+  let lastNightModeState: MainChatNightModeStatus["state"] = "active";
   let manualFlushActive = false;
   let manualTargetMainAgentId: string | null = null;
 
@@ -401,9 +410,25 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     now: getNowMs,
   });
 
-  function effectivePatrolIntervalMs(): number {
-    if (deps.stalledCheckIntervalMs !== undefined) return deps.stalledCheckIntervalMs;
-    return deps.store.getSettings().intervals.patrolIntervalSec * 1000;
+  function hasActiveFleetWorkNow(): boolean {
+    return deps.agentManager
+      .listAgents()
+      .some(
+        (agent) =>
+          isObservedFleetAgent(agent) &&
+          (agent.lifecycle === "running" || agent.pendingPermissions.size > 0),
+      );
+  }
+
+  function evaluatePowerState(nowMs: number = getNowMs()): MainChatNightModeEvaluation {
+    return evaluateMainChatNightMode({
+      settings: deps.store.getSettings(),
+      nowMs,
+      hasActiveFleetWork: hasActiveFleetWorkNow(),
+      lastActivityAtMs: lastFleetOrUserActivityAtMs,
+      lastUserForegroundAtMs,
+      basePatrolIntervalMsOverride: deps.stalledCheckIntervalMs,
+    });
   }
 
   function effectiveStalledThresholdMs(): number {
@@ -552,8 +577,18 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   async function deliverSupervisionBatch(batch: DeliverSupervisionBatchPayload): Promise<boolean> {
     const settings = deps.store.getSettings();
     const forced = manualFlushActive;
-    if (!forced && !settings.capabilities.proactiveWakeupEnabled) {
+    if (!isMainChatEnabled(settings)) {
       return false;
+    }
+    if (!forced) {
+      const power = evaluatePowerState();
+      const canWake =
+        batch.hasUrgent || batch.hasImmediate
+          ? power.allowUrgentWakeup
+          : power.allowProactiveWakeup;
+      if (!canWake) {
+        return false;
+      }
     }
 
     const target = await resolveTargetForConversation(batch.conversationId);
@@ -1268,7 +1303,8 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     lastReply: string;
     settings: ReturnType<MainChatStore["getSettings"]>;
   }): Promise<SemanticTriageOutput | null> {
-    if (!input.settings.capabilities.semanticTriageEnabled || input.lastReply.length === 0) {
+    const power = evaluatePowerState();
+    if (!power.allowSemanticTriage || input.lastReply.length === 0) {
       return null;
     }
     try {
@@ -1295,6 +1331,22 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         lastAssistantReply: input.lastReply,
         providers,
         logger: deps.logger,
+        onUsage: (usage, meta) => {
+          void deps.store
+            .recordTokenUsage({
+              source: "triage",
+              provider: meta.provider,
+              model: meta.model,
+              inputTokens: usage.inputTokens,
+              cachedInputTokens: usage.cachedInputTokens,
+              outputTokens: usage.outputTokens,
+              costUsd: usage.totalCostUsd,
+              atMs: getNowMs(),
+            })
+            .catch((error) => {
+              deps.logger.warn({ err: error }, "Failed to record semantic triage token usage");
+            });
+        },
       });
     } catch (error) {
       deps.logger.warn(
@@ -1587,25 +1639,46 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     pendingTriageTimers.set(agentId, timer);
   }
 
+  function handleAgentStateEvent(
+    agent: ManagedAgent,
+    settings: ReturnType<MainChatStore["getSettings"]>,
+  ): void {
+    const now = getNowMs();
+    if (agent.lifecycle === "running") {
+      clearTimerMapEntry(pendingTriageTimers, agent.id);
+      if (!lastActivityAtByAgent.has(agent.id)) {
+        lastActivityAtByAgent.set(agent.id, now);
+      }
+      if (isObservedFleetAgent(agent)) {
+        lastFleetOrUserActivityAtMs = Math.max(lastFleetOrUserActivityAtMs, now);
+        if (
+          lastNightModeState === "hibernating" &&
+          resolveMainChatNightMode(settings).behavior === "throttle"
+        ) {
+          armPatrolTimer();
+        }
+      }
+    }
+    if (agent.pendingPermissions.size === 0) {
+      permissionFirstSeenAt.delete(agent.id);
+      approvalTracker.resolveAllForAgent(agent.id);
+    }
+  }
+
   function handleManagerEvent(event: AgentManagerEvent): void {
     deps.turnQueue.handleEvent(event);
+    deps.onAgentEvent?.(event);
+    const settings = deps.store.getSettings();
+    if (!isMainChatEnabled(settings)) {
+      return;
+    }
     if (event.type === "agent_removed") {
       clearAgentState(event.agentId);
       deps.contextSnapshots.invalidateCache();
       return;
     }
     if (event.type === "agent_state") {
-      const now = getNowMs();
-      if (event.agent.lifecycle === "running") {
-        clearTimerMapEntry(pendingTriageTimers, event.agent.id);
-        if (!lastActivityAtByAgent.has(event.agent.id)) {
-          lastActivityAtByAgent.set(event.agent.id, now);
-        }
-      }
-      if (event.agent.pendingPermissions.size === 0) {
-        permissionFirstSeenAt.delete(event.agent.id);
-        approvalTracker.resolveAllForAgent(event.agent.id);
-      }
+      handleAgentStateEvent(event.agent, settings);
       return;
     }
     if (event.type !== "agent_stream") return;
@@ -1616,6 +1689,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
 
     const agent = deps.agentManager.getAgent(event.agentId);
     if (!isObservedFleetAgent(agent)) return;
+    lastFleetOrUserActivityAtMs = Math.max(lastFleetOrUserActivityAtMs, now);
 
     if (event.event.type === "turn_started") {
       clearTimerMapEntry(pendingTriageTimers, event.agentId);
@@ -2042,14 +2116,37 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     forceWakeup?: boolean;
     manualTrigger?: boolean;
   }): Promise<MainChatPatrolResult> {
+    const patrolledAt = new Date(getNowMs()).toISOString();
+    const settings = deps.store.getSettings();
+    if (!isMainChatEnabled(settings)) {
+      return {
+        scannedSessions: 0,
+        signalsFound: 0,
+        wokeMainChat: false,
+        summary: "主对话功能已关闭，跳过巡检",
+        patrolledAt,
+      };
+    }
+
+    const force = options?.forceWakeup === true || options?.manualTrigger === true;
+    const power = evaluatePowerState();
+    lastNightModeState = power.status.state;
+    if (!force && !power.allowPatrol) {
+      return {
+        scannedSessions: 0,
+        signalsFound: signalQueue.getPendingCount(),
+        wokeMainChat: false,
+        summary: power.status.reason ?? "夜间休眠中，已暂停自动巡检",
+        patrolledAt,
+      };
+    }
+
     deps.contextSnapshots.invalidateCache();
     const { scannedSessions } = await scanFleetAndBuildSignals();
     const signalsFound = signalQueue.getPendingCount();
-    const patrolledAt = new Date(getNowMs()).toISOString();
     await deps.store.setLastPatrolAt(patrolledAt);
     await deps.store.incrementMetric("patrolRuns");
 
-    const force = options?.forceWakeup === true || options?.manualTrigger === true;
     manualFlushActive = force;
     manualTargetMainAgentId = options?.mainAgentId ?? null;
     let wokeMainChat = false;
@@ -2079,19 +2176,46 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     };
   }
 
-  function armPatrolTimer(): void {
-    const intervalMs = Math.max(50, effectivePatrolIntervalMs());
-    if (patrolTimer && currentPatrolIntervalMs === intervalMs) return;
+  function clearAllPendingTimers(): void {
     if (patrolTimer) {
-      clearInterval(patrolTimer);
+      clearTimeout(patrolTimer);
       patrolTimer = null;
     }
-    currentPatrolIntervalMs = intervalMs;
-    patrolTimer = setInterval(() => {
-      void runPatrol().catch((error) => {
-        deps.logger.warn({ err: error }, "Periodic main-chat patrol failed");
-      });
-    }, intervalMs);
+    signalQueue.stop();
+    for (const timer of pendingRetryTimers.values()) clearTimeout(timer);
+    pendingRetryTimers.clear();
+    for (const timer of pendingTriageTimers.values()) clearTimeout(timer);
+    pendingTriageTimers.clear();
+  }
+
+  function armPatrolTimer(): void {
+    if (patrolTimer) {
+      clearTimeout(patrolTimer);
+      patrolTimer = null;
+    }
+    if (!unsubscribeEvents) return;
+    const power = evaluatePowerState();
+    lastNightModeState = power.status.state;
+    if (power.nextTimerDelayMs === null) {
+      return;
+    }
+    const delayMs = Math.max(50, power.nextTimerDelayMs);
+    patrolTimer = setTimeout(() => {
+      patrolTimer = null;
+      void (async () => {
+        try {
+          const nextPower = evaluatePowerState();
+          lastNightModeState = nextPower.status.state;
+          if (nextPower.allowPatrol) {
+            await runPatrol();
+          }
+        } catch (error) {
+          deps.logger.warn({ err: error }, "Periodic main-chat patrol failed");
+        } finally {
+          armPatrolTimer();
+        }
+      })();
+    }, delayMs);
     patrolTimer.unref?.();
   }
 
@@ -2105,21 +2229,29 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     stop() {
       unsubscribeEvents?.();
       unsubscribeEvents = null;
-      if (patrolTimer) {
-        clearInterval(patrolTimer);
-        patrolTimer = null;
-      }
-      currentPatrolIntervalMs = null;
-      signalQueue.stop();
-      for (const timer of pendingRetryTimers.values()) clearTimeout(timer);
-      pendingRetryTimers.clear();
-      for (const timer of pendingTriageTimers.values()) clearTimeout(timer);
-      pendingTriageTimers.clear();
+      clearAllPendingTimers();
     },
 
     refreshSchedule() {
+      if (!isMainChatEnabled(deps.store.getSettings())) {
+        clearAllPendingTimers();
+        return;
+      }
       if (!unsubscribeEvents) return;
       armPatrolTimer();
+    },
+
+    getNightModeStatus() {
+      return evaluatePowerState().status;
+    },
+
+    notifyUserForegroundActivity(atMs) {
+      const now = atMs ?? getNowMs();
+      lastUserForegroundAtMs = now;
+      lastFleetOrUserActivityAtMs = Math.max(lastFleetOrUserActivityAtMs, now);
+      if (unsubscribeEvents && lastNightModeState === "hibernating") {
+        armPatrolTimer();
+      }
     },
 
     runPatrol,
@@ -2155,7 +2287,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
 
     async dispatchInitialBriefing(mainAgentId) {
       const settings = deps.store.getSettings();
-      if (!settings.capabilities.initialBriefingEnabled) return false;
+      if (!isMainChatEnabled(settings) || !settings.capabilities.initialBriefingEnabled) {
+        return false;
+      }
       if (initialBriefingSentAgents.has(mainAgentId)) return false;
       const existingTimeline = deps.agentManager.getTimeline(mainAgentId);
       if (existingTimeline.length > 0) {

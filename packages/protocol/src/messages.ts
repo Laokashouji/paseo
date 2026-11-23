@@ -104,6 +104,10 @@ import {
   MainChatRevokeStandingAuthorizationResponseSchema,
   MainChatDismissRuleSuggestionRequestSchema,
   MainChatDismissRuleSuggestionResponseSchema,
+  MainChatGetUsageRequestSchema,
+  MainChatGetUsageResponseSchema,
+  MainChatResetUsageRequestSchema,
+  MainChatResetUsageResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -247,6 +251,22 @@ export {
   MainChatSupervisionSignalKindSchema,
   MainChatSupervisionSignalSchema,
   MainChatSupervisionUrgencySchema,
+  MainChatNightModeBehaviorSchema,
+  MainChatNightModeConfigSchema,
+  MainChatRuntimePowerStateSchema,
+  MainChatNightModeStatusSchema,
+  MainChatTokenUsageSourceSchema,
+  MainChatTokenUsageCountersSchema,
+  MainChatTokenUsageBySourceSchema,
+  MainChatTokenUsageDayEntrySchema,
+  MainChatTokenUsageModelEntrySchema,
+  MainChatTokenUsageSummarySchema,
+  MainChatGetUsageRequestSchema,
+  MainChatGetUsageResponsePayloadSchema,
+  MainChatGetUsageResponseSchema,
+  MainChatResetUsageRequestSchema,
+  MainChatResetUsageResponsePayloadSchema,
+  MainChatResetUsageResponseSchema,
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatActivityStatus,
@@ -387,6 +407,22 @@ export {
   type MainChatStandingAuthorizationScope,
   type MainChatSupervisionSignal,
   type MainChatSupervisionSignalKind,
+  type MainChatNightModeBehavior,
+  type MainChatNightModeConfig,
+  type MainChatRuntimePowerState,
+  type MainChatNightModeStatus,
+  type MainChatTokenUsageSource,
+  type MainChatTokenUsageCounters,
+  type MainChatTokenUsageBySource,
+  type MainChatTokenUsageDayEntry,
+  type MainChatTokenUsageModelEntry,
+  type MainChatTokenUsageSummary,
+  type MainChatGetUsageRequest,
+  type MainChatGetUsageResponse,
+  type MainChatGetUsageResponsePayload,
+  type MainChatResetUsageRequest,
+  type MainChatResetUsageResponse,
+  type MainChatResetUsageResponsePayload,
   type MainChatSupervisionUrgency,
 } from "./main-chat.js";
 import { z } from "zod";
@@ -4198,6 +4234,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatGrantStandingAuthorizationRequestSchema,
   MainChatRevokeStandingAuthorizationRequestSchema,
   MainChatDismissRuleSuggestionRequestSchema,
+  MainChatGetUsageRequestSchema,
+  MainChatResetUsageRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8352,6 +8390,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatGrantStandingAuthorizationResponseSchema,
   MainChatRevokeStandingAuthorizationResponseSchema,
   MainChatDismissRuleSuggestionResponseSchema,
+  MainChatGetUsageResponseSchema,
+  MainChatResetUsageResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

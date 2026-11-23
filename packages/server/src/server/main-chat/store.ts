@@ -21,8 +21,16 @@ import {
   MainChatTaskModeSchema,
   MainChatTaskReceiptSchema,
   MainChatTaskRecordSchema,
+  MainChatTokenUsageBySourceSchema,
+  MainChatTokenUsageCountersSchema,
+  MainChatTokenUsageDayEntrySchema,
+  MainChatTokenUsageModelEntrySchema,
   createDefaultMainChatSettings,
+  createEmptyMainChatTokenUsageBySource,
+  createEmptyMainChatTokenUsageCounters,
+  isMainChatEnabled,
   mergeMainChatSettings,
+  resolveMainChatNightMode,
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatApprovalClarification,
@@ -42,6 +50,11 @@ import {
   type MainChatTaskMode,
   type MainChatTaskReceipt,
   type MainChatTaskRecord,
+  type MainChatTokenUsageBySource,
+  type MainChatTokenUsageCounters,
+  type MainChatTokenUsageDayEntry,
+  type MainChatTokenUsageSource,
+  type MainChatTokenUsageSummary,
 } from "@getpaseo/protocol/main-chat";
 import {
   buildStandingAuthorizationLabel,
@@ -101,6 +114,15 @@ const ManualApprovalObservationSchema = z.object({
   lastObservedAt: z.string(),
 });
 
+const PersistedMainChatTokenUsageSchema = z.object({
+  allTime: MainChatTokenUsageCountersSchema,
+  bySource: MainChatTokenUsageBySourceSchema,
+  byModel: z.array(MainChatTokenUsageModelEntrySchema),
+  daily: z.array(MainChatTokenUsageDayEntrySchema),
+  updatedAt: z.string().nullable(),
+});
+type PersistedMainChatTokenUsage = z.infer<typeof PersistedMainChatTokenUsageSchema>;
+
 const PersistedMainChatStateSchema = z.object({
   version: z.literal(1),
   settings: MainChatSettingsSchema.optional(),
@@ -125,6 +147,7 @@ const PersistedMainChatStateSchema = z.object({
   lastPatrolAt: z.string().nullable().optional(),
   lastWakeupAt: z.string().nullable().optional(),
   metrics: PartialMetricsSchema.optional(),
+  tokenUsage: PersistedMainChatTokenUsageSchema.optional(),
 });
 
 interface MainChatStateFile {
@@ -151,6 +174,7 @@ interface MainChatStateFile {
   lastPatrolAt: string | null;
   lastWakeupAt: string | null;
   metrics: MainChatFullMetrics;
+  tokenUsage: PersistedMainChatTokenUsage;
 }
 
 export const MAX_RETAINED_ACTIVITIES = 200;
@@ -161,7 +185,142 @@ const MAX_RETAINED_STANDING_AUTHS = 300;
 const MAX_RETAINED_RULE_SUGGESTIONS = 100;
 const MAX_RETAINED_CLARIFICATIONS = 100;
 const MAX_RETAINED_OBSERVATIONS = 300;
+const MAX_RETAINED_USAGE_DAYS = 30;
+const MAX_RETAINED_USAGE_MODELS = 100;
 const DELEGATED_QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function emptyPersistedTokenUsage(): PersistedMainChatTokenUsage {
+  return {
+    allTime: createEmptyMainChatTokenUsageCounters(),
+    bySource: createEmptyMainChatTokenUsageBySource(),
+    byModel: [],
+    daily: [],
+    updatedAt: null,
+  };
+}
+
+function formatLocalDateKey(ms: number): string {
+  const date = new Date(ms);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function sanitizeTokenCount(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.round(value);
+}
+
+function sanitizeCostUsd(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return value;
+}
+
+function addCountersInto(
+  target: MainChatTokenUsageCounters,
+  delta: MainChatTokenUsageCounters,
+): void {
+  target.turns += delta.turns;
+  target.inputTokens += delta.inputTokens;
+  target.cachedInputTokens += delta.cachedInputTokens;
+  target.outputTokens += delta.outputTokens;
+  target.totalTokens += delta.totalTokens;
+  target.costUsd = Number((target.costUsd + delta.costUsd).toFixed(6));
+}
+
+function cloneCounters(counters: MainChatTokenUsageCounters): MainChatTokenUsageCounters {
+  return { ...counters };
+}
+
+function cloneBySource(bySource: MainChatTokenUsageBySource): MainChatTokenUsageBySource {
+  return {
+    foreground: cloneCounters(bySource.foreground),
+    background: cloneCounters(bySource.background),
+    direction: cloneCounters(bySource.direction),
+    triage: cloneCounters(bySource.triage),
+  };
+}
+
+function cloneDayEntry(entry: MainChatTokenUsageDayEntry): MainChatTokenUsageDayEntry {
+  return {
+    date: entry.date,
+    turns: entry.turns,
+    inputTokens: entry.inputTokens,
+    cachedInputTokens: entry.cachedInputTokens,
+    outputTokens: entry.outputTokens,
+    totalTokens: entry.totalTokens,
+    costUsd: entry.costUsd,
+    bySource: cloneBySource(entry.bySource),
+  };
+}
+
+function cloneModelEntry(
+  entry: MainChatTokenUsageSummary["byModel"][number],
+): MainChatTokenUsageSummary["byModel"][number] {
+  return {
+    provider: entry.provider,
+    model: entry.model,
+    turns: entry.turns,
+    inputTokens: entry.inputTokens,
+    cachedInputTokens: entry.cachedInputTokens,
+    outputTokens: entry.outputTokens,
+    totalTokens: entry.totalTokens,
+    costUsd: entry.costUsd,
+  };
+}
+
+function pruneDailyUsage(
+  daily: readonly MainChatTokenUsageDayEntry[],
+  nowMs: number,
+): MainChatTokenUsageDayEntry[] {
+  const cutoffDate = new Date(nowMs);
+  cutoffDate.setHours(0, 0, 0, 0);
+  cutoffDate.setDate(cutoffDate.getDate() - (MAX_RETAINED_USAGE_DAYS - 1));
+  const cutoffKey = formatLocalDateKey(cutoffDate.getTime());
+  return daily
+    .filter((entry) => entry.date >= cutoffKey)
+    .sort((left, right) => left.date.localeCompare(right.date))
+    .slice(-MAX_RETAINED_USAGE_DAYS)
+    .map(cloneDayEntry);
+}
+
+function buildTokenUsageSummary(
+  usage: PersistedMainChatTokenUsage,
+  nowMs: number,
+): MainChatTokenUsageSummary {
+  const todayKey = formatLocalDateKey(nowMs);
+  const weekStartDate = new Date(nowMs);
+  weekStartDate.setHours(0, 0, 0, 0);
+  weekStartDate.setDate(weekStartDate.getDate() - 6);
+  const weekStartKey = formatLocalDateKey(weekStartDate.getTime());
+
+  const today = createEmptyMainChatTokenUsageCounters();
+  const last7Days = createEmptyMainChatTokenUsageCounters();
+  const daily = pruneDailyUsage(usage.daily, nowMs);
+
+  for (const entry of daily) {
+    if (entry.date === todayKey) {
+      addCountersInto(today, entry);
+    }
+    if (entry.date >= weekStartKey && entry.date <= todayKey) {
+      addCountersInto(last7Days, entry);
+    }
+  }
+
+  return {
+    today,
+    last7Days,
+    allTime: cloneCounters(usage.allTime),
+    bySource: cloneBySource(usage.bySource),
+    byModel: usage.byModel
+      .slice()
+      .sort((left, right) => right.totalTokens - left.totalTokens || right.turns - left.turns)
+      .map(cloneModelEntry),
+    daily,
+    updatedAt: usage.updatedAt,
+  };
+}
 
 function emptyCompactionMeta(): PersistedMainChatCompactionMeta {
   return {
@@ -224,6 +383,7 @@ function emptyState(): MainChatStateFile {
     lastPatrolAt: null,
     lastWakeupAt: null,
     metrics: emptyMetrics(),
+    tokenUsage: emptyPersistedTokenUsage(),
   };
 }
 
@@ -311,6 +471,17 @@ export interface MainChatMigrationCounts {
   migratedDecisions: number;
   migratedReceipts: number;
   migratedActivities: number;
+}
+
+export interface RecordMainChatTokenUsageInput {
+  source: MainChatTokenUsageSource;
+  provider: string;
+  model?: string | null;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  atMs?: number;
 }
 
 export interface MainChatStore {
@@ -418,6 +589,9 @@ export interface MainChatStore {
   setLastWakeupAt(iso: string): Promise<void>;
   getMetrics(): MainChatFullMetrics;
   incrementMetric(key: keyof MainChatFullMetrics): Promise<void>;
+  recordTokenUsage(input: RecordMainChatTokenUsageInput): Promise<MainChatTokenUsageSummary>;
+  getTokenUsageSummary(nowMs?: number): MainChatTokenUsageSummary;
+  resetTokenUsage(): Promise<MainChatTokenUsageSummary>;
 }
 
 function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
@@ -591,6 +765,32 @@ function hydrateM5SafetyFields(
   };
 }
 
+function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
+  if (!raw) return createDefaultMainChatSettings("conservative");
+  return {
+    ...raw,
+    enabled: isMainChatEnabled(raw),
+    backgroundModel: { ...raw.backgroundModel },
+    intervals: { ...raw.intervals },
+    capabilities: { ...raw.capabilities },
+    nightMode: resolveMainChatNightMode(raw),
+  };
+}
+
+function hydrateTokenUsage(
+  raw: PersistedMainChatTokenUsage | undefined,
+  nowMs: number,
+): PersistedMainChatTokenUsage {
+  if (!raw) return emptyPersistedTokenUsage();
+  return {
+    allTime: cloneCounters(raw.allTime),
+    bySource: cloneBySource(raw.bySource),
+    byModel: raw.byModel.slice(0, MAX_RETAINED_USAGE_MODELS).map(cloneModelEntry),
+    daily: pruneDailyUsage(raw.daily, nowMs),
+    updatedAt: raw.updatedAt,
+  };
+}
+
 function hydratePersistedState(
   data: z.infer<typeof PersistedMainChatStateSchema>,
   nowMs: number,
@@ -599,7 +799,7 @@ function hydratePersistedState(
   const permissionRules = data.permissionRules ?? [];
   return {
     version: 1,
-    settings: data.settings ?? createDefaultMainChatSettings("conservative"),
+    settings: hydrateSettings(data.settings),
     plans: data.plans ?? {},
     tasks: pruneTaskRecordList(data.tasks ?? [], MAX_RETAINED_TASKS),
     decisions: data.decisions ?? {},
@@ -617,6 +817,7 @@ function hydratePersistedState(
     lastPatrolAt: data.lastPatrolAt ?? null,
     lastWakeupAt: data.lastWakeupAt ?? null,
     metrics: { ...emptyMetrics(), ...data.metrics },
+    tokenUsage: hydrateTokenUsage(data.tokenUsage, nowMs),
   };
 }
 
@@ -703,9 +904,11 @@ export function createMainChatStore(
     getSettings() {
       return {
         ...state.settings,
+        enabled: isMainChatEnabled(state.settings),
         backgroundModel: { ...state.settings.backgroundModel },
         intervals: { ...state.settings.intervals },
         capabilities: { ...state.settings.capabilities },
+        nightMode: resolveMainChatNightMode(state.settings),
       };
     },
 
@@ -1337,6 +1540,79 @@ export function createMainChatStore(
     async incrementMetric(key) {
       state.metrics[key] = (state.metrics[key] ?? 0) + 1;
       await persist();
+    },
+
+    async recordTokenUsage(input) {
+      const nowMs = input.atMs ?? getNowMs();
+      const inputTokens = sanitizeTokenCount(input.inputTokens);
+      const cachedInputTokens = sanitizeTokenCount(input.cachedInputTokens);
+      const outputTokens = sanitizeTokenCount(input.outputTokens);
+      const costUsd = sanitizeCostUsd(input.costUsd);
+      const totalTokens = inputTokens + cachedInputTokens + outputTokens;
+      if (totalTokens === 0 && costUsd === 0) {
+        return buildTokenUsageSummary(state.tokenUsage, nowMs);
+      }
+
+      const delta: MainChatTokenUsageCounters = {
+        turns: 1,
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        totalTokens,
+        costUsd,
+      };
+
+      addCountersInto(state.tokenUsage.allTime, delta);
+      addCountersInto(state.tokenUsage.bySource[input.source], delta);
+
+      const provider = input.provider.trim() || "unknown";
+      const model = input.model?.trim() || null;
+      const existingModel = state.tokenUsage.byModel.find(
+        (entry) => entry.provider === provider && entry.model === model,
+      );
+      if (existingModel) {
+        addCountersInto(existingModel, delta);
+      } else {
+        state.tokenUsage.byModel.push({
+          provider,
+          model,
+          ...cloneCounters(delta),
+        });
+        if (state.tokenUsage.byModel.length > MAX_RETAINED_USAGE_MODELS) {
+          state.tokenUsage.byModel.sort(
+            (left, right) => right.totalTokens - left.totalTokens || right.turns - left.turns,
+          );
+          state.tokenUsage.byModel = state.tokenUsage.byModel.slice(0, MAX_RETAINED_USAGE_MODELS);
+        }
+      }
+
+      const dateKey = formatLocalDateKey(nowMs);
+      let dayEntry = state.tokenUsage.daily.find((entry) => entry.date === dateKey);
+      if (!dayEntry) {
+        dayEntry = {
+          date: dateKey,
+          ...createEmptyMainChatTokenUsageCounters(),
+          bySource: createEmptyMainChatTokenUsageBySource(),
+        };
+        state.tokenUsage.daily.push(dayEntry);
+      }
+      addCountersInto(dayEntry, delta);
+      addCountersInto(dayEntry.bySource[input.source], delta);
+      state.tokenUsage.daily = pruneDailyUsage(state.tokenUsage.daily, nowMs);
+      state.tokenUsage.updatedAt = new Date(nowMs).toISOString();
+
+      await persist();
+      return buildTokenUsageSummary(state.tokenUsage, nowMs);
+    },
+
+    getTokenUsageSummary(nowMs = getNowMs()) {
+      return buildTokenUsageSummary(state.tokenUsage, nowMs);
+    },
+
+    async resetTokenUsage() {
+      state.tokenUsage = emptyPersistedTokenUsage();
+      await persist();
+      return buildTokenUsageSummary(state.tokenUsage, getNowMs());
     },
   };
 }

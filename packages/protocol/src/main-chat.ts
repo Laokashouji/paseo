@@ -50,22 +50,108 @@ export const MainChatCapabilitiesSchema = z.object({
 });
 export type MainChatCapabilities = z.infer<typeof MainChatCapabilitiesSchema>;
 
+export const MainChatNightModeBehaviorSchema = z.enum(["throttle", "hibernate"]);
+export type MainChatNightModeBehavior = z.infer<typeof MainChatNightModeBehaviorSchema>;
+
+export const MainChatNightModeConfigSchema = z.object({
+  enabled: z.boolean(),
+  startHour: z.number().int().min(0).max(23),
+  endHour: z.number().int().min(0).max(23),
+  behavior: MainChatNightModeBehaviorSchema,
+  patrolIntervalSec: z.number().int().min(60).max(7200),
+  autoHibernateAfterIdleMin: z.number().int().min(0).max(480),
+  disableSemanticTriage: z.boolean(),
+  deferProactiveWakeups: z.boolean(),
+  allowUrgentWakeups: z.boolean(),
+});
+export type MainChatNightModeConfig = z.infer<typeof MainChatNightModeConfigSchema>;
+
+export const MainChatRuntimePowerStateSchema = z.enum([
+  "active",
+  "throttled",
+  "hibernating",
+  "disabled",
+]);
+export type MainChatRuntimePowerState = z.infer<typeof MainChatRuntimePowerStateSchema>;
+
+export const MainChatNightModeStatusSchema = z.object({
+  state: MainChatRuntimePowerStateSchema,
+  inNightWindow: z.boolean(),
+  effectivePatrolIntervalSec: z.number().int().nonnegative(),
+  nextTransitionAt: z.string().nullable(),
+  reason: z.string().nullable(),
+});
+export type MainChatNightModeStatus = z.infer<typeof MainChatNightModeStatusSchema>;
+
+export const MainChatTokenUsageSourceSchema = z.enum([
+  "foreground",
+  "background",
+  "direction",
+  "triage",
+]);
+export type MainChatTokenUsageSource = z.infer<typeof MainChatTokenUsageSourceSchema>;
+
+export const MainChatTokenUsageCountersSchema = z.object({
+  turns: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  costUsd: z.number().nonnegative(),
+});
+export type MainChatTokenUsageCounters = z.infer<typeof MainChatTokenUsageCountersSchema>;
+
+export const MainChatTokenUsageBySourceSchema = z.object({
+  foreground: MainChatTokenUsageCountersSchema,
+  background: MainChatTokenUsageCountersSchema,
+  direction: MainChatTokenUsageCountersSchema,
+  triage: MainChatTokenUsageCountersSchema,
+});
+export type MainChatTokenUsageBySource = z.infer<typeof MainChatTokenUsageBySourceSchema>;
+
+export const MainChatTokenUsageDayEntrySchema = MainChatTokenUsageCountersSchema.extend({
+  date: z.string(),
+  bySource: MainChatTokenUsageBySourceSchema,
+});
+export type MainChatTokenUsageDayEntry = z.infer<typeof MainChatTokenUsageDayEntrySchema>;
+
+export const MainChatTokenUsageModelEntrySchema = MainChatTokenUsageCountersSchema.extend({
+  provider: z.string(),
+  model: z.string().nullable(),
+});
+export type MainChatTokenUsageModelEntry = z.infer<typeof MainChatTokenUsageModelEntrySchema>;
+
+export const MainChatTokenUsageSummarySchema = z.object({
+  today: MainChatTokenUsageCountersSchema,
+  last7Days: MainChatTokenUsageCountersSchema,
+  allTime: MainChatTokenUsageCountersSchema,
+  bySource: MainChatTokenUsageBySourceSchema,
+  byModel: z.array(MainChatTokenUsageModelEntrySchema),
+  daily: z.array(MainChatTokenUsageDayEntrySchema),
+  updatedAt: z.string().nullable(),
+});
+export type MainChatTokenUsageSummary = z.infer<typeof MainChatTokenUsageSummarySchema>;
+
 export const MainChatSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40),
   style: MainChatStyleSchema,
   backgroundModel: MainChatBackgroundModelConfigSchema,
   intervals: MainChatIntervalsSchema,
   capabilities: MainChatCapabilitiesSchema,
+  nightMode: MainChatNightModeConfigSchema.optional(),
 });
 export type MainChatSettings = z.infer<typeof MainChatSettingsSchema>;
 
 export const MainChatSettingsPatchSchema = z.object({
   applyPreset: MainChatStyleSchema.optional(),
+  enabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40).optional(),
   style: MainChatStyleSchema.optional(),
   backgroundModel: MainChatBackgroundModelConfigSchema.partial().optional(),
   intervals: MainChatIntervalsSchema.partial().optional(),
   capabilities: MainChatCapabilitiesSchema.partial().optional(),
+  nightMode: MainChatNightModeConfigSchema.partial().optional(),
 });
 export type MainChatSettingsPatch = z.infer<typeof MainChatSettingsPatchSchema>;
 
@@ -174,16 +260,79 @@ export function getMainChatStylePreset(style: MainChatStyle): MainChatStylePrese
   };
 }
 
+export function createDefaultMainChatNightMode(): MainChatNightModeConfig {
+  return {
+    enabled: false,
+    startHour: 23,
+    endHour: 8,
+    behavior: "throttle",
+    patrolIntervalSec: 600,
+    autoHibernateAfterIdleMin: 30,
+    disableSemanticTriage: true,
+    deferProactiveWakeups: true,
+    allowUrgentWakeups: false,
+  };
+}
+
+export function isMainChatEnabled(
+  settings: Pick<MainChatSettings, "enabled"> | null | undefined,
+): boolean {
+  return settings?.enabled !== false;
+}
+
+export function resolveMainChatNightMode(
+  settings: Pick<MainChatSettings, "nightMode"> | null | undefined,
+): MainChatNightModeConfig {
+  return {
+    ...createDefaultMainChatNightMode(),
+    ...settings?.nightMode,
+  };
+}
+
+export function createEmptyMainChatTokenUsageCounters(): MainChatTokenUsageCounters {
+  return {
+    turns: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+}
+
+export function createEmptyMainChatTokenUsageBySource(): MainChatTokenUsageBySource {
+  return {
+    foreground: createEmptyMainChatTokenUsageCounters(),
+    background: createEmptyMainChatTokenUsageCounters(),
+    direction: createEmptyMainChatTokenUsageCounters(),
+    triage: createEmptyMainChatTokenUsageCounters(),
+  };
+}
+
+export function createEmptyMainChatTokenUsageSummary(): MainChatTokenUsageSummary {
+  return {
+    today: createEmptyMainChatTokenUsageCounters(),
+    last7Days: createEmptyMainChatTokenUsageCounters(),
+    allTime: createEmptyMainChatTokenUsageCounters(),
+    bySource: createEmptyMainChatTokenUsageBySource(),
+    byModel: [],
+    daily: [],
+    updatedAt: null,
+  };
+}
+
 export function createDefaultMainChatSettings(
   style: MainChatStyle = "conservative",
 ): MainChatSettings {
   const preset = getMainChatStylePreset(style);
   return {
+    enabled: true,
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
     backgroundModel: preset.backgroundModel,
     intervals: preset.intervals,
     capabilities: preset.capabilities,
+    nightMode: createDefaultMainChatNightMode(),
   };
 }
 
@@ -192,17 +341,25 @@ export function mergeMainChatSettings(
   patch: MainChatSettingsPatch,
 ): MainChatSettings {
   const presetBase = patch.applyPreset ? getMainChatStylePreset(patch.applyPreset) : null;
+  const currentNightMode = resolveMainChatNightMode(current);
   const base: MainChatSettings = presetBase
     ? {
+        enabled: isMainChatEnabled(current),
         title: current.title,
         style: presetBase.style,
         backgroundModel: { ...current.backgroundModel },
         intervals: presetBase.intervals,
         capabilities: presetBase.capabilities,
+        nightMode: currentNightMode,
       }
-    : current;
+    : {
+        ...current,
+        enabled: isMainChatEnabled(current),
+        nightMode: currentNightMode,
+      };
   const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
   return MainChatSettingsSchema.parse({
+    enabled: patch.enabled ?? base.enabled ?? true,
     title: nextTitle,
     style: patch.style ?? base.style,
     backgroundModel: {
@@ -216,6 +373,10 @@ export function mergeMainChatSettings(
     capabilities: {
       ...base.capabilities,
       ...patch.capabilities,
+    },
+    nightMode: {
+      ...resolveMainChatNightMode(base),
+      ...patch.nightMode,
     },
   });
 }
@@ -707,6 +868,8 @@ export const MainChatOverviewSchema = z.object({
   nextStepSuggestions: z.array(MainChatNextStepSuggestionSchema).optional(),
   suppressedQuietBadgeCount: z.number().int().nonnegative().optional(),
   pendingSignalCount: z.number().int().nonnegative().optional(),
+  nightModeStatus: MainChatNightModeStatusSchema.optional(),
+  tokenUsage: MainChatTokenUsageSummarySchema.optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -913,6 +1076,7 @@ export type MainChatGetSettingsRequest = z.infer<typeof MainChatGetSettingsReque
 export const MainChatGetSettingsResponsePayloadSchema = z.object({
   requestId: z.string(),
   settings: MainChatSettingsSchema.nullable(),
+  nightModeStatus: MainChatNightModeStatusSchema.optional(),
   error: z.string().nullable(),
 });
 export type MainChatGetSettingsResponsePayload = z.infer<
@@ -935,6 +1099,7 @@ export type MainChatUpdateSettingsRequest = z.infer<typeof MainChatUpdateSetting
 export const MainChatUpdateSettingsResponsePayloadSchema = z.object({
   requestId: z.string(),
   settings: MainChatSettingsSchema.nullable(),
+  nightModeStatus: MainChatNightModeStatusSchema.optional(),
   error: z.string().nullable(),
 });
 export type MainChatUpdateSettingsResponsePayload = z.infer<
@@ -1491,6 +1656,47 @@ export const MainChatDismissRuleSuggestionResponseSchema = z.object({
 export type MainChatDismissRuleSuggestionResponse = z.infer<
   typeof MainChatDismissRuleSuggestionResponseSchema
 >;
+
+export const MainChatGetUsageRequestSchema = z.object({
+  type: z.literal("main_chat.get_usage.request"),
+  requestId: z.string(),
+});
+export type MainChatGetUsageRequest = z.infer<typeof MainChatGetUsageRequestSchema>;
+
+export const MainChatGetUsageResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  usage: MainChatTokenUsageSummarySchema.nullable(),
+  nightModeStatus: MainChatNightModeStatusSchema.nullable().optional(),
+  error: z.string().nullable(),
+});
+export type MainChatGetUsageResponsePayload = z.infer<typeof MainChatGetUsageResponsePayloadSchema>;
+
+export const MainChatGetUsageResponseSchema = z.object({
+  type: z.literal("main_chat.get_usage.response"),
+  payload: MainChatGetUsageResponsePayloadSchema,
+});
+export type MainChatGetUsageResponse = z.infer<typeof MainChatGetUsageResponseSchema>;
+
+export const MainChatResetUsageRequestSchema = z.object({
+  type: z.literal("main_chat.reset_usage.request"),
+  requestId: z.string(),
+});
+export type MainChatResetUsageRequest = z.infer<typeof MainChatResetUsageRequestSchema>;
+
+export const MainChatResetUsageResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  usage: MainChatTokenUsageSummarySchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatResetUsageResponsePayload = z.infer<
+  typeof MainChatResetUsageResponsePayloadSchema
+>;
+
+export const MainChatResetUsageResponseSchema = z.object({
+  type: z.literal("main_chat.reset_usage.response"),
+  payload: MainChatResetUsageResponsePayloadSchema,
+});
+export type MainChatResetUsageResponse = z.infer<typeof MainChatResetUsageResponseSchema>;
 
 export interface MainChatTaskLabelsMeta {
   planId: string | null;

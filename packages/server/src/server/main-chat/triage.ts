@@ -9,7 +9,7 @@ import {
   type StructuredGenerationLogger,
   type StructuredGenerationProvider,
 } from "../agent/agent-response-loop.js";
-import type { AgentProvider } from "../agent/agent-sdk-types.js";
+import type { AgentProvider, AgentUsage } from "../agent/agent-sdk-types.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import {
   resolveStructuredGenerationProviders,
@@ -432,6 +432,7 @@ export interface RunSemanticTriageInput {
   providers: readonly StructuredGenerationProvider[];
   logger?: StructuredGenerationLogger;
   generator?: typeof generateStructuredAgentResponseWithFallback;
+  onUsage?: (usage: AgentUsage, meta: { provider: AgentProvider; model: string | null }) => void;
 }
 
 export async function runMainChatSemanticTriage(
@@ -473,6 +474,7 @@ export async function runMainChatSemanticTriage(
     maxRetries: 1,
     schemaName: "MainChatSemanticTriage",
     logger: input.logger,
+    onUsage: input.onUsage,
     agentConfigOverrides: {
       title: "Main chat semantic triage",
       internal: true,

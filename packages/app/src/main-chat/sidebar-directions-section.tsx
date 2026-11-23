@@ -1,5 +1,5 @@
 import { isAgentRunning } from "@getpaseo/protocol/agent-state-bucket";
-import type { MainChatConversationRecord } from "@getpaseo/protocol/main-chat";
+import { isMainChatEnabled, type MainChatConversationRecord } from "@getpaseo/protocol/main-chat";
 import { router, usePathname } from "expo-router";
 import equal from "fast-deep-equal";
 import { History, Plus, X } from "lucide-react-native";
@@ -40,6 +40,7 @@ import {
 import { openMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { selectMainChatSidebarSummary } from "./selectors";
+import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedPlus = withUnistyles(Plus);
 const ThemedHistory = withUnistyles(History);
@@ -328,6 +329,10 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
     preferredServerId,
     directions,
   );
+  const mainChatSettings = useMainChatSettingsStore((state) =>
+    targetServerId ? state.settingsByServerId[targetServerId] : undefined,
+  );
+  const isEnabled = isMainChatEnabled(mainChatSettings);
 
   const collapsed = useMainChatConversationsStore((state) => state.sectionCollapsed);
   const toggleCollapsed = useMainChatConversationsStore((state) => state.toggleSectionCollapsed);
@@ -462,7 +467,7 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
     setActionError(null);
   }, []);
 
-  if (!snapshot.supportsMainChat) {
+  if (!snapshot.supportsMainChat || !isEnabled) {
     return null;
   }
 

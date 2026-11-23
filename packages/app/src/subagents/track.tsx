@@ -18,7 +18,7 @@ import {
 import type { Theme } from "@/styles/theme";
 import { useAgentFactsLine } from "@/panels/agent-facts-line";
 import { getPanelManifest } from "@/panels/panel-manifest";
-import { useSheetPanePage } from "@/screens/workspace/sheet-pane";
+import { useSheetPanePageIfAny } from "@/screens/workspace/sheet-pane";
 import type { SheetTab } from "@/stores/workspace-layout-store";
 import type { SubagentRow } from "./select";
 import type { ArchiveFinishedStatus } from "./use-archive-finished";
@@ -80,7 +80,7 @@ export function SubagentsTrack({
   onDetachSubagent,
 }: SubagentsTrackProps): ReactElement | null {
   const { t } = useTranslation();
-  const sheetPanePage = useSheetPanePage();
+  const sheetPanePage = useSheetPanePageIfAny();
 
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";
@@ -91,8 +91,10 @@ export function SubagentsTrack({
   const pill = buildSubagentPillPresentation(t, rows);
   const finishedCount = countFinishedSubagents(rows);
   const showArchiveFinished = finishedCount > 0 || isArchivingFinished || isArchiveFinishedFailed;
-  const sheets = rows.map(sheetTabFor);
-  const pages = sheets.flatMap((sheet) => (sheet ? [sheetPanePage(sheet)] : []));
+  const sheets = sheetPanePage ? rows.map(sheetTabFor) : rows.map(() => null);
+  const pages = sheetPanePage
+    ? sheets.flatMap((sheet) => (sheet ? [sheetPanePage(sheet)] : []))
+    : [];
 
   return (
     <ComposerTrackPill

@@ -1,9 +1,12 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { isMainChatEnabled, type MainChatNightModeStatus } from "@getpaseo/protocol/main-chat";
 import { router, usePathname } from "expo-router";
 import equal from "fast-deep-equal";
 import {
+  ChevronRight,
   Ellipsis,
   History,
+  Moon,
   Pencil,
   Radar,
   Settings,
@@ -69,8 +72,10 @@ import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedSparkles = withUnistyles(Sparkles);
+const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedHistory = withUnistyles(History);
+const ThemedMoon = withUnistyles(Moon);
 const ThemedPencil = withUnistyles(Pencil);
 const ThemedRadar = withUnistyles(Radar);
 const ThemedSettings = withUnistyles(Settings);
@@ -78,7 +83,8 @@ const ThemedShield = withUnistyles(Shield);
 const ThemedZap = withUnistyles(Zap);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
-const accentIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
+const accentForegroundIconMapping = (theme: Theme) => ({ color: theme.colors.accentForeground });
+const accentColorIconMapping = (theme: Theme) => ({ color: theme.colors.accent });
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const renameIcon = <ThemedPencil size={14} uniProps={mutedIconMapping} />;
 const patrolIcon = <ThemedRadar size={14} uniProps={mutedIconMapping} />;
@@ -90,17 +96,57 @@ const proactiveIcon = <ThemedZap size={14} uniProps={mutedIconMapping} />;
 const SELECTED_STATE = { selected: true } as const;
 const ARCHIVE_GUARD_ACTIONS = ["workspace.archive"] as const;
 
-/** Returns true when at least one connected host supports the sticky Main Chat hero entry. */
+/** Returns true when at least one connected host supports Main Chat and it has not been globally disabled. */
 export function useShouldShowMainChatHero(): boolean {
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
   const preferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
-  return useSessionStore(
+  const hostState = useStoreWithEqualityFn(
+    useSessionStore,
     useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId).supportsMainChat,
+      (state) => {
+        const summary = selectMainChatSidebarSummary(state, preferredServerId);
+        return {
+          supportsMainChat: summary.supportsMainChat,
+          targetServerId: summary.targetServerId,
+        };
+      },
       [preferredServerId],
     ),
+    equal,
   );
+  const client = useSessionStore((state) =>
+    hostState.targetServerId ? (state.sessions[hostState.targetServerId]?.client ?? null) : null,
+  );
+  const settings = useMainChatSettingsStore((state) =>
+    hostState.targetServerId ? state.settingsByServerId[hostState.targetServerId] : undefined,
+  );
+  const isLoading = useMainChatSettingsStore((state) =>
+    hostState.targetServerId ? Boolean(state.loadingByServerId[hostState.targetServerId]) : false,
+  );
+  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+
+  useEffect(() => {
+    if (
+      !hostState.supportsMainChat ||
+      !hostState.targetServerId ||
+      !client ||
+      settings ||
+      isLoading
+    ) {
+      return;
+    }
+    void loadSettings(hostState.targetServerId, client).catch(() => undefined);
+  }, [
+    client,
+    hostState.supportsMainChat,
+    hostState.targetServerId,
+    isLoading,
+    loadSettings,
+    settings,
+  ]);
+
+  return hostState.supportsMainChat && isMainChatEnabled(settings);
 }
 
 export interface MainChatHeroRowProps {
@@ -150,6 +196,7 @@ const HeroRowContent = memo(function HeroRowContent({
   attentionCount,
   hasUnsentDraft,
   secondLineText,
+  nightPowerState,
 }: {
   displayTitle: string;
   isSelected: boolean;
@@ -159,19 +206,24 @@ const HeroRowContent = memo(function HeroRowContent({
   attentionCount: number;
   hasUnsentDraft: boolean;
   secondLineText: string;
+  nightPowerState: MainChatNightModeStatus["state"] | undefined;
 }) {
-  const { t } = useTranslation();
+  const isNightQuiet = nightPowerState === "throttled" || nightPowerState === "hibernating";
   return (
     <>
       <View style={[styles.iconBadge, isSelected && styles.iconBadgeSelected]}>
-        <ThemedSparkles size={15} uniProps={accentIconMapping} />
-        <View style={styles.iconStatusOverlay}>
-          <HeroStatusMark
-            loading={isPatrolling}
-            running={isRunning}
-            needsYou={needsYouCount > 0}
-            attention={attentionCount > 0}
-          />
+        <ThemedSparkles size={18} uniProps={accentForegroundIconMapping} />
+        <View style={[styles.iconStatusOverlay, isSelected && styles.iconStatusOverlaySelected]}>
+          {isNightQuiet && !isRunning && needsYouCount === 0 ? (
+            <ThemedMoon size={9} uniProps={accentColorIconMapping} />
+          ) : (
+            <HeroStatusMark
+              loading={isPatrolling}
+              running={isRunning}
+              needsYou={needsYouCount > 0}
+              attention={attentionCount > 0}
+            />
+          )}
         </View>
       </View>
 
@@ -184,15 +236,11 @@ const HeroRowContent = memo(function HeroRowContent({
           >
             {displayTitle}
           </Text>
-          {needsYouCount > 0 ? (
-            <View testID="sidebar-main-chat-hero-needs-you">
-              <StatusBadge
-                size="xs"
-                variant="warning"
-                label={t("mainChat.hero.needsYouBadge", { count: needsYouCount })}
-              />
-            </View>
-          ) : null}
+          <HeroTitleBadge
+            needsYouCount={needsYouCount}
+            isNightQuiet={isNightQuiet}
+            nightPowerState={nightPowerState}
+          />
         </View>
         <Text
           style={[styles.subtitle, hasUnsentDraft && styles.draftSubtitle]}
@@ -205,6 +253,48 @@ const HeroRowContent = memo(function HeroRowContent({
         </Text>
       </View>
     </>
+  );
+});
+
+const HeroTitleBadge = memo(function HeroTitleBadge({
+  needsYouCount,
+  isNightQuiet,
+  nightPowerState,
+}: {
+  needsYouCount: number;
+  isNightQuiet: boolean;
+  nightPowerState: MainChatNightModeStatus["state"] | undefined;
+}): ReactElement {
+  const { t } = useTranslation();
+  if (needsYouCount > 0) {
+    return (
+      <View testID="sidebar-main-chat-hero-needs-you">
+        <StatusBadge
+          size="xs"
+          variant="warning"
+          label={t("mainChat.hero.needsYouBadge", { count: needsYouCount })}
+        />
+      </View>
+    );
+  }
+  if (isNightQuiet) {
+    return (
+      <View style={styles.nightPill} testID="sidebar-main-chat-hero-night-badge">
+        <ThemedMoon size={10} uniProps={mutedIconMapping} />
+        <Text style={styles.nightPillText} numberOfLines={1}>
+          {nightPowerState === "hibernating"
+            ? t("mainChat.nightMode.badgeHibernating")
+            : t("mainChat.nightMode.badgeThrottled")}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.rolePill}>
+      <Text style={styles.rolePillText} numberOfLines={1}>
+        {t("mainChat.hero.rolePill")}
+      </Text>
+    </View>
   );
 });
 
@@ -524,6 +614,9 @@ function useMainChatHeroData() {
   const settings = useMainChatSettingsStore((state) =>
     targetServerId ? state.settingsByServerId[targetServerId] : undefined,
   );
+  const nightModeStatus = useMainChatSettingsStore((state) =>
+    targetServerId ? state.nightModeStatusByServerId[targetServerId] : undefined,
+  );
   const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
 
   useEffect(() => {
@@ -549,6 +642,8 @@ function useMainChatHeroData() {
     targetServerId,
     client,
     unsentDraftText,
+    enabled: isMainChatEnabled(settings),
+    nightPowerState: nightModeStatus?.state,
     displayTitle: settings?.title?.trim() || summaryBase.displayTitle,
     currentStyle: settings?.style ?? ("conservative" as const),
   };
@@ -572,8 +667,16 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
   const [isRowHovered, setIsRowHovered] = useState(false);
   const [isRowPressed, setIsRowPressed] = useState(false);
 
-  const { summaryBase, targetServerId, client, unsentDraftText, displayTitle, currentStyle } =
-    useMainChatHeroData();
+  const {
+    summaryBase,
+    targetServerId,
+    client,
+    unsentDraftText,
+    enabled,
+    nightPowerState,
+    displayTitle,
+    currentStyle,
+  } = useMainChatHeroData();
   const isSelected = isMainChatPathname(pathname);
 
   const actions = useMainChatHeroActions({
@@ -629,7 +732,7 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
 
   const subtitle = useMemo(() => formatHeroSubtitle(summaryBase, t), [summaryBase, t]);
 
-  if (!summaryBase.supportsMainChat) {
+  if (!summaryBase.supportsMainChat || !enabled) {
     return null;
   }
 
@@ -654,6 +757,7 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
             onPointerEnter={handlePointerEnter}
             onPointerLeave={handlePointerLeave}
           >
+            <View style={[styles.accentRail, isSelected && styles.accentRailSelected]} />
             <PressHighlight
               onPress={handleOpen}
               onPressIn={handlePressIn}
@@ -674,6 +778,7 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
                 attentionCount={summaryBase.attentionCount}
                 hasUnsentDraft={hasUnsentDraft}
                 secondLineText={secondLineText}
+                nightPowerState={nightPowerState}
               />
             </PressHighlight>
 
@@ -682,7 +787,9 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
                 <View style={styles.shortcutSlot}>
                   <Shortcut chord={shortcutKeys} />
                 </View>
-              ) : null}
+              ) : (
+                <ThemedChevronRight size={14} uniProps={mutedIconMapping} />
+              )}
               <MainChatHeroMenu
                 visible={showKebab}
                 open={menuProps.open}
@@ -730,7 +837,7 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
 const styles = StyleSheet.create((theme) => ({
   stickyWrapper: {
     paddingHorizontal: theme.spacing[2],
-    paddingTop: theme.spacing[1.5],
+    paddingTop: theme.spacing[2],
     paddingBottom: theme.spacing[2],
   },
   heroLine: {
@@ -742,61 +849,89 @@ const styles = StyleSheet.create((theme) => ({
     position: "relative",
     flex: 1,
     minWidth: 0,
-    minHeight: 52,
+    minHeight: 58,
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: theme.borderRadius.lg,
-    borderWidth: theme.borderWidth[1],
-    borderColor: "transparent",
-  },
-  rowHighlighted: {
-    backgroundColor: theme.colors.surfaceSidebarHover,
-  },
-  rowSelected: {
+    overflow: "hidden",
     backgroundColor: theme.colors.surface2,
+    borderRadius: theme.borderRadius.xl,
+    borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.border,
   },
+  accentRail: {
+    position: "absolute",
+    left: 0,
+    top: 8,
+    bottom: 8,
+    width: 3,
+    borderTopRightRadius: theme.borderRadius.full,
+    borderBottomRightRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.accent,
+    opacity: 0.85,
+  },
+  accentRailSelected: {
+    top: 0,
+    bottom: 0,
+    width: 3.5,
+    borderTopRightRadius: 0,
+    borderBottomRightRadius: 0,
+    opacity: 1,
+  },
+  rowHighlighted: {
+    backgroundColor: theme.colors.surface3,
+    borderColor: theme.colors.accent,
+  },
+  rowSelected: {
+    backgroundColor: theme.colors.statusSuccessTint,
+    borderColor: theme.colors.accent,
+  },
   rowPressed: {
-    backgroundColor: theme.colors.surface2,
+    backgroundColor: theme.colors.surface3,
   },
   mainButton: {
     flex: 1,
     minWidth: 0,
-    minHeight: 50,
+    minHeight: 56,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
-    paddingLeft: theme.spacing[2],
+    gap: 10,
+    paddingLeft: theme.spacing[3],
     paddingRight: theme.spacing[1],
-    paddingVertical: theme.spacing[1.5],
-    borderRadius: theme.borderRadius.lg,
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.borderRadius.xl,
   },
   mainButtonPressed: {
     backgroundColor: "transparent",
   },
   iconBadge: {
     position: "relative",
-    width: 30,
-    height: 30,
+    width: 36,
+    height: 36,
     borderRadius: theme.borderRadius.lg,
-    backgroundColor: theme.colors.surface3,
+    backgroundColor: theme.colors.accent,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
   },
   iconBadgeSelected: {
-    backgroundColor: theme.colors.surface1,
+    backgroundColor: theme.colors.accentBright,
   },
   iconStatusOverlay: {
     position: "absolute",
-    right: -2,
-    bottom: -2,
-    width: 12,
-    height: 12,
+    right: -3,
+    bottom: -3,
+    width: 14,
+    height: 14,
     borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.surfaceSidebar,
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1.5,
+    borderColor: theme.colors.surface2,
     alignItems: "center",
     justifyContent: "center",
+  },
+  iconStatusOverlaySelected: {
+    backgroundColor: theme.colors.surface1,
+    borderColor: theme.colors.surface1,
   },
   body: {
     flex: 1,
@@ -811,11 +946,40 @@ const styles = StyleSheet.create((theme) => ({
   title: {
     flexShrink: 1,
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
   },
   titleSelected: {
+    fontWeight: theme.fontWeight.bold,
+  },
+  rolePill: {
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusSuccessTint,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.accent,
+    flexShrink: 0,
+  },
+  rolePillText: {
+    fontSize: 10,
     fontWeight: theme.fontWeight.semibold,
+    color: theme.colors.accent,
+  },
+  nightPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.surface3,
+    flexShrink: 0,
+  },
+  nightPillText: {
+    fontSize: 10,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
   },
   subtitle: {
     fontSize: theme.fontSize.sm,

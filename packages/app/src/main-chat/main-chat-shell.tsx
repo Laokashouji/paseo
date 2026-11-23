@@ -1,10 +1,13 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { MainChatNightModeStatus } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import {
+  Activity,
   ArrowLeft,
   Compass,
   Ellipsis,
   History,
+  Moon,
   PanelRight,
   Radar,
   Settings,
@@ -45,6 +48,7 @@ import {
   useIsCompactFormFactor,
 } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
+import { DiffDocumentWorkspaceCacheProvider } from "@/git/diff-document/workspace-cache";
 import { useHosts } from "@/runtime/host-runtime";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -68,11 +72,14 @@ import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
 import { StandingAuthModal } from "./standing-auth-panel";
 import { TaskPanelDrawer } from "./task-panel-drawer";
+import { formatCompactTokenCount } from "./usage-format";
 
+const ThemedActivity = withUnistyles(Activity);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const ThemedCompass = withUnistyles(Compass);
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedHistory = withUnistyles(History);
+const ThemedMoon = withUnistyles(Moon);
 const ThemedPanelRight = withUnistyles(PanelRight);
 const ThemedRadar = withUnistyles(Radar);
 const ThemedSettings = withUnistyles(Settings);
@@ -300,6 +307,8 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   canToggleStyle,
   isTogglingStyle,
   currentStyle,
+  nightPowerState,
+  todayTokens,
   canPatrol,
   canRunLifecycle,
   showRightDrawer,
@@ -320,6 +329,8 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   canToggleStyle: boolean;
   isTogglingStyle: boolean;
   currentStyle: "conservative" | "proactive";
+  nightPowerState: MainChatNightModeStatus["state"] | undefined;
+  todayTokens: number;
   canPatrol: boolean;
   canRunLifecycle: boolean;
   showRightDrawer: boolean;
@@ -336,9 +347,44 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
 }) {
   const { t } = useTranslation();
   const isProactive = currentStyle === "proactive";
+  const isNightQuiet = nightPowerState === "throttled" || nightPowerState === "hibernating";
 
   return (
     <View style={styles.headerRight}>
+      {isNightQuiet ? (
+        <PressHighlight
+          onPress={onOpenSettings}
+          style={styles.telemetryCapsule}
+          highlightStyle={styles.controlPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.nightMode.sectionTitle")}
+          testID="main-chat-night-mode-capsule"
+        >
+          <ThemedMoon size={12} uniProps={mutedIconMapping} />
+          <Text style={styles.telemetryCapsuleText} numberOfLines={1}>
+            {nightPowerState === "hibernating"
+              ? t("mainChat.nightMode.badgeHibernating")
+              : t("mainChat.nightMode.badgeThrottled")}
+          </Text>
+        </PressHighlight>
+      ) : null}
+
+      {!isCompact && todayTokens > 0 ? (
+        <PressHighlight
+          onPress={onOpenSettings}
+          style={styles.telemetryCapsule}
+          highlightStyle={styles.controlPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.usage.sectionTitle")}
+          testID="main-chat-usage-capsule"
+        >
+          <ThemedActivity size={12} uniProps={mutedIconMapping} />
+          <Text style={styles.telemetryCapsuleText} numberOfLines={1}>
+            {t("mainChat.usage.headerPill", { count: formatCompactTokenCount(todayTokens) })}
+          </Text>
+        </PressHighlight>
+      ) : null}
+
       {canToggleStyle ? (
         <PressHighlight
           onPress={onToggleStyle}
@@ -512,6 +558,51 @@ function useShellHeaderActions(input: {
   };
 }
 
+function useHostLabelsByServerId(): Record<string, string> {
+  const hosts = useHosts();
+  return useMemo(() => {
+    const labels: Record<string, string> = {};
+    for (const host of hosts) {
+      labels[host.serverId] = host.label;
+    }
+    return labels;
+  }, [hosts]);
+}
+
+function useMainChatShellTelemetry(serverId: string | null) {
+  const client = useSessionStore((state) =>
+    serverId ? (state.sessions[serverId]?.client ?? null) : null,
+  );
+  const settings = useMainChatSettingsStore((state) =>
+    serverId ? state.settingsByServerId[serverId] : undefined,
+  );
+  const nightModeStatus = useMainChatSettingsStore((state) =>
+    serverId ? state.nightModeStatusByServerId[serverId] : undefined,
+  );
+  const usageSummary = useMainChatSettingsStore((state) =>
+    serverId ? state.usageByServerId[serverId] : undefined,
+  );
+  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+  const loadUsage = useMainChatSettingsStore((state) => state.loadUsage);
+
+  useEffect(() => {
+    if (!serverId || !client || settings) return;
+    void loadSettings(serverId, client);
+  }, [client, loadSettings, serverId, settings]);
+
+  useEffect(() => {
+    if (!serverId || !client || usageSummary) return;
+    void loadUsage(serverId, client).catch(() => undefined);
+  }, [client, loadUsage, serverId, usageSummary]);
+
+  return {
+    client,
+    currentStyle: settings?.style ?? "conservative",
+    nightPowerState: nightModeStatus?.state,
+    todayTokens: usageSummary?.today.totalTokens ?? 0,
+  };
+}
+
 /**
  * Exclusive minimalist assistant shell for `/main` and `/main/c/[conversationId]`.
  * Strips all WorkspaceScreen tabs, terminal, explorer, git, and script chrome; pairs the main
@@ -535,25 +626,12 @@ export const MainChatShell = memo(function MainChatShell({
   const isCompact = useIsCompactFormFactor();
   const isDesktopSidebarOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const clearCameFrom = useMainChatCameFromStore((state) => state.clearCameFrom);
-
-  const client = useSessionStore((state) =>
-    serverId ? (state.sessions[serverId]?.client ?? null) : null,
-  );
-  const settings = useMainChatSettingsStore((state) =>
-    serverId ? state.settingsByServerId[serverId] : undefined,
-  );
-  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+  const { client, currentStyle, nightPowerState, todayTokens } =
+    useMainChatShellTelemetry(serverId);
 
   useEffect(() => {
     clearCameFrom();
   }, [clearCameFrom]);
-
-  useEffect(() => {
-    if (!serverId || !client || settings) return;
-    void loadSettings(serverId, client);
-  }, [client, loadSettings, serverId, settings]);
-
-  const currentStyle = settings?.style ?? "conservative";
   const actions = useShellHeaderActions({
     serverId,
     client,
@@ -566,14 +644,7 @@ export const MainChatShell = memo(function MainChatShell({
     client,
     mainAgentId,
   });
-  const hosts = useHosts();
-  const hostLabelsByServerId = useMemo<Record<string, string>>(() => {
-    const labels: Record<string, string> = {};
-    for (const host of hosts) {
-      labels[host.serverId] = host.label;
-    }
-    return labels;
-  }, [hosts]);
+  const hostLabelsByServerId = useHostLabelsByServerId();
   const [standingAuthModalOpen, setStandingAuthModalOpen] = useState(false);
 
   const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
@@ -615,90 +686,94 @@ export const MainChatShell = memo(function MainChatShell({
   const headerHorizontalPadding = isCompact ? 8 : 12;
 
   return (
-    <MainChatShellProvider value={shellContextValue}>
-      <View style={styles.root} testID="main-chat-shell">
-        <View style={styles.headerContainer} testID="main-chat-shell-header">
-          <View style={headerInnerStyle}>
-            <WindowChromeSafeArea
-              placement="inline"
-              horizontalPadding={headerHorizontalPadding}
-              style={styles.headerRow}
+    <DiffDocumentWorkspaceCacheProvider>
+      <MainChatShellProvider value={shellContextValue}>
+        <View style={styles.root} testID="main-chat-shell">
+          <View style={styles.headerContainer} testID="main-chat-shell-header">
+            <View style={headerInnerStyle}>
+              <WindowChromeSafeArea
+                placement="inline"
+                horizontalPadding={headerHorizontalPadding}
+                style={styles.headerRow}
+              >
+                <TitlebarDragRegion />
+                <ShellHeaderLeft
+                  variant={variant}
+                  title={title}
+                  isCompact={isCompact}
+                  showAvatar={showHeaderAvatar}
+                  isActiveRunning={isRunning || runningCount > 0}
+                  needsYouCount={needsYouCount}
+                  onBackToMain={handleBackToMain}
+                />
+                <ShellHeaderRight
+                  variant={variant}
+                  title={title}
+                  isCompact={isCompact}
+                  canToggleStyle={Boolean(serverId && client)}
+                  isTogglingStyle={actions.isTogglingStyle}
+                  currentStyle={currentStyle}
+                  nightPowerState={nightPowerState}
+                  todayTokens={todayTokens}
+                  canPatrol={Boolean(serverId && client && !actions.isPatrolling)}
+                  canRunLifecycle={lifecycle.canRunLifecycle}
+                  showRightDrawer={showRightDrawer}
+                  extraMenuItems={extraMenuItems}
+                  onToggleStyle={actions.toggleStyle}
+                  onOpenHistory={handleOpenHistory}
+                  onTriggerPatrol={actions.runPatrol}
+                  onToggleTaskDrawer={actions.toggleTaskDrawer}
+                  onCompact={lifecycle.triggerCompact}
+                  onClear={lifecycle.requestClear}
+                  onNewSession={lifecycle.requestNewSession}
+                  onOpenStandingAuth={handleOpenStandingAuth}
+                  onOpenSettings={handleOpenSettings}
+                />
+              </WindowChromeSafeArea>
+            </View>
+          </View>
+
+          <View style={styles.workbench}>
+            <View
+              style={styles.mainColumn}
+              onStartShouldSetResponderCapture={handleMainColumnResponderCapture}
+              testID="main-chat-main-column"
             >
-              <TitlebarDragRegion />
-              <ShellHeaderLeft
-                variant={variant}
-                title={title}
-                isCompact={isCompact}
-                showAvatar={showHeaderAvatar}
-                isActiveRunning={isRunning || runningCount > 0}
-                needsYouCount={needsYouCount}
-                onBackToMain={handleBackToMain}
-              />
-              <ShellHeaderRight
-                variant={variant}
-                title={title}
-                isCompact={isCompact}
-                canToggleStyle={Boolean(serverId && client)}
-                isTogglingStyle={actions.isTogglingStyle}
-                currentStyle={currentStyle}
-                canPatrol={Boolean(serverId && client && !actions.isPatrolling)}
-                canRunLifecycle={lifecycle.canRunLifecycle}
-                showRightDrawer={showRightDrawer}
-                extraMenuItems={extraMenuItems}
-                onToggleStyle={actions.toggleStyle}
-                onOpenHistory={handleOpenHistory}
-                onTriggerPatrol={actions.runPatrol}
-                onToggleTaskDrawer={actions.toggleTaskDrawer}
-                onCompact={lifecycle.triggerCompact}
-                onClear={lifecycle.requestClear}
-                onNewSession={lifecycle.requestNewSession}
-                onOpenStandingAuth={handleOpenStandingAuth}
-                onOpenSettings={handleOpenSettings}
-              />
-            </WindowChromeSafeArea>
-          </View>
-        </View>
+              {variant === "main" ? (
+                <MainChatCompactionBanner serverId={serverId} mainAgentId={mainAgentId} />
+              ) : null}
+              {children}
+            </View>
 
-        <View style={styles.workbench}>
-          <View
-            style={styles.mainColumn}
-            onStartShouldSetResponderCapture={handleMainColumnResponderCapture}
-            testID="main-chat-main-column"
-          >
-            {variant === "main" ? (
-              <MainChatCompactionBanner serverId={serverId} mainAgentId={mainAgentId} />
+            {showRightDrawer && actions.activeDrawerTarget ? (
+              <TaskPanelDrawer
+                target={actions.activeDrawerTarget}
+                mainServerId={serverId}
+                mainAgentId={mainAgentId ?? null}
+                isFocused={activePane === "drawer"}
+                onFocus={handleFocusDrawerPane}
+              />
             ) : null}
-            {children}
           </View>
-
-          {showRightDrawer && actions.activeDrawerTarget ? (
-            <TaskPanelDrawer
-              target={actions.activeDrawerTarget}
-              mainServerId={serverId}
-              mainAgentId={mainAgentId ?? null}
-              isFocused={activePane === "drawer"}
-              onFocus={handleFocusDrawerPane}
-            />
-          ) : null}
         </View>
-      </View>
 
-      <MainChatLifecycleConfirmModal
-        confirmKind={lifecycle.confirmKind}
-        busy={lifecycle.busyAction !== null}
-        onCancel={lifecycle.cancelConfirm}
-        onConfirm={lifecycle.confirmPendingAction}
-      />
+        <MainChatLifecycleConfirmModal
+          confirmKind={lifecycle.confirmKind}
+          busy={lifecycle.busyAction !== null}
+          onCancel={lifecycle.cancelConfirm}
+          onConfirm={lifecycle.confirmPendingAction}
+        />
 
-      <StandingAuthModal
-        visible={standingAuthModalOpen}
-        serverId={serverId}
-        mainAgentId={mainAgentId ?? null}
-        client={client}
-        hostLabelsByServerId={hostLabelsByServerId}
-        onClose={handleCloseStandingAuth}
-      />
-    </MainChatShellProvider>
+        <StandingAuthModal
+          visible={standingAuthModalOpen}
+          serverId={serverId}
+          mainAgentId={mainAgentId ?? null}
+          client={client}
+          hostLabelsByServerId={hostLabelsByServerId}
+          onClose={handleCloseStandingAuth}
+        />
+      </MainChatShellProvider>
+    </DiffDocumentWorkspaceCacheProvider>
   );
 });
 
@@ -801,6 +876,22 @@ const styles = StyleSheet.create((theme) => ({
   },
   styleCapsuleTextProactive: {
     color: theme.colors.statusWarning,
+  },
+  telemetryCapsule: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    height: 28,
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.full,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+  },
+  telemetryCapsuleText: {
+    fontSize: 11,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
   },
   iconButton: {
     width: 30,

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import Ajv, { type ErrorObject, type Options as AjvOptions } from "ajv";
-import type { AgentProvider, AgentSessionConfig } from "./agent-sdk-types.js";
+import type { AgentProvider, AgentSessionConfig, AgentUsage } from "./agent-sdk-types.js";
 import type { AgentManager } from "./agent-manager.js";
 
 export interface StructuredGenerationLogger {
@@ -78,6 +78,7 @@ export interface StructuredAgentGenerationOptions<T> {
   schema: z.ZodType<T> | JsonSchema;
   maxRetries?: number;
   schemaName?: string;
+  onUsage?: (usage: AgentUsage, meta: { provider: AgentProvider; model: string | null }) => void;
 }
 
 export interface StructuredAgentGenerationWithFallbackOptions<T> {
@@ -98,6 +99,7 @@ export interface StructuredAgentGenerationWithFallbackOptions<T> {
   /** Cooldown duration after a provider auth hard failure (401/403/OAuth expired) during multi-provider fallback. */
   authFailureCooldownMs?: number;
   now?: () => number;
+  onUsage?: (usage: AgentUsage, meta: { provider: AgentProvider; model: string | null }) => void;
 }
 
 // Re-export from the legacy module path so existing server consumers keep working.
@@ -357,8 +359,17 @@ export async function getStructuredAgentResponse<T>(
 export async function generateStructuredAgentResponse<T>(
   options: StructuredAgentGenerationOptions<T>,
 ): Promise<T> {
-  const { manager, agentConfig, agentId, persistSession, prompt, schema, maxRetries, schemaName } =
-    options;
+  const {
+    manager,
+    agentConfig,
+    agentId,
+    persistSession,
+    prompt,
+    schema,
+    maxRetries,
+    schemaName,
+    onUsage,
+  } = options;
   // Structured generation runs ephemeral helper turns; default to internal so callers that omit
   // `internal` never persist junk sessions into visible workspaces or trigger fleet listeners.
   const resolvedAgentConfig: AgentSessionConfig = {
@@ -372,6 +383,12 @@ export async function generateStructuredAgentResponse<T>(
   try {
     const caller: AgentCaller = async (nextPrompt) => {
       const result = await manager.runAgent(agent.id, nextPrompt);
+      if (result.usage && onUsage) {
+        onUsage(result.usage, {
+          provider: resolvedAgentConfig.provider,
+          model: resolvedAgentConfig.model ?? null,
+        });
+      }
       if (typeof result.finalText === "string" && result.finalText.length > 0) {
         return result.finalText;
       }
@@ -531,6 +548,7 @@ export async function generateStructuredAgentResponseWithFallback<T>(
     runner,
     authFailureCooldownMs = DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
     now,
+    onUsage,
   } = options;
 
   if (providers.length === 0) {
@@ -566,6 +584,7 @@ export async function generateStructuredAgentResponseWithFallback<T>(
         maxRetries,
         schemaName,
         persistSession,
+        onUsage,
         agentConfig: {
           ...agentConfigOverrides,
           provider: candidate.provider,

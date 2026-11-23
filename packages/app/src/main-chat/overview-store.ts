@@ -178,7 +178,15 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
     }
     const overview = response.overview;
     if (overview.settings) {
-      useMainChatSettingsStore.getState().hydrateSettings(serverId, overview.settings);
+      useMainChatSettingsStore
+        .getState()
+        .hydrateSettings(serverId, overview.settings, overview.nightModeStatus);
+    }
+    if (overview.nightModeStatus || overview.tokenUsage) {
+      useMainChatSettingsStore.getState().hydrateTelemetry(serverId, {
+        nightModeStatus: overview.nightModeStatus,
+        tokenUsage: overview.tokenUsage,
+      });
     }
     if (overview.plans.length > 0) {
       useMainChatPlanStore.getState().upsertPlans(serverId, overview.plans);

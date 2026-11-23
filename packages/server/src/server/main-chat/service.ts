@@ -17,6 +17,7 @@ import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   extractMainChatPermissionRuleCandidate,
   getMainChatTaskMetaFromLabels,
+  isMainChatEnabled,
   isMainChatLabels,
   type MainChatActivityEntry,
   type MainChatActivityKind,
@@ -29,6 +30,7 @@ import {
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
   type MainChatFleetHostStatus,
+  type MainChatNightModeStatus,
   type MainChatOverview,
   type MainChatPatrolResult,
   type MainChatPermissionRule,
@@ -50,6 +52,8 @@ import {
   type MainChatTaskReceipt,
   type MainChatTaskRecord,
   type MainChatTaskReviewVerdict,
+  type MainChatTokenUsageSource,
+  type MainChatTokenUsageSummary,
 } from "@getpaseo/protocol/main-chat";
 import {
   PARENT_AGENT_ID_LABEL,
@@ -65,7 +69,7 @@ import {
   stripMainChatContextBlock,
   wrapMainChatContextBlock,
 } from "../agent/agent-messages/index.js";
-import type { AgentPromptInput, AgentTimelineItem } from "../agent/agent-sdk-types.js";
+import type { AgentPromptInput, AgentTimelineItem, AgentUsage } from "../agent/agent-sdk-types.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type { StructuredGenerationDaemonConfig } from "../agent/structured-generation-providers.js";
@@ -313,6 +317,9 @@ export interface MainChatService {
   ensureMainChat(input?: EnsureMainChatInput): Promise<EnsureMainChatResult>;
   getSettings(): Promise<MainChatSettings>;
   getCurrentSettings(): MainChatSettings;
+  getNightModeStatus(): MainChatNightModeStatus;
+  getTokenUsage(): Promise<MainChatTokenUsageSummary>;
+  resetTokenUsage(): Promise<MainChatTokenUsageSummary>;
   updateSettings(patch: MainChatSettingsPatch): Promise<MainChatSettings>;
   triggerPatrol(options?: {
     mainAgentId?: string;
@@ -668,6 +675,40 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   const compactionStatusByAgent = new Map<string, MainChatCompactionStatus>();
   const compactionInFlightByAgent = new Map<string, Promise<MainChatCompactResult>>();
   const lastPrecompactWatermarkByAgent = new Map<string, number>();
+  const lastCumulativeCostByAgent = new Map<string, number>();
+
+  function recordAgentTurnTokenUsage(input: {
+    agentId: string;
+    source: MainChatTokenUsageSource;
+    provider: AgentProvider;
+    model: string | null;
+    usage: AgentUsage;
+  }): void {
+    let costUsd = input.usage.totalCostUsd;
+    if (input.provider === "opencode" && typeof costUsd === "number" && Number.isFinite(costUsd)) {
+      const prev = lastCumulativeCostByAgent.get(input.agentId) ?? 0;
+      const delta = Math.max(0, costUsd - prev);
+      lastCumulativeCostByAgent.set(input.agentId, Math.max(prev, costUsd));
+      costUsd = delta;
+    }
+    void store
+      .recordTokenUsage({
+        source: input.source,
+        provider: input.provider,
+        model: input.model,
+        inputTokens: input.usage.inputTokens,
+        cachedInputTokens: input.usage.cachedInputTokens,
+        outputTokens: input.usage.outputTokens,
+        costUsd,
+        atMs: getNowMs(),
+      })
+      .catch((error) => {
+        logger.warn(
+          { err: error, agentId: input.agentId, source: input.source },
+          "Failed to record main-chat token usage",
+        );
+      });
+  }
 
   const turnQueue = createMainChatTurnQueue({
     agentManager: deps.agentManager,
@@ -689,6 +730,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           lastError: null,
         })
         .catch(() => undefined);
+    },
+    onMainAgentTurnCompleted: (info) => {
+      recordAgentTurnTokenUsage({
+        agentId: info.agentId,
+        source: info.kind,
+        provider: info.provider,
+        model: info.model,
+        usage: info.usage,
+      });
     },
   });
 
@@ -719,6 +769,29 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
     },
+    onAgentEvent: (event) => {
+      if (event.type === "agent_removed") {
+        lastCumulativeCostByAgent.delete(event.agentId);
+        return;
+      }
+      if (event.type !== "agent_stream" || event.event.type !== "turn_completed") return;
+      const usage = event.event.usage;
+      if (!usage) return;
+      const live = deps.agentManager.getAgent(event.agentId);
+      if (!live || live.internal || isMainChatLabels(live.labels)) return;
+      const hasConversationLabel = Boolean(live.labels[MAIN_CHAT_CONVERSATION_ID_LABEL]);
+      const trackedConversation = conversationManager.getConversationByAgentId(event.agentId);
+      if (!hasConversationLabel && (!trackedConversation || trackedConversation.kind === "main")) {
+        return;
+      }
+      recordAgentTurnTokenUsage({
+        agentId: event.agentId,
+        source: "direction",
+        provider: event.event.provider,
+        model: live.config.model ?? live.runtimeInfo?.model ?? null,
+        usage,
+      });
+    },
     semanticTriageRunner: deps.semanticTriageRunner,
     transientRetryDelayMs: deps.transientRetryDelayMs,
     maxTransientAutoRetries: deps.maxTransientAutoRetries,
@@ -741,6 +814,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   let ensureInFlight: Promise<EnsureMainChatResult> | null = null;
   let lifecycleLock: Promise<unknown> = Promise.resolve();
   let idlePrecompactTimer: ReturnType<typeof setInterval> | null = null;
+  let serviceStarted = false;
+  let runtimeActive = false;
   const planLocks = new Map<string, Promise<unknown>>();
 
   function runWithLifecycleLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -1200,6 +1275,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     input?: EnsureMainChatInput,
   ): Promise<EnsureMainChatResult> {
     await store.load();
+    if (!isMainChatEnabled(store.getSettings())) {
+      throw new Error("主对话功能已在设置中关闭，请先开启后再使用");
+    }
     const existing = await findExistingMainChat();
     if (existing) {
       await conversationManager.load();
@@ -2181,6 +2259,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
   async function checkIdlePrecompactionInternal(requestedMainAgentId?: string): Promise<boolean> {
     await store.load();
+    if (!isMainChatEnabled(store.getSettings())) return false;
+    if (supervisor.getNightModeStatus().state === "hibernating") return false;
     const mainAgentId = requestedMainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
     if (!mainAgentId) return false;
     if (compactionInFlightByAgent.has(mainAgentId)) return false;
@@ -2882,40 +2962,65 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  function startActiveRuntime(): void {
+    if (runtimeActive) {
+      supervisor.refreshSchedule();
+      return;
+    }
+    runtimeActive = true;
+    fleetAggregator.start();
+    if (!unsubscribeFleetEvents) {
+      unsubscribeFleetEvents = fleetBridge.subscribeFleetEvents({
+        onInvalidateSnapshot: () => {
+          contextSnapshots.invalidateCache();
+        },
+      });
+    }
+    turnQueue.start();
+    supervisor.start();
+    if (!idlePrecompactTimer && idlePrecompactCheckIntervalMs > 0) {
+      idlePrecompactTimer = setInterval(() => {
+        void checkIdlePrecompactionInternal().catch((error) => {
+          logger.warn({ err: error }, "Idle pre-compaction check failed");
+        });
+      }, idlePrecompactCheckIntervalMs);
+      idlePrecompactTimer.unref?.();
+    }
+  }
+
+  function stopActiveRuntime(): void {
+    runtimeActive = false;
+    if (idlePrecompactTimer) {
+      clearInterval(idlePrecompactTimer);
+      idlePrecompactTimer = null;
+    }
+    unsubscribeFleetEvents?.();
+    unsubscribeFleetEvents = null;
+    fleetAggregator.stop();
+    supervisor.stop();
+    turnQueue.stop();
+  }
+
+  function syncRuntimeEnabledState(): void {
+    if (!serviceStarted) return;
+    if (isMainChatEnabled(store.getSettings())) {
+      startActiveRuntime();
+    } else {
+      stopActiveRuntime();
+    }
+  }
+
   return {
     async start() {
+      serviceStarted = true;
       await store.load();
       await conversationManager.load();
-      fleetAggregator.start();
-      if (!unsubscribeFleetEvents) {
-        unsubscribeFleetEvents = fleetBridge.subscribeFleetEvents({
-          onInvalidateSnapshot: () => {
-            contextSnapshots.invalidateCache();
-          },
-        });
-      }
-      turnQueue.start();
-      supervisor.start();
-      if (!idlePrecompactTimer && idlePrecompactCheckIntervalMs > 0) {
-        idlePrecompactTimer = setInterval(() => {
-          void checkIdlePrecompactionInternal().catch((error) => {
-            logger.warn({ err: error }, "Idle pre-compaction check failed");
-          });
-        }, idlePrecompactCheckIntervalMs);
-        idlePrecompactTimer.unref?.();
-      }
+      syncRuntimeEnabledState();
     },
 
     stop() {
-      if (idlePrecompactTimer) {
-        clearInterval(idlePrecompactTimer);
-        idlePrecompactTimer = null;
-      }
-      unsubscribeFleetEvents?.();
-      unsubscribeFleetEvents = null;
-      fleetAggregator.stop();
-      supervisor.stop();
-      turnQueue.stop();
+      serviceStarted = false;
+      stopActiveRuntime();
     },
 
     async ensureMainChat(input) {
@@ -2936,10 +3041,26 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       return store.getSettings();
     },
 
+    getNightModeStatus() {
+      return supervisor.getNightModeStatus();
+    },
+
+    async getTokenUsage() {
+      await store.load();
+      return store.getTokenUsageSummary(getNowMs());
+    },
+
+    async resetTokenUsage() {
+      await store.load();
+      lastCumulativeCostByAgent.clear();
+      return store.resetTokenUsage();
+    },
+
     async updateSettings(patch) {
       await store.load();
       const previous = store.getSettings();
       const updated = await store.updateSettings(patch);
+      syncRuntimeEnabledState();
       supervisor.refreshSchedule();
 
       const existing = await findExistingMainChat();
@@ -2993,6 +3114,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     },
 
     beginForegroundUserSend(agentId) {
+      if (!isMainChatEnabled(store.getSettings())) {
+        return null;
+      }
       const live = deps.agentManager.getAgent(agentId);
       if (live && !isMainChatLabels(live.labels)) {
         return null;
@@ -3012,6 +3136,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return prompt;
       }
       await store.load();
+      if (!isMainChatEnabled(store.getSettings())) {
+        return prompt;
+      }
+      supervisor.notifyUserForegroundActivity(getNowMs());
       await turnQueue.preemptForForegroundUser(agentId);
       const handoffSummary = await store.consumePendingHandoffSummary(agentId);
       const snapshot = await contextSnapshots.buildTurnContext(agentId, {
@@ -3458,6 +3586,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         nextStepSuggestions,
         suppressedQuietBadgeCount: store.getSuppressedQuietBadgeCount(),
         pendingSignalCount: supervisor.getPendingSignalCount(),
+        nightModeStatus: supervisor.getNightModeStatus(),
+        tokenUsage: store.getTokenUsageSummary(getNowMs()),
       };
     },
 
