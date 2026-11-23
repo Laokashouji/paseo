@@ -1,7 +1,9 @@
 import { usesDesktopBindings } from "@/keyboard";
-import { useMemo } from "react";
+import equal from "fast-deep-equal";
+import { useCallback, useMemo } from "react";
 import { router, type Href } from "expo-router";
 import { useTranslation } from "react-i18next";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 import {
   CalendarClock,
   CircleDashed,
@@ -135,8 +137,20 @@ export function CommandCenterRootActions() {
   const toast = useToast();
   const activeWorkspace = useActiveWorkspaceSelection();
   const preferredServerId = activeWorkspace?.serverId ?? null;
-  const mainChatSummary = useSessionStore((state) =>
-    selectMainChatSidebarSummary(state, preferredServerId),
+  const mainChatSummary = useStoreWithEqualityFn(
+    useSessionStore,
+    useCallback(
+      (state) => {
+        const summary = selectMainChatSidebarSummary(state, preferredServerId);
+        return {
+          supportsMainChat: summary.supportsMainChat,
+          targetServerId: summary.targetServerId,
+          displayTitle: summary.displayTitle,
+        };
+      },
+      [preferredServerId],
+    ),
+    equal,
   );
   const configuredMainChatTitle = useMainChatSettingsStore((state) =>
     mainChatSummary.targetServerId

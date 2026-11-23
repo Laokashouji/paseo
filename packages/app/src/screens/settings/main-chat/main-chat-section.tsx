@@ -7,11 +7,13 @@ import {
   type MainChatSettingsPatch,
   type MainChatStyle,
 } from "@getpaseo/protocol/main-chat";
+import equal from "fast-deep-equal";
 import { Radar, Shield, Zap } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { Button } from "@/components/ui/button";
 import { FormTextInput } from "@/components/ui/form-field";
@@ -338,16 +340,23 @@ export function MainChatSettingsSection(): ReactElement {
   const hosts = useHosts();
   const activeWorkspace = useActiveWorkspaceSelection();
 
-  const capableHosts = useSessionStore((state) =>
-    hosts
-      .filter((host) => {
-        const session = state.sessions[host.serverId];
-        return Boolean(session?.client && session.serverInfo?.features?.mainChat === true);
-      })
-      .map((host) => ({
-        serverId: host.serverId,
-        label: host.label || state.sessions[host.serverId]?.serverInfo?.hostname || host.serverId,
-      })),
+  const capableHosts = useStoreWithEqualityFn(
+    useSessionStore,
+    useCallback(
+      (state) =>
+        hosts
+          .filter((host) => {
+            const session = state.sessions[host.serverId];
+            return Boolean(session?.client && session.serverInfo?.features?.mainChat === true);
+          })
+          .map((host) => ({
+            serverId: host.serverId,
+            label:
+              host.label || state.sessions[host.serverId]?.serverInfo?.hostname || host.serverId,
+          })),
+      [hosts],
+    ),
+    equal,
   );
 
   const [selectedServerId, setSelectedServerId] = useState<string | null>(() =>
