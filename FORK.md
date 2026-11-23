@@ -160,6 +160,7 @@ paseo daemon restart
 | 类别 | 飞书文档 | 绑定分支 / 目录 | Wiki `node_token` | `doc_id` |
 | --- | --- | --- | --- | --- |
 | 主文档 | [Paseo Fork — 工程总览](https://bytedance.larkoffice.com/wiki/Nq50wJhwkiRz2gkpNbDcwrjunnb) | 全局（`fork`） | `Nq50wJhwkiRz2gkpNbDcwrjunnb` | `Y5wsdWF18olzKzxEonVcv1qsnXg` |
+| 速览 A0 | [【速览】Paseo Fork 新增与修改能力汇总（实机红框图解）](https://bytedance.larkoffice.com/wiki/RDt9wdTcEiAFuZk6jCfc6VRhnNg) | 新人速览（全量 `fork` 能力） | `RDt9wdTcEiAFuZk6jCfc6VRhnNg` | `U3FidWxwFoIK5Rxim9pcUTaVndd` |
 | 能力 A2 | [【能力】原生无损分叉与分支管理](https://bytedance.larkoffice.com/wiki/BOsFwD4vFiRThrkqDJfcI7WPnib) | `feat/native-fork-and-branches` | `BOsFwD4vFiRThrkqDJfcI7WPnib` | `Ah7Kdn8tQobNzLxxXXmcMDuFnUc` |
 | 能力 A3 | [【能力】原生 `/btw` 旁路提问](https://bytedance.larkoffice.com/wiki/H2TBwgRevixWU0kN1O4ckgERnpd) | `feat/native-btw-side-question` | `H2TBwgRevixWU0kN1O4ckgERnpd` | `Symyd2lpDo0Z1Hx2n6xcoC85nAb` |
 | 能力 A4 | [【能力】插件扩展底座增强](https://bytedance.larkoffice.com/wiki/AfVfwyvXbi9YTakQlijcuZ8anbd) | `closeAgentTab`、`buildForkContext` | `AfVfwyvXbi9YTakQlijcuZ8anbd` | `MkT8dxyLxoLbuzxiivXcLOSMnIc` |
