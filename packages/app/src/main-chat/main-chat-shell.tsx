@@ -9,6 +9,7 @@ import {
   Radar,
   Settings,
   Shield,
+  ShieldCheck,
   Sparkles,
   Zap,
 } from "lucide-react-native";
@@ -44,6 +45,7 @@ import {
   useIsCompactFormFactor,
 } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
+import { useHosts } from "@/runtime/host-runtime";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
@@ -64,6 +66,7 @@ import {
 import { selectMainChatDockTasks } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
+import { StandingAuthModal } from "./standing-auth-panel";
 import { TaskPanelDrawer } from "./task-panel-drawer";
 
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
@@ -74,6 +77,7 @@ const ThemedPanelRight = withUnistyles(PanelRight);
 const ThemedRadar = withUnistyles(Radar);
 const ThemedSettings = withUnistyles(Settings);
 const ThemedShield = withUnistyles(Shield);
+const ThemedShieldCheck = withUnistyles(ShieldCheck);
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedZap = withUnistyles(Zap);
 
@@ -84,6 +88,7 @@ const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarnin
 const patrolMenuIcon = <ThemedRadar size={14} uniProps={mutedIconMapping} />;
 const drawerMenuIcon = <ThemedPanelRight size={14} uniProps={mutedIconMapping} />;
 const historyMenuIcon = <ThemedHistory size={14} uniProps={mutedIconMapping} />;
+const standingAuthMenuIcon = <ThemedShieldCheck size={14} uniProps={mutedIconMapping} />;
 const settingsMenuIcon = <ThemedSettings size={14} uniProps={mutedIconMapping} />;
 
 export interface MainChatShellProps {
@@ -181,6 +186,7 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
   isCompact,
   canPatrol,
   canRunLifecycle,
+  canManageStandingAuth,
   showRightDrawer,
   extraMenuItems,
   onTriggerPatrol,
@@ -189,6 +195,7 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
   onCompact,
   onClear,
   onNewSession,
+  onOpenStandingAuth,
   onOpenSettings,
 }: {
   variant: "main" | "conversation";
@@ -196,6 +203,7 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
   isCompact: boolean;
   canPatrol: boolean;
   canRunLifecycle: boolean;
+  canManageStandingAuth: boolean;
   showRightDrawer: boolean;
   extraMenuItems?: ReactNode;
   onTriggerPatrol: () => void;
@@ -204,6 +212,7 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
   onCompact: () => void;
   onClear: () => void;
   onNewSession: () => void;
+  onOpenStandingAuth: () => void;
   onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
@@ -265,6 +274,14 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
         ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuItem
+          leading={standingAuthMenuIcon}
+          onSelect={onOpenStandingAuth}
+          disabled={!canManageStandingAuth}
+          testID="main-chat-header-standing-auth"
+        >
+          {t("mainChat.standingAuth.menuItem")}
+        </DropdownMenuItem>
+        <DropdownMenuItem
           leading={settingsMenuIcon}
           onSelect={onOpenSettings}
           testID="main-chat-header-settings"
@@ -294,6 +311,7 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   onCompact,
   onClear,
   onNewSession,
+  onOpenStandingAuth,
   onOpenSettings,
 }: {
   variant: "main" | "conversation";
@@ -313,6 +331,7 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   onCompact: () => void;
   onClear: () => void;
   onNewSession: () => void;
+  onOpenStandingAuth: () => void;
   onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
@@ -367,6 +386,7 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
         isCompact={isCompact}
         canPatrol={canPatrol}
         canRunLifecycle={canRunLifecycle}
+        canManageStandingAuth={canToggleStyle}
         showRightDrawer={showRightDrawer}
         extraMenuItems={extraMenuItems}
         onTriggerPatrol={onTriggerPatrol}
@@ -375,6 +395,7 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
         onCompact={onCompact}
         onClear={onClear}
         onNewSession={onNewSession}
+        onOpenStandingAuth={onOpenStandingAuth}
         onOpenSettings={onOpenSettings}
       />
     </View>
@@ -545,9 +566,20 @@ export const MainChatShell = memo(function MainChatShell({
     client,
     mainAgentId,
   });
+  const hosts = useHosts();
+  const hostLabelsByServerId = useMemo<Record<string, string>>(() => {
+    const labels: Record<string, string> = {};
+    for (const host of hosts) {
+      labels[host.serverId] = host.label;
+    }
+    return labels;
+  }, [hosts]);
+  const [standingAuthModalOpen, setStandingAuthModalOpen] = useState(false);
 
   const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
   const handleOpenHistory = useCallback(() => router.push(buildMainChatHistoryRoute()), []);
+  const handleOpenStandingAuth = useCallback(() => setStandingAuthModalOpen(true), []);
+  const handleCloseStandingAuth = useCallback(() => setStandingAuthModalOpen(false), []);
   const handleOpenSettings = useCallback(
     () => router.push(buildSettingsSectionRoute("main-chat")),
     [],
@@ -620,6 +652,7 @@ export const MainChatShell = memo(function MainChatShell({
                 onCompact={lifecycle.triggerCompact}
                 onClear={lifecycle.requestClear}
                 onNewSession={lifecycle.requestNewSession}
+                onOpenStandingAuth={handleOpenStandingAuth}
                 onOpenSettings={handleOpenSettings}
               />
             </WindowChromeSafeArea>
@@ -655,6 +688,15 @@ export const MainChatShell = memo(function MainChatShell({
         busy={lifecycle.busyAction !== null}
         onCancel={lifecycle.cancelConfirm}
         onConfirm={lifecycle.confirmPendingAction}
+      />
+
+      <StandingAuthModal
+        visible={standingAuthModalOpen}
+        serverId={serverId}
+        mainAgentId={mainAgentId ?? null}
+        client={client}
+        hostLabelsByServerId={hostLabelsByServerId}
+        onClose={handleCloseStandingAuth}
       />
     </MainChatShellProvider>
   );

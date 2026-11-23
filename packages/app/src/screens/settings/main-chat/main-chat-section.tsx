@@ -26,6 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
+import { StandingAuthPanel } from "@/main-chat/standing-auth-panel";
 import { useHosts } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -551,6 +552,14 @@ export function MainChatSettingsSection(): ReactElement {
     [capableHosts],
   );
 
+  const hostLabelsByServerId = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    for (const host of capableHosts) {
+      map[host.serverId] = host.label;
+    }
+    return map;
+  }, [capableHosts]);
+
   const providerOptions = useMemo<SelectFieldOption<string>[]>(
     () =>
       enabledProviders.map((entry) => ({
@@ -907,6 +916,21 @@ export function MainChatSettingsSection(): ReactElement {
               onToggle={handleCapabilityToggle}
             />
           ))}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.standingAuth.sectionTitle")}
+        info={t("mainChat.standingAuth.sectionDescription")}
+        testID="settings-main-chat-standing-auth"
+      >
+        <View style={settingsStyles.card}>
+          <StandingAuthPanel
+            serverId={selectedServerId}
+            client={client}
+            hostLabelsByServerId={hostLabelsByServerId}
+            variant="settings"
+          />
         </View>
       </SettingsSection>
     </>
