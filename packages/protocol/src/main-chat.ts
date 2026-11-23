@@ -132,10 +132,29 @@ export const MainChatTokenUsageSummarySchema = z.object({
 });
 export type MainChatTokenUsageSummary = z.infer<typeof MainChatTokenUsageSummarySchema>;
 
+export const MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS = 32;
+
+export const MainChatCustomStylePresetSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(32),
+  description: z.string().trim().max(160).optional(),
+  baseStyle: MainChatStyleSchema,
+  customGuidance: z.string().trim().max(1200).optional(),
+  intervals: MainChatIntervalsSchema,
+  capabilities: MainChatCapabilitiesSchema,
+  updatedAt: z.string().optional(),
+});
+export type MainChatCustomStylePreset = z.infer<typeof MainChatCustomStylePresetSchema>;
+
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40),
   style: MainChatStyleSchema,
+  activePresetId: z.string().trim().min(1).max(64).optional(),
+  customPresets: z
+    .array(MainChatCustomStylePresetSchema)
+    .max(MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS)
+    .optional(),
   backgroundModel: MainChatBackgroundModelConfigSchema,
   intervals: MainChatIntervalsSchema,
   capabilities: MainChatCapabilitiesSchema,
@@ -145,6 +164,14 @@ export type MainChatSettings = z.infer<typeof MainChatSettingsSchema>;
 
 export const MainChatSettingsPatchSchema = z.object({
   applyPreset: MainChatStyleSchema.optional(),
+  applyPresetId: z.string().trim().min(1).max(64).optional(),
+  upsertCustomPreset: MainChatCustomStylePresetSchema.optional(),
+  deleteCustomPresetId: z.string().trim().min(1).max(64).optional(),
+  customPresets: z
+    .array(MainChatCustomStylePresetSchema)
+    .max(MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS)
+    .optional(),
+  resetStyleToDefault: z.boolean().optional(),
   enabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40).optional(),
   style: MainChatStyleSchema.optional(),
@@ -321,6 +348,200 @@ export function createEmptyMainChatTokenUsageSummary(): MainChatTokenUsageSummar
   };
 }
 
+export interface MainChatResolvedStylePreset {
+  id: string;
+  kind: "builtin" | "custom";
+  name?: string;
+  description?: string;
+  baseStyle: MainChatStyle;
+  customGuidance?: string;
+  intervals: MainChatIntervals;
+  capabilities: MainChatCapabilities;
+  updatedAt?: string;
+}
+
+export function isBuiltInMainChatStylePresetId(id: string): id is MainChatStyle {
+  return id === "conservative" || id === "proactive";
+}
+
+function normalizeCustomStylePreset(
+  preset: MainChatCustomStylePreset,
+): MainChatCustomStylePreset {
+  const description = preset.description?.trim();
+  const customGuidance = preset.customGuidance?.trim();
+  const updatedAt = preset.updatedAt?.trim();
+  return {
+    id: preset.id.trim(),
+    name: preset.name.trim(),
+    ...(description ? { description } : {}),
+    baseStyle: preset.baseStyle,
+    ...(customGuidance ? { customGuidance } : {}),
+    intervals: { ...preset.intervals },
+    capabilities: { ...preset.capabilities },
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
+function sanitizeCustomStylePresets(
+  raw: readonly MainChatCustomStylePreset[] | null | undefined,
+): MainChatCustomStylePreset[] {
+  if (!raw || raw.length === 0) return [];
+  const seen = new Set<string>();
+  const result: MainChatCustomStylePreset[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeCustomStylePreset(entry);
+    if (!normalized.id || !normalized.name) continue;
+    if (isBuiltInMainChatStylePresetId(normalized.id)) continue;
+    if (seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    result.push(normalized);
+    if (result.length >= MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS) break;
+  }
+  return result;
+}
+
+export function resolveMainChatCustomPresets(
+  settings: Pick<MainChatSettings, "customPresets"> | null | undefined,
+): MainChatCustomStylePreset[] {
+  return sanitizeCustomStylePresets(settings?.customPresets);
+}
+
+export function resolveActiveMainChatStylePresetId(
+  settings: Pick<MainChatSettings, "style" | "activePresetId" | "customPresets"> | null | undefined,
+): string {
+  const fallbackStyle = settings?.style ?? "conservative";
+  const candidate = settings?.activePresetId?.trim();
+  if (!candidate) return fallbackStyle;
+  if (isBuiltInMainChatStylePresetId(candidate)) return candidate;
+  const customPresets = resolveMainChatCustomPresets(settings);
+  if (customPresets.some((preset) => preset.id === candidate)) {
+    return candidate;
+  }
+  return fallbackStyle;
+}
+
+export function resolveActiveMainChatStylePreset(
+  settings: Pick<MainChatSettings, "style" | "activePresetId" | "customPresets"> | null | undefined,
+): MainChatResolvedStylePreset {
+  const activeId = resolveActiveMainChatStylePresetId(settings);
+  if (isBuiltInMainChatStylePresetId(activeId)) {
+    const builtin = getMainChatStylePreset(activeId);
+    return {
+      id: activeId,
+      kind: "builtin",
+      baseStyle: builtin.style,
+      intervals: builtin.intervals,
+      capabilities: builtin.capabilities,
+    };
+  }
+  const custom = resolveMainChatCustomPresets(settings).find((entry) => entry.id === activeId);
+  if (custom) {
+    return {
+      id: custom.id,
+      kind: "custom",
+      name: custom.name,
+      description: custom.description,
+      baseStyle: custom.baseStyle,
+      customGuidance: custom.customGuidance,
+      intervals: { ...custom.intervals },
+      capabilities: { ...custom.capabilities },
+      updatedAt: custom.updatedAt,
+    };
+  }
+  const fallbackStyle = settings?.style ?? "conservative";
+  const builtin = getMainChatStylePreset(fallbackStyle);
+  return {
+    id: fallbackStyle,
+    kind: "builtin",
+    baseStyle: builtin.style,
+    intervals: builtin.intervals,
+    capabilities: builtin.capabilities,
+  };
+}
+
+function intervalsEqual(left: MainChatIntervals, right: MainChatIntervals): boolean {
+  return (
+    left.patrolIntervalSec === right.patrolIntervalSec &&
+    left.triageSettleSec === right.triageSettleSec &&
+    left.stalledThresholdMin === right.stalledThresholdMin &&
+    left.noProgressThresholdMin === right.noProgressThresholdMin &&
+    left.needsYouEscalateMin === right.needsYouEscalateMin &&
+    left.wakeupCooldownMin === right.wakeupCooldownMin
+  );
+}
+
+function capabilitiesEqual(left: MainChatCapabilities, right: MainChatCapabilities): boolean {
+  return (
+    left.semanticTriageEnabled === right.semanticTriageEnabled &&
+    left.proactiveWakeupEnabled === right.proactiveWakeupEnabled &&
+    left.initialBriefingEnabled === right.initialBriefingEnabled &&
+    left.autoContinueManualErrors === right.autoContinueManualErrors &&
+    left.autoDelegateManualQuestions === right.autoDelegateManualQuestions &&
+    left.autoNudgeManualStalled === right.autoNudgeManualStalled
+  );
+}
+
+export function isMainChatStyleModified(
+  settings:
+    | Pick<
+        MainChatSettings,
+        "style" | "activePresetId" | "customPresets" | "intervals" | "capabilities"
+      >
+    | null
+    | undefined,
+): boolean {
+  if (!settings) return false;
+  const preset = resolveActiveMainChatStylePreset(settings);
+  return (
+    settings.style !== preset.baseStyle ||
+    !intervalsEqual(settings.intervals, preset.intervals) ||
+    !capabilitiesEqual(settings.capabilities, preset.capabilities)
+  );
+}
+
+export function isMainChatStyleFactoryDefault(
+  settings:
+    | Pick<
+        MainChatSettings,
+        "style" | "activePresetId" | "customPresets" | "intervals" | "capabilities"
+      >
+    | null
+    | undefined,
+): boolean {
+  if (!settings) return true;
+  const activeId = resolveActiveMainChatStylePresetId(settings);
+  if (activeId !== "conservative" || settings.style !== "conservative") return false;
+  const factory = MAIN_CHAT_STYLE_PRESETS.conservative;
+  return (
+    intervalsEqual(settings.intervals, factory.intervals) &&
+    capabilitiesEqual(settings.capabilities, factory.capabilities)
+  );
+}
+
+export function createMainChatCustomPresetId(
+  name: string,
+  existingIds: readonly string[] = [],
+): string {
+  const taken = new Set(existingIds);
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  const prefix = slug ? `custom-${slug}` : "custom-style";
+  if (!taken.has(prefix) && !isBuiltInMainChatStylePresetId(prefix)) {
+    return prefix;
+  }
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${prefix}-${suffix}`.slice(0, 64);
+    if (!taken.has(candidate) && !isBuiltInMainChatStylePresetId(candidate)) {
+      return candidate;
+    }
+  }
+  return `custom-${Date.now().toString(36)}`;
+}
+
 export function createDefaultMainChatSettings(
   style: MainChatStyle = "conservative",
 ): MainChatSettings {
@@ -329,6 +550,8 @@ export function createDefaultMainChatSettings(
     enabled: true,
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
+    activePresetId: preset.style,
+    customPresets: [],
     backgroundModel: preset.backgroundModel,
     intervals: preset.intervals,
     capabilities: preset.capabilities,
@@ -336,32 +559,110 @@ export function createDefaultMainChatSettings(
   };
 }
 
+function applyCustomPresetMutations(
+  current: MainChatSettings,
+  patch: MainChatSettingsPatch,
+): MainChatCustomStylePreset[] {
+  let nextCustomPresets =
+    patch.customPresets !== undefined
+      ? sanitizeCustomStylePresets(patch.customPresets)
+      : resolveMainChatCustomPresets(current);
+
+  if (patch.upsertCustomPreset) {
+    const parsedPreset = MainChatCustomStylePresetSchema.parse(patch.upsertCustomPreset);
+    const normalized = normalizeCustomStylePreset(parsedPreset);
+    if (isBuiltInMainChatStylePresetId(normalized.id)) {
+      throw new Error(`Cannot overwrite built-in style preset "${normalized.id}"`);
+    }
+    const existingIndex = nextCustomPresets.findIndex((entry) => entry.id === normalized.id);
+    if (existingIndex >= 0) {
+      nextCustomPresets = nextCustomPresets.map((entry, idx) =>
+        idx === existingIndex ? normalized : entry,
+      );
+    } else {
+      if (nextCustomPresets.length >= MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS) {
+        throw new Error(
+          `Custom style preset limit reached (${MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS})`,
+        );
+      }
+      nextCustomPresets = [...nextCustomPresets, normalized];
+    }
+  }
+
+  if (patch.deleteCustomPresetId) {
+    const targetId = patch.deleteCustomPresetId.trim();
+    if (targetId && !isBuiltInMainChatStylePresetId(targetId)) {
+      nextCustomPresets = nextCustomPresets.filter((entry) => entry.id !== targetId);
+    }
+  }
+
+  return nextCustomPresets;
+}
+
 export function mergeMainChatSettings(
   current: MainChatSettings,
   patch: MainChatSettingsPatch,
 ): MainChatSettings {
-  const presetBase = patch.applyPreset ? getMainChatStylePreset(patch.applyPreset) : null;
+  const nextCustomPresets = applyCustomPresetMutations(current, patch);
   const currentNightMode = resolveMainChatNightMode(current);
-  const base: MainChatSettings = presetBase
-    ? {
+  const requestedPresetId = patch.resetStyleToDefault
+    ? "conservative"
+    : (patch.applyPresetId?.trim() || patch.applyPreset || null);
+
+  let base: MainChatSettings;
+  if (requestedPresetId) {
+    if (isBuiltInMainChatStylePresetId(requestedPresetId)) {
+      const builtin = getMainChatStylePreset(requestedPresetId);
+      base = {
         enabled: isMainChatEnabled(current),
         title: current.title,
-        style: presetBase.style,
+        style: builtin.style,
+        activePresetId: requestedPresetId,
+        customPresets: nextCustomPresets,
         backgroundModel: { ...current.backgroundModel },
-        intervals: presetBase.intervals,
-        capabilities: presetBase.capabilities,
-        nightMode: currentNightMode,
-      }
-    : {
-        ...current,
-        enabled: isMainChatEnabled(current),
+        intervals: builtin.intervals,
+        capabilities: builtin.capabilities,
         nightMode: currentNightMode,
       };
+    } else {
+      const custom = nextCustomPresets.find((entry) => entry.id === requestedPresetId);
+      if (!custom) {
+        throw new Error(`Style preset "${requestedPresetId}" not found`);
+      }
+      base = {
+        enabled: isMainChatEnabled(current),
+        title: current.title,
+        style: custom.baseStyle,
+        activePresetId: custom.id,
+        customPresets: nextCustomPresets,
+        backgroundModel: { ...current.backgroundModel },
+        intervals: { ...custom.intervals },
+        capabilities: { ...custom.capabilities },
+        nightMode: currentNightMode,
+      };
+    }
+  } else {
+    const resolvedActiveId = resolveActiveMainChatStylePresetId({
+      style: current.style,
+      activePresetId: current.activePresetId,
+      customPresets: nextCustomPresets,
+    });
+    base = {
+      ...current,
+      enabled: isMainChatEnabled(current),
+      activePresetId: resolvedActiveId,
+      customPresets: nextCustomPresets,
+      nightMode: currentNightMode,
+    };
+  }
+
   const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
   return MainChatSettingsSchema.parse({
     enabled: patch.enabled ?? base.enabled ?? true,
     title: nextTitle,
     style: patch.style ?? base.style,
+    activePresetId: base.activePresetId,
+    customPresets: nextCustomPresets,
     backgroundModel: {
       ...base.backgroundModel,
       ...patch.backgroundModel,

@@ -1,9 +1,10 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { MainChatNightModeStatus } from "@getpaseo/protocol/main-chat";
+import type { MainChatNightModeStatus, MainChatSettings } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import {
   Activity,
   ArrowLeft,
+  ChevronDown,
   Compass,
   Ellipsis,
   History,
@@ -36,6 +37,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -71,11 +73,18 @@ import { selectMainChatDockTasks } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
 import { StandingAuthModal } from "./standing-auth-panel";
+import {
+  buildMainChatStylePresetItems,
+  findActiveMainChatStylePresetItem,
+  formatSwitchedMainChatPresetToast,
+  type MainChatStylePresetListItem,
+} from "./style-presets";
 import { TaskPanelDrawer } from "./task-panel-drawer";
 import { formatCompactTokenCount } from "./usage-format";
 
 const ThemedActivity = withUnistyles(Activity);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
+const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedCompass = withUnistyles(Compass);
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedHistory = withUnistyles(History);
@@ -300,20 +309,146 @@ const ShellOverflowMenu = memo(function ShellOverflowMenu({
   );
 });
 
+const StylePresetMenuOptionItem = memo(function StylePresetMenuOptionItem({
+  preset,
+  selected,
+  onSelectPreset,
+}: {
+  preset: MainChatStylePresetListItem;
+  selected: boolean;
+  onSelectPreset: (presetId: string, presetName: string) => void;
+}): ReactElement {
+  const handleSelect = useCallback(() => {
+    onSelectPreset(preset.id, preset.name);
+  }, [onSelectPreset, preset.id, preset.name]);
+
+  return (
+    <DropdownMenuItem
+      selected={selected}
+      showSelectedCheck
+      description={preset.kind === "custom" ? preset.description : undefined}
+      onSelect={handleSelect}
+      testID={`main-chat-style-option-${preset.id}`}
+    >
+      {preset.name}
+    </DropdownMenuItem>
+  );
+});
+
+function renderCapsuleStyleIcon(isCustom: boolean, isProactive: boolean): ReactElement {
+  if (isCustom) {
+    return (
+      <ThemedSparkles size={12} uniProps={isProactive ? warningIconMapping : mutedIconMapping} />
+    );
+  }
+  if (isProactive) {
+    return <ThemedZap size={12} uniProps={warningIconMapping} />;
+  }
+  return <ThemedShield size={12} uniProps={mutedIconMapping} />;
+}
+
+const StylePresetCapsuleMenu = memo(function StylePresetCapsuleMenu({
+  settings,
+  disabled,
+  onSelectPreset,
+  onOpenSettings,
+}: {
+  settings: MainChatSettings | undefined;
+  disabled: boolean;
+  onSelectPreset: (presetId: string, presetName: string) => void;
+  onOpenSettings: () => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  const allPresets = useMemo(() => buildMainChatStylePresetItems(settings, t), [settings, t]);
+  const activePreset = useMemo(() => findActiveMainChatStylePresetItem(settings, t), [settings, t]);
+  const builtinPresets = useMemo(
+    () => allPresets.filter((item) => item.kind === "builtin"),
+    [allPresets],
+  );
+  const customPresets = useMemo(
+    () => allPresets.filter((item) => item.kind === "custom"),
+    [allPresets],
+  );
+
+  const isProactive = (settings?.style ?? activePreset.baseStyle) === "proactive";
+  const isCustom = activePreset.kind === "custom";
+
+  return (
+    <DropdownMenu compactMode="sheet">
+      <DropdownMenuTrigger
+        disabled={disabled}
+        style={[styles.styleCapsule, isProactive && styles.styleCapsuleProactive]}
+        accessibilityRole="button"
+        accessibilityLabel={t("mainChat.actions.switchStyle")}
+        testID="main-chat-style-capsule"
+      >
+        {renderCapsuleStyleIcon(isCustom, isProactive)}
+        <Text
+          style={[styles.styleCapsuleText, isProactive && styles.styleCapsuleTextProactive]}
+          numberOfLines={1}
+        >
+          {activePreset.shortName}
+        </Text>
+        <ThemedChevronDown
+          size={11}
+          uniProps={isProactive ? warningIconMapping : mutedIconMapping}
+        />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        width={256}
+        sheetTitle={t("mainChat.actions.switchStyle")}
+      >
+        <DropdownMenuLabel>{t("mainChat.settings.style.builtinGroupLabel")}</DropdownMenuLabel>
+        {builtinPresets.map((preset) => (
+          <StylePresetMenuOptionItem
+            key={preset.id}
+            preset={preset}
+            selected={preset.id === activePreset.id}
+            onSelectPreset={onSelectPreset}
+          />
+        ))}
+        {customPresets.length > 0 ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>{t("mainChat.settings.style.customGroupLabel")}</DropdownMenuLabel>
+            {customPresets.map((preset) => (
+              <StylePresetMenuOptionItem
+                key={preset.id}
+                preset={preset}
+                selected={preset.id === activePreset.id}
+                onSelectPreset={onSelectPreset}
+              />
+            ))}
+          </>
+        ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          leading={settingsMenuIcon}
+          onSelect={onOpenSettings}
+          testID="main-chat-style-manage"
+        >
+          {t("mainChat.actions.manageStylePresets")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+});
+
 const ShellHeaderRight = memo(function ShellHeaderRight({
   variant,
   title,
   isCompact,
   canToggleStyle,
   isTogglingStyle,
-  currentStyle,
+  settings,
   nightPowerState,
   todayTokens,
   canPatrol,
   canRunLifecycle,
   showRightDrawer,
   extraMenuItems,
-  onToggleStyle,
+  onSelectPreset,
   onOpenHistory,
   onTriggerPatrol,
   onToggleTaskDrawer,
@@ -328,14 +463,14 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   isCompact: boolean;
   canToggleStyle: boolean;
   isTogglingStyle: boolean;
-  currentStyle: "conservative" | "proactive";
+  settings: MainChatSettings | undefined;
   nightPowerState: MainChatNightModeStatus["state"] | undefined;
   todayTokens: number;
   canPatrol: boolean;
   canRunLifecycle: boolean;
   showRightDrawer: boolean;
   extraMenuItems?: ReactNode;
-  onToggleStyle: () => void;
+  onSelectPreset: (presetId: string, presetName: string) => void;
   onOpenHistory: () => void;
   onTriggerPatrol: () => void;
   onToggleTaskDrawer: () => void;
@@ -346,7 +481,6 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
-  const isProactive = currentStyle === "proactive";
   const isNightQuiet = nightPowerState === "throttled" || nightPowerState === "hibernating";
 
   return (
@@ -386,33 +520,12 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
       ) : null}
 
       {canToggleStyle ? (
-        <PressHighlight
-          onPress={onToggleStyle}
+        <StylePresetCapsuleMenu
+          settings={settings}
           disabled={isTogglingStyle}
-          style={[styles.styleCapsule, isProactive && styles.styleCapsuleProactive]}
-          highlightStyle={styles.controlPressed}
-          accessibilityRole="button"
-          accessibilityLabel={
-            isProactive
-              ? t("mainChat.actions.switchToConservative")
-              : t("mainChat.actions.switchToProactive")
-          }
-          testID="main-chat-style-capsule"
-        >
-          {isProactive ? (
-            <ThemedZap size={12} uniProps={warningIconMapping} />
-          ) : (
-            <ThemedShield size={12} uniProps={mutedIconMapping} />
-          )}
-          <Text
-            style={[styles.styleCapsuleText, isProactive && styles.styleCapsuleTextProactive]}
-            numberOfLines={1}
-          >
-            {isProactive
-              ? t("mainChat.style.proactiveShort")
-              : t("mainChat.style.conservativeShort")}
-          </Text>
-        </PressHighlight>
+          onSelectPreset={onSelectPreset}
+          onOpenSettings={onOpenSettings}
+        />
       ) : null}
 
       <PressHighlight
@@ -452,10 +565,9 @@ function useShellHeaderActions(input: {
   serverId: string | null;
   client: DaemonClient | null;
   mainAgentId: string | null | undefined;
-  currentStyle: "conservative" | "proactive";
   onActivePaneChange?: (pane: "main" | "drawer") => void;
 }) {
-  const { serverId, client, mainAgentId, currentStyle, onActivePaneChange } = input;
+  const { serverId, client, mainAgentId, onActivePaneChange } = input;
   const { t } = useTranslation();
   const toast = useToast();
   const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
@@ -467,27 +579,26 @@ function useShellHeaderActions(input: {
   const [isTogglingStyle, setIsTogglingStyle] = useState(false);
   const [isPatrolling, setIsPatrolling] = useState(false);
 
-  const toggleStyle = useCallback(() => {
-    if (!serverId || !client || isTogglingStyle) return;
-    setIsTogglingStyle(true);
-    const nextStyle = currentStyle === "conservative" ? "proactive" : "conservative";
-    void updateSettings(serverId, { applyPreset: nextStyle }, client)
-      .then(() => {
-        toast.show(
-          nextStyle === "proactive"
-            ? t("mainChat.settings.switchedProactiveToast")
-            : t("mainChat.settings.switchedConservativeToast"),
-          { variant: "success" },
-        );
-        return nextStyle;
-      })
-      .catch((error) => {
-        toast.error(error instanceof Error ? error.message : t("mainChat.settings.saveFailed"));
-      })
-      .finally(() => {
-        setIsTogglingStyle(false);
-      });
-  }, [client, currentStyle, isTogglingStyle, serverId, t, toast, updateSettings]);
+  const selectPreset = useCallback(
+    (presetId: string, presetName: string) => {
+      if (!serverId || !client || isTogglingStyle) return;
+      setIsTogglingStyle(true);
+      void updateSettings(serverId, { applyPresetId: presetId }, client)
+        .then(() => {
+          toast.show(formatSwitchedMainChatPresetToast(presetId, presetName, t), {
+            variant: "success",
+          });
+          return presetId;
+        })
+        .catch((error) => {
+          toast.error(error instanceof Error ? error.message : t("mainChat.settings.saveFailed"));
+        })
+        .finally(() => {
+          setIsTogglingStyle(false);
+        });
+    },
+    [client, isTogglingStyle, serverId, t, toast, updateSettings],
+  );
 
   const runPatrol = useCallback(() => {
     if (!serverId || !client || isPatrolling) return;
@@ -552,7 +663,7 @@ function useShellHeaderActions(input: {
     activeDrawerTarget,
     isTogglingStyle,
     isPatrolling,
-    toggleStyle,
+    selectPreset,
     runPatrol,
     toggleTaskDrawer,
   };
@@ -597,7 +708,7 @@ function useMainChatShellTelemetry(serverId: string | null) {
 
   return {
     client,
-    currentStyle: settings?.style ?? "conservative",
+    settings,
     nightPowerState: nightModeStatus?.state,
     todayTokens: usageSummary?.today.totalTokens ?? 0,
   };
@@ -626,8 +737,7 @@ export const MainChatShell = memo(function MainChatShell({
   const isCompact = useIsCompactFormFactor();
   const isDesktopSidebarOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const clearCameFrom = useMainChatCameFromStore((state) => state.clearCameFrom);
-  const { client, currentStyle, nightPowerState, todayTokens } =
-    useMainChatShellTelemetry(serverId);
+  const { client, settings, nightPowerState, todayTokens } = useMainChatShellTelemetry(serverId);
 
   useEffect(() => {
     clearCameFrom();
@@ -636,7 +746,6 @@ export const MainChatShell = memo(function MainChatShell({
     serverId,
     client,
     mainAgentId,
-    currentStyle,
     onActivePaneChange,
   });
   const lifecycle = useMainChatLifecycleActions({
@@ -712,14 +821,14 @@ export const MainChatShell = memo(function MainChatShell({
                   isCompact={isCompact}
                   canToggleStyle={Boolean(serverId && client)}
                   isTogglingStyle={actions.isTogglingStyle}
-                  currentStyle={currentStyle}
+                  settings={settings}
                   nightPowerState={nightPowerState}
                   todayTokens={todayTokens}
                   canPatrol={Boolean(serverId && client && !actions.isPatrolling)}
                   canRunLifecycle={lifecycle.canRunLifecycle}
                   showRightDrawer={showRightDrawer}
                   extraMenuItems={extraMenuItems}
-                  onToggleStyle={actions.toggleStyle}
+                  onSelectPreset={actions.selectPreset}
                   onOpenHistory={handleOpenHistory}
                   onTriggerPatrol={actions.runPatrol}
                   onToggleTaskDrawer={actions.toggleTaskDrawer}
@@ -870,6 +979,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.statusWarningTint,
   },
   styleCapsuleText: {
+    maxWidth: 112,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,

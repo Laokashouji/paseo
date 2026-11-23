@@ -3,16 +3,14 @@ import {
   isMainChatEnabled,
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
-  type MainChatCapabilities,
   type MainChatIntervals,
   type MainChatNightModeConfig,
   type MainChatNightModeStatus,
   type MainChatSettings,
   type MainChatSettingsPatch,
-  type MainChatStyle,
 } from "@getpaseo/protocol/main-chat";
 import equal from "fast-deep-equal";
-import { Power, Radar, Shield, Zap } from "lucide-react-native";
+import { Power, Radar } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -22,7 +20,6 @@ import { SettingsSection } from "@/components/settings/headings/settings-section
 import { Button } from "@/components/ui/button";
 import { FormTextInput } from "@/components/ui/form-field";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { PressHighlight } from "@/components/ui/press-highlight";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import { SelectField, type SelectFieldOption } from "@/components/ui/select-field";
 import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
@@ -31,125 +28,36 @@ import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { StandingAuthPanel } from "@/main-chat/standing-auth-panel";
+import {
+  MAIN_CHAT_CAPABILITY_FIELDS,
+  MAIN_CHAT_INTERVAL_FIELDS,
+  type MainChatCapabilityFieldKey,
+  type MainChatCapabilityFieldSpec,
+  type MainChatIntervalFieldKey,
+  type MainChatIntervalFieldSpec,
+} from "@/main-chat/style-presets";
 import { useHosts } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { MainChatNightModePanel } from "./night-mode-panel";
+import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
 
 const ThemedPower = withUnistyles(Power);
-const ThemedShield = withUnistyles(Shield);
-const ThemedZap = withUnistyles(Zap);
 const ThemedRadar = withUnistyles(Radar);
 const ThemedSpinner = withUnistyles(LoadingSpinner);
 
-const accentIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
-const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-type IntervalFieldKey = keyof MainChatIntervals;
-type CapabilityKey = keyof MainChatCapabilities;
+type IntervalFieldKey = MainChatIntervalFieldKey;
+type CapabilityKey = MainChatCapabilityFieldKey;
+type IntervalFieldSpec = MainChatIntervalFieldSpec;
+type CapabilityFieldSpec = MainChatCapabilityFieldSpec;
 
-interface IntervalFieldSpec {
-  key: IntervalFieldKey;
-  labelKey: string;
-  hintKey: string;
-  unitKey: string;
-  min: number;
-  max: number;
-}
-
-const INTERVAL_FIELDS: readonly IntervalFieldSpec[] = [
-  {
-    key: "patrolIntervalSec",
-    labelKey: "mainChat.settings.intervals.patrolIntervalSec",
-    hintKey: "mainChat.settings.intervals.patrolIntervalSecHint",
-    unitKey: "mainChat.settings.units.seconds",
-    min: 15,
-    max: 3600,
-  },
-  {
-    key: "triageSettleSec",
-    labelKey: "mainChat.settings.intervals.triageSettleSec",
-    hintKey: "mainChat.settings.intervals.triageSettleSecHint",
-    unitKey: "mainChat.settings.units.seconds",
-    min: 5,
-    max: 300,
-  },
-  {
-    key: "stalledThresholdMin",
-    labelKey: "mainChat.settings.intervals.stalledThresholdMin",
-    hintKey: "mainChat.settings.intervals.stalledThresholdMinHint",
-    unitKey: "mainChat.settings.units.minutes",
-    min: 2,
-    max: 240,
-  },
-  {
-    key: "noProgressThresholdMin",
-    labelKey: "mainChat.settings.intervals.noProgressThresholdMin",
-    hintKey: "mainChat.settings.intervals.noProgressThresholdMinHint",
-    unitKey: "mainChat.settings.units.minutes",
-    min: 2,
-    max: 120,
-  },
-  {
-    key: "needsYouEscalateMin",
-    labelKey: "mainChat.settings.intervals.needsYouEscalateMin",
-    hintKey: "mainChat.settings.intervals.needsYouEscalateMinHint",
-    unitKey: "mainChat.settings.units.minutes",
-    min: 1,
-    max: 120,
-  },
-  {
-    key: "wakeupCooldownMin",
-    labelKey: "mainChat.settings.intervals.wakeupCooldownMin",
-    hintKey: "mainChat.settings.intervals.wakeupCooldownMinHint",
-    unitKey: "mainChat.settings.units.minutes",
-    min: 1,
-    max: 240,
-  },
-];
-
-interface CapabilityFieldSpec {
-  key: CapabilityKey;
-  labelKey: string;
-  hintKey: string;
-}
-
-const CAPABILITY_FIELDS: readonly CapabilityFieldSpec[] = [
-  {
-    key: "semanticTriageEnabled",
-    labelKey: "mainChat.settings.capabilities.semanticTriage",
-    hintKey: "mainChat.settings.capabilities.semanticTriageHint",
-  },
-  {
-    key: "proactiveWakeupEnabled",
-    labelKey: "mainChat.settings.capabilities.proactiveWakeup",
-    hintKey: "mainChat.settings.capabilities.proactiveWakeupHint",
-  },
-  {
-    key: "initialBriefingEnabled",
-    labelKey: "mainChat.settings.capabilities.initialBriefing",
-    hintKey: "mainChat.settings.capabilities.initialBriefingHint",
-  },
-  {
-    key: "autoContinueManualErrors",
-    labelKey: "mainChat.settings.capabilities.autoContinueManualErrors",
-    hintKey: "mainChat.settings.capabilities.autoContinueManualErrorsHint",
-  },
-  {
-    key: "autoDelegateManualQuestions",
-    labelKey: "mainChat.settings.capabilities.autoDelegateManualQuestions",
-    hintKey: "mainChat.settings.capabilities.autoDelegateManualQuestionsHint",
-  },
-  {
-    key: "autoNudgeManualStalled",
-    labelKey: "mainChat.settings.capabilities.autoNudgeManualStalled",
-    hintKey: "mainChat.settings.capabilities.autoNudgeManualStalledHint",
-  },
-];
+const INTERVAL_FIELDS = MAIN_CHAT_INTERVAL_FIELDS;
+const CAPABILITY_FIELDS = MAIN_CHAT_CAPABILITY_FIELDS;
 
 function toIntervalDrafts(intervals: MainChatIntervals): Record<IntervalFieldKey, string> {
   return {
@@ -172,72 +80,6 @@ function getBackgroundModelModeHintKey(mode: MainChatBackgroundModelMode): strin
       return "mainChat.settings.backgroundModel.modeCustomHint";
   }
 }
-
-const StylePresetCard = memo(function StylePresetCard({
-  styleKind,
-  active,
-  disabled,
-  onSelect,
-}: {
-  styleKind: MainChatStyle;
-  active: boolean;
-  disabled: boolean;
-  onSelect: (style: MainChatStyle) => void;
-}) {
-  const { t } = useTranslation();
-  const handlePress = useCallback(() => {
-    onSelect(styleKind);
-  }, [onSelect, styleKind]);
-
-  const isProactive = styleKind === "proactive";
-  return (
-    <PressHighlight
-      onPress={handlePress}
-      disabled={disabled}
-      style={[styles.presetCard, active && styles.presetCardActive]}
-      highlightStyle={styles.presetCardPressed}
-      testID={`settings-main-chat-preset-${styleKind}`}
-    >
-      <View style={styles.presetHeader}>
-        <View style={styles.presetTitleRow}>
-          {isProactive ? (
-            <ThemedZap size={16} uniProps={warningIconMapping} />
-          ) : (
-            <ThemedShield size={16} uniProps={accentIconMapping} />
-          )}
-          <Text style={styles.presetTitle}>
-            {t(
-              isProactive
-                ? "mainChat.settings.style.proactiveTitle"
-                : "mainChat.settings.style.conservativeTitle",
-            )}
-          </Text>
-        </View>
-        {active ? (
-          <StatusBadge
-            size="xs"
-            variant={isProactive ? "warning" : "success"}
-            label={t("mainChat.settings.style.activeBadge")}
-          />
-        ) : null}
-      </View>
-      <Text style={styles.presetDesc}>
-        {t(
-          isProactive
-            ? "mainChat.settings.style.proactiveDescription"
-            : "mainChat.settings.style.conservativeDescription",
-        )}
-      </Text>
-      <Text style={styles.presetMeta}>
-        {t(
-          isProactive
-            ? "mainChat.settings.style.proactiveIntervalsSummary"
-            : "mainChat.settings.style.conservativeIntervalsSummary",
-        )}
-      </Text>
-    </PressHighlight>
-  );
-});
 
 const IntervalFieldRow = memo(function IntervalFieldRow({
   field,
@@ -767,18 +609,6 @@ export function MainChatSettingsSection(): ReactElement {
       });
   }, [client, resetUsage, resettingUsage, selectedServerId, t, toast]);
 
-  const handleSelectPreset = useCallback(
-    (style: MainChatStyle) => {
-      void applyPatch(
-        { applyPreset: style },
-        style === "proactive"
-          ? t("mainChat.settings.switchedProactiveToast")
-          : t("mainChat.settings.switchedConservativeToast"),
-      );
-    },
-    [applyPatch, t],
-  );
-
   const handleSelectModelMode = useCallback(
     (mode: MainChatBackgroundModelMode) => {
       if (mode === "custom") {
@@ -1048,20 +878,11 @@ export function MainChatSettingsSection(): ReactElement {
             info={t("mainChat.settings.style.description")}
             testID="settings-main-chat-style"
           >
-            <View style={styles.presetGrid}>
-              <StylePresetCard
-                styleKind="conservative"
-                active={settings.style === "conservative"}
-                disabled={saving}
-                onSelect={handleSelectPreset}
-              />
-              <StylePresetCard
-                styleKind="proactive"
-                active={settings.style === "proactive"}
-                disabled={saving}
-                onSelect={handleSelectPreset}
-              />
-            </View>
+            <MainChatStylePresetPanel
+              settings={settings}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
           </SettingsSection>
 
           <SettingsSection
@@ -1242,50 +1063,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   actionRow: {
     gap: theme.spacing[3],
-  },
-  presetGrid: {
-    gap: theme.spacing[3],
-  },
-  presetCard: {
-    borderRadius: theme.borderRadius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
-    padding: theme.spacing[3.5],
-    gap: theme.spacing[1.5],
-  },
-  presetCardActive: {
-    borderColor: theme.colors.primary,
-    backgroundColor: theme.colors.surface2,
-  },
-  presetCardPressed: {
-    backgroundColor: theme.colors.surface2,
-  },
-  presetHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: theme.spacing[2],
-  },
-  presetTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-  },
-  presetTitle: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.semibold,
-    color: theme.colors.foreground,
-  },
-  presetDesc: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    lineHeight: 18,
-  },
-  presetMeta: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    opacity: 0.85,
   },
   intervalRow: {
     gap: theme.spacing[3],

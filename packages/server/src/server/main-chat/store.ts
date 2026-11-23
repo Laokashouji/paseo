@@ -30,6 +30,8 @@ import {
   createEmptyMainChatTokenUsageCounters,
   isMainChatEnabled,
   mergeMainChatSettings,
+  resolveActiveMainChatStylePresetId,
+  resolveMainChatCustomPresets,
   resolveMainChatNightMode,
   type MainChatActivityEntry,
   type MainChatActivityKind,
@@ -767,9 +769,17 @@ function hydrateM5SafetyFields(
 
 function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
   if (!raw) return createDefaultMainChatSettings("conservative");
+  const customPresets = resolveMainChatCustomPresets(raw);
+  const activePresetId = resolveActiveMainChatStylePresetId({
+    style: raw.style,
+    activePresetId: raw.activePresetId,
+    customPresets,
+  });
   return {
     ...raw,
     enabled: isMainChatEnabled(raw),
+    activePresetId,
+    customPresets,
     backgroundModel: { ...raw.backgroundModel },
     intervals: { ...raw.intervals },
     capabilities: { ...raw.capabilities },
@@ -902,9 +912,17 @@ export function createMainChatStore(
     },
 
     getSettings() {
+      const customPresets = resolveMainChatCustomPresets(state.settings);
+      const activePresetId = resolveActiveMainChatStylePresetId({
+        style: state.settings.style,
+        activePresetId: state.settings.activePresetId,
+        customPresets,
+      });
       return {
         ...state.settings,
         enabled: isMainChatEnabled(state.settings),
+        activePresetId,
+        customPresets,
         backgroundModel: { ...state.settings.backgroundModel },
         intervals: { ...state.settings.intervals },
         capabilities: { ...state.settings.capabilities },
