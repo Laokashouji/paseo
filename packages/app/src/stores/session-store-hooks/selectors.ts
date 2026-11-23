@@ -5,6 +5,7 @@ import {
   type WorkspaceStructure,
   type WorkspaceStructureProject,
 } from "@/projects/workspace-structure";
+import { isMainChatWorkspaceDirectory } from "@getpaseo/protocol/main-chat";
 import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import type { Agent, ProjectDescriptor, WorkspaceDescriptor } from "../session-store";
@@ -181,7 +182,8 @@ export function selectWorkspaceStructureProjects(
     const visibleProjectIds = new Set(visibleWorkspaces.map((workspace) => workspace.projectId));
     const visibleProjects = Array.from(projects.values()).filter(
       (project) =>
-        !hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId),
+        !isMainChatWorkspaceDirectory(project.projectRootPath) &&
+        (!hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId)),
     );
     sessions.push({
       serverId,

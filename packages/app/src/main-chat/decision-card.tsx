@@ -12,7 +12,7 @@ import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { decisionStoreKey, useMainChatOverviewStore } from "./overview-store";
 
 const ThemedHelpIcon = withUnistyles(HelpCircle);
@@ -102,10 +102,12 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
 
   const effective: MainChatDecisionRecord | null = storedDecision ?? parsed;
 
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
   const handleOpenChild = useCallback(() => {
     if (!effective?.agentId) return;
-    navigateToAgent({ serverId, agentId: effective.agentId });
-  }, [effective?.agentId, serverId]);
+    openMainChatTaskTarget({ serverId, agentId: effective.agentId, title: effective.title });
+  }, [effective?.agentId, effective?.title, openMainChatTaskTarget, serverId]);
 
   const handleSelectOption = useCallback(
     (option: MainChatDecisionOption) => {

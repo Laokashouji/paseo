@@ -32,16 +32,14 @@ import { resolveShortcutKeysForAction } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { selectMainChatSidebarSummary } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
-import {
-  navigateToWorkspace,
-  useActiveWorkspaceSelection,
-} from "@/stores/navigation-active-workspace-store";
+import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { clearCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
 import { copyToClipboard } from "@/utils/copy-to-clipboard";
 import {
+  buildMainChatRoute,
   buildOpenProjectRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
@@ -305,46 +303,16 @@ export function CommandCenterRootActions() {
               visibility: "always" as const,
               run: () => {
                 clearCommandCenterFocusRestoreElement();
-                const latest = selectMainChatSidebarSummary(
-                  useSessionStore.getState(),
-                  preferredServerId,
-                );
-                if (latest.existing) {
-                  navigateToWorkspace({
-                    serverId: latest.existing.serverId,
-                    workspaceId: latest.existing.workspaceId,
-                    target: { kind: "agent", agentId: latest.existing.agentId },
-                  });
-                  return;
-                }
-                const targetServerId = latest.targetServerId;
-                const client = targetServerId
-                  ? useSessionStore.getState().sessions[targetServerId]?.client
-                  : null;
-                if (!targetServerId || !client) return;
-                void client
-                  .ensureMainChat()
-                  .then((result) => {
-                    if (result.error || !result.agentId || !result.workspaceId) {
-                      toast.error(result.error ?? t("mainChat.openFailed"));
-                      return null;
-                    }
-                    navigateToWorkspace({
-                      serverId: targetServerId,
-                      workspaceId: result.workspaceId,
-                      target: { kind: "agent", agentId: result.agentId },
-                    });
-                    return result.agentId;
-                  })
-                  .catch((error) => {
-                    toast.error(error instanceof Error ? error.message : t("mainChat.openFailed"));
-                  });
+                router.push(buildMainChatRoute());
               },
               presentation: {
                 kind: "action" as const,
                 title: mainChatTitle,
                 sectionTitle: t("shell.commandCenter.actions"),
                 icon: MainChatIcon,
+                shortcutKeys:
+                  resolveShortcutKeysForAction("open-main-chat", overrides, shortcutPlatform) ??
+                  undefined,
               },
             },
           ]
@@ -469,7 +437,6 @@ export function CommandCenterRootActions() {
     mainChatTitle,
     openAddProject,
     openImportSession,
-    preferredServerId,
     overrides,
     schedulesRoute,
     sessionsRoute,

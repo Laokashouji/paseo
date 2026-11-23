@@ -15,7 +15,7 @@ import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { selectAgentTurnPresentation, useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { encodeImages } from "@/utils/encode-images";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 import {
   routeStoreKey,
   useMainChatRouteStore,
@@ -126,10 +126,16 @@ export const MainChatRouteBanner = memo(function MainChatRouteBanner({
 }) {
   const { t } = useTranslation();
 
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
   const handleOpenTarget = useCallback(() => {
     if (!target) return;
-    navigateToAgent({ serverId: target.targetServerId, agentId: target.targetAgentId });
-  }, [target]);
+    openMainChatTaskTarget({
+      serverId: target.targetServerId,
+      agentId: target.targetAgentId,
+      title: target.targetTitle,
+    });
+  }, [openMainChatTaskTarget, target]);
 
   if (!target) return null;
 

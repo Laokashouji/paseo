@@ -13,6 +13,7 @@ import {
   type WorkspaceDescriptor,
 } from "@/stores/session-store";
 import { buildProjects, type ProjectHost, type ProjectSummary } from "@/utils/projects";
+import { isMainChatWorkspaceDirectory } from "@getpaseo/protocol/main-chat";
 import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 
 export interface ProjectHostError {
@@ -96,7 +97,8 @@ function selectProjectHostReplicas(
       const visibleProjectIds = new Set(visibleWorkspaces.map((workspace) => workspace.projectId));
       const projects = Array.from(session?.projects.values() ?? []).filter(
         (project) =>
-          !hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId),
+          !isMainChatWorkspaceDirectory(project.projectRootPath) &&
+          (!hiddenProjectIds.has(project.projectId) || visibleProjectIds.has(project.projectId)),
       );
       return {
         serverId: host.serverId,

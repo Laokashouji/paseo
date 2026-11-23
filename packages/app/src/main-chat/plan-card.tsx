@@ -25,10 +25,10 @@ import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useSessionStore, type Agent } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { planStoreKey, useMainChatPlanStore } from "./plan-store";
 import { derivePlanTaskLiveBucket } from "./selectors";
 
@@ -475,11 +475,13 @@ export const MainChatPlanCard = memo(function MainChatPlanCard({
     })();
   }, [busyAction, cancelPlan, client, effectivePlan, serverId]);
 
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
   const handleOpenTaskAgent = useCallback(
     (targetAgentId: string) => {
-      navigateToAgent({ serverId, agentId: targetAgentId });
+      openMainChatTaskTarget({ serverId, agentId: targetAgentId });
     },
-    [serverId],
+    [openMainChatTaskTarget, serverId],
   );
 
   if (!effectivePlan) {

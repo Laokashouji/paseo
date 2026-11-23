@@ -36,7 +36,6 @@ import {
 } from "lucide-react-native";
 import { useToast } from "@/contexts/toast-context";
 import { SidebarToastClearance } from "@/components/sidebar/sidebar-toast-region";
-import { SidebarPinnedMainChatRow, useShouldShowPinnedMainChat } from "@/main-chat/pinned-row";
 import { useSidebarWorkspaceRename } from "@/workspace-rename";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
 import { redirectIfArchivingActiveWorkspace } from "@/utils/sidebar-workspace-archive-redirect";
@@ -221,10 +220,9 @@ export function SidebarStatusWorkspaceList({
       }),
     [renderPinnedWorkspaceRow],
   );
-  const showPinnedMainChat = useShouldShowPinnedMainChat();
   const content = (
     <>
-      {pinnedWorkspaces.length > 0 || showPinnedMainChat ? (
+      {pinnedWorkspaces.length > 0 ? (
         <View style={styles.pinnedSection} testID="sidebar-pinned-section">
           <SidebarSectionHeader
             title={t("sidebar.pinned.title")}
@@ -234,7 +232,6 @@ export function SidebarStatusWorkspaceList({
           />
           {pinnedCollapsed ? null : (
             <>
-              <SidebarPinnedMainChatRow onBeforeNavigate={onWorkspacePress} />
               {leadingPinnedWorkspace ? renderPinnedWorkspaceRow(leadingPinnedWorkspace) : null}
               {visiblePinnedWorkspaces.length > 0 ? (
                 <DraggableList

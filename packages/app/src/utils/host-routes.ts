@@ -546,6 +546,44 @@ export function normalizeHostSectionSlug(value: string): HostSectionSlug | null 
   return LEGACY_HOST_SECTION_SLUGS[value] ?? null;
 }
 
+export function buildMainChatRoute() {
+  return "/main" as const;
+}
+
+export function buildMainChatConversationRoute(conversationId: string) {
+  const normalized = trimNonEmpty(conversationId);
+  if (!normalized) {
+    throw new Error("buildMainChatConversationRoute requires a non-empty conversationId");
+  }
+  return `/main/c/${encodeSegment(normalized)}` as const;
+}
+
+export function buildMainChatHistoryRoute() {
+  return "/main/history" as const;
+}
+
+export function isMainChatPathname(pathname: NullableString): boolean {
+  const normalized = trimNonEmpty(pathname);
+  if (!normalized) {
+    return false;
+  }
+  const clean = stripSearchAndHash(normalized).replace(/\/+$/, "") || "/";
+  return clean === "/main" || clean.startsWith("/main/");
+}
+
+export function parseMainChatConversationIdFromPathname(pathname: NullableString): string | null {
+  const normalized = trimNonEmpty(pathname);
+  if (!normalized) {
+    return null;
+  }
+  const clean = stripSearchAndHash(normalized).replace(/\/+$/, "");
+  const match = /^\/main\/c\/([^/]+)$/.exec(clean);
+  if (!match?.[1]) {
+    return null;
+  }
+  return trimNonEmpty(decodeSegment(match[1]));
+}
+
 export function buildSettingsRoute() {
   return "/settings" as const;
 }

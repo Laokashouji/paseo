@@ -142,6 +142,7 @@ import {
 } from "@/utils/desktop-window";
 import {
   buildOpenProjectRoute,
+  isMainChatPathname,
   parseHostWorkspaceRouteFromPathname,
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
@@ -892,6 +893,7 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/new" ||
       pathname === "/sessions" ||
       pathname === "/schedules" ||
+      isMainChatPathname(pathname) ||
       routeHasKnownHost);
 
   return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
@@ -906,7 +908,7 @@ const ROOT_STACK_SCREEN_OPTIONS = {
   headerShown: false,
   animation: "none" as const,
 };
-const ROOT_STACK_NESTED_NAVIGATOR_SCREENS = ["h/[serverId]"] as const;
+const ROOT_STACK_NESTED_NAVIGATOR_SCREENS = ["h/[serverId]", "main"] as const;
 // Settings owns reactive typography leaves; its scroll and form state survive appearance edits.
 const ROOT_STACK_SCREEN_OWNED_APPEARANCE = ["settings/[section]"] as const;
 
@@ -928,6 +930,7 @@ function RootStack() {
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
       </Stack.Protected>
+      <Stack.Screen name="main" />
       <Stack.Screen name="h/[serverId]" />
       <Stack.Screen name="settings/hosts/[serverId]/index" />
       <Stack.Screen name="settings/hosts/[serverId]/[hostSection]" />

@@ -7,7 +7,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedAlertIcon = withUnistyles(CircleAlert);
@@ -30,10 +30,12 @@ export const MainChatReceiptCard = memo(function MainChatReceiptCard({
   const { t } = useTranslation();
   const receipt = useMemo(() => parseTaskCompleteToolPayload(input, output), [input, output]);
 
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
   const handleOpenChild = useCallback(() => {
     if (!receipt?.agentId) return;
-    navigateToAgent({ serverId, agentId: receipt.agentId });
-  }, [receipt?.agentId, serverId]);
+    openMainChatTaskTarget({ serverId, agentId: receipt.agentId, title: receipt.title });
+  }, [openMainChatTaskTarget, receipt?.agentId, receipt?.title, serverId]);
 
   if (!receipt) return null;
 

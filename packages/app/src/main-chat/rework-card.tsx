@@ -7,7 +7,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 
 const ThemedReworkIcon = withUnistyles(RotateCcw);
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
@@ -33,10 +33,12 @@ export const MainChatReworkCard = memo(function MainChatReworkCard({
   const { t } = useTranslation();
   const rework = useMemo(() => parseTaskReworkToolPayload(input, output), [input, output]);
 
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
   const handleOpenChild = useCallback(() => {
     if (!rework?.agentId) return;
-    navigateToAgent({ serverId, agentId: rework.agentId });
-  }, [rework?.agentId, serverId]);
+    openMainChatTaskTarget({ serverId, agentId: rework.agentId, title: rework.title });
+  }, [openMainChatTaskTarget, rework?.agentId, rework?.title, serverId]);
 
   if (!rework) return null;
 

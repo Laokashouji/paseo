@@ -162,6 +162,7 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
     "cycle-theme",
   ],
   workspaces: [
+    "open-main-chat",
     "new-agent",
     "new-workspace",
     "workspace-jump-index",
@@ -208,6 +209,7 @@ export const SHORTCUT_HELP_ROW_ORDER: Record<ShortcutSectionId, readonly string[
 };
 
 const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
+  "open-main-chat": "mainChat.shortcuts.openMainChat",
   "new-agent": "settings.shortcuts.help.openProject",
   "new-workspace": "settings.shortcuts.help.newWorkspace",
   "switch-project": "settings.shortcuts.help.switchProject",
@@ -559,6 +561,41 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       id: "workspace-tab-close-current",
       section: "tabs-panes",
       label: "Close current tab",
+    },
+  },
+
+  // --- Open main chat ---
+  {
+    id: "main-chat-open-cmd-0-mac",
+    action: "main-chat.open",
+    combo: "Cmd+0",
+    when: { mac: true, desktopBindings: true, commandCenter: false },
+    help: {
+      id: "open-main-chat",
+      section: "workspaces",
+      label: "Open main chat",
+    },
+  },
+  {
+    id: "main-chat-open-ctrl-0-non-mac",
+    action: "main-chat.open",
+    combo: "Ctrl+0",
+    when: { mac: false, desktopBindings: true, commandCenter: false, terminal: false },
+    help: {
+      id: "open-main-chat",
+      section: "workspaces",
+      label: "Open main chat",
+    },
+  },
+  {
+    id: "main-chat-open-alt-0-web",
+    action: "main-chat.open",
+    combo: "Alt+0",
+    when: { desktopBindings: false, commandCenter: false },
+    help: {
+      id: "open-main-chat",
+      section: "workspaces",
+      label: "Open main chat",
     },
   },
 

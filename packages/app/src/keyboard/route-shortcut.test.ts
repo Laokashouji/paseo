@@ -80,6 +80,26 @@ describe("routeKeyboardShortcut — dispatch passthroughs", () => {
       action: { id: "agent.interrupt", scope: "global" },
     });
   });
+
+  it("routes main-chat.open to /main from workspaces and sub-routes, and no-ops on /main", () => {
+    expect(
+      routeKeyboardShortcut({ action: "main-chat.open", payload: null }, makeCtx()),
+    ).toEqual<ShortcutAction>({ kind: "router-push", route: "/main" });
+
+    expect(
+      routeKeyboardShortcut(
+        { action: "main-chat.open", payload: null },
+        makeCtx({ pathname: "/main/history" }),
+      ),
+    ).toEqual<ShortcutAction>({ kind: "router-push", route: "/main" });
+
+    expect(
+      routeKeyboardShortcut(
+        { action: "main-chat.open", payload: null },
+        makeCtx({ pathname: "/main" }),
+      ),
+    ).toEqual<ShortcutAction>({ kind: "none" });
+  });
 });
 
 describe("routeKeyboardShortcut — workspace.tab.navigate", () => {

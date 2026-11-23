@@ -4,6 +4,9 @@ import {
   buildHostRootRoute,
   buildHostWorkspaceOpenRoute,
   buildHostWorkspaceRoute,
+  buildMainChatConversationRoute,
+  buildMainChatHistoryRoute,
+  buildMainChatRoute,
   buildNewWorkspaceRoute,
   buildOpenProjectRoute,
   resolveKnownHostRoute,
@@ -14,6 +17,7 @@ import {
   decodeWorkspaceIdFromPathSegment,
   encodeFilePathForPathSegment,
   encodeWorkspaceIdForPathSegment,
+  isMainChatPathname,
   isSettingsSectionSlug,
   normalizeHostSectionSlug,
   normalizeProjectSettingsRouteId,
@@ -21,6 +25,7 @@ import {
   parseHostAgentRouteFromPathname,
   parseHostWorkspaceOpenIntentFromPathname,
   parseHostWorkspaceRouteFromPathname,
+  parseMainChatConversationIdFromPathname,
   parseWorkspaceOpenIntent,
   stripHostWorkspaceRouteEchoSearch,
 } from "./host-routes";
@@ -211,6 +216,28 @@ describe("provider settings routes", () => {
 describe("global routes", () => {
   it("buildSessionsRoute returns the all-host Sessions route", () => {
     expect(buildSessionsRoute()).toBe("/sessions");
+  });
+
+  it("builds and parses /main route family helpers", () => {
+    expect(buildMainChatRoute()).toBe("/main");
+    expect(buildMainChatHistoryRoute()).toBe("/main/history");
+    expect(buildMainChatConversationRoute("srv_1:conv/42")).toBe("/main/c/srv_1%3Aconv%2F42");
+    expect(() => buildMainChatConversationRoute("   ")).toThrow();
+
+    expect(isMainChatPathname("/main")).toBe(true);
+    expect(isMainChatPathname("/main/")).toBe(true);
+    expect(isMainChatPathname("/main/history")).toBe(true);
+    expect(isMainChatPathname("/main/c/abc?foo=1#bar")).toBe(true);
+    expect(isMainChatPathname("/main-other")).toBe(false);
+    expect(isMainChatPathname("/h/local/workspace/ws-1")).toBe(false);
+    expect(isMainChatPathname(null)).toBe(false);
+
+    expect(parseMainChatConversationIdFromPathname("/main/c/srv_1%3Aconv%2F42")).toBe(
+      "srv_1:conv/42",
+    );
+    expect(parseMainChatConversationIdFromPathname("/main/c/dir-1?tab=1")).toBe("dir-1");
+    expect(parseMainChatConversationIdFromPathname("/main")).toBeNull();
+    expect(parseMainChatConversationIdFromPathname("/main/history")).toBeNull();
   });
 
   it("buildNewWorkspaceRoute returns the all-host New Workspace route", () => {
