@@ -470,6 +470,50 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+async function checkStructuredGenerationCandidate(options: {
+  manager: AgentManager;
+  candidate: StructuredGenerationProvider;
+  enforceCooldown: boolean;
+  nowMs: number;
+  schemaName?: string;
+  logger?: StructuredGenerationLogger;
+}): Promise<StructuredGenerationAttempt | null> {
+  const { manager, candidate, enforceCooldown, nowMs, schemaName, logger } = options;
+  if (enforceCooldown) {
+    const cooled = getAuthCooldownEntry(manager, candidate.provider, nowMs);
+    if (cooled) {
+      const reason = `auth failure cooldown (${cooled.reason})`;
+      logger?.warn(
+        { provider: candidate.provider, model: candidate.model, schemaName, reason },
+        "Structured generation: skipping provider in auth failure cooldown",
+      );
+      return {
+        provider: candidate.provider,
+        model: candidate.model ?? null,
+        available: false,
+        error: reason,
+      };
+    }
+  }
+
+  const availabilityEntry = await manager.getProviderAvailability(candidate.provider);
+  if (!availabilityEntry.available) {
+    const reason = availabilityEntry.error ?? "unavailable";
+    logger?.warn(
+      { provider: candidate.provider, model: candidate.model, schemaName, reason },
+      "Structured generation: skipping unavailable provider",
+    );
+    return {
+      provider: candidate.provider,
+      model: candidate.model ?? null,
+      available: false,
+      error: availabilityEntry.error ?? null,
+    };
+  }
+
+  return null;
+}
+
 export async function generateStructuredAgentResponseWithFallback<T>(
   options: StructuredAgentGenerationWithFallbackOptions<T>,
 ): Promise<T> {
@@ -501,37 +545,16 @@ export async function generateStructuredAgentResponseWithFallback<T>(
   const enforceCooldown = authFailureCooldownMs > 0 && providers.length > 1;
 
   for (const candidate of providers) {
-    if (enforceCooldown) {
-      const cooled = getAuthCooldownEntry(manager, candidate.provider, getNowMs());
-      if (cooled) {
-        const reason = `auth failure cooldown (${cooled.reason})`;
-        attempts.push({
-          provider: candidate.provider,
-          model: candidate.model ?? null,
-          available: false,
-          error: reason,
-        });
-        logger?.warn(
-          { provider: candidate.provider, model: candidate.model, schemaName, reason },
-          "Structured generation: skipping provider in auth failure cooldown",
-        );
-        continue;
-      }
-    }
-
-    const availabilityEntry = await manager.getProviderAvailability(candidate.provider);
-    if (!availabilityEntry.available) {
-      const reason = availabilityEntry.error ?? "unavailable";
-      attempts.push({
-        provider: candidate.provider,
-        model: candidate.model ?? null,
-        available: false,
-        error: availabilityEntry.error ?? null,
-      });
-      logger?.warn(
-        { provider: candidate.provider, model: candidate.model, schemaName, reason },
-        "Structured generation: skipping unavailable provider",
-      );
+    const skippedAttempt = await checkStructuredGenerationCandidate({
+      manager,
+      candidate,
+      enforceCooldown,
+      nowMs: getNowMs(),
+      schemaName,
+      logger,
+    });
+    if (skippedAttempt) {
+      attempts.push(skippedAttempt);
       continue;
     }
 

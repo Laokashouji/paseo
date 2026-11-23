@@ -405,7 +405,9 @@ describe("generateStructuredAgentResponseWithFallback", () => {
       runner: async (opts) => {
         called.push(`${opts.agentConfig.provider}:${opts.agentConfig.model}`);
         if (opts.agentConfig.provider === "opencode") {
-          throw new Error('{"name":"APIError","data":{"message":"API key expired.","statusCode":401}}');
+          throw new Error(
+            '{"name":"APIError","data":{"message":"API key expired.","statusCode":401}}',
+          );
         }
         if (opts.agentConfig.provider === "claude") {
           throw new Error("Failed to authenticate: OAuth session expired");
