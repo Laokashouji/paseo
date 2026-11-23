@@ -2,6 +2,12 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.512 - 2026-11-23
+
+- **彻底修复 React #185 无限重渲染崩溃**：将 `CommandCenterRootActions`（`root-registration.tsx`）与「设置 → 对话管理」（`main-chat-section.tsx`）中每次读取都会构造新对象/新数组的 `useSessionStore` 订阅改为 `useStoreWithEqualityFn(..., ..., equal)` 深度比对并收窄订阅字段，同时完成 `packages/app` 全量 491 处 Zustand 订阅审计确认无其他同类隐患。
+- **补齐真实渲染回归单测与自动防回归静态检测**：新增 `CommandCenterRootActions` 与 `MainChatSettingsSection` 的 React 19 真实挂载渲染单测（覆盖高频无关 store 更新场景），以及基于 TypeScript AST 的零侵入静态防回归守卫（`zustand-selector-guard.test.ts`），在 `packages/app` 测试阶段自动拦截不稳定 plain / 嵌套 `useShallow` 订阅。
+- **代码质量清理**：拆分 `generateStructuredAgentResponseWithFallback` 候选前置检查辅助函数并通过 `oxlint` / `oxfmt` 校验，确保前后端受影响文件零警告零错误。
+
 ## 0.17.511 - 2026-11-23
 
 - **紧急修复后台语义分诊自我递归死循环**：为对话管理后台语义分诊器显式标记 `internal: true`，并在督办事件监听器（`isObservedFleetAgent` / `isManagedChildAgent`）中过滤内部对话，彻底避免分诊临时对话落盘污染工作区或触发自我递归分诊。
