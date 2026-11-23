@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
+  generateStructuredAgentResponse,
   getStructuredAgentResponse,
   generateStructuredAgentResponseWithFallback,
+  isStructuredGenerationAuthFailure,
   StructuredAgentFallbackError,
   StructuredAgentResponseError,
   type AgentCaller,
@@ -328,5 +330,150 @@ describe("generateStructuredAgentResponseWithFallback", () => {
         },
       }),
     ).rejects.toBeInstanceOf(StructuredAgentFallbackError);
+  });
+
+  it("defaults ephemeral structured generation agents to internal=true unless explicitly overridden", async () => {
+    const createdConfigs: Array<Record<string, unknown>> = [];
+    const manager = {
+      createAgent: async (config: Record<string, unknown>) => {
+        createdConfigs.push(config);
+        return { id: `ephemeral_${createdConfigs.length}` };
+      },
+      runAgent: async () => ({
+        finalText: '{"summary":"ok"}',
+        timeline: [],
+      }),
+      closeAgent: async () => undefined,
+      deleteAgentState: async () => undefined,
+    } as unknown as AgentManager;
+
+    await generateStructuredAgentResponse({
+      manager,
+      agentConfig: { provider: "claude", cwd: "/tmp/project" },
+      prompt: "Return JSON",
+      schema,
+    });
+    await generateStructuredAgentResponse({
+      manager,
+      agentConfig: { provider: "claude", cwd: "/tmp/project", internal: false },
+      prompt: "Return JSON",
+      schema,
+    });
+
+    expect(createdConfigs[0]?.internal).toBe(true);
+    expect(createdConfigs[1]?.internal).toBe(false);
+  });
+
+  it("cools down auth-failed providers across fallback models and subsequent calls until expiry", async () => {
+    expect(
+      isStructuredGenerationAuthFailure(
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+      ),
+    ).toBe(true);
+    expect(
+      isStructuredGenerationAuthFailure(
+        '{"name":"APIError","data":{"message":"API key expired.","statusCode":401}}',
+      ),
+    ).toBe(true);
+    expect(isStructuredGenerationAuthFailure("connection reset by peer")).toBe(false);
+
+    const manager = createManager([
+      { provider: "opencode", available: true, error: null },
+      { provider: "claude", available: true, error: null },
+      { provider: "codex", available: true, error: null },
+    ]);
+
+    let currentNow = 1_000_000;
+    const called: string[] = [];
+    const providers = [
+      { provider: "opencode", model: "openrouter/openai/gpt-5.4-mini" },
+      { provider: "opencode", model: "openrouter/minimax/minimax-m3" },
+      { provider: "claude", model: "claude-haiku-5-5" },
+      { provider: "codex", model: "gpt-5.4-mini" },
+    ];
+
+    // First call: opencode fails with 401 -> second opencode model skipped immediately;
+    // claude fails with OAuth expired; codex succeeds.
+    const first = await generateStructuredAgentResponseWithFallback({
+      manager,
+      cwd: "/tmp/project",
+      prompt: "Return JSON",
+      schema,
+      providers,
+      authFailureCooldownMs: 60_000,
+      now: () => currentNow,
+      runner: async (opts) => {
+        called.push(`${opts.agentConfig.provider}:${opts.agentConfig.model}`);
+        if (opts.agentConfig.provider === "opencode") {
+          throw new Error('{"name":"APIError","data":{"message":"API key expired.","statusCode":401}}');
+        }
+        if (opts.agentConfig.provider === "claude") {
+          throw new Error("Failed to authenticate: OAuth session expired");
+        }
+        return { summary: "ok-1" };
+      },
+    });
+    expect(first).toEqual({ summary: "ok-1" });
+    expect(called).toEqual([
+      "opencode:openrouter/openai/gpt-5.4-mini",
+      "claude:claude-haiku-5-5",
+      "codex:gpt-5.4-mini",
+    ]);
+
+    // Second call within cooldown: skips both opencode and claude immediately, goes straight to codex.
+    called.length = 0;
+    currentNow += 10_000;
+    const second = await generateStructuredAgentResponseWithFallback({
+      manager,
+      cwd: "/tmp/project",
+      prompt: "Return JSON",
+      schema,
+      providers,
+      authFailureCooldownMs: 60_000,
+      now: () => currentNow,
+      runner: async (opts) => {
+        called.push(`${opts.agentConfig.provider}:${opts.agentConfig.model}`);
+        return { summary: "ok-2" };
+      },
+    });
+    expect(second).toEqual({ summary: "ok-2" });
+    expect(called).toEqual(["codex:gpt-5.4-mini"]);
+
+    // Single-provider explicit call is not blocked by cooldown and clears cooldown on success.
+    called.length = 0;
+    const explicitSingle = await generateStructuredAgentResponseWithFallback({
+      manager,
+      cwd: "/tmp/project",
+      prompt: "Return JSON",
+      schema,
+      providers: [{ provider: "claude", model: "claude-haiku-5-5" }],
+      authFailureCooldownMs: 60_000,
+      now: () => currentNow,
+      runner: async (opts) => {
+        called.push(`${opts.agentConfig.provider}:${opts.agentConfig.model}`);
+        return { summary: "ok-explicit" };
+      },
+    });
+    expect(explicitSingle).toEqual({ summary: "ok-explicit" });
+    expect(called).toEqual(["claude:claude-haiku-5-5"]);
+
+    // After cooldown expires, opencode is retried again.
+    called.length = 0;
+    currentNow += 60_000;
+    const third = await generateStructuredAgentResponseWithFallback({
+      manager,
+      cwd: "/tmp/project",
+      prompt: "Return JSON",
+      schema,
+      providers,
+      authFailureCooldownMs: 60_000,
+      now: () => currentNow,
+      runner: async (opts) => {
+        called.push(`${opts.agentConfig.provider}:${opts.agentConfig.model}`);
+        return { summary: "ok-3" };
+      },
+    });
+    expect(third).toEqual({ summary: "ok-3" });
+    expect(called).toEqual(["opencode:openrouter/openai/gpt-5.4-mini"]);
   });
 });

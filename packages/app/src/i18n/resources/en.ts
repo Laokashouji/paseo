@@ -3601,7 +3601,7 @@ export const en = {
         modeMain: "Same as steward",
         modeCustom: "Custom model",
         modeAutoHint:
-          "Uses Paseo's lightweight metadata model preference first to conserve main quota.",
+          "Uses lightweight metadata models only and falls back to local deterministic rules if unavailable, without silently spending main model quota. Choose 'Same as steward' to reuse the main model.",
         modeMainHint: "Reuses the provider and model currently active on the steward conversation.",
         modeCustomHint:
           "Explicitly choose any enabled provider, model, and thinking level on this host.",

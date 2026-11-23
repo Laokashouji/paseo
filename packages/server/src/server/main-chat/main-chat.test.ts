@@ -38,6 +38,8 @@ import {
   isNoProgressToolCall,
   isSimilarDelegatedQuestion,
   parseUsageLimitResetDelayMs,
+  resolveMainChatBackgroundProviders,
+  runMainChatSemanticTriage,
   type RunSemanticTriageInput,
   type SemanticTriageOutput,
 } from "./triage.js";
@@ -226,6 +228,7 @@ describe("main-chat service, tools, and session", () => {
             currentModeId: config.modeId ?? null,
             availableModes: [],
             pendingPermissions: new Map(),
+            internal: config.internal === true,
             background: options?.background === true,
             updatedAt: new Date(),
             runtimeInfo: {
@@ -1102,5 +1105,124 @@ describe("main-chat service, tools, and session", () => {
     expect(sentPrompts.some((entry) => entry.agentId === manual.id)).toBe(true);
 
     service.stop();
+  });
+
+  it("marks semantic triage helper agents as internal and ignores internal agents in supervisor", async () => {
+    const generatorSpy = vi.fn(async () => ({
+      phase: "done" as const,
+      summary: "已完成",
+      waitReason: null,
+      needsUserDecision: false,
+      isLowRiskTechnicalQuestion: false,
+      riskyAction: false,
+      suggestedReply: null,
+    }));
+    const triageSpy = vi.fn(async () => null);
+    const { service, agentManager } = makeHarness({
+      triageSettleMs: 15,
+      wakeupCooldownMs: 10,
+      stalledCheckIntervalMs: 60_000,
+      semanticTriageRunner: triageSpy,
+    });
+    await service.start();
+    await service.ensureMainChat();
+
+    await runMainChatSemanticTriage({
+      agentManager,
+      cwd: repoDir,
+      sessionTitle: "测试会话",
+      projectName: "demo",
+      lastAssistantReply: "已经修完并跑通单测。",
+      providers: [{ provider: "claude", model: "claude-haiku-5-5" }],
+      generator: generatorSpy as never,
+    });
+    expect(generatorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        persistSession: false,
+        agentConfigOverrides: expect.objectContaining({
+          internal: true,
+        }),
+      }),
+    );
+
+    const internalAgent = await agentManager.createAgent(
+      { provider: "claude", cwd: repoDir, title: "Main chat semantic triage", internal: true },
+      "internal_triage_1",
+      {},
+    );
+    subscriber?.({
+      type: "agent_stream",
+      agentId: internalAgent.id,
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "assistant_message", text: '{"phase":"done","summary":"ok"}' },
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: internalAgent.id,
+      event: { type: "turn_completed", provider: "claude" },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: internalAgent.id,
+      event: { type: "turn_failed", provider: "claude", error: "API key expired" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(triageSpy).not.toHaveBeenCalled();
+    const overview = await service.getOverview();
+    expect(overview.triages.some((item) => item.agentId === internalAgent.id)).toBe(false);
+    expect(sentPrompts).toHaveLength(0);
+
+    service.stop();
+  });
+
+  it("keeps auto background triage on lightweight models without falling back to the main model", async () => {
+    const providerSnapshotManager = {
+      listProviders: vi.fn(async () => [
+        {
+          provider: "claude-magpie",
+          enabled: true,
+          models: [{ id: "agy-cli/gemini-4-neon[1m]", label: "Gemini 4 Neon" }],
+        },
+        {
+          provider: "claude",
+          enabled: true,
+          models: [{ id: "claude-haiku-5-5", label: "Claude Haiku 5.5" }],
+        },
+      ]),
+    } as unknown as Pick<ProviderSnapshotManager, "listProviders">;
+
+    const autoProviders = await resolveMainChatBackgroundProviders({
+      backgroundModel: { mode: "auto", provider: null, model: null, thinkingOptionId: null },
+      cwd: repoDir,
+      providerSnapshotManager,
+      mainSelection: {
+        provider: "claude-magpie",
+        model: "agy-cli/gemini-4-neon[1m]",
+        thinkingOptionId: "xhigh",
+      },
+    });
+    expect(autoProviders).toEqual([{ provider: "claude", model: "claude-haiku-5-5" }]);
+
+    const mainProviders = await resolveMainChatBackgroundProviders({
+      backgroundModel: { mode: "main", provider: null, model: null, thinkingOptionId: null },
+      cwd: repoDir,
+      providerSnapshotManager,
+      mainSelection: {
+        provider: "claude-magpie",
+        model: "agy-cli/gemini-4-neon[1m]",
+        thinkingOptionId: "xhigh",
+      },
+    });
+    expect(mainProviders).toEqual([
+      {
+        provider: "claude-magpie",
+        model: "agy-cli/gemini-4-neon[1m]",
+        thinkingOptionId: "xhigh",
+      },
+    ]);
   });
 });

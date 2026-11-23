@@ -95,6 +95,9 @@ export interface StructuredAgentGenerationWithFallbackOptions<T> {
   schemaName?: string;
   logger?: StructuredGenerationLogger;
   runner?: <TResult>(options: StructuredAgentGenerationOptions<TResult>) => Promise<TResult>;
+  /** Cooldown duration after a provider auth hard failure (401/403/OAuth expired) during multi-provider fallback. */
+  authFailureCooldownMs?: number;
+  now?: () => number;
 }
 
 // Re-export from the legacy module path so existing server consumers keep working.
@@ -356,7 +359,13 @@ export async function generateStructuredAgentResponse<T>(
 ): Promise<T> {
   const { manager, agentConfig, agentId, persistSession, prompt, schema, maxRetries, schemaName } =
     options;
-  const agent = await manager.createAgent(agentConfig, agentId, {
+  // Structured generation runs ephemeral helper turns; default to internal so callers that omit
+  // `internal` never persist junk sessions into visible workspaces or trigger fleet listeners.
+  const resolvedAgentConfig: AgentSessionConfig = {
+    ...agentConfig,
+    internal: agentConfig.internal ?? true,
+  };
+  const agent = await manager.createAgent(resolvedAgentConfig, agentId, {
     persistSession,
     workspaceId: undefined,
   });
@@ -388,6 +397,72 @@ export async function generateStructuredAgentResponse<T>(
   }
 }
 
+const DEFAULT_AUTH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
+
+const STRUCTURED_GENERATION_AUTH_ERROR_PATTERNS = [
+  /failed to authenticate/i,
+  /oauth.*expired/i,
+  /api key.*(expired|invalid|missing|revoked)/i,
+  /invalid[_ ]api[_ ]key/i,
+  /invalid[_ ]token/i,
+  /not logged in/i,
+  /please run \/login/i,
+  /"statusCode"\s*:\s*(401|403)\b/,
+  /\b(401|403)\b.*(unauthorized|forbidden|expired|invalid|auth)/i,
+];
+
+interface AuthFailureCooldownEntry {
+  expiresAt: number;
+  reason: string;
+}
+
+const authFailureCooldownByManager = new WeakMap<
+  AgentManager,
+  Map<AgentProvider, AuthFailureCooldownEntry>
+>();
+
+export function isStructuredGenerationAuthFailure(message: string): boolean {
+  return STRUCTURED_GENERATION_AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function getAuthCooldownEntry(
+  manager: AgentManager,
+  provider: AgentProvider,
+  currentTimeMs: number,
+): AuthFailureCooldownEntry | null {
+  const byProvider = authFailureCooldownByManager.get(manager);
+  if (!byProvider) return null;
+  const entry = byProvider.get(provider);
+  if (!entry) return null;
+  if (entry.expiresAt <= currentTimeMs) {
+    byProvider.delete(provider);
+    return null;
+  }
+  return entry;
+}
+
+function recordAuthCooldown(
+  manager: AgentManager,
+  provider: AgentProvider,
+  reason: string,
+  currentTimeMs: number,
+  cooldownMs: number,
+): void {
+  let byProvider = authFailureCooldownByManager.get(manager);
+  if (!byProvider) {
+    byProvider = new Map();
+    authFailureCooldownByManager.set(manager, byProvider);
+  }
+  byProvider.set(provider, {
+    expiresAt: currentTimeMs + cooldownMs,
+    reason,
+  });
+}
+
+function clearAuthCooldown(manager: AgentManager, provider: AgentProvider): void {
+  authFailureCooldownByManager.get(manager)?.delete(provider);
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -410,6 +485,8 @@ export async function generateStructuredAgentResponseWithFallback<T>(
     schemaName,
     logger,
     runner,
+    authFailureCooldownMs = DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
+    now,
   } = options;
 
   if (providers.length === 0) {
@@ -420,8 +497,28 @@ export async function generateStructuredAgentResponseWithFallback<T>(
     runner ??
     ((input: StructuredAgentGenerationOptions<T>) => generateStructuredAgentResponse<T>(input));
   const attempts: StructuredGenerationAttempt[] = [];
+  const getNowMs = () => (now ? now() : Date.now());
+  const enforceCooldown = authFailureCooldownMs > 0 && providers.length > 1;
 
   for (const candidate of providers) {
+    if (enforceCooldown) {
+      const cooled = getAuthCooldownEntry(manager, candidate.provider, getNowMs());
+      if (cooled) {
+        const reason = `auth failure cooldown (${cooled.reason})`;
+        attempts.push({
+          provider: candidate.provider,
+          model: candidate.model ?? null,
+          available: false,
+          error: reason,
+        });
+        logger?.warn(
+          { provider: candidate.provider, model: candidate.model, schemaName, reason },
+          "Structured generation: skipping provider in auth failure cooldown",
+        );
+        continue;
+      }
+    }
+
     const availabilityEntry = await manager.getProviderAvailability(candidate.provider);
     if (!availabilityEntry.available) {
       const reason = availabilityEntry.error ?? "unavailable";
@@ -454,6 +551,7 @@ export async function generateStructuredAgentResponseWithFallback<T>(
           ...(candidate.thinkingOptionId ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
         },
       });
+      clearAuthCooldown(manager, candidate.provider);
       if (attempts.length > 0) {
         logger?.info(
           {
@@ -467,11 +565,21 @@ export async function generateStructuredAgentResponseWithFallback<T>(
       }
       return result;
     } catch (error) {
+      const message = errorMessage(error);
+      if (authFailureCooldownMs > 0 && isStructuredGenerationAuthFailure(message)) {
+        recordAuthCooldown(
+          manager,
+          candidate.provider,
+          message.slice(0, 160),
+          getNowMs(),
+          authFailureCooldownMs,
+        );
+      }
       attempts.push({
         provider: candidate.provider,
         model: candidate.model ?? null,
         available: true,
-        error: errorMessage(error),
+        error: message,
       });
       logger?.warn(
         { err: error, provider: candidate.provider, model: candidate.model, schemaName },

@@ -83,14 +83,14 @@ interface AgentToolLoopTracker {
 }
 
 function isManagedChildAgent(agent: ManagedAgent | null | undefined): boolean {
-  if (!agent || agent.background || isMainChatLabels(agent.labels)) return false;
+  if (!agent || agent.internal || agent.background || isMainChatLabels(agent.labels)) return false;
   const parentId = getParentAgentIdFromLabels(agent.labels);
   const taskMeta = getMainChatTaskMetaFromLabels(agent.labels);
   return Boolean(parentId && taskMeta?.planId);
 }
 
 function isObservedFleetAgent(agent: ManagedAgent | null | undefined): agent is ManagedAgent {
-  if (!agent || agent.background || isMainChatLabels(agent.labels)) return false;
+  if (!agent || agent.internal || agent.background || isMainChatLabels(agent.labels)) return false;
   return true;
 }
 
