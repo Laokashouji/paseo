@@ -8,12 +8,14 @@ import {
   MainChatCompactionReasonSchema,
   MainChatCompactionStrategySchema,
   MainChatDecisionRecordSchema,
+  MainChatDurationSampleSchema,
   MainChatMetricsSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
   MainChatSessionTriageSchema,
   MainChatSettingsSchema,
   MainChatTaskReceiptSchema,
+  MainChatTaskRecordSchema,
   createDefaultMainChatSettings,
   mergeMainChatSettings,
   type MainChatActivityEntry,
@@ -22,6 +24,7 @@ import {
   type MainChatCompactionReason,
   type MainChatCompactionStrategy,
   type MainChatDecisionRecord,
+  type MainChatDurationSample,
   type MainChatMetrics,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
@@ -30,7 +33,16 @@ import {
   type MainChatSettingsPatch,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
+  type MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
+import {
+  MAX_RETAINED_RECEIPTS,
+  MAX_RETAINED_TASKS,
+  matchesTrustRule,
+  normalizeTrustCwd,
+  pruneDurationSamples,
+  pruneTaskRecordList,
+} from "./task-ledger.js";
 
 export type MainChatTrustRule = MainChatAutoStartRule;
 export type MainChatFullMetrics = Required<MainChatMetrics>;
@@ -69,8 +81,10 @@ const PersistedMainChatStateSchema = z.object({
   version: z.literal(1),
   settings: MainChatSettingsSchema.optional(),
   plans: z.record(z.string(), MainChatPlanRecordSchema).optional(),
+  tasks: z.array(MainChatTaskRecordSchema).optional(),
   decisions: z.record(z.string(), MainChatDecisionRecordSchema).optional(),
   receipts: z.array(PersistedMainChatReceiptSchema).optional(),
+  durationSamples: z.array(MainChatDurationSampleSchema).optional(),
   activities: z.array(MainChatActivityEntrySchema).optional(),
   compactionByMainAgent: z.record(z.string(), PersistedMainChatCompactionMetaSchema).optional(),
   pendingHandoffByMainAgent: z.record(z.string(), z.string()).optional(),
@@ -88,8 +102,10 @@ interface MainChatStateFile {
   version: 1;
   settings: MainChatSettings;
   plans: Record<string, MainChatPlanRecord>;
+  tasks: MainChatTaskRecord[];
   decisions: Record<string, MainChatDecisionRecord>;
   receipts: PersistedMainChatReceipt[];
+  durationSamples: MainChatDurationSample[];
   activities: MainChatActivityEntry[];
   compactionByMainAgent: Record<string, PersistedMainChatCompactionMeta>;
   pendingHandoffByMainAgent: Record<string, string>;
@@ -106,7 +122,6 @@ interface MainChatStateFile {
 export const MAX_RETAINED_ACTIVITIES = 200;
 const MAX_RETAINED_PLANS = 200;
 const MAX_RETAINED_DECISIONS = 200;
-const MAX_RETAINED_RECEIPTS = 200;
 const MAX_RETAINED_TRIAGES = 200;
 const DELEGATED_QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -151,8 +166,10 @@ function emptyState(): MainChatStateFile {
     version: 1,
     settings: createDefaultMainChatSettings("conservative"),
     plans: {},
+    tasks: [],
     decisions: {},
     receipts: [],
+    durationSamples: [],
     activities: [],
     compactionByMainAgent: {},
     pendingHandoffByMainAgent: {},
@@ -228,8 +245,26 @@ export interface MainChatActivityListOptions {
   kind?: MainChatActivityKind;
 }
 
+export interface MainChatTaskListOptions {
+  mainAgentId?: string;
+  conversationId?: string;
+  includeCompleted?: boolean;
+}
+
+export interface MainChatTrustRuleLookupOptions {
+  serverId?: string | null;
+  localServerId?: string | null;
+}
+
+export interface MainChatAddTrustRuleOptions {
+  serverId?: string | null;
+  hostLabel?: string | null;
+  allowSubdirectories?: boolean;
+}
+
 export interface MainChatMigrationCounts {
   migratedPlans: number;
+  migratedTasks: number;
   migratedDecisions: number;
   migratedReceipts: number;
   migratedActivities: number;
@@ -242,6 +277,12 @@ export interface MainChatStore {
   getPlan(planId: string): MainChatPlanRecord | null;
   listPlans(mainAgentId?: string): MainChatPlanRecord[];
   putPlan(plan: MainChatPlanRecord): Promise<void>;
+  getTask(taskId: string): MainChatTaskRecord | null;
+  findTaskByAgentId(agentId: string): MainChatTaskRecord | null;
+  listTasks(options?: MainChatTaskListOptions): MainChatTaskRecord[];
+  putTask(task: MainChatTaskRecord): Promise<void>;
+  addDurationSample(sample: MainChatDurationSample): Promise<MainChatDurationSample>;
+  listDurationSamples(nowMs?: number): MainChatDurationSample[];
   getDecision(decisionId: string): MainChatDecisionRecord | null;
   listDecisions(mainAgentId?: string): MainChatDecisionRecord[];
   putDecision(decision: MainChatDecisionRecord): Promise<void>;
@@ -268,8 +309,16 @@ export interface MainChatStore {
     fromMainAgentId: string,
     toMainAgentId: string,
   ): Promise<MainChatMigrationCounts>;
-  hasTrustRule(cwd: string, mode: MainChatTaskMode): boolean;
-  addTrustRule(cwd: string, mode: MainChatTaskMode): Promise<MainChatAutoStartRule>;
+  hasTrustRule(
+    cwd: string,
+    mode: MainChatTaskMode,
+    options?: MainChatTrustRuleLookupOptions,
+  ): boolean;
+  addTrustRule(
+    cwd: string,
+    mode: MainChatTaskMode,
+    options?: MainChatAddTrustRuleOptions,
+  ): Promise<MainChatAutoStartRule>;
   removeTrustRule(ruleId: string): Promise<boolean>;
   listTrustRules(): MainChatAutoStartRule[];
   findMatchingPermissionRule(lookup: MainChatPermissionRuleLookup): MainChatPermissionRule | null;
@@ -298,6 +347,7 @@ export interface MainChatStore {
 
 function hydratePersistedState(
   data: z.infer<typeof PersistedMainChatStateSchema>,
+  nowMs: number,
 ): MainChatStateFile {
   const compactionByMainAgent: Record<string, PersistedMainChatCompactionMeta> = {};
   for (const [key, value] of Object.entries(data.compactionByMainAgent ?? {})) {
@@ -313,8 +363,10 @@ function hydratePersistedState(
     version: 1,
     settings: data.settings ?? createDefaultMainChatSettings("conservative"),
     plans: data.plans ?? {},
+    tasks: pruneTaskRecordList(data.tasks ?? [], MAX_RETAINED_TASKS),
     decisions: data.decisions ?? {},
-    receipts: data.receipts ?? [],
+    receipts: (data.receipts ?? []).slice(-MAX_RETAINED_RECEIPTS),
+    durationSamples: pruneDurationSamples(data.durationSamples ?? [], nowMs),
     activities: data.activities ?? [],
     compactionByMainAgent,
     pendingHandoffByMainAgent: data.pendingHandoffByMainAgent ?? {},
@@ -329,24 +381,40 @@ function hydratePersistedState(
   };
 }
 
-export function createMainChatStore(paseoHome: string): MainChatStore {
+export interface MainChatStoreOptions {
+  now?: () => number;
+}
+
+function normalizeServerIdKey(serverId: string | null | undefined): string | null {
+  const trimmed = serverId?.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function createMainChatStore(
+  paseoHome: string,
+  storeOptions?: MainChatStoreOptions,
+): MainChatStore {
   const dirPath = path.join(paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME);
   const filePath = path.join(dirPath, "state.json");
+  const getNowMs = storeOptions?.now ?? (() => Date.now());
   let state: MainChatStateFile = emptyState();
   let loaded = false;
   let writeChain = Promise.resolve();
 
   async function persist(): Promise<void> {
+    const nowMs = getNowMs();
     pruneMapByTimestamp(state.plans, MAX_RETAINED_PLANS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.decisions, MAX_RETAINED_DECISIONS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.triages, MAX_RETAINED_TRIAGES, (entry) => entry.updatedAt);
+    state.tasks = pruneTaskRecordList(state.tasks, MAX_RETAINED_TASKS);
+    state.durationSamples = pruneDurationSamples(state.durationSamples, nowMs);
     if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
       state.receipts = state.receipts.slice(-MAX_RETAINED_RECEIPTS);
     }
     if (state.activities.length > MAX_RETAINED_ACTIVITIES) {
       state.activities = state.activities.slice(-MAX_RETAINED_ACTIVITIES);
     }
-    pruneDelegatedQuestions(state.delegatedQuestions, Date.now());
+    pruneDelegatedQuestions(state.delegatedQuestions, nowMs);
     const snapshot = JSON.stringify(state, null, 2);
     const task = writeChain.then(async () => {
       await mkdir(dirPath, { recursive: true });
@@ -370,7 +438,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
         const raw = await readFile(filePath, "utf8");
         const parsed = PersistedMainChatStateSchema.safeParse(JSON.parse(raw));
         if (parsed.success) {
-          state = hydratePersistedState(parsed.data);
+          state = hydratePersistedState(parsed.data, getNowMs());
         }
       } catch {
         // Missing or unreadable state starts clean.
@@ -407,6 +475,59 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
     async putPlan(plan) {
       state.plans[plan.id] = plan;
       await persist();
+    },
+
+    getTask(taskId) {
+      return state.tasks.find((task) => task.id === taskId) ?? null;
+    },
+
+    findTaskByAgentId(agentId) {
+      const trimmed = agentId.trim();
+      if (!trimmed) return null;
+      const activeMatches = state.tasks.filter((task) => task.activeAgentId === trimmed);
+      if (activeMatches.length > 0) {
+        activeMatches.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+        return activeMatches[0]!;
+      }
+      const linkedMatches = state.tasks.filter((task) => task.agentIds.includes(trimmed));
+      if (linkedMatches.length === 0) return null;
+      linkedMatches.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      return linkedMatches[0]!;
+    },
+
+    listTasks(options) {
+      const includeCompleted = options?.includeCompleted ?? true;
+      const filtered = state.tasks.filter((task) => {
+        if (options?.mainAgentId && task.mainAgentId !== options.mainAgentId) return false;
+        if (options?.conversationId && task.conversationId !== options.conversationId) return false;
+        if (!includeCompleted && (task.status === "completed" || task.status === "cancelled")) {
+          return false;
+        }
+        return true;
+      });
+      filtered.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      return filtered;
+    },
+
+    async putTask(task) {
+      const index = state.tasks.findIndex((entry) => entry.id === task.id);
+      if (index >= 0) {
+        state.tasks[index] = task;
+      } else {
+        state.tasks.push(task);
+      }
+      await persist();
+    },
+
+    async addDurationSample(sample) {
+      state.durationSamples.push(sample);
+      state.durationSamples = pruneDurationSamples(state.durationSamples, getNowMs());
+      await persist();
+      return sample;
+    },
+
+    listDurationSamples(nowMs = getNowMs()) {
+      return pruneDurationSamples(state.durationSamples, nowMs);
     },
 
     getDecision(decisionId) {
@@ -522,6 +643,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
 
     async migrateMainAgent(fromMainAgentId, toMainAgentId) {
       let migratedPlans = 0;
+      let migratedTasks = 0;
       let migratedDecisions = 0;
       let migratedReceipts = 0;
       let migratedActivities = 0;
@@ -532,6 +654,13 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
           migratedPlans += 1;
         }
       }
+      state.tasks = state.tasks.map((task) => {
+        if (task.mainAgentId === fromMainAgentId) {
+          migratedTasks += 1;
+          return { ...task, mainAgentId: toMainAgentId };
+        }
+        return task;
+      });
       for (const [decisionId, decision] of Object.entries(state.decisions)) {
         if (decision.mainAgentId === fromMainAgentId) {
           state.decisions[decisionId] = { ...decision, mainAgentId: toMainAgentId };
@@ -558,30 +687,61 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
       await persist();
       return {
         migratedPlans,
+        migratedTasks,
         migratedDecisions,
         migratedReceipts,
         migratedActivities,
       };
     },
 
-    hasTrustRule(cwd, mode) {
-      const normalized = normalizeCwdKey(cwd);
-      return state.trustRules.some(
-        (rule) => normalizeCwdKey(rule.cwd) === normalized && rule.mode === mode,
+    hasTrustRule(cwd, mode, options) {
+      return state.trustRules.some((rule) =>
+        matchesTrustRule(rule, {
+          cwd,
+          mode,
+          serverId: options?.serverId,
+          localServerId: options?.localServerId,
+        }),
       );
     },
 
-    async addTrustRule(cwd, mode) {
-      const normalized = normalizeCwdKey(cwd);
-      const existing = state.trustRules.find(
-        (rule) => normalizeCwdKey(rule.cwd) === normalized && rule.mode === mode,
+    async addTrustRule(cwd, mode, options) {
+      const normalized = normalizeTrustCwd(cwd);
+      const serverId = normalizeServerIdKey(options?.serverId);
+      const hostLabel = options?.hostLabel?.trim() || null;
+      const allowSubdirectories = options?.allowSubdirectories ?? true;
+      const existingIndex = state.trustRules.findIndex(
+        (rule) =>
+          normalizeTrustCwd(rule.cwd) === normalized &&
+          rule.mode === mode &&
+          normalizeServerIdKey(rule.serverId) === serverId,
       );
-      if (existing) return existing;
+      if (existingIndex >= 0) {
+        const existing = state.trustRules[existingIndex]!;
+        const needsUpdate =
+          (existing.allowSubdirectories ?? true) !== allowSubdirectories ||
+          (hostLabel !== null && existing.hostLabel !== hostLabel);
+        if (!needsUpdate) {
+          return existing;
+        }
+        const updated: MainChatAutoStartRule = {
+          ...existing,
+          serverId,
+          hostLabel: hostLabel ?? existing.hostLabel ?? null,
+          allowSubdirectories,
+        };
+        state.trustRules[existingIndex] = updated;
+        await persist();
+        return updated;
+      }
       const rule: MainChatAutoStartRule = {
         id: makeRuleId("trust"),
         cwd: normalized,
         mode,
-        createdAt: new Date().toISOString(),
+        serverId,
+        hostLabel,
+        allowSubdirectories,
+        createdAt: new Date(getNowMs()).toISOString(),
       };
       state.trustRules.push(rule);
       await persist();

@@ -2,6 +2,7 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
 import {
+  MAIN_CHAT_CONVERSATION_ID_LABEL,
   MAIN_CHAT_FORMER_ROLE_VALUE,
   MAIN_CHAT_REPLACED_BY_LABEL,
   MAIN_CHAT_ROLE_LABEL,
@@ -10,6 +11,8 @@ import {
   MAIN_CHAT_TASK_ID_LABEL,
   MAIN_CHAT_TASK_MODE_LABEL,
   MAIN_CHAT_TASK_PLAN_ID_LABEL,
+  MAIN_CHAT_TASK_QUIET_LABEL,
+  MAIN_CHAT_TASK_RECORD_ID_LABEL,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   getMainChatTaskMetaFromLabels,
   isMainChatLabels,
@@ -34,6 +37,8 @@ import {
   type MainChatRuleKind,
   type MainChatSettings,
   type MainChatSettingsPatch,
+  type MainChatTaskDecisionActor,
+  type MainChatTaskDecisionEntry,
   type MainChatTaskIsolation,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
@@ -76,6 +81,18 @@ import {
 } from "./prompts.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
 import { createMainChatSupervisor } from "./supervisor.js";
+import {
+  appendTaskDecision,
+  applyTaskScopeUpdate,
+  attachContinuationAgentToTask,
+  buildScopeRevisionNoticePrompt,
+  computeTaskDurationMinutes,
+  createTaskRecordFromPlannedTask,
+  estimateExpectedMinutes,
+  formatTaskDecisionsPromptSection,
+  resolveEffectiveTaskStatus,
+  validateTaskBriefInput,
+} from "./task-ledger.js";
 import { createMainChatTurnQueue } from "./turn-queue.js";
 import type { RunSemanticTriageInput, SemanticTriageOutput } from "./triage.js";
 
@@ -90,6 +107,8 @@ export interface CreateMainChatPlanTaskInput {
   goal: string;
   mode?: MainChatTaskMode;
   isolation?: MainChatTaskIsolation;
+  serverId?: string;
+  hostLabel?: string;
   cwd?: string;
   workspaceId?: string;
   reason?: string;
@@ -100,11 +119,15 @@ export interface CreateMainChatPlanTaskInput {
   thinkingOptionId?: string;
   branchName?: string;
   baseBranch?: string;
+  continuesTaskId?: string;
+  continuesWhy?: string;
+  quiet?: boolean;
 }
 
 export interface CreateMainChatPlanInput {
   summary?: string;
   autoStart?: boolean;
+  conversationId?: string;
   tasks: CreateMainChatPlanTaskInput[];
 }
 
@@ -296,31 +319,31 @@ export interface MainChatService {
   removeRule(kind: MainChatRuleKind, ruleId: string): Promise<boolean>;
   recordReceipt(receipt: MainChatTaskReceipt, mainAgentId?: string): Promise<MainChatTaskReceipt>;
   getMetrics(): MainChatMetrics;
-  // M3 Task Ledger & Inline Plan Editing contract (implemented by Wave 2 M3 backend)
-  updatePlanTask?(
+  // M3 Task Ledger & Inline Plan Editing contract
+  updatePlanTask(
     planId: string,
     taskId: string,
     patch: MainChatPlanTaskPatch,
   ): Promise<MainChatPlanRecord>;
-  withdrawPlan?(planId: string, reason: string): Promise<MainChatPlanRecord>;
-  listTaskRecords?(options?: {
+  withdrawPlan(planId: string, reason: string): Promise<MainChatPlanRecord>;
+  listTaskRecords(options?: {
     mainAgentId?: string;
     conversationId?: string;
     includeCompleted?: boolean;
   }): Promise<MainChatTaskRecord[]>;
-  updateTaskScope?(input: {
+  updateTaskScope(input: {
     taskId: string;
     goal?: string;
     doneWhen?: string[];
     outOfBounds?: string[];
     reason?: string;
   }): Promise<MainChatTaskRecord>;
-  parkTask?(input: {
+  parkTask(input: {
     taskId: string;
     parked: boolean;
     reason?: string;
   }): Promise<MainChatTaskRecord>;
-  reviewTask?(input: {
+  reviewTask(input: {
     taskId: string;
     verdict: MainChatTaskReviewVerdict;
     summary?: string;
@@ -407,7 +430,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   const idlePrecompactCheckIntervalMs =
     deps.idlePrecompactCheckIntervalMs ?? DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS;
 
-  const store: MainChatStore = createMainChatStore(deps.paseoHome);
+  const store: MainChatStore = createMainChatStore(deps.paseoHome, { now: getNowMs });
   const contextSnapshots = createMainChatContextSnapshotBuilder({
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
@@ -570,6 +593,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     title: string,
     workspaceIdInput: string | undefined,
     cwdInput: string | undefined,
+    targetServerId?: string | null,
   ): Promise<{ workspaceId: string | null; cwd: string; workspaceLabel: string }> {
     const workspaceId = workspaceIdInput?.trim() || null;
     if (workspaceId) {
@@ -589,7 +613,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       throw new Error(`任务「${title}」必须指定 workspaceId 或 cwd`);
     }
     const cwd = path.resolve(expandUserPath(rawCwd));
-    if (!(await isExistingDirectory(cwd))) {
+    const isRemoteHost = Boolean(targetServerId && targetServerId !== deps.serverId);
+    if (!isRemoteHost && !(await isExistingDirectory(cwd))) {
       throw new Error(`任务「${title}」指定的目录不存在：${cwd}`);
     }
     return {
@@ -599,40 +624,263 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  function resolveTaskRecordByRef(ref: {
+    taskId?: string | null;
+    agentId?: string | null;
+    planId?: string | null;
+  }): MainChatTaskRecord | null {
+    const taskId = ref.taskId?.trim() || null;
+    if (taskId) {
+      const direct = store.getTask(taskId);
+      if (direct) return direct;
+      for (const plan of store.listPlans()) {
+        const planned = plan.tasks.find((item) => item.id === taskId);
+        if (planned?.taskRecordId) {
+          const linked = store.getTask(planned.taskRecordId);
+          if (linked) return linked;
+        }
+      }
+    }
+    const agentId = ref.agentId?.trim() || null;
+    if (agentId) {
+      const byAgent = store.findTaskByAgentId(agentId);
+      if (byAgent) return byAgent;
+    }
+    const planId = ref.planId?.trim() || null;
+    if (planId) {
+      const plan = store.getPlan(planId);
+      if (plan && plan.tasks.length === 1) {
+        const sole = plan.tasks[0]!;
+        const linkedId = sole.taskRecordId ?? sole.id;
+        const byPlan = store.getTask(linkedId);
+        if (byPlan) return byPlan;
+      }
+    }
+    return null;
+  }
+
+  async function stopPreviousTaskAgent(agentId: string): Promise<void> {
+    const live = deps.agentManager.getAgent(agentId);
+    if (!live || live.lifecycle === "closed") {
+      return;
+    }
+    if (typeof deps.agentManager.cancelAgentRun !== "function") {
+      return;
+    }
+    try {
+      await deps.agentManager.cancelAgentRun(agentId);
+    } catch (error) {
+      logger.warn(
+        { err: error, agentId },
+        "Failed to cancel previous running agent before task continuation",
+      );
+    }
+  }
+
+  async function resolveAgentProviderName(
+    agentId: string | null | undefined,
+    fallbackSpec?: string | null,
+  ): Promise<string | null> {
+    if (agentId) {
+      const live = deps.agentManager.getAgent(agentId);
+      if (live?.provider) return live.provider;
+      const stored = await deps.agentStorage.get(agentId);
+      if (stored?.provider) return stored.provider;
+    }
+    return fallbackSpec?.trim() || null;
+  }
+
+  function resolveTaskStartIso(task: MainChatTaskRecord): string {
+    if (task.planId) {
+      const plan = store.getPlan(task.planId);
+      const matched = plan?.tasks.find(
+        (item) => item.taskRecordId === task.id || item.id === task.id,
+      );
+      if (matched?.startedAt && Number.isFinite(Date.parse(matched.startedAt))) {
+        return matched.startedAt;
+      }
+    }
+    return task.createdAt;
+  }
+
+  function collectPreExistingDecisionsForTask(
+    mainAgentId: string,
+    taskId: string,
+  ): MainChatTaskDecisionEntry[] {
+    return store
+      .listDecisions(mainAgentId)
+      .filter((decision) => decision.taskId === taskId && decision.answeredAt && decision.answer)
+      .map((decision) => ({
+        id: decision.id,
+        taskId,
+        question: decision.question,
+        answer: decision.answer!,
+        decidedBy: "user" as const,
+        createdAt: decision.answeredAt!,
+      }))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  function taskHasOpenDecision(
+    task: MainChatTaskRecord,
+    openDecisions: readonly MainChatDecisionRecord[],
+  ): boolean {
+    return openDecisions.some((decision) => {
+      if (decision.taskId === task.id) return true;
+      if (decision.agentId === null) return false;
+      return decision.agentId === task.activeAgentId || task.agentIds.includes(decision.agentId);
+    });
+  }
+
+  async function resolveStoredAgentLastStatus(agentId: string | null): Promise<string | null> {
+    if (!agentId) return null;
+    const stored = await deps.agentStorage.get(agentId);
+    return stored?.lastStatus ?? null;
+  }
+
+  async function listTaskRecordsInternal(options?: {
+    mainAgentId?: string;
+    conversationId?: string;
+    includeCompleted?: boolean;
+  }): Promise<MainChatTaskRecord[]> {
+    await store.load();
+    const includeCompleted = options?.includeCompleted ?? true;
+    const mainAgentId = options?.mainAgentId?.trim() || undefined;
+    const rawTasks = store.listTasks({
+      mainAgentId,
+      conversationId: options?.conversationId?.trim() || undefined,
+      includeCompleted: true,
+    });
+    const openDecisions = store
+      .listDecisions(mainAgentId)
+      .filter((decision) => !decision.answeredAt);
+
+    const resolved: MainChatTaskRecord[] = [];
+    for (const task of rawTasks) {
+      const liveAgent = task.activeAgentId ? deps.agentManager.getAgent(task.activeAgentId) : null;
+      const storedStatus = liveAgent
+        ? null
+        : await resolveStoredAgentLastStatus(task.activeAgentId);
+      const triage = task.activeAgentId ? store.getTriage(task.activeAgentId) : null;
+      const effectiveStatus = resolveEffectiveTaskStatus({
+        task,
+        liveAgent,
+        storedStatus,
+        triage,
+        hasOpenDecision: taskHasOpenDecision(task, openDecisions),
+      });
+      const isTerminal = effectiveStatus === "completed" || effectiveStatus === "cancelled";
+      if (!includeCompleted && isTerminal) continue;
+      resolved.push(effectiveStatus === task.status ? task : { ...task, status: effectiveStatus });
+    }
+
+    resolved.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return resolved;
+  }
+
+  function resolveInheritedContinuationInputs(
+    item: CreateMainChatPlanTaskInput,
+    continuedTask: MainChatTaskRecord | null,
+  ): {
+    rawGoal: string;
+    rawDoneWhen: string[];
+    rawOutOfBounds: string[];
+    effectiveServerId: string;
+    hostLabel: string | null;
+    workspaceIdInput: string | undefined;
+    cwdInput: string | undefined;
+  } {
+    const trimmedDoneWhen = trimList(item.doneWhen);
+    if (!continuedTask) {
+      return {
+        rawGoal: item.goal.trim(),
+        rawDoneWhen: trimmedDoneWhen,
+        rawOutOfBounds: trimList(item.outOfBounds),
+        effectiveServerId: trimOptional(item.serverId) ?? deps.serverId,
+        hostLabel: trimOptional(item.hostLabel),
+        workspaceIdInput: item.workspaceId,
+        cwdInput: item.cwd,
+      };
+    }
+
+    const rawDoneWhen = trimmedDoneWhen.length > 0 ? trimmedDoneWhen : continuedTask.brief.doneWhen;
+    const rawOutOfBounds =
+      item.outOfBounds !== undefined ? trimList(item.outOfBounds) : continuedTask.brief.outOfBounds;
+    return {
+      rawGoal: item.goal.trim() || continuedTask.brief.goal,
+      rawDoneWhen,
+      rawOutOfBounds,
+      effectiveServerId: trimOptional(item.serverId) ?? continuedTask.serverId ?? deps.serverId,
+      hostLabel: trimOptional(item.hostLabel) ?? continuedTask.hostLabel ?? null,
+      workspaceIdInput:
+        item.workspaceId ?? (item.cwd ? undefined : (continuedTask.workspaceId ?? undefined)),
+      cwdInput: item.cwd ?? (item.workspaceId ? undefined : (continuedTask.cwd ?? undefined)),
+    };
+  }
+
   async function buildPlannedTask(
     item: CreateMainChatPlanTaskInput,
     index: number,
+    context: { defaultProvider: string | null },
   ): Promise<{ task: MainChatPlannedTask; autoStartEligible: boolean }> {
     const mode: MainChatTaskMode = item.mode ?? "write";
     const isolation: MainChatTaskIsolation = item.isolation ?? "local";
     const title = item.title.trim();
-    const goal = item.goal.trim();
-    if (!title || !goal) {
-      throw new Error(`第 ${index + 1} 个任务缺少 title 或 goal`);
+    if (!title) {
+      throw new Error(`第 ${index + 1} 个任务缺少 title`);
     }
 
-    const doneWhen = trimList(item.doneWhen);
-    if (mode === "write" && doneWhen.length === 0) {
-      throw new Error(`写操作任务「${title}」必须至少提供 1 条验收标准 doneWhen`);
+    const continuesTaskId = trimOptional(item.continuesTaskId);
+    const continuesWhy = trimOptional(item.continuesWhy);
+    const continuedTask = continuesTaskId ? store.getTask(continuesTaskId) : null;
+    if (continuesTaskId && !continuedTask) {
+      throw new Error(`找不到要续接的原任务：${continuesTaskId}`);
     }
 
-    const location = await resolvePlannedTaskLocation(title, item.workspaceId, item.cwd);
+    const inherited = resolveInheritedContinuationInputs(item, continuedTask);
+    const validatedBrief = validateTaskBriefInput({
+      title,
+      goal: inherited.rawGoal,
+      mode,
+      doneWhen: inherited.rawDoneWhen,
+      outOfBounds: inherited.rawOutOfBounds,
+    });
+    const location = await resolvePlannedTaskLocation(
+      title,
+      inherited.workspaceIdInput,
+      inherited.cwdInput,
+      inherited.effectiveServerId,
+    );
     const defaultReason =
       mode === "readonly" ? "只读分析任务，自动在目标目录开工" : "涉及改动，建议确认后开始";
+    const providerSpec = trimOptional(item.provider);
+    const nowMs = getNowMs();
+    const expectedMinutes = estimateExpectedMinutes(
+      store.listDurationSamples(nowMs),
+      {
+        serverId: inherited.effectiveServerId,
+        cwd: location.cwd,
+        mode,
+        provider: providerSpec ?? context.defaultProvider,
+      },
+      nowMs,
+    );
 
     const task: MainChatPlannedTask = {
       id: makeId("task"),
       title,
-      goal,
+      goal: validatedBrief.goal,
       mode,
       isolation,
+      serverId: inherited.effectiveServerId,
+      hostLabel: inherited.hostLabel,
       cwd: location.cwd,
       workspaceId: location.workspaceId,
       workspaceLabel: location.workspaceLabel,
       reason: trimOptional(item.reason) ?? defaultReason,
-      doneWhen,
-      outOfBounds: trimList(item.outOfBounds),
-      provider: trimOptional(item.provider),
+      doneWhen: validatedBrief.doneWhen,
+      outOfBounds: validatedBrief.outOfBounds,
+      provider: providerSpec,
       modeId: trimOptional(item.modeId),
       thinkingOptionId: trimOptional(item.thinkingOptionId),
       branchName: trimOptional(item.branchName),
@@ -640,9 +888,20 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       agentId: null,
       startedAt: null,
       startError: null,
+      continuesTaskId,
+      continuesWhy,
+      expectedMinutes,
+      quiet: item.quiet ?? true,
+      scopeRevision: continuedTask?.brief.scopeRevision ?? 1,
+      taskRecordId: continuedTask?.id ?? null,
     };
 
-    const autoStartEligible = mode === "readonly" || store.hasTrustRule(location.cwd, mode);
+    const autoStartEligible =
+      mode === "readonly" ||
+      store.hasTrustRule(location.cwd, mode, {
+        serverId: inherited.effectiveServerId,
+        localServerId: deps.serverId,
+      });
     return { task, autoStartEligible };
   }
 
@@ -848,76 +1107,242 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return { workspaceId: created.workspaceId, cwd: created.cwd };
   }
 
+  function buildTaskAgentLabels(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    resolvedTaskRecordId: string;
+    effectiveGoal: string;
+  }): Record<string, string> {
+    const labels: Record<string, string> = {
+      [PARENT_AGENT_ID_LABEL]: input.plan.mainAgentId,
+      [PARENT_SERVER_ID_LABEL]: deps.serverId,
+      [MAIN_CHAT_TASK_PLAN_ID_LABEL]: input.plan.id,
+      [MAIN_CHAT_TASK_ID_LABEL]: input.task.id,
+      [MAIN_CHAT_TASK_RECORD_ID_LABEL]: input.resolvedTaskRecordId,
+      [MAIN_CHAT_TASK_MODE_LABEL]: input.task.mode,
+      [MAIN_CHAT_TASK_GOAL_LABEL]: input.effectiveGoal.slice(0, 200),
+      [MAIN_CHAT_TASK_QUIET_LABEL]: input.task.quiet === false ? "false" : "true",
+    };
+    if (input.plan.conversationId) {
+      labels[MAIN_CHAT_CONVERSATION_ID_LABEL] = input.plan.conversationId;
+    }
+    return labels;
+  }
+
+  async function persistSpawnedTaskRecord(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    existingRecord: MainChatTaskRecord | null;
+    resolvedTaskRecordId: string;
+    preExistingDecisions: MainChatTaskDecisionEntry[];
+    agentId: string;
+    cwd: string;
+    workspaceId: string;
+    nowIso: string;
+  }): Promise<void> {
+    const targetToAttach = input.continuedTask ?? input.existingRecord;
+    if (targetToAttach) {
+      const updatedRecord = attachContinuationAgentToTask(targetToAttach, {
+        planId: input.plan.id,
+        newAgentId: input.agentId,
+        cwd: input.cwd,
+        workspaceId: input.workspaceId,
+        workspaceLabel: input.task.workspaceLabel,
+        serverId: input.task.serverId ?? deps.serverId,
+        hostLabel: input.task.hostLabel ?? null,
+        continuesWhy: input.continuedTask ? (input.task.continuesWhy ?? null) : null,
+        nowIso: input.nowIso,
+      });
+      await store.putTask(updatedRecord);
+      return;
+    }
+
+    const createdRecord = createTaskRecordFromPlannedTask({
+      id: input.resolvedTaskRecordId,
+      mainAgentId: input.plan.mainAgentId,
+      conversationId: input.plan.conversationId ?? null,
+      planId: input.plan.id,
+      plannedTask: input.task,
+      agentId: input.agentId,
+      cwd: input.cwd,
+      workspaceId: input.workspaceId,
+      serverId: input.task.serverId ?? deps.serverId,
+      hostLabel: input.task.hostLabel ?? null,
+      nowIso: input.nowIso,
+    });
+    if (input.preExistingDecisions.length > 0) {
+      createdRecord.decisions = input.preExistingDecisions;
+    }
+    await store.putTask(createdRecord);
+  }
+
+  function prepareSpawnTaskPromptAndLabels(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    previousAgentId: string | null;
+  }): {
+    resolvedTaskRecordId: string;
+    existingRecord: MainChatTaskRecord | null;
+    preExistingDecisions: MainChatTaskDecisionEntry[];
+    initialPrompt: string;
+    labels: Record<string, string>;
+    title: string;
+  } {
+    const { plan, task, continuedTask, previousAgentId } = input;
+    const resolvedTaskRecordId = continuedTask ? continuedTask.id : (task.taskRecordId ?? task.id);
+    const existingRecord = continuedTask ?? store.getTask(resolvedTaskRecordId);
+    const preExistingDecisions =
+      existingRecord?.decisions ??
+      collectPreExistingDecisionsForTask(plan.mainAgentId, resolvedTaskRecordId);
+    const activeBrief = existingRecord ? existingRecord.brief : null;
+    const continuesFrom = continuedTask
+      ? {
+          taskId: continuedTask.id,
+          reason: task.continuesWhy ?? null,
+          previousAgentId,
+        }
+      : null;
+
+    return {
+      resolvedTaskRecordId,
+      existingRecord,
+      preExistingDecisions,
+      initialPrompt: buildWorkerInitialPrompt(task, {
+        brief: activeBrief,
+        decisions: preExistingDecisions,
+        continuesFrom,
+      }),
+      labels: buildTaskAgentLabels({
+        plan,
+        task,
+        resolvedTaskRecordId,
+        effectiveGoal: continuedTask ? continuedTask.brief.goal : task.goal,
+      }),
+      title: continuedTask ? continuedTask.title : task.title,
+    };
+  }
+
+  async function spawnSinglePlannedTask(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    mainAgent: {
+      provider: string;
+      model: string | null;
+      modeId: string | null;
+      thinkingOptionId: string | null;
+    };
+    nowIso: string;
+  }): Promise<MainChatPlannedTask> {
+    const { plan, task, mainAgent, nowIso } = input;
+    const continuedTask = task.continuesTaskId ? store.getTask(task.continuesTaskId) : null;
+    let stoppedPreviousAgent = false;
+    try {
+      if (task.continuesTaskId && !continuedTask) {
+        throw new Error(`找不到要续接的原任务：${task.continuesTaskId}`);
+      }
+
+      const previousAgentId = continuedTask ? continuedTask.activeAgentId : null;
+      if (previousAgentId) {
+        await stopPreviousTaskAgent(previousAgentId);
+        stoppedPreviousAgent = true;
+      }
+
+      const target = await resolveTaskWorkspaceTarget(task);
+      const prepared = prepareSpawnTaskPromptAndLabels({
+        plan,
+        task,
+        continuedTask,
+        previousAgentId,
+      });
+      const providerSpec =
+        task.provider ?? formatProviderModel(mainAgent.provider, mainAgent.model);
+
+      const { snapshot } = await createAgentCommand(
+        {
+          agentManager: deps.agentManager,
+          agentStorage: deps.agentStorage,
+          finishSubscriptions: deps.finishSubscriptions?.(),
+          logger,
+          paseoHome: deps.paseoHome,
+          worktreesRoot: deps.worktreesRoot,
+          terminalManager: deps.terminalManager,
+          providerSnapshotManager: deps.providerSnapshotManager,
+          createPaseoWorktree: deps.createPaseoWorktree,
+          ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
+        },
+        {
+          kind: "mcp",
+          provider: providerSpec,
+          title: prepared.title,
+          initialPrompt: prepared.initialPrompt,
+          cwd: target.cwd,
+          workspaceId: target.workspaceId,
+          thinking: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? undefined,
+          mode: task.modeId ?? mainAgent.modeId ?? undefined,
+          labels: prepared.labels,
+          promptFailure: "throw",
+          notifyOnFinish: true,
+          background: false,
+          detached: false,
+          callerAgentId: plan.mainAgentId,
+        },
+      );
+
+      const resolvedWorkspaceId = snapshot.workspaceId ?? target.workspaceId;
+      await persistSpawnedTaskRecord({
+        plan,
+        task,
+        continuedTask,
+        existingRecord: prepared.existingRecord,
+        resolvedTaskRecordId: prepared.resolvedTaskRecordId,
+        preExistingDecisions: prepared.preExistingDecisions,
+        agentId: snapshot.id,
+        cwd: target.cwd,
+        workspaceId: resolvedWorkspaceId,
+        nowIso,
+      });
+
+      return {
+        ...task,
+        cwd: target.cwd,
+        workspaceId: resolvedWorkspaceId,
+        agentId: snapshot.id,
+        startedAt: nowIso,
+        startError: null,
+        taskRecordId: prepared.resolvedTaskRecordId,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn({ err: error, planId: plan.id, taskId: task.id }, "Failed to start plan task");
+      if (continuedTask && stoppedPreviousAgent) {
+        await store.putTask({
+          ...continuedTask,
+          activeAgentId: null,
+          status: "failed",
+          updatedAt: nowIso,
+          lastActivityAt: nowIso,
+        });
+      }
+      return { ...task, startError: message };
+    }
+  }
+
   async function spawnTasksForPlan(
     plan: MainChatPlanRecord,
     selectedTaskIds?: ReadonlySet<string>,
   ): Promise<MainChatPlanRecord> {
     const mainAgent = await resolveMainAgentSnapshot(plan.mainAgentId);
     const updatedTasks: MainChatPlannedTask[] = [];
-    const nowIso = new Date().toISOString();
+    const nowIso = new Date(getNowMs()).toISOString();
 
     for (const task of plan.tasks) {
       if (task.agentId || (selectedTaskIds && !selectedTaskIds.has(task.id))) {
         updatedTasks.push(task);
         continue;
       }
-      try {
-        const target = await resolveTaskWorkspaceTarget(task);
-        const providerSpec =
-          task.provider ?? formatProviderModel(mainAgent.provider, mainAgent.model);
-        const { snapshot } = await createAgentCommand(
-          {
-            agentManager: deps.agentManager,
-            agentStorage: deps.agentStorage,
-            finishSubscriptions: deps.finishSubscriptions?.(),
-            logger,
-            paseoHome: deps.paseoHome,
-            worktreesRoot: deps.worktreesRoot,
-            terminalManager: deps.terminalManager,
-            providerSnapshotManager: deps.providerSnapshotManager,
-            createPaseoWorktree: deps.createPaseoWorktree,
-            ensureWorkspaceForCreate: deps.ensureWorkspaceForCreate,
-          },
-          {
-            kind: "mcp",
-            provider: providerSpec,
-            title: task.title,
-            initialPrompt: buildWorkerInitialPrompt(task),
-            cwd: target.cwd,
-            workspaceId: target.workspaceId,
-            thinking: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? undefined,
-            mode: task.modeId ?? mainAgent.modeId ?? undefined,
-            labels: {
-              [PARENT_AGENT_ID_LABEL]: plan.mainAgentId,
-              [PARENT_SERVER_ID_LABEL]: deps.serverId,
-              [MAIN_CHAT_TASK_PLAN_ID_LABEL]: plan.id,
-              [MAIN_CHAT_TASK_ID_LABEL]: task.id,
-              [MAIN_CHAT_TASK_MODE_LABEL]: task.mode,
-              [MAIN_CHAT_TASK_GOAL_LABEL]: task.goal.slice(0, 200),
-            },
-            promptFailure: "throw",
-            notifyOnFinish: true,
-            background: false,
-            detached: false,
-            callerAgentId: plan.mainAgentId,
-          },
-        );
-        updatedTasks.push({
-          ...task,
-          cwd: target.cwd,
-          workspaceId: snapshot.workspaceId ?? target.workspaceId,
-          agentId: snapshot.id,
-          startedAt: nowIso,
-          startError: null,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.warn({ err: error, planId: plan.id, taskId: task.id }, "Failed to start plan task");
-        updatedTasks.push({
-          ...task,
-          startError: message,
-        });
-      }
+      updatedTasks.push(await spawnSinglePlannedTask({ plan, task, mainAgent, nowIso }));
     }
 
     const updatedPlan: MainChatPlanRecord = {
@@ -928,6 +1353,156 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
     await store.putPlan(updatedPlan);
     return updatedPlan;
+  }
+
+  async function syncTaskRecordCompleted(
+    task: MainChatTaskRecord,
+    receipt: MainChatTaskReceipt,
+    nowIso: string,
+  ): Promise<MainChatTaskRecord> {
+    const startIso = resolveTaskStartIso(task);
+    const { actualMinutes, sampleMinutes } = computeTaskDurationMinutes(startIso, nowIso);
+    const linkedPlan = task.planId ? store.getPlan(task.planId) : null;
+    const linkedPlannedTask = linkedPlan?.tasks.find(
+      (item) => item.taskRecordId === task.id || item.id === task.id,
+    );
+    const resolvedProvider = await resolveAgentProviderName(
+      receipt.agentId ?? task.activeAgentId ?? task.agentIds.at(-1) ?? null,
+      linkedPlannedTask?.provider ?? null,
+    );
+
+    await store.addDurationSample({
+      id: makeId("dur"),
+      serverId: task.serverId ?? deps.serverId,
+      cwd: task.cwd,
+      mode: task.mode,
+      role: "worker",
+      provider: resolvedProvider,
+      durationMinutes: sampleMinutes,
+      completedAt: nowIso,
+    });
+
+    const completedTask: MainChatTaskRecord = {
+      ...task,
+      status: "completed",
+      completedAt: nowIso,
+      actualMinutes,
+      parkedAt: null,
+      parkedReason: null,
+      latestReceipt: receipt,
+      updatedAt: nowIso,
+      lastActivityAt: nowIso,
+    };
+    await store.putTask(completedTask);
+    return completedTask;
+  }
+
+  async function recordTaskDecisionEntry(
+    decision: {
+      id?: string;
+      taskId?: string | null;
+      agentId?: string | null;
+      planId?: string | null;
+      question: string;
+      answer: string;
+    },
+    decidedBy: MainChatTaskDecisionActor,
+    nowIso: string,
+  ): Promise<MainChatTaskRecord | null> {
+    const linked = resolveTaskRecordByRef({
+      taskId: decision.taskId,
+      agentId: decision.agentId,
+      planId: decision.planId,
+    });
+    if (!linked) return null;
+
+    let updated = appendTaskDecision(linked, {
+      id: decision.id,
+      question: decision.question,
+      answer: decision.answer,
+      decidedBy,
+      nowIso,
+    });
+    if (updated.status === "needs_you") {
+      updated = { ...updated, status: "running" };
+    }
+    await store.putTask(updated);
+    return updated;
+  }
+
+  async function dispatchReworkForAgent(input: {
+    agentId: string;
+    title: string;
+    planId: string | null;
+    taskId: string | null;
+    taskRecord: MainChatTaskRecord | null;
+    gaps: string[];
+    note: string | null;
+  }): Promise<{ rework: MainChatReworkRecord; task: MainChatTaskRecord | null }> {
+    const existingCount = Math.max(
+      input.taskRecord?.reworkCount ?? 0,
+      store.getReworkRound(input.agentId),
+    );
+    if (existingCount >= MAX_REWORK_ROUNDS) {
+      throw new Error(
+        `该任务已达到返工上限（${MAX_REWORK_ROUNDS} 轮），请不要继续退回，请改用 task_ask_user 向用户汇报现状并请用户拍板。`,
+      );
+    }
+
+    const roundFromStore = await store.incrementReworkRound(input.agentId);
+    const round = Math.max(roundFromStore, (input.taskRecord?.reworkCount ?? 0) + 1);
+    await store.incrementMetric("reworkCount");
+
+    const decisionsSection = formatTaskDecisionsPromptSection(input.taskRecord?.decisions);
+    const scopeHint =
+      input.taskRecord && input.taskRecord.brief.scopeRevision > 1
+        ? `（Scope Revision #${input.taskRecord.brief.scopeRevision}）`
+        : "";
+    const promptLines = [
+      `【主对话复核退回 · 第 ${round}/${MAX_REWORK_ROUNDS} 轮返工】`,
+      `对照验收标准${scopeHint}，以下缺口尚未满足，请逐项补齐并给出可核验的证据：`,
+      ...input.gaps.map((gap, index) => `${index + 1}. ${gap}`),
+      ...(input.note ? [`【补充说明】${input.note}`] : []),
+      ...(decisionsSection ? ["", decisionsSection] : []),
+    ];
+
+    await sendPromptToAgent({
+      agentId: input.agentId,
+      prompt: promptLines.join("\n"),
+      agentManager: deps.agentManager,
+      agentStorage: deps.agentStorage,
+      logger,
+      unarchive: false,
+    });
+
+    const nowIso = new Date(getNowMs()).toISOString();
+    let updatedTask: MainChatTaskRecord | null = null;
+    if (input.taskRecord) {
+      updatedTask = {
+        ...input.taskRecord,
+        status: "running",
+        activeAgentId: input.agentId,
+        parkedAt: null,
+        parkedReason: null,
+        completedAt: null,
+        reworkCount: round,
+        updatedAt: nowIso,
+        lastActivityAt: nowIso,
+      };
+      await store.putTask(updatedTask);
+    }
+
+    const rework: MainChatReworkRecord = {
+      title: input.title,
+      agentId: input.agentId,
+      planId: input.planId,
+      taskId: input.taskRecord?.id ?? input.taskId,
+      round,
+      maxRounds: MAX_REWORK_ROUNDS,
+      gaps: input.gaps,
+      note: input.note,
+    };
+    return { rework, task: updatedTask };
   }
 
   async function resolveReworkTargetMeta(
@@ -1557,10 +2132,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       let activitySummary = `已开启全新主对话并完成督办权转移（迁移 ${migratedChildAgents} 个子会话）`;
       if (input.mode === "clear") {
         activityTrigger = "user_clear";
-        activitySummary = `已原位清空上下文并归档旧会话，迁移 ${storeMigration.migratedPlans} 个计划、${storeMigration.migratedDecisions} 个决策与 ${migratedChildAgents} 个子会话`;
+        activitySummary = `已原位清空上下文并归档旧会话，迁移 ${storeMigration.migratedPlans} 个计划、${storeMigration.migratedTasks} 个任务、${storeMigration.migratedDecisions} 个决策与 ${migratedChildAgents} 个子会话`;
       } else if (input.carryHandoffSummary) {
         activityTrigger = "new_session_with_handoff";
-        activitySummary = `已开启新主对话并完成交接摘要与督办权转移（迁移 ${migratedChildAgents} 个子会话）`;
+        activitySummary = `已开启新主对话并完成交接摘要与督办权转移（迁移 ${storeMigration.migratedTasks} 个任务与 ${migratedChildAgents} 个子会话）`;
       }
       await store.appendActivity({
         id: makeId("act"),
@@ -1586,6 +2161,118 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         migratedChildAgents,
       };
     });
+  }
+
+  function applyOptionalNullablePatch(
+    patchValue: string | null | undefined,
+    currentValue: string | null,
+  ): string | null {
+    if (patchValue === undefined) return currentValue;
+    return patchValue?.trim() || null;
+  }
+
+  async function resolvePatchedPlannedTaskLocation(
+    existing: MainChatPlannedTask,
+    nextTitle: string,
+    nextServerId: string | null,
+    patchedCwd: string | null | undefined,
+  ): Promise<{ cwd: string | null; workspaceId: string | null; workspaceLabel: string }> {
+    if (patchedCwd === undefined) {
+      return {
+        cwd: existing.cwd,
+        workspaceId: existing.workspaceId,
+        workspaceLabel: existing.workspaceLabel,
+      };
+    }
+    if (patchedCwd === null) {
+      if (!existing.workspaceId) {
+        throw new Error(`任务「${nextTitle}」必须保留有效的 cwd 或 workspaceId`);
+      }
+      return {
+        cwd: null,
+        workspaceId: existing.workspaceId,
+        workspaceLabel: existing.workspaceLabel,
+      };
+    }
+    const location = await resolvePlannedTaskLocation(
+      nextTitle,
+      undefined,
+      patchedCwd,
+      nextServerId,
+    );
+    const sameCwd = existing.cwd !== null && path.resolve(existing.cwd) === location.cwd;
+    return {
+      cwd: location.cwd,
+      workspaceId: sameCwd ? existing.workspaceId : null,
+      workspaceLabel: location.workspaceLabel,
+    };
+  }
+
+  async function applyPatchToPlannedTask(
+    planMainAgentId: string,
+    existing: MainChatPlannedTask,
+    patch: MainChatPlanTaskPatch,
+  ): Promise<MainChatPlannedTask> {
+    const nextTitle = patch.title !== undefined ? patch.title.trim() : existing.title;
+    if (!nextTitle) {
+      throw new Error("任务标题 title 不能为空");
+    }
+    const nextMode = patch.mode ?? existing.mode;
+    const validatedBrief = validateTaskBriefInput({
+      title: nextTitle,
+      goal: patch.goal !== undefined ? patch.goal : existing.goal,
+      mode: nextMode,
+      doneWhen: patch.doneWhen !== undefined ? trimList(patch.doneWhen) : existing.doneWhen,
+      outOfBounds:
+        patch.outOfBounds !== undefined ? trimList(patch.outOfBounds) : existing.outOfBounds,
+    });
+    const nextServerId = applyOptionalNullablePatch(
+      patch.serverId,
+      existing.serverId ?? deps.serverId,
+    );
+    const location = await resolvePatchedPlannedTaskLocation(
+      existing,
+      nextTitle,
+      nextServerId,
+      patch.cwd,
+    );
+    const nextProvider = applyOptionalNullablePatch(patch.provider, existing.provider);
+    const mainSnapshot = await resolveMainAgentSnapshot(planMainAgentId).catch(() => null);
+    const nowMs = getNowMs();
+    const expectedMinutes = estimateExpectedMinutes(
+      store.listDurationSamples(nowMs),
+      {
+        serverId: nextServerId,
+        cwd: location.cwd,
+        mode: nextMode,
+        provider: nextProvider ?? mainSnapshot?.provider ?? null,
+      },
+      nowMs,
+    );
+
+    return {
+      ...existing,
+      title: nextTitle,
+      goal: validatedBrief.goal,
+      mode: nextMode,
+      isolation: patch.isolation ?? existing.isolation,
+      serverId: nextServerId,
+      cwd: location.cwd,
+      workspaceId: location.workspaceId,
+      workspaceLabel: location.workspaceLabel,
+      doneWhen: validatedBrief.doneWhen,
+      outOfBounds: validatedBrief.outOfBounds,
+      provider: nextProvider,
+      modeId: applyOptionalNullablePatch(patch.modeId, existing.modeId),
+      thinkingOptionId: applyOptionalNullablePatch(
+        patch.thinkingOptionId,
+        existing.thinkingOptionId,
+      ),
+      branchName: applyOptionalNullablePatch(patch.branchName, existing.branchName),
+      baseBranch: applyOptionalNullablePatch(patch.baseBranch, existing.baseBranch),
+      quiet: patch.quiet !== undefined ? patch.quiet : existing.quiet,
+      expectedMinutes,
+    };
   }
 
   return {
@@ -1780,11 +2467,21 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         throw new Error("task_plan 至少需要包含 1 个任务");
       }
 
+      const mainSnapshot = await resolveMainAgentSnapshot(mainAgentId).catch(() => null);
+      const liveMain = deps.agentManager.getAgent(mainAgentId);
+      const conversationId =
+        trimOptional(input.conversationId) ??
+        (typeof liveMain?.labels?.[MAIN_CHAT_CONVERSATION_ID_LABEL] === "string"
+          ? liveMain.labels[MAIN_CHAT_CONVERSATION_ID_LABEL].trim() || null
+          : null);
+
       const plannedTasks: MainChatPlannedTask[] = [];
       let allEligibleForAutoStart = true;
 
       for (let index = 0; index < input.tasks.length; index += 1) {
-        const built = await buildPlannedTask(input.tasks[index]!, index);
+        const built = await buildPlannedTask(input.tasks[index]!, index, {
+          defaultProvider: mainSnapshot?.provider ?? null,
+        });
         plannedTasks.push(built.task);
         if (!built.autoStartEligible && input.autoStart !== true) {
           allEligibleForAutoStart = false;
@@ -1794,12 +2491,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       const plan: MainChatPlanRecord = {
         id: makeId("plan"),
         mainAgentId,
+        conversationId,
         status: "open",
         autoStarted: allEligibleForAutoStart,
         summary: input.summary?.trim() || null,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date(getNowMs()).toISOString(),
         startedAt: null,
         cancelledAt: null,
+        withdrawnAt: null,
+        withdrawReason: null,
         tasks: plannedTasks,
       };
       await store.putPlan(plan);
@@ -1825,12 +2525,19 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         if (existing.status === "cancelled") {
           throw new Error("该任务计划已取消，无法启动");
         }
+        if (existing.status === "withdrawn") {
+          throw new Error("该任务计划已撤回，无法启动");
+        }
         const selected = options?.taskIds?.length ? new Set(options.taskIds) : undefined;
         if (options?.rememberAutoStart) {
           for (const task of existing.tasks) {
             if (selected && !selected.has(task.id)) continue;
             if (task.cwd) {
-              await store.addTrustRule(task.cwd, task.mode);
+              await store.addTrustRule(task.cwd, task.mode, {
+                serverId: task.serverId ?? deps.serverId,
+                hostLabel: task.hostLabel ?? null,
+                allowSubdirectories: true,
+              });
             }
           }
         }
@@ -1856,13 +2563,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         if (existing.status === "started") {
           throw new Error("该任务计划已经开始，无法取消；请直接操作对应的子 Agent");
         }
+        if (existing.status === "withdrawn") {
+          throw new Error("该任务计划已撤回，无法取消");
+        }
         if (existing.status === "cancelled") {
           return existing;
         }
         const cancelled: MainChatPlanRecord = {
           ...existing,
           status: "cancelled",
-          cancelledAt: new Date().toISOString(),
+          cancelledAt: new Date(getNowMs()).toISOString(),
         };
         await store.putPlan(cancelled);
         await store.incrementMetric("plansCancelled");
@@ -1936,43 +2646,25 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       if (gaps.length === 0) {
         throw new Error("task_rework 至少需要列出 1 条具体缺口 gaps");
       }
-      if (store.getReworkRound(input.agentId) >= MAX_REWORK_ROUNDS) {
-        throw new Error(
-          `该任务已达到返工上限（${MAX_REWORK_ROUNDS} 轮），请不要继续退回，请改用 task_ask_user 向用户汇报现状并请用户拍板。`,
-        );
-      }
 
       const targetMeta = await resolveReworkTargetMeta(input);
-      const round = await store.incrementReworkRound(input.agentId);
-      await store.incrementMetric("reworkCount");
-
-      const note = trimOptional(input.note);
-      const promptLines = [
-        `【主对话复核退回 · 第 ${round}/${MAX_REWORK_ROUNDS} 轮返工】`,
-        "对照验收标准，以下缺口尚未满足，请逐项补齐并给出可核验的证据：",
-        ...gaps.map((gap, index) => `${index + 1}. ${gap}`),
-        ...(note ? [`【补充说明】${note}`] : []),
-      ];
-
-      await sendPromptToAgent({
-        agentId: input.agentId,
-        prompt: promptLines.join("\n"),
-        agentManager: deps.agentManager,
-        agentStorage: deps.agentStorage,
-        logger,
-        unarchive: false,
-      });
-
-      return {
-        title: targetMeta.title,
+      const taskRecord = resolveTaskRecordByRef({
+        taskId: targetMeta.taskId,
         agentId: input.agentId,
         planId: targetMeta.planId,
+      });
+
+      const { rework } = await dispatchReworkForAgent({
+        agentId: input.agentId,
+        title: targetMeta.title,
+        planId: targetMeta.planId,
         taskId: targetMeta.taskId,
-        round,
-        maxRounds: MAX_REWORK_ROUNDS,
+        taskRecord,
         gaps,
-        note,
-      };
+        note: trimOptional(input.note),
+      });
+      contextSnapshots.invalidateCache();
+      return rework;
     },
 
     async askUserDecision(mainAgentId, input) {
@@ -1985,6 +2677,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       if (!input.options || input.options.length < 2) {
         throw new Error("task_ask_user 至少需要提供 2 个明确选项");
       }
+      const nowIso = new Date(getNowMs()).toISOString();
       const decision: MainChatDecisionRecord = {
         id: makeId("decision"),
         mainAgentId,
@@ -2003,10 +2696,30 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         answer: null,
         answeredOptionId: null,
         answeredAt: null,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       };
       await store.putDecision(decision);
       await store.incrementMetric("interrupts");
+
+      const linkedTask = resolveTaskRecordByRef({
+        taskId: decision.taskId,
+        agentId: decision.agentId,
+        planId: decision.planId,
+      });
+      if (
+        linkedTask &&
+        linkedTask.status !== "completed" &&
+        linkedTask.status !== "cancelled" &&
+        linkedTask.status !== "parked"
+      ) {
+        await store.putTask({
+          ...linkedTask,
+          status: "needs_you",
+          updatedAt: nowIso,
+          lastActivityAt: nowIso,
+        });
+      }
+
       contextSnapshots.invalidateCache();
       return decision;
     },
@@ -2025,13 +2738,26 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return existing;
       }
 
+      const nowIso = new Date(getNowMs()).toISOString();
       const updated: MainChatDecisionRecord = {
         ...existing,
         answer,
         answeredOptionId: trimOptional(input.optionId),
-        answeredAt: new Date().toISOString(),
+        answeredAt: nowIso,
       };
       await store.putDecision(updated);
+      await recordTaskDecisionEntry(
+        {
+          id: updated.id,
+          taskId: updated.taskId,
+          agentId: updated.agentId,
+          planId: updated.planId,
+          question: updated.question,
+          answer,
+        },
+        "user",
+        nowIso,
+      );
       contextSnapshots.invalidateCache();
 
       const targetAgentId = updated.agentId ?? updated.mainAgentId;
@@ -2063,6 +2789,21 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         limit: 200,
         includeSilent: true,
       });
+      const tasks = await listTaskRecordsInternal({
+        mainAgentId: resolvedMainAgentId,
+        includeCompleted: true,
+      });
+      const recentReceipts: MainChatTaskReceipt[] = store
+        .listReceipts(resolvedMainAgentId)
+        .map((entry) => ({
+          title: entry.title,
+          summary: entry.summary,
+          agentId: entry.agentId,
+          planId: entry.planId,
+          taskId: entry.taskId,
+          checks: entry.checks,
+          nextSteps: entry.nextSteps,
+        }));
       return {
         plans: store.listPlans(resolvedMainAgentId),
         decisions: store.listDecisions(resolvedMainAgentId),
@@ -2081,6 +2822,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         queuedBackgroundCount: resolvedMainAgentId
           ? turnQueue.getQueuedCount(resolvedMainAgentId)
           : 0,
+        tasks,
+        recentReceipts,
       };
     },
 
@@ -2100,13 +2843,290 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async recordReceipt(receipt, mainAgentId) {
       await store.load();
       const resolvedMainId = mainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
+      const nowIso = new Date(getNowMs()).toISOString();
       await store.addReceipt(receipt, resolvedMainId);
       await store.incrementMetric("receiptsRecorded");
+
+      const linkedTask = resolveTaskRecordByRef({
+        taskId: receipt.taskId,
+        agentId: receipt.agentId,
+        planId: receipt.planId,
+      });
+      if (linkedTask && linkedTask.status !== "completed") {
+        await syncTaskRecordCompleted(linkedTask, receipt, nowIso);
+      }
+
+      contextSnapshots.invalidateCache();
       return receipt;
     },
 
     getMetrics() {
       return store.getMetrics();
+    },
+
+    async updatePlanTask(planId, taskId, patch) {
+      await store.load();
+      return runWithPlanLock(planId, async () => {
+        const plan = store.getPlan(planId);
+        if (!plan) {
+          throw new Error(`找不到任务计划：${planId}`);
+        }
+        if (plan.status !== "open") {
+          throw new Error(`仅允许修改待开始（open）状态的计划任务，当前计划状态为：${plan.status}`);
+        }
+
+        const taskIndex = plan.tasks.findIndex((item) => item.id === taskId);
+        if (taskIndex < 0) {
+          throw new Error(`计划 ${planId} 中找不到任务：${taskId}`);
+        }
+        const updatedTask = await applyPatchToPlannedTask(
+          plan.mainAgentId,
+          plan.tasks[taskIndex]!,
+          patch,
+        );
+        const updatedPlan: MainChatPlanRecord = {
+          ...plan,
+          tasks: plan.tasks.map((item, idx) => (idx === taskIndex ? updatedTask : item)),
+        };
+        await store.putPlan(updatedPlan);
+        contextSnapshots.invalidateCache();
+        return updatedPlan;
+      });
+    },
+
+    async withdrawPlan(planId, reason) {
+      await store.load();
+      return runWithPlanLock(planId, async () => {
+        const existing = store.getPlan(planId);
+        if (!existing) {
+          throw new Error(`找不到任务计划：${planId}`);
+        }
+        const trimmedReason = reason.trim();
+        if (!trimmedReason) {
+          throw new Error("撤回计划必须说明原因 reason");
+        }
+        if (existing.status === "withdrawn") {
+          return existing;
+        }
+        if (existing.status !== "open") {
+          throw new Error(`仅允许撤回待开始（open）状态的计划，当前计划状态为：${existing.status}`);
+        }
+
+        const nowIso = new Date(getNowMs()).toISOString();
+        const withdrawn: MainChatPlanRecord = {
+          ...existing,
+          status: "withdrawn",
+          withdrawnAt: nowIso,
+          withdrawReason: trimmedReason,
+        };
+        await store.putPlan(withdrawn);
+
+        // Clean up any unstarted orphan task records linked solely to this withdrawn plan.
+        for (const plannedTask of existing.tasks) {
+          if (plannedTask.continuesTaskId) continue;
+          const record = store.getTask(plannedTask.taskRecordId ?? plannedTask.id);
+          if (
+            record &&
+            record.planId === existing.id &&
+            record.status === "open" &&
+            record.agentIds.length === 0
+          ) {
+            await store.putTask({
+              ...record,
+              status: "cancelled",
+              updatedAt: nowIso,
+              lastActivityAt: nowIso,
+            });
+          }
+        }
+
+        contextSnapshots.invalidateCache();
+        return withdrawn;
+      });
+    },
+
+    async listTaskRecords(options) {
+      return listTaskRecordsInternal(options);
+    },
+
+    async updateTaskScope(input) {
+      await store.load();
+      const existing = resolveTaskRecordByRef({ taskId: input.taskId });
+      if (!existing) {
+        throw new Error(`找不到对应的任务：${input.taskId}`);
+      }
+      if (existing.status === "completed" || existing.status === "cancelled") {
+        throw new Error(`任务「${existing.title}」已结束（${existing.status}），无法修改范围`);
+      }
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      const { task: updated } = applyTaskScopeUpdate(
+        existing,
+        {
+          goal: input.goal,
+          doneWhen: input.doneWhen,
+          outOfBounds: input.outOfBounds,
+          reason: input.reason,
+        },
+        nowIso,
+      );
+      await store.putTask(updated);
+
+      if (updated.planId) {
+        const plan = store.getPlan(updated.planId);
+        if (plan) {
+          const nextPlanTasks = plan.tasks.map((item) =>
+            item.taskRecordId === updated.id || item.id === updated.id
+              ? {
+                  ...item,
+                  goal: updated.brief.goal,
+                  doneWhen: updated.brief.doneWhen,
+                  outOfBounds: updated.brief.outOfBounds,
+                  scopeRevision: updated.brief.scopeRevision,
+                }
+              : item,
+          );
+          await store.putPlan({ ...plan, tasks: nextPlanTasks });
+        }
+      }
+
+      if (updated.activeAgentId && updated.status !== "parked") {
+        const live = deps.agentManager.getAgent(updated.activeAgentId);
+        if (live && live.lifecycle !== "closed") {
+          const noticePrompt = buildScopeRevisionNoticePrompt(updated, input.reason);
+          try {
+            await sendPromptToAgent({
+              agentId: updated.activeAgentId,
+              prompt: noticePrompt,
+              agentManager: deps.agentManager,
+              agentStorage: deps.agentStorage,
+              logger,
+              unarchive: false,
+            });
+          } catch (error) {
+            logger.warn(
+              { err: error, taskId: updated.id, agentId: updated.activeAgentId },
+              "Failed to deliver scope revision notice to active child agent",
+            );
+          }
+        }
+      }
+
+      contextSnapshots.invalidateCache();
+      return updated;
+    },
+
+    async parkTask(input) {
+      await store.load();
+      const existing = resolveTaskRecordByRef({ taskId: input.taskId });
+      if (!existing) {
+        throw new Error(`找不到对应的任务：${input.taskId}`);
+      }
+      if (existing.status === "completed" || existing.status === "cancelled") {
+        throw new Error(`任务「${existing.title}」已结束（${existing.status}），无法挂起或恢复`);
+      }
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      let updated: MainChatTaskRecord;
+      if (input.parked) {
+        updated = {
+          ...existing,
+          status: "parked",
+          parkedAt: existing.parkedAt ?? nowIso,
+          parkedReason: trimOptional(input.reason) ?? existing.parkedReason ?? null,
+          updatedAt: nowIso,
+          lastActivityAt: nowIso,
+        };
+      } else {
+        const baseStatus = existing.activeAgentId ? "running" : "open";
+        const liveAgent = existing.activeAgentId
+          ? deps.agentManager.getAgent(existing.activeAgentId)
+          : null;
+        const triage = existing.activeAgentId ? store.getTriage(existing.activeAgentId) : null;
+        const openDecisions = store
+          .listDecisions(existing.mainAgentId)
+          .filter((decision) => !decision.answeredAt);
+        const hasOpenDecision = openDecisions.some(
+          (decision) =>
+            decision.taskId === existing.id ||
+            (decision.agentId !== null &&
+              (decision.agentId === existing.activeAgentId ||
+                existing.agentIds.includes(decision.agentId))),
+        );
+        const resumedStatus = resolveEffectiveTaskStatus({
+          task: { ...existing, status: baseStatus },
+          liveAgent,
+          triage,
+          hasOpenDecision,
+        });
+        updated = {
+          ...existing,
+          status: resumedStatus,
+          parkedAt: null,
+          parkedReason: null,
+          updatedAt: nowIso,
+          lastActivityAt: nowIso,
+        };
+      }
+
+      await store.putTask(updated);
+      contextSnapshots.invalidateCache();
+      return updated;
+    },
+
+    async reviewTask(input) {
+      await store.load();
+      const existing = resolveTaskRecordByRef({ taskId: input.taskId });
+      if (!existing) {
+        throw new Error(`找不到要验收的任务：${input.taskId}`);
+      }
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      if (input.verdict === "accept") {
+        const receipt: MainChatTaskReceipt = {
+          title: existing.title,
+          summary: trimOptional(input.summary) ?? `任务「${existing.title}」已通过验收`,
+          agentId: existing.activeAgentId ?? existing.agentIds.at(-1) ?? null,
+          planId: existing.planId,
+          taskId: existing.id,
+          checks: input.checks ?? [],
+          nextSteps: trimList(input.nextSteps),
+        };
+        await store.addReceipt(receipt, existing.mainAgentId);
+        await store.incrementMetric("receiptsRecorded");
+        const completedTask = await syncTaskRecordCompleted(existing, receipt, nowIso);
+        contextSnapshots.invalidateCache();
+        return {
+          task: completedTask,
+          receipt,
+          rework: null,
+        };
+      }
+
+      const gaps = trimList(input.gaps);
+      if (gaps.length === 0) {
+        throw new Error("task_review 打回返工时至少需要列出 1 条具体缺口 gaps");
+      }
+      const targetAgentId = existing.activeAgentId ?? existing.agentIds.at(-1) ?? null;
+      if (!targetAgentId) {
+        throw new Error(`任务「${existing.title}」没有可返工的关联子 Agent`);
+      }
+
+      const { rework, task: reworkedTask } = await dispatchReworkForAgent({
+        agentId: targetAgentId,
+        title: existing.title,
+        planId: existing.planId,
+        taskId: existing.id,
+        taskRecord: existing,
+        gaps,
+        note: trimOptional(input.note),
+      });
+      contextSnapshots.invalidateCache();
+      return {
+        task: reworkedTask ?? existing,
+        receipt: null,
+        rework,
+      };
     },
   };
 }

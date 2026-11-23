@@ -5,8 +5,11 @@ import {
   type MainChatPlanRecord,
   type MainChatPlannedTask,
   type MainChatSettings,
+  type MainChatTaskBrief,
+  type MainChatTaskDecisionEntry,
 } from "@getpaseo/protocol/main-chat";
 import type { FleetSnapshotSummary } from "./context-snapshot.js";
+import { formatTaskDecisionsPromptSection } from "./task-ledger.js";
 
 /** Appends the native Main Chat system prompt when opening a `paseo.role=main` interactive session. */
 export function appendMainChatSystemPrompt(
@@ -55,17 +58,20 @@ ${manualSessionPolicy}
 2. **自动开工（只读）**：读代码、调研、排查日志、分析架构等不修改仓库的工作，调用 \`task_plan\` 时设 \`mode: "readonly"\`。只要计划里所有任务都是只读，系统会自动立即开工，不要再弹窗问用户确认。
 3. **先出计划卡（可写 / 多任务 / 高影响）**：改代码、跑写操作、并行开多个子任务时，调用 \`task_plan\` 时设 \`mode: "write"\`，系统会在对话流里展示原生计划卡，等用户点击「开始执行」或口头确认（用户口头说「开始」「好的」「直接干」时，你调用 \`task_start\` 启动对应 \`planId\`）。如果用户已明确要求直接动手或命中了同类信任规则，计划会自动开工。
 
-## 调用 task_plan 前的准备
-- 不确定目录或项目时，先调用 \`list_workspaces\` 或 \`list_projects\` 确认已有路径与工作区，再为每个任务填准确的 \`workspaceId\` 或 \`cwd\`。
-- 每个任务必须写清楚：\`title\`（15 字以内中文标题）、\`goal\`（一句话目标）、\`mode\`（\`"readonly"\` / \`"write"\`）、\`isolation\`（\`"local"\` / \`"worktree"\`）、\`reason\`（简短推断理由）、\`doneWhen\`（写操作至少 1 条可验证验收标准）。
+## 调用 task_plan 前的准备与 Brief 纪律
+- 不确定目录或项目时，先调用 \`list_workspaces\` 或 \`list_projects\` 确认已有路径与工作区，再为每个任务填准确的 \`workspaceId\` 或 \`cwd\`（跨主机任务同时填写 \`serverId\`）。
+- 每个任务必须锁定结构化 Brief：\`title\`（15 字以内中文标题）、\`goal\`（必填，一句话明确目标）、\`mode\`（\`"readonly"\` / \`"write"\`）、\`isolation\`（\`"local"\` / \`"worktree"\`）、\`reason\`（简短推断理由）、\`doneWhen\`（可写任务 \`mode: "write"\` **必填至少 1 条可验证验收标准**）、\`outOfBounds\`（边界红线）。默认开启 \`quiet: true\` 降低过程噪音。
+- **同卡续接（禁止造重复卡）**：如果已有任务需要更换子 Agent、切换模型/隔离方式或重启会话继续推进，调用 \`task_plan\` 时必须填写 \`continuesTaskId\`（原任务 ID）与 \`continuesWhy\`（续接原因）。系统会自动停掉旧的运行中 Agent、把新 Agent 挂载到原任务卡下，并自动沿用原 Brief 与全部历史已拍板决策清单。
+- **主动撤回过时计划**：如果一张处于 \`open\` 待开始状态的计划已经过时、需求变更或在别处做完，必须调用 \`task_plan_withdraw\` 写明理由将其撤下，不留僵尸计划卡。
+- **中途变更范围先升级口径**：任务进行中如果目标、验收标准或边界发生变化，先调用 \`task_scope\` 递增 \`scopeRevision\`，系统会自动向活跃子 Agent 注入范围变更通知，防止其继续按旧口径工作。
 - 派活统一使用 \`task_plan\`，不要绕开它直接用 \`create_agent\`。
 - **派活后不要轮询**：子 Agent 完成、出错或等待权限审批时，Paseo 会自动通知你。
 
 ## 复核、返工、拍板与完成回执
-- 收到子 Agent 完成通知后，**子 Agent 的自报完成只能作为输入**。先用 \`get_agent_activity\` 核对它的最后输出与真实证据，逐条对照 \`doneWhen\`：
-  - 若有缺口或验证不足：调用 \`task_rework\` 退回同一个子 Agent 返工（最多 2 轮；超限再通过 \`task_ask_user\` 交由用户拍板）。
-  - 若遇到产品取舍、架构分叉、高风险操作或返工未收敛：调用 \`task_ask_user\` 提供 2-4 个明确选项、后果和推荐项。
-  - 若逐条验收通过：调用 \`task_complete\` 记录结构化完成回执，再用一两句话告知用户结论。`;
+- 收到子 Agent 完成通知后，**子 Agent 的自报完成只能作为输入**。先用 \`get_agent_activity\` 核对它的最后输出与真实证据，逐条对照 \`doneWhen\`，然后调用 \`task_review\` 落账：
+  - 若逐条验收通过：调用 \`task_review\`（\`verdict: "accept"\`，填写 \`summary\` / \`checks\` / \`nextSteps\`），系统会自动记录完成回执并写入耗时自学习样本；再用一两句话告知用户结论。
+  - 若有缺口或验证不足：调用 \`task_review\`（\`verdict: "rework"\`，填写具体 \`gaps\` 与 \`note\`），退回同一个子 Agent 返工（自动附带该任务已拍板决策清单，最多 2 轮；超限再通过 \`task_ask_user\` 交由用户拍板）。
+  - 若遇到产品取舍、架构分叉、高风险操作或返工未收敛：调用 \`task_ask_user\` 提供 2-4 个明确选项、后果和推荐项；用户拍板后结论会自动写入该任务的决策表，后续续接或返工都会自动继承。`;
 }
 
 export interface MainChatPatrolSignalItem {
@@ -142,28 +148,71 @@ export function buildMainChatInitialBriefingPrompt(input: {
   ].join("\n");
 }
 
-export function buildWorkerInitialPrompt(task: MainChatPlannedTask): string {
+export interface BuildWorkerInitialPromptOptions {
+  brief?: MainChatTaskBrief | null;
+  decisions?: readonly MainChatTaskDecisionEntry[];
+  continuesFrom?: {
+    taskId: string;
+    reason?: string | null;
+    previousAgentId?: string | null;
+  } | null;
+}
+
+function formatContinuationContextLines(
+  continuesFrom: NonNullable<BuildWorkerInitialPromptOptions["continuesFrom"]>,
+): string[] {
+  const lines = ["", "## 原任务续接上下文", `- 续接原任务 ID：${continuesFrom.taskId}`];
+  if (continuesFrom.previousAgentId) {
+    lines.push(`- 上一任执行 Agent：${continuesFrom.previousAgentId}（已停止，由你接管）`);
+  }
+  const trimmedReason = continuesFrom.reason?.trim();
+  if (trimmedReason) {
+    lines.push(`- 续接原因：${trimmedReason}`);
+  }
+  return lines;
+}
+
+function formatBulletSectionLines(heading: string, items: readonly string[]): string[] {
+  if (items.length === 0) return [];
+  return ["", heading, ...items.map((entry) => `- ${entry}`)];
+}
+
+export function buildWorkerInitialPrompt(
+  task: MainChatPlannedTask,
+  options?: BuildWorkerInitialPromptOptions,
+): string {
+  const brief = options?.brief;
+  const goal = brief ? brief.goal : task.goal;
+  const doneWhen = brief ? brief.doneWhen : task.doneWhen;
+  const outOfBounds = brief ? brief.outOfBounds : task.outOfBounds;
+  const scopeRevision = brief ? brief.scopeRevision : (task.scopeRevision ?? 1);
+  const titleHeading =
+    scopeRevision > 1
+      ? `# 任务：${task.title}（Scope Revision #${scopeRevision}）`
+      : `# 任务：${task.title}`;
+
   const lines: string[] = [
-    `# 任务：${task.title}`,
+    titleHeading,
     "",
-    `目标：${task.goal}`,
+    `目标：${goal}`,
     `工作模式：${task.mode === "readonly" ? "只读分析（不要修改或写入仓库文件）" : "可写执行"}`,
   ];
 
-  if (task.doneWhen.length > 0) {
-    lines.push("", "## 验收标准（完成后请逐条给出真实证据）");
-    for (const criterion of task.doneWhen) {
-      lines.push(`- ${criterion}`);
-    }
+  if (options?.continuesFrom) {
+    lines.push(...formatContinuationContextLines(options.continuesFrom));
   }
 
-  if (task.outOfBounds.length > 0) {
-    lines.push("", "## 边界约束");
-    for (const rule of task.outOfBounds) {
-      lines.push(`- ${rule}`);
-    }
+  lines.push(...formatBulletSectionLines("## 验收标准（完成后请逐条给出真实证据）", doneWhen));
+
+  if (outOfBounds.length > 0) {
+    lines.push(...formatBulletSectionLines("## 边界约束", outOfBounds));
   } else if (task.mode === "readonly") {
     lines.push("", "## 边界约束", "- 严格只读，不要修改仓库文件、不要提交或推送。");
+  }
+
+  const decisionsSection = formatTaskDecisionsPromptSection(options?.decisions);
+  if (decisionsSection) {
+    lines.push("", decisionsSection);
   }
 
   lines.push(
@@ -223,7 +272,9 @@ export function buildMainChatHandoffSummary(input: MainChatHandoffSummaryInput):
     }
   }
 
-  const activePlans = input.plans.filter((plan) => plan.status !== "cancelled").slice(0, 5);
+  const activePlans = input.plans
+    .filter((plan) => plan.status !== "cancelled" && plan.status !== "withdrawn")
+    .slice(0, 5);
   if (activePlans.length > 0) {
     lines.push("近期任务计划进展：");
     for (const plan of activePlans) {

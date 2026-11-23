@@ -139,6 +139,8 @@ describe("main-chat store", () => {
     await reloaded.load();
     expect(reloaded.getPlan("plan_1")?.summary).toBe("修复侧栏");
     expect(reloaded.hasTrustRule("/tmp/repo-a/", "write")).toBe(true);
+    expect(reloaded.hasTrustRule("/tmp/repo-a/packages/app", "write")).toBe(true);
+    expect(reloaded.hasTrustRule("/tmp/repo-a-other", "write")).toBe(false);
     expect(reloaded.hasTrustRule("/tmp/repo-a", "readonly")).toBe(false);
     expect(reloaded.getMetrics().plansCreated).toBe(1);
   });
@@ -770,7 +772,10 @@ describe("main-chat service, tools, and session", () => {
       "task_complete",
       "task_list",
       "task_plan",
+      "task_plan_withdraw",
+      "task_review",
       "task_rework",
+      "task_scope",
       "task_start",
     ]);
 
@@ -841,6 +846,127 @@ describe("main-chat service, tools, and session", () => {
       builtinNames: new Set(),
     });
     expect(childTools.size).toBe(0);
+
+    service.stop();
+  });
+
+  it("handles M3 task-ledger session RPCs end-to-end", async () => {
+    const { service } = makeHarness();
+    await service.start();
+    const { agentId: mainAgentId } = await service.ensureMainChat();
+
+    const openPlanForM3 = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "待编辑计划",
+          goal: "初始目标",
+          mode: "write",
+          cwd: repoDir,
+          doneWhen: ["检查 1"],
+        },
+      ],
+    });
+    const m3Responses: SessionOutboundMessage[] = [];
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.update_plan_task.request",
+        requestId: "m3_edit",
+        planId: openPlanForM3.id,
+        taskId: openPlanForM3.tasks[0]!.id,
+        patch: { title: "已编辑计划", doneWhen: ["检查 1", "检查 2"] },
+      },
+      (msg) => m3Responses.push(msg),
+    );
+    expect(m3Responses[0]).toMatchObject({
+      type: "main_chat.update_plan_task.response",
+      payload: { error: null },
+    });
+    if (m3Responses[0]?.type === "main_chat.update_plan_task.response") {
+      expect(m3Responses[0].payload.plan?.tasks[0]?.title).toBe("已编辑计划");
+    }
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.withdraw_plan.request",
+        requestId: "m3_withdraw",
+        planId: openPlanForM3.id,
+        reason: "已在其他任务合并",
+      },
+      (msg) => m3Responses.push(msg),
+    );
+    expect(m3Responses[1]).toMatchObject({
+      type: "main_chat.withdraw_plan.response",
+      payload: { error: null, plan: { status: "withdrawn" } },
+    });
+
+    const activePlan = await service.createPlan(mainAgentId, {
+      autoStart: true,
+      tasks: [
+        {
+          title: "执行中任务",
+          goal: "补齐测试",
+          mode: "write",
+          cwd: repoDir,
+          doneWhen: ["vitest 通过"],
+        },
+      ],
+    });
+    const startedTaskId = activePlan.tasks[0]!.taskRecordId!;
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.update_task_scope.request",
+        requestId: "m3_scope",
+        taskId: startedTaskId,
+        goal: "补齐全部边界单测",
+        reason: "范围细化",
+      },
+      (msg) => m3Responses.push(msg),
+    );
+    expect(m3Responses[2]).toMatchObject({
+      type: "main_chat.update_task_scope.response",
+      payload: { error: null, task: { brief: { scopeRevision: 2 } } },
+    });
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.park_task.request",
+        requestId: "m3_park",
+        taskId: startedTaskId,
+        parked: true,
+        reason: "等外部依赖",
+      },
+      (msg) => m3Responses.push(msg),
+    );
+    expect(m3Responses[3]).toMatchObject({
+      type: "main_chat.park_task.response",
+      payload: { error: null, task: { status: "parked" } },
+    });
+
+    await handleMainChatSessionMessage(
+      service,
+      {
+        type: "main_chat.review_task.request",
+        requestId: "m3_review",
+        taskId: startedTaskId,
+        verdict: "accept",
+        summary: "验收通过",
+        checks: [{ criterion: "vitest 通过", met: true, evidence: "all green" }],
+      },
+      (msg) => m3Responses.push(msg),
+    );
+    expect(m3Responses[4]).toMatchObject({
+      type: "main_chat.review_task.response",
+      payload: {
+        error: null,
+        task: { status: "completed" },
+        receipt: { summary: "验收通过" },
+      },
+    });
 
     service.stop();
   });
