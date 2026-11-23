@@ -843,6 +843,12 @@ export interface TurnSummaryItem {
   hostId: string;
   expanded: boolean;
   tools: OverviewSummary;
+  /** `"background"` marks a system-injected Main Chat background turn collapsed to a single row. */
+  variant?: "default" | "background";
+  backgroundMeta?: {
+    label: string | null;
+    running: boolean;
+  };
 }
 
 export interface TodoEntry {

@@ -10,7 +10,12 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
 import type { PendingPermission } from "@/types/shared";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
-import { useMainChatOverviewStore } from "./overview-store";
+import {
+  ApprovalClarifySection,
+  RuleSuggestionBanner,
+  findMatchingRuleSuggestion,
+} from "./approval-clarify";
+import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
 const ThemedShieldIcon = withUnistyles(ShieldCheck);
@@ -46,7 +51,12 @@ export const ChildPermissionWrapper = memo(function ChildPermissionWrapper({
 }: ChildPermissionWrapperProps) {
   const { t } = useTranslation();
   const addPermissionRule = useMainChatOverviewStore((state) => state.addPermissionRule);
+  const overviewKey = overviewStoreKey(serverId, mainAgentId);
+  const ruleSuggestions = useMainChatOverviewStore(
+    (state) => state.overviewsByKey[overviewKey]?.ruleSuggestions,
+  );
   const [remembering, setRemembering] = useState(false);
+  const [resolvedSuggestionIds, setResolvedSuggestionIds] = useState<string[]>([]);
 
   const ruleCandidate = useMemo(
     () =>
@@ -57,6 +67,34 @@ export const ChildPermissionWrapper = memo(function ChildPermissionWrapper({
         input: permission.request.input ?? null,
       }),
     [permission.request],
+  );
+
+  const matchingSuggestion = useMemo(
+    () =>
+      findMatchingRuleSuggestion({
+        suggestions: ruleSuggestions,
+        resolvedIds: new Set(resolvedSuggestionIds),
+        serverId,
+        permissionToolName: permission.request.name ?? permission.request.title ?? null,
+        ruleCandidate,
+      }),
+    [
+      permission.request.name,
+      permission.request.title,
+      resolvedSuggestionIds,
+      ruleCandidate,
+      ruleSuggestions,
+      serverId,
+    ],
+  );
+
+  const handleRuleSuggestionResolved = useCallback(
+    (_outcome: "granted" | "dismissed", suggestionId: string) => {
+      setResolvedSuggestionIds((prev) =>
+        prev.includes(suggestionId) ? prev : [...prev, suggestionId],
+      );
+    },
+    [],
   );
 
   const handleOpenChild = useCallback(() => {
@@ -135,6 +173,22 @@ export const ChildPermissionWrapper = memo(function ChildPermissionWrapper({
         </PressHighlight>
       </View>
       {children}
+      <ApprovalClarifySection
+        serverId={serverId}
+        mainAgentId={mainAgentId}
+        agentId={permission.agentId}
+        permissionRequestId={permission.request.id}
+        client={client}
+      />
+      {matchingSuggestion ? (
+        <RuleSuggestionBanner
+          serverId={serverId}
+          mainAgentId={mainAgentId}
+          suggestion={matchingSuggestion}
+          client={client}
+          onResolved={handleRuleSuggestionResolved}
+        />
+      ) : null}
     </View>
   );
 });

@@ -3,25 +3,58 @@ import path from "node:path";
 import { z } from "zod";
 import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
+  MainChatActivityEntrySchema,
+  MainChatApprovalClarificationSchema,
   MainChatAutoStartRuleSchema,
+  MainChatCompactionReasonSchema,
+  MainChatCompactionStrategySchema,
   MainChatDecisionRecordSchema,
+  MainChatDurationSampleSchema,
   MainChatMetricsSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
+  MainChatRuleSuggestionSchema,
   MainChatSessionTriageSchema,
   MainChatSettingsSchema,
+  MainChatStandingAuthorizationSchema,
+  MainChatStandingAuthorizationScopeSchema,
+  MainChatTaskModeSchema,
+  MainChatTaskReceiptSchema,
+  MainChatTaskRecordSchema,
   createDefaultMainChatSettings,
   mergeMainChatSettings,
+  type MainChatActivityEntry,
+  type MainChatActivityKind,
+  type MainChatApprovalClarification,
   type MainChatAutoStartRule,
+  type MainChatCompactionReason,
+  type MainChatCompactionStrategy,
   type MainChatDecisionRecord,
+  type MainChatDurationSample,
   type MainChatMetrics,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
+  type MainChatRuleSuggestion,
   type MainChatSessionTriage,
   type MainChatSettings,
   type MainChatSettingsPatch,
+  type MainChatStandingAuthorization,
   type MainChatTaskMode,
+  type MainChatTaskReceipt,
+  type MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
+import {
+  buildStandingAuthorizationLabel,
+  matchStandingAuthorization,
+  type ManualApprovalObservation,
+} from "./safety.js";
+import {
+  MAX_RETAINED_RECEIPTS,
+  MAX_RETAINED_TASKS,
+  normalizeTrustCwd,
+  pruneDurationSamples,
+  pruneTaskRecordList,
+} from "./task-ledger.js";
 
 export type MainChatTrustRule = MainChatAutoStartRule;
 export type MainChatFullMetrics = Required<MainChatMetrics>;
@@ -35,13 +68,57 @@ const DelegatedQuestionEntrySchema = z.object({
 });
 export type DelegatedQuestionEntry = z.infer<typeof DelegatedQuestionEntrySchema>;
 
+const PersistedMainChatReceiptSchema = MainChatTaskReceiptSchema.extend({
+  mainAgentId: z.string().nullable().optional(),
+  recordedAt: z.string(),
+});
+export type PersistedMainChatReceipt = z.infer<typeof PersistedMainChatReceiptSchema>;
+
+const PersistedMainChatCompactionMetaSchema = z.object({
+  lastCompactedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  summary: z.string().nullable(),
+  reason: MainChatCompactionReasonSchema.nullable().optional(),
+  strategy: MainChatCompactionStrategySchema.nullable().optional(),
+});
+export interface PersistedMainChatCompactionMeta {
+  lastCompactedAt: string | null;
+  lastError: string | null;
+  summary: string | null;
+  reason: MainChatCompactionReason | null;
+  strategy: MainChatCompactionStrategy | null;
+}
+
+const ManualApprovalObservationSchema = z.object({
+  key: z.string(),
+  scope: MainChatStandingAuthorizationScopeSchema,
+  serverId: z.string().nullable(),
+  cwd: z.string().nullable(),
+  toolName: z.string().nullable(),
+  commandPrefix: z.string().nullable(),
+  mode: MainChatTaskModeSchema.nullable(),
+  count: z.number().int().positive(),
+  lastObservedAt: z.string(),
+});
+
 const PersistedMainChatStateSchema = z.object({
   version: z.literal(1),
   settings: MainChatSettingsSchema.optional(),
   plans: z.record(z.string(), MainChatPlanRecordSchema).optional(),
+  tasks: z.array(MainChatTaskRecordSchema).optional(),
   decisions: z.record(z.string(), MainChatDecisionRecordSchema).optional(),
+  receipts: z.array(PersistedMainChatReceiptSchema).optional(),
+  durationSamples: z.array(MainChatDurationSampleSchema).optional(),
+  activities: z.array(MainChatActivityEntrySchema).optional(),
+  compactionByMainAgent: z.record(z.string(), PersistedMainChatCompactionMetaSchema).optional(),
+  pendingHandoffByMainAgent: z.record(z.string(), z.string()).optional(),
   trustRules: z.array(MainChatAutoStartRuleSchema).optional(),
   permissionRules: z.array(MainChatPermissionRuleSchema).optional(),
+  standingAuthorizations: z.array(MainChatStandingAuthorizationSchema).optional(),
+  ruleSuggestions: z.array(MainChatRuleSuggestionSchema).optional(),
+  pendingClarifications: z.array(MainChatApprovalClarificationSchema).optional(),
+  manualApprovalObservations: z.record(z.string(), ManualApprovalObservationSchema).optional(),
+  suppressedQuietBadgeCount: z.number().int().nonnegative().optional(),
   reworkRounds: z.record(z.string(), z.number().int().nonnegative()).optional(),
   triages: z.record(z.string(), MainChatSessionTriageSchema).optional(),
   delegatedQuestions: z.record(z.string(), z.array(DelegatedQuestionEntrySchema)).optional(),
@@ -54,9 +131,20 @@ interface MainChatStateFile {
   version: 1;
   settings: MainChatSettings;
   plans: Record<string, MainChatPlanRecord>;
+  tasks: MainChatTaskRecord[];
   decisions: Record<string, MainChatDecisionRecord>;
+  receipts: PersistedMainChatReceipt[];
+  durationSamples: MainChatDurationSample[];
+  activities: MainChatActivityEntry[];
+  compactionByMainAgent: Record<string, PersistedMainChatCompactionMeta>;
+  pendingHandoffByMainAgent: Record<string, string>;
   trustRules: MainChatAutoStartRule[];
   permissionRules: MainChatPermissionRule[];
+  standingAuthorizations: MainChatStandingAuthorization[];
+  ruleSuggestions: MainChatRuleSuggestion[];
+  pendingClarifications: MainChatApprovalClarification[];
+  manualApprovalObservations: Record<string, ManualApprovalObservation>;
+  suppressedQuietBadgeCount: number;
   reworkRounds: Record<string, number>;
   triages: Record<string, MainChatSessionTriage>;
   delegatedQuestions: Record<string, DelegatedQuestionEntry[]>;
@@ -65,10 +153,25 @@ interface MainChatStateFile {
   metrics: MainChatFullMetrics;
 }
 
+export const MAX_RETAINED_ACTIVITIES = 200;
 const MAX_RETAINED_PLANS = 200;
 const MAX_RETAINED_DECISIONS = 200;
 const MAX_RETAINED_TRIAGES = 200;
+const MAX_RETAINED_STANDING_AUTHS = 300;
+const MAX_RETAINED_RULE_SUGGESTIONS = 100;
+const MAX_RETAINED_CLARIFICATIONS = 100;
+const MAX_RETAINED_OBSERVATIONS = 300;
 const DELEGATED_QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function emptyCompactionMeta(): PersistedMainChatCompactionMeta {
+  return {
+    lastCompactedAt: null,
+    lastError: null,
+    summary: null,
+    reason: null,
+    strategy: null,
+  };
+}
 
 function emptyMetrics(): MainChatFullMetrics {
   return {
@@ -89,6 +192,10 @@ function emptyMetrics(): MainChatFullMetrics {
     proactiveWakeups: 0,
     autoDelegatedQuestions: 0,
     noProgressNudges: 0,
+    preemptedTurns: 0,
+    silentTurns: 0,
+    missingReplyRecoveries: 0,
+    compactions: 0,
   };
 }
 
@@ -97,9 +204,20 @@ function emptyState(): MainChatStateFile {
     version: 1,
     settings: createDefaultMainChatSettings("conservative"),
     plans: {},
+    tasks: [],
     decisions: {},
+    receipts: [],
+    durationSamples: [],
+    activities: [],
+    compactionByMainAgent: {},
+    pendingHandoffByMainAgent: {},
     trustRules: [],
     permissionRules: [],
+    standingAuthorizations: [],
+    ruleSuggestions: [],
+    pendingClarifications: [],
+    manualApprovalObservations: {},
+    suppressedQuietBadgeCount: 0,
     reworkRounds: {},
     triages: {},
     delegatedQuestions: {},
@@ -163,6 +281,38 @@ export interface MainChatPermissionRuleLookup {
   cwd?: string | null;
 }
 
+export interface MainChatActivityListOptions {
+  mainAgentId?: string;
+  limit?: number;
+  includeSilent?: boolean;
+  kind?: MainChatActivityKind;
+}
+
+export interface MainChatTaskListOptions {
+  mainAgentId?: string;
+  conversationId?: string;
+  includeCompleted?: boolean;
+}
+
+export interface MainChatTrustRuleLookupOptions {
+  serverId?: string | null;
+  localServerId?: string | null;
+}
+
+export interface MainChatAddTrustRuleOptions {
+  serverId?: string | null;
+  hostLabel?: string | null;
+  allowSubdirectories?: boolean;
+}
+
+export interface MainChatMigrationCounts {
+  migratedPlans: number;
+  migratedTasks: number;
+  migratedDecisions: number;
+  migratedReceipts: number;
+  migratedActivities: number;
+}
+
 export interface MainChatStore {
   load(): Promise<void>;
   getSettings(): MainChatSettings;
@@ -170,11 +320,48 @@ export interface MainChatStore {
   getPlan(planId: string): MainChatPlanRecord | null;
   listPlans(mainAgentId?: string): MainChatPlanRecord[];
   putPlan(plan: MainChatPlanRecord): Promise<void>;
+  getTask(taskId: string): MainChatTaskRecord | null;
+  findTaskByAgentId(agentId: string): MainChatTaskRecord | null;
+  listTasks(options?: MainChatTaskListOptions): MainChatTaskRecord[];
+  putTask(task: MainChatTaskRecord): Promise<void>;
+  addDurationSample(sample: MainChatDurationSample): Promise<MainChatDurationSample>;
+  listDurationSamples(nowMs?: number): MainChatDurationSample[];
   getDecision(decisionId: string): MainChatDecisionRecord | null;
   listDecisions(mainAgentId?: string): MainChatDecisionRecord[];
   putDecision(decision: MainChatDecisionRecord): Promise<void>;
-  hasTrustRule(cwd: string, mode: MainChatTaskMode): boolean;
-  addTrustRule(cwd: string, mode: MainChatTaskMode): Promise<MainChatAutoStartRule>;
+  addReceipt(
+    receipt: MainChatTaskReceipt,
+    mainAgentId?: string | null,
+  ): Promise<PersistedMainChatReceipt>;
+  listReceipts(mainAgentId?: string): PersistedMainChatReceipt[];
+  appendActivity(entry: MainChatActivityEntry): Promise<MainChatActivityEntry>;
+  updateActivity(
+    id: string,
+    patch: Partial<Omit<MainChatActivityEntry, "id" | "mainAgentId" | "createdAt">>,
+  ): Promise<MainChatActivityEntry | null>;
+  listActivities(options?: MainChatActivityListOptions): {
+    activities: MainChatActivityEntry[];
+    total: number;
+  };
+  getCompactionMeta(mainAgentId: string): PersistedMainChatCompactionMeta;
+  setCompactionMeta(mainAgentId: string, meta: PersistedMainChatCompactionMeta): Promise<void>;
+  getPendingHandoffSummary(mainAgentId: string): string | null;
+  setPendingHandoffSummary(mainAgentId: string, summary: string | null): Promise<void>;
+  consumePendingHandoffSummary(mainAgentId: string): Promise<string | null>;
+  migrateMainAgent(
+    fromMainAgentId: string,
+    toMainAgentId: string,
+  ): Promise<MainChatMigrationCounts>;
+  hasTrustRule(
+    cwd: string,
+    mode: MainChatTaskMode,
+    options?: MainChatTrustRuleLookupOptions,
+  ): boolean;
+  addTrustRule(
+    cwd: string,
+    mode: MainChatTaskMode,
+    options?: MainChatAddTrustRuleOptions,
+  ): Promise<MainChatAutoStartRule>;
   removeTrustRule(ruleId: string): Promise<boolean>;
   listTrustRules(): MainChatAutoStartRule[];
   findMatchingPermissionRule(lookup: MainChatPermissionRuleLookup): MainChatPermissionRule | null;
@@ -185,6 +372,38 @@ export interface MainChatStore {
   }): Promise<MainChatPermissionRule>;
   removePermissionRule(ruleId: string): Promise<boolean>;
   listPermissionRules(): MainChatPermissionRule[];
+  listStandingAuthorizations(options?: {
+    includeRevoked?: boolean;
+  }): MainChatStandingAuthorization[];
+  getStandingAuthorization(id: string): MainChatStandingAuthorization | null;
+  putStandingAuthorization(
+    auth: MainChatStandingAuthorization,
+  ): Promise<MainChatStandingAuthorization>;
+  revokeStandingAuthorization(
+    id: string,
+    revokedAt?: string,
+  ): Promise<{ revoked: boolean; authorization: MainChatStandingAuthorization | null }>;
+  recordStandingAuthorizationMatch(
+    id: string,
+    matchedAt?: string,
+  ): Promise<MainChatStandingAuthorization | null>;
+  listRuleSuggestions(options?: { includeDismissed?: boolean }): MainChatRuleSuggestion[];
+  getRuleSuggestion(id: string): MainChatRuleSuggestion | null;
+  putRuleSuggestion(suggestion: MainChatRuleSuggestion): Promise<MainChatRuleSuggestion>;
+  dismissRuleSuggestion(id: string, dismissedAt?: string): Promise<boolean>;
+  removeRuleSuggestion(id: string): Promise<boolean>;
+  getManualApprovalObservation(key: string): ManualApprovalObservation | null;
+  putManualApprovalObservation(
+    observation: ManualApprovalObservation,
+  ): Promise<ManualApprovalObservation>;
+  listPendingClarifications(): MainChatApprovalClarification[];
+  putClarification(
+    clarification: MainChatApprovalClarification,
+  ): Promise<MainChatApprovalClarification>;
+  removeClarificationsForPermission(agentId: string, permissionRequestId: string): Promise<number>;
+  removeClarificationsForAgent(agentId: string): Promise<number>;
+  getSuppressedQuietBadgeCount(): number;
+  incrementSuppressedQuietBadgeCount(delta?: number): Promise<number>;
   getReworkRound(agentId: string): number;
   incrementReworkRound(agentId: string): Promise<number>;
   getTriage(agentId: string): MainChatSessionTriage | null;
@@ -201,18 +420,256 @@ export interface MainChatStore {
   incrementMetric(key: keyof MainChatFullMetrics): Promise<void>;
 }
 
-export function createMainChatStore(paseoHome: string): MainChatStore {
+function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
+  return {
+    id: rule.id,
+    scope: "auto_start",
+    serverId: normalizeServerIdKey(rule.serverId),
+    cwd: normalizeTrustCwd(rule.cwd),
+    allowSubdirectories: rule.allowSubdirectories ?? true,
+    toolName: null,
+    commandPrefix: null,
+    mode: rule.mode,
+    label: buildStandingAuthorizationLabel({
+      scope: "auto_start",
+      mode: rule.mode,
+      cwd: rule.cwd,
+    }),
+    reason: null,
+    createdAt: rule.createdAt,
+    lastMatchedAt: null,
+    matchCount: 0,
+    expiresAt: null,
+    revokedAt: null,
+  };
+}
+
+function standingAuthFromPermissionRule(
+  rule: MainChatPermissionRule,
+): MainChatStandingAuthorization {
+  return {
+    id: rule.id,
+    scope: "permission",
+    serverId: null,
+    cwd: rule.cwd ? normalizeCwdKey(rule.cwd) : null,
+    allowSubdirectories: false,
+    toolName: rule.toolName,
+    commandPrefix: normalizePrefixKey(rule.commandPrefix),
+    mode: null,
+    label: buildStandingAuthorizationLabel({
+      scope: "permission",
+      toolName: rule.toolName,
+      commandPrefix: rule.commandPrefix,
+      cwd: rule.cwd,
+    }),
+    reason: null,
+    createdAt: rule.createdAt,
+    lastMatchedAt: null,
+    matchCount: 0,
+    expiresAt: null,
+    revokedAt: null,
+  };
+}
+
+function mergeLegacyRulesIntoStandingAuthorizations(
+  trustRules: readonly MainChatAutoStartRule[],
+  permissionRules: readonly MainChatPermissionRule[],
+  existing: readonly MainChatStandingAuthorization[],
+): MainChatStandingAuthorization[] {
+  const result = [...existing];
+  const existingIds = new Set(result.map((entry) => entry.id));
+
+  for (const rule of trustRules) {
+    if (!existingIds.has(rule.id)) {
+      result.push(standingAuthFromTrustRule(rule));
+      existingIds.add(rule.id);
+    }
+  }
+  for (const rule of permissionRules) {
+    if (!existingIds.has(rule.id)) {
+      result.push(standingAuthFromPermissionRule(rule));
+      existingIds.add(rule.id);
+    }
+  }
+  return result;
+}
+
+function syncStandingAuthToLegacyLists(
+  state: MainChatStateFile,
+  auth: MainChatStandingAuthorization,
+): void {
+  if (auth.revokedAt !== null) {
+    state.trustRules = state.trustRules.filter((rule) => rule.id !== auth.id);
+    state.permissionRules = state.permissionRules.filter((rule) => rule.id !== auth.id);
+    return;
+  }
+
+  if (auth.scope === "auto_start" && auth.cwd && auth.mode) {
+    const legacyTrust: MainChatAutoStartRule = {
+      id: auth.id,
+      cwd: normalizeTrustCwd(auth.cwd),
+      mode: auth.mode,
+      serverId: normalizeServerIdKey(auth.serverId),
+      hostLabel: null,
+      allowSubdirectories: auth.allowSubdirectories ?? true,
+      createdAt: auth.createdAt,
+    };
+    const idx = state.trustRules.findIndex((rule) => rule.id === auth.id);
+    if (idx >= 0) {
+      state.trustRules[idx] = { ...state.trustRules[idx]!, ...legacyTrust };
+    } else {
+      state.trustRules.push(legacyTrust);
+    }
+    return;
+  }
+
+  if (auth.scope === "permission" && auth.toolName) {
+    const legacyPerm: MainChatPermissionRule = {
+      id: auth.id,
+      toolName: auth.toolName,
+      commandPrefix: normalizePrefixKey(auth.commandPrefix),
+      cwd: auth.cwd ? normalizeCwdKey(auth.cwd) : null,
+      createdAt: auth.createdAt,
+    };
+    const idx = state.permissionRules.findIndex((rule) => rule.id === auth.id);
+    if (idx >= 0) {
+      state.permissionRules[idx] = legacyPerm;
+    } else {
+      state.permissionRules.push(legacyPerm);
+    }
+  }
+}
+
+function cloneShallowArray<T extends object>(items: readonly T[]): T[] {
+  const result: T[] = [];
+  for (const item of items) {
+    result.push({ ...item });
+  }
+  return result;
+}
+
+function hydrateCompactionMetaMap(
+  raw: Record<string, z.infer<typeof PersistedMainChatCompactionMetaSchema>> | undefined,
+): Record<string, PersistedMainChatCompactionMeta> {
+  const map: Record<string, PersistedMainChatCompactionMeta> = {};
+  if (!raw) return map;
+  for (const [key, value] of Object.entries(raw)) {
+    map[key] = {
+      lastCompactedAt: value.lastCompactedAt,
+      lastError: value.lastError,
+      summary: value.summary,
+      reason: value.reason ?? null,
+      strategy: value.strategy ?? null,
+    };
+  }
+  return map;
+}
+
+function hydrateM5SafetyFields(
+  data: z.infer<typeof PersistedMainChatStateSchema>,
+  trustRules: readonly MainChatAutoStartRule[],
+  permissionRules: readonly MainChatPermissionRule[],
+): Pick<
+  MainChatStateFile,
+  | "standingAuthorizations"
+  | "ruleSuggestions"
+  | "pendingClarifications"
+  | "manualApprovalObservations"
+  | "suppressedQuietBadgeCount"
+> {
+  const standingAuthorizations = mergeLegacyRulesIntoStandingAuthorizations(
+    trustRules,
+    permissionRules,
+    data.standingAuthorizations ?? [],
+  );
+  return {
+    standingAuthorizations: standingAuthorizations.slice(-MAX_RETAINED_STANDING_AUTHS),
+    ruleSuggestions: (data.ruleSuggestions ?? []).slice(-MAX_RETAINED_RULE_SUGGESTIONS),
+    pendingClarifications: (data.pendingClarifications ?? []).slice(-MAX_RETAINED_CLARIFICATIONS),
+    manualApprovalObservations: data.manualApprovalObservations ?? {},
+    suppressedQuietBadgeCount: data.suppressedQuietBadgeCount ?? 0,
+  };
+}
+
+function hydratePersistedState(
+  data: z.infer<typeof PersistedMainChatStateSchema>,
+  nowMs: number,
+): MainChatStateFile {
+  const trustRules = data.trustRules ?? [];
+  const permissionRules = data.permissionRules ?? [];
+  return {
+    version: 1,
+    settings: data.settings ?? createDefaultMainChatSettings("conservative"),
+    plans: data.plans ?? {},
+    tasks: pruneTaskRecordList(data.tasks ?? [], MAX_RETAINED_TASKS),
+    decisions: data.decisions ?? {},
+    receipts: (data.receipts ?? []).slice(-MAX_RETAINED_RECEIPTS),
+    durationSamples: pruneDurationSamples(data.durationSamples ?? [], nowMs),
+    activities: data.activities ?? [],
+    compactionByMainAgent: hydrateCompactionMetaMap(data.compactionByMainAgent),
+    pendingHandoffByMainAgent: data.pendingHandoffByMainAgent ?? {},
+    trustRules,
+    permissionRules,
+    ...hydrateM5SafetyFields(data, trustRules, permissionRules),
+    reworkRounds: data.reworkRounds ?? {},
+    triages: data.triages ?? {},
+    delegatedQuestions: data.delegatedQuestions ?? {},
+    lastPatrolAt: data.lastPatrolAt ?? null,
+    lastWakeupAt: data.lastWakeupAt ?? null,
+    metrics: { ...emptyMetrics(), ...data.metrics },
+  };
+}
+
+export interface MainChatStoreOptions {
+  now?: () => number;
+}
+
+function normalizeServerIdKey(serverId: string | null | undefined): string | null {
+  const trimmed = serverId?.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function createMainChatStore(
+  paseoHome: string,
+  storeOptions?: MainChatStoreOptions,
+): MainChatStore {
   const dirPath = path.join(paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME);
   const filePath = path.join(dirPath, "state.json");
+  const getNowMs = storeOptions?.now ?? (() => Date.now());
   let state: MainChatStateFile = emptyState();
   let loaded = false;
   let writeChain = Promise.resolve();
 
   async function persist(): Promise<void> {
+    const nowMs = getNowMs();
     pruneMapByTimestamp(state.plans, MAX_RETAINED_PLANS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.decisions, MAX_RETAINED_DECISIONS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.triages, MAX_RETAINED_TRIAGES, (entry) => entry.updatedAt);
-    pruneDelegatedQuestions(state.delegatedQuestions, Date.now());
+    state.tasks = pruneTaskRecordList(state.tasks, MAX_RETAINED_TASKS);
+    state.durationSamples = pruneDurationSamples(state.durationSamples, nowMs);
+    if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
+      state.receipts = state.receipts.slice(-MAX_RETAINED_RECEIPTS);
+    }
+    if (state.activities.length > MAX_RETAINED_ACTIVITIES) {
+      state.activities = state.activities.slice(-MAX_RETAINED_ACTIVITIES);
+    }
+    if (state.standingAuthorizations.length > MAX_RETAINED_STANDING_AUTHS) {
+      state.standingAuthorizations = state.standingAuthorizations.slice(
+        -MAX_RETAINED_STANDING_AUTHS,
+      );
+    }
+    if (state.ruleSuggestions.length > MAX_RETAINED_RULE_SUGGESTIONS) {
+      state.ruleSuggestions = state.ruleSuggestions.slice(-MAX_RETAINED_RULE_SUGGESTIONS);
+    }
+    if (state.pendingClarifications.length > MAX_RETAINED_CLARIFICATIONS) {
+      state.pendingClarifications = state.pendingClarifications.slice(-MAX_RETAINED_CLARIFICATIONS);
+    }
+    pruneMapByTimestamp(
+      state.manualApprovalObservations,
+      MAX_RETAINED_OBSERVATIONS,
+      (entry) => entry.lastObservedAt,
+    );
+    pruneDelegatedQuestions(state.delegatedQuestions, nowMs);
     const snapshot = JSON.stringify(state, null, 2);
     const task = writeChain.then(async () => {
       await mkdir(dirPath, { recursive: true });
@@ -236,20 +693,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
         const raw = await readFile(filePath, "utf8");
         const parsed = PersistedMainChatStateSchema.safeParse(JSON.parse(raw));
         if (parsed.success) {
-          state = {
-            version: 1,
-            settings: parsed.data.settings ?? createDefaultMainChatSettings("conservative"),
-            plans: parsed.data.plans ?? {},
-            decisions: parsed.data.decisions ?? {},
-            trustRules: parsed.data.trustRules ?? [],
-            permissionRules: parsed.data.permissionRules ?? [],
-            reworkRounds: parsed.data.reworkRounds ?? {},
-            triages: parsed.data.triages ?? {},
-            delegatedQuestions: parsed.data.delegatedQuestions ?? {},
-            lastPatrolAt: parsed.data.lastPatrolAt ?? null,
-            lastWakeupAt: parsed.data.lastWakeupAt ?? null,
-            metrics: { ...emptyMetrics(), ...parsed.data.metrics },
-          };
+          state = hydratePersistedState(parsed.data, getNowMs());
         }
       } catch {
         // Missing or unreadable state starts clean.
@@ -288,6 +732,59 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
       await persist();
     },
 
+    getTask(taskId) {
+      return state.tasks.find((task) => task.id === taskId) ?? null;
+    },
+
+    findTaskByAgentId(agentId) {
+      const trimmed = agentId.trim();
+      if (!trimmed) return null;
+      const activeMatches = state.tasks.filter((task) => task.activeAgentId === trimmed);
+      if (activeMatches.length > 0) {
+        activeMatches.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+        return activeMatches[0]!;
+      }
+      const linkedMatches = state.tasks.filter((task) => task.agentIds.includes(trimmed));
+      if (linkedMatches.length === 0) return null;
+      linkedMatches.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      return linkedMatches[0]!;
+    },
+
+    listTasks(options) {
+      const includeCompleted = options?.includeCompleted ?? true;
+      const filtered = state.tasks.filter((task) => {
+        if (options?.mainAgentId && task.mainAgentId !== options.mainAgentId) return false;
+        if (options?.conversationId && task.conversationId !== options.conversationId) return false;
+        if (!includeCompleted && (task.status === "completed" || task.status === "cancelled")) {
+          return false;
+        }
+        return true;
+      });
+      filtered.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      return filtered;
+    },
+
+    async putTask(task) {
+      const index = state.tasks.findIndex((entry) => entry.id === task.id);
+      if (index >= 0) {
+        state.tasks[index] = task;
+      } else {
+        state.tasks.push(task);
+      }
+      await persist();
+    },
+
+    async addDurationSample(sample) {
+      state.durationSamples.push(sample);
+      state.durationSamples = pruneDurationSamples(state.durationSamples, getNowMs());
+      await persist();
+      return sample;
+    },
+
+    listDurationSamples(nowMs = getNowMs()) {
+      return pruneDurationSamples(state.durationSamples, nowMs);
+    },
+
     getDecision(decisionId) {
       return state.decisions[decisionId] ?? null;
     },
@@ -305,26 +802,218 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
       await persist();
     },
 
-    hasTrustRule(cwd, mode) {
-      const normalized = normalizeCwdKey(cwd);
-      return state.trustRules.some(
-        (rule) => normalizeCwdKey(rule.cwd) === normalized && rule.mode === mode,
-      );
+    async addReceipt(receipt, mainAgentId = null) {
+      const entry: PersistedMainChatReceipt = {
+        ...receipt,
+        mainAgentId,
+        recordedAt: new Date().toISOString(),
+      };
+      state.receipts.push(entry);
+      if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
+        state.receipts = state.receipts.slice(-MAX_RETAINED_RECEIPTS);
+      }
+      await persist();
+      return entry;
     },
 
-    async addTrustRule(cwd, mode) {
-      const normalized = normalizeCwdKey(cwd);
-      const existing = state.trustRules.find(
-        (rule) => normalizeCwdKey(rule.cwd) === normalized && rule.mode === mode,
+    listReceipts(mainAgentId) {
+      return state.receipts
+        .filter((entry) => !mainAgentId || entry.mainAgentId === mainAgentId)
+        .toReversed();
+    },
+
+    async appendActivity(entry) {
+      state.activities.push(entry);
+      if (state.activities.length > MAX_RETAINED_ACTIVITIES) {
+        state.activities = state.activities.slice(-MAX_RETAINED_ACTIVITIES);
+      }
+      await persist();
+      return entry;
+    },
+
+    async updateActivity(id, patch) {
+      const index = state.activities.findIndex((entry) => entry.id === id);
+      if (index < 0) return null;
+      const updated: MainChatActivityEntry = {
+        ...state.activities[index]!,
+        ...patch,
+      };
+      state.activities[index] = updated;
+      await persist();
+      return updated;
+    },
+
+    listActivities(options) {
+      const includeSilent = options?.includeSilent ?? true;
+      const filtered = state.activities
+        .filter((entry) => {
+          if (options?.mainAgentId && entry.mainAgentId !== options.mainAgentId) return false;
+          if (!includeSilent && entry.silent) return false;
+          if (options?.kind && entry.kind !== options.kind) return false;
+          return true;
+        })
+        .toReversed();
+      const total = filtered.length;
+      const limit = options?.limit
+        ? Math.max(1, Math.min(MAX_RETAINED_ACTIVITIES, options.limit))
+        : 50;
+      return {
+        activities: filtered.slice(0, limit),
+        total,
+      };
+    },
+
+    getCompactionMeta(mainAgentId) {
+      const existing = state.compactionByMainAgent[mainAgentId];
+      if (!existing) return emptyCompactionMeta();
+      return { ...existing };
+    },
+
+    async setCompactionMeta(mainAgentId, meta) {
+      state.compactionByMainAgent[mainAgentId] = { ...meta };
+      await persist();
+    },
+
+    getPendingHandoffSummary(mainAgentId) {
+      return state.pendingHandoffByMainAgent[mainAgentId] ?? null;
+    },
+
+    async setPendingHandoffSummary(mainAgentId, summary) {
+      const trimmed = summary?.trim();
+      if (trimmed) {
+        state.pendingHandoffByMainAgent[mainAgentId] = trimmed;
+      } else {
+        delete state.pendingHandoffByMainAgent[mainAgentId];
+      }
+      await persist();
+    },
+
+    async consumePendingHandoffSummary(mainAgentId) {
+      const existing = state.pendingHandoffByMainAgent[mainAgentId];
+      if (!existing) return null;
+      delete state.pendingHandoffByMainAgent[mainAgentId];
+      await persist();
+      return existing;
+    },
+
+    async migrateMainAgent(fromMainAgentId, toMainAgentId) {
+      let migratedPlans = 0;
+      let migratedTasks = 0;
+      let migratedDecisions = 0;
+      let migratedReceipts = 0;
+      let migratedActivities = 0;
+
+      for (const [planId, plan] of Object.entries(state.plans)) {
+        if (plan.mainAgentId === fromMainAgentId) {
+          state.plans[planId] = { ...plan, mainAgentId: toMainAgentId };
+          migratedPlans += 1;
+        }
+      }
+      state.tasks = state.tasks.map((task) => {
+        if (task.mainAgentId === fromMainAgentId) {
+          migratedTasks += 1;
+          return { ...task, mainAgentId: toMainAgentId };
+        }
+        return task;
+      });
+      for (const [decisionId, decision] of Object.entries(state.decisions)) {
+        if (decision.mainAgentId === fromMainAgentId) {
+          state.decisions[decisionId] = { ...decision, mainAgentId: toMainAgentId };
+          migratedDecisions += 1;
+        }
+      }
+      state.receipts = state.receipts.map((receipt) => {
+        if (receipt.mainAgentId === fromMainAgentId) {
+          migratedReceipts += 1;
+          return { ...receipt, mainAgentId: toMainAgentId };
+        }
+        return receipt;
+      });
+      state.activities = state.activities.map((activity) => {
+        if (activity.mainAgentId === fromMainAgentId) {
+          migratedActivities += 1;
+          return { ...activity, mainAgentId: toMainAgentId };
+        }
+        return activity;
+      });
+      delete state.compactionByMainAgent[fromMainAgentId];
+      delete state.pendingHandoffByMainAgent[fromMainAgentId];
+
+      await persist();
+      return {
+        migratedPlans,
+        migratedTasks,
+        migratedDecisions,
+        migratedReceipts,
+        migratedActivities,
+      };
+    },
+
+    hasTrustRule(cwd, mode, options) {
+      return matchStandingAuthorization(
+        {
+          scope: "auto_start",
+          cwd,
+          mode,
+          serverId: options?.serverId,
+          localServerId: options?.localServerId,
+        },
+        state.standingAuthorizations,
+        getNowMs(),
+      ).matched;
+    },
+
+    async addTrustRule(cwd, mode, options) {
+      const normalized = normalizeTrustCwd(cwd);
+      const serverId = normalizeServerIdKey(options?.serverId);
+      const hostLabel = options?.hostLabel?.trim() || null;
+      const allowSubdirectories = options?.allowSubdirectories ?? true;
+      const existingIndex = state.trustRules.findIndex(
+        (rule) =>
+          normalizeTrustCwd(rule.cwd) === normalized &&
+          rule.mode === mode &&
+          normalizeServerIdKey(rule.serverId) === serverId,
       );
-      if (existing) return existing;
+      if (existingIndex >= 0) {
+        const existing = state.trustRules[existingIndex]!;
+        const needsUpdate =
+          (existing.allowSubdirectories ?? true) !== allowSubdirectories ||
+          (hostLabel !== null && existing.hostLabel !== hostLabel);
+        if (!needsUpdate) {
+          return existing;
+        }
+        const updated: MainChatAutoStartRule = {
+          ...existing,
+          serverId,
+          hostLabel: hostLabel ?? existing.hostLabel ?? null,
+          allowSubdirectories,
+        };
+        state.trustRules[existingIndex] = updated;
+        const authIdx = state.standingAuthorizations.findIndex((entry) => entry.id === updated.id);
+        if (authIdx >= 0) {
+          state.standingAuthorizations[authIdx] = {
+            ...state.standingAuthorizations[authIdx]!,
+            serverId,
+            allowSubdirectories,
+            revokedAt: null,
+          };
+        } else {
+          state.standingAuthorizations.push(standingAuthFromTrustRule(updated));
+        }
+        await persist();
+        return updated;
+      }
       const rule: MainChatAutoStartRule = {
         id: makeRuleId("trust"),
         cwd: normalized,
         mode,
-        createdAt: new Date().toISOString(),
+        serverId,
+        hostLabel,
+        allowSubdirectories,
+        createdAt: new Date(getNowMs()).toISOString(),
       };
       state.trustRules.push(rule);
+      state.standingAuthorizations.push(standingAuthFromTrustRule(rule));
       await persist();
       return rule;
     },
@@ -332,7 +1021,11 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
     async removeTrustRule(ruleId) {
       const before = state.trustRules.length;
       state.trustRules = state.trustRules.filter((rule) => rule.id !== ruleId);
-      if (state.trustRules.length === before) return false;
+      const auth = state.standingAuthorizations.find((entry) => entry.id === ruleId);
+      if (auth && auth.revokedAt === null) {
+        auth.revokedAt = new Date(getNowMs()).toISOString();
+      }
+      if (state.trustRules.length === before && !auth) return false;
       await persist();
       return true;
     },
@@ -371,9 +1064,10 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
         toolName,
         commandPrefix,
         cwd,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date(getNowMs()).toISOString(),
       };
       state.permissionRules.push(rule);
+      state.standingAuthorizations.push(standingAuthFromPermissionRule(rule));
       await persist();
       return rule;
     },
@@ -381,13 +1075,192 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
     async removePermissionRule(ruleId) {
       const before = state.permissionRules.length;
       state.permissionRules = state.permissionRules.filter((rule) => rule.id !== ruleId);
-      if (state.permissionRules.length === before) return false;
+      const auth = state.standingAuthorizations.find((entry) => entry.id === ruleId);
+      if (auth && auth.revokedAt === null) {
+        auth.revokedAt = new Date(getNowMs()).toISOString();
+      }
+      if (state.permissionRules.length === before && !auth) return false;
       await persist();
       return true;
     },
 
     listPermissionRules() {
       return [...state.permissionRules];
+    },
+
+    listStandingAuthorizations(options) {
+      const includeRevoked = options?.includeRevoked === true;
+      const filtered = state.standingAuthorizations
+        .filter((auth) => includeRevoked || auth.revokedAt === null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      return cloneShallowArray(filtered);
+    },
+
+    getStandingAuthorization(id) {
+      const found = state.standingAuthorizations.find((auth) => auth.id === id);
+      return found ? { ...found } : null;
+    },
+
+    async putStandingAuthorization(auth) {
+      const idx = state.standingAuthorizations.findIndex((entry) => entry.id === auth.id);
+      const copy: MainChatStandingAuthorization = { ...auth };
+      if (idx >= 0) {
+        state.standingAuthorizations[idx] = copy;
+      } else {
+        state.standingAuthorizations.push(copy);
+      }
+      syncStandingAuthToLegacyLists(state, copy);
+      await persist();
+      return { ...copy };
+    },
+
+    async revokeStandingAuthorization(id, revokedAt) {
+      const idx = state.standingAuthorizations.findIndex((entry) => entry.id === id);
+      if (idx < 0) {
+        return { revoked: false, authorization: null };
+      }
+      const existing = state.standingAuthorizations[idx]!;
+      if (existing.revokedAt !== null) {
+        return { revoked: false, authorization: { ...existing } };
+      }
+      const updated: MainChatStandingAuthorization = {
+        ...existing,
+        revokedAt: revokedAt ?? new Date(getNowMs()).toISOString(),
+      };
+      state.standingAuthorizations[idx] = updated;
+      syncStandingAuthToLegacyLists(state, updated);
+      await persist();
+      return { revoked: true, authorization: { ...updated } };
+    },
+
+    async recordStandingAuthorizationMatch(id, matchedAt) {
+      const idx = state.standingAuthorizations.findIndex((entry) => entry.id === id);
+      if (idx < 0) return null;
+      const existing = state.standingAuthorizations[idx]!;
+      const updated: MainChatStandingAuthorization = {
+        ...existing,
+        matchCount: existing.matchCount + 1,
+        lastMatchedAt: matchedAt ?? new Date(getNowMs()).toISOString(),
+      };
+      state.standingAuthorizations[idx] = updated;
+      await persist();
+      return { ...updated };
+    },
+
+    listRuleSuggestions(options) {
+      const includeDismissed = options?.includeDismissed === true;
+      const filtered = state.ruleSuggestions
+        .filter((item) => includeDismissed || item.dismissedAt === null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      return cloneShallowArray(filtered);
+    },
+
+    getRuleSuggestion(id) {
+      const found = state.ruleSuggestions.find((item) => item.id === id);
+      return found ? { ...found } : null;
+    },
+
+    async putRuleSuggestion(suggestion) {
+      const idx = state.ruleSuggestions.findIndex((item) => item.id === suggestion.id);
+      const copy: MainChatRuleSuggestion = { ...suggestion };
+      if (idx >= 0) {
+        state.ruleSuggestions[idx] = copy;
+      } else {
+        state.ruleSuggestions.push(copy);
+      }
+      await persist();
+      return { ...copy };
+    },
+
+    async dismissRuleSuggestion(id, dismissedAt) {
+      const idx = state.ruleSuggestions.findIndex((item) => item.id === id);
+      if (idx < 0) return false;
+      const existing = state.ruleSuggestions[idx]!;
+      if (existing.dismissedAt !== null) return false;
+      state.ruleSuggestions[idx] = {
+        ...existing,
+        dismissedAt: dismissedAt ?? new Date(getNowMs()).toISOString(),
+      };
+      await persist();
+      return true;
+    },
+
+    async removeRuleSuggestion(id) {
+      const before = state.ruleSuggestions.length;
+      state.ruleSuggestions = state.ruleSuggestions.filter((item) => item.id !== id);
+      if (state.ruleSuggestions.length === before) return false;
+      await persist();
+      return true;
+    },
+
+    getManualApprovalObservation(key) {
+      const found = state.manualApprovalObservations[key];
+      return found ? { ...found } : null;
+    },
+
+    async putManualApprovalObservation(observation) {
+      state.manualApprovalObservations[observation.key] = { ...observation };
+      await persist();
+      return { ...observation };
+    },
+
+    listPendingClarifications() {
+      const sorted = state.pendingClarifications
+        .slice()
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      return cloneShallowArray(sorted);
+    },
+
+    async putClarification(clarification) {
+      const idx = state.pendingClarifications.findIndex(
+        (entry) =>
+          entry.id === clarification.id ||
+          (entry.agentId === clarification.agentId &&
+            entry.permissionRequestId === clarification.permissionRequestId),
+      );
+      const copy: MainChatApprovalClarification = { ...clarification };
+      if (idx >= 0) {
+        state.pendingClarifications[idx] = copy;
+      } else {
+        state.pendingClarifications.push(copy);
+      }
+      await persist();
+      return { ...copy };
+    },
+
+    async removeClarificationsForPermission(agentId, permissionRequestId) {
+      const before = state.pendingClarifications.length;
+      state.pendingClarifications = state.pendingClarifications.filter(
+        (entry) =>
+          !(entry.agentId === agentId && entry.permissionRequestId === permissionRequestId),
+      );
+      const removed = before - state.pendingClarifications.length;
+      if (removed > 0) {
+        await persist();
+      }
+      return removed;
+    },
+
+    async removeClarificationsForAgent(agentId) {
+      const before = state.pendingClarifications.length;
+      state.pendingClarifications = state.pendingClarifications.filter(
+        (entry) => entry.agentId !== agentId,
+      );
+      const removed = before - state.pendingClarifications.length;
+      if (removed > 0) {
+        await persist();
+      }
+      return removed;
+    },
+
+    getSuppressedQuietBadgeCount() {
+      return state.suppressedQuietBadgeCount;
+    },
+
+    async incrementSuppressedQuietBadgeCount(delta = 1) {
+      state.suppressedQuietBadgeCount += Math.max(0, Math.trunc(delta));
+      await persist();
+      return state.suppressedQuietBadgeCount;
     },
 
     getReworkRound(agentId) {
@@ -422,7 +1295,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
       await persist();
     },
 
-    listRecentDelegatedQuestions(agentId, nowMs = Date.now()) {
+    listRecentDelegatedQuestions(agentId, nowMs = getNowMs()) {
       const entries = state.delegatedQuestions[agentId] ?? [];
       return entries.filter((entry) => {
         const ts = Date.parse(entry.at);
@@ -434,7 +1307,7 @@ export function createMainChatStore(paseoHome: string): MainChatStore {
       const trimmed = text.trim();
       if (!trimmed) return;
       const list = state.delegatedQuestions[agentId] ?? [];
-      list.push({ text: trimmed, at: new Date().toISOString() });
+      list.push({ text: trimmed, at: new Date(getNowMs()).toISOString() });
       state.delegatedQuestions[agentId] = list.slice(-10);
       await persist();
     },

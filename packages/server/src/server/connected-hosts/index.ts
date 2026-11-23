@@ -40,6 +40,18 @@ export interface HostActor {
   sourceId: string;
   manageSources: boolean;
 }
+export interface ConnectedSelfHost {
+  serverId: string;
+  label: string;
+}
+export interface ConnectedHostClientHandle {
+  registrationId: string;
+  serverId: string;
+  label: string;
+  client: DaemonClient;
+  lastOnlineAt: string | null;
+}
+export type ConnectedHostSummary = HostSummary;
 interface Live {
   client: DaemonClient;
   accepted: boolean;
@@ -82,6 +94,39 @@ export class ConnectedHosts {
       row.nextRetryAt = null;
       this.start(row);
     }
+    if (this.rows.length > 0) this.changed();
+  }
+  getSelfHost(): ConnectedSelfHost {
+    return { ...this.self };
+  }
+  listKnownHosts(): ConnectedHostSummary[] {
+    return this.rows.map((row) => this.summary(row));
+  }
+  listAcceptedHosts(): ConnectedHostClientHandle[] {
+    if (this.closed) return [];
+    const handles: ConnectedHostClientHandle[] = [];
+    for (const row of this.rows) {
+      if (!row.enabled || row.status !== "online" || !row.serverId) continue;
+      const live = this.live.get(row.registrationId);
+      if (!live?.accepted || !live.client.isConnected) continue;
+      handles.push({
+        registrationId: row.registrationId,
+        serverId: row.serverId,
+        label: resolveHostDisplayLabel(row, live.client),
+        client: live.client,
+        lastOnlineAt: row.lastOnlineAt,
+      });
+    }
+    return handles;
+  }
+  getAcceptedClient(serverId: string): DaemonClient | null {
+    if (this.closed) return null;
+    for (const row of this.rows) {
+      if (row.serverId !== serverId || !row.enabled || row.status !== "online") continue;
+      const live = this.live.get(row.registrationId);
+      if (live?.accepted && live.client.isConnected) return live.client;
+    }
+    return null;
   }
   async list(): Promise<HostDirectory> {
     await this.ready;
@@ -94,8 +139,22 @@ export class ConnectedHosts {
     this.listeners.add(changed);
     return () => this.listeners.delete(changed);
   }
+  subscribeHostChanges(listener: () => void): () => void {
+    if (this.closed) return () => {};
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
   private changed(): void {
-    for (const listener of this.listeners) listener();
+    // Snapshot listeners and isolate throws so one broken consumer cannot block others.
+    for (const listener of Array.from(this.listeners)) {
+      try {
+        listener();
+      } catch {
+        // Subscriber errors are isolated by contract.
+      }
+    }
   }
   private async persist(rows: Saved[]): Promise<void> {
     await mkdir(this.home, { recursive: true });
@@ -570,6 +629,14 @@ const terminalFailures = new Set([
   "duplicate_host",
   "authentication_failed",
 ]);
+
+function resolveHostDisplayLabel(row: Saved, client: DaemonClient): string {
+  const configured = row.label?.trim();
+  if (configured) return configured;
+  const hostname = client.getLastServerInfoMessage()?.hostname?.trim();
+  if (hostname) return hostname;
+  return row.targetDescription || row.serverId || row.registrationId;
+}
 
 function connectionFailure(error: unknown, authenticationFailed: boolean): HostSummary["error"] {
   if (error instanceof HostError) return { code: error.code, message: error.message };

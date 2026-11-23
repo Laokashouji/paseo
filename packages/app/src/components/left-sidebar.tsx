@@ -104,6 +104,8 @@ import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { openSettingsFromSidebar } from "@/navigation/settings-navigation";
 import { UsageSidebarItem, UsageSidebarRoot, useUsageSummary, useOpenSidebarUsage } from "@/usage";
+import { MainChatHeroRow, useShouldShowMainChatHero } from "@/main-chat/hero-row";
+import { SidebarDirectionsSection } from "@/main-chat/sidebar-directions-section";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -622,11 +624,13 @@ function MobileSidebar({
     [insetsTop, insetsBottom, theme.colors.surfaceSidebar],
   );
 
+  const showMainChatHero = useShouldShowMainChatHero();
+
   const navRows = (
     <SidebarNavRows
       style={styles.mobileNavRowsGroup}
       onBeforeNavigate={closeSidebar}
-      firstRowTrailing={closeButton}
+      firstRowTrailing={showMainChatHero ? undefined : closeButton}
     />
   );
 
@@ -638,6 +642,11 @@ function MobileSidebar({
     >
       <View style={styles.sidebarContent} pointerEvents="auto">
         <WindowChromeSafeArea placement="below" />
+        <MainChatHeroRow
+          onBeforeNavigate={closeSidebar}
+          trailingAccessory={showMainChatHero ? closeButton : undefined}
+        />
+        <SidebarDirectionsSection onBeforeNavigate={closeSidebar} />
         <SidebarNavScroll closeGestureRef={closeGestureRef}>{navRows}</SidebarNavScroll>
 
         <SidebarViewSlot dismiss={handleWorkspacePress}>
@@ -851,7 +860,8 @@ function DesktopSidebar({
   // With every top item hidden the sidebar starts at the Workspaces section, as before the
   // nav scroller existed: no strip above it and no divider below it.
   const hasNavRows = useVisibleSidebarNavItems().length > 0;
-  const showsDragStrip = hasNavRows && !showsChromeRow && !inTopBand;
+  const showMainChatHero = useShouldShowMainChatHero();
+  const showsDragStrip = (hasNavRows || showMainChatHero) && !showsChromeRow && !inTopBand;
   return (
     <MobilePanelOverlay
       panel="agent-list"
@@ -886,6 +896,8 @@ function DesktopSidebar({
               </View>
             ) : null}
           </View>
+          <MainChatHeroRow onBeforeNavigate={closeSidebar} />
+          <SidebarDirectionsSection onBeforeNavigate={closeSidebar} />
           {/* The drag overlay stays above this viewport: Electron does not clip
               app-region rects to scroll viewports, so a scrolled-out row would
               still claim its no-drag rect. */}

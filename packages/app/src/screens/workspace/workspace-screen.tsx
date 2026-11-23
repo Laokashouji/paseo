@@ -197,6 +197,7 @@ import { SheetTabs } from "@/screens/workspace/sheet-tabs";
 import type { PaneHost } from "@/panels/panel-manifest";
 import { WorkspaceFocusProvider } from "@/workspace/focus";
 import { DiffDocumentWorkspaceCacheProvider } from "@/git/diff-document/workspace-cache";
+import { MainChatCameFromBar } from "@/main-chat/came-from-bar";
 import type { NewTabSelection } from "@/workspace-tabs/new-tab";
 import {
   NewTabLauncherProvider,
@@ -3643,9 +3644,14 @@ function WorkspaceScreenContent({
     composerFullscreen: useComposerTabFullscreen(workspacePanelKey, activeTabId),
   });
 
+  const cameFromBar = (
+    <MainChatCameFromBar serverId={normalizedServerId} workspaceId={normalizedWorkspaceId} />
+  );
+
   // Compact sheets escape to the app overlay host, above both sidebars.
   const workspaceCenterColumn = isMobile ? (
     <View style={styles.centerColumn}>
+      {cameFromBar}
       <FloatingHeaderLayout
         header={compactHeaderLayout.header}
         floating={compactHeaderLayout.floating}
@@ -3663,6 +3669,7 @@ function WorkspaceScreenContent({
       explorerOpen={isExplorerSidebarShowing}
       focusModeEnabled={desktopFocusModeEnabled}
     >
+      {cameFromBar}
       {rendersDesktopSplitContent ? null : (
         <AdaptiveWorkspaceChrome compactHeader={centerColumnCompactHeader}>
           {fullWorkspaceActions}

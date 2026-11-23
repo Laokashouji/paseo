@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
+  buildMissingReplyRecoveryPrompt,
   generateStructuredAgentResponse,
   getStructuredAgentResponse,
   generateStructuredAgentResponseWithFallback,
+  isExplicitSilentSentinel,
+  isPlaceholderEmptyReply,
+  isSilentBackgroundReply,
   isStructuredGenerationAuthFailure,
+  shouldRecoverMissingFinalReply,
   StructuredAgentFallbackError,
   StructuredAgentResponseError,
   type AgentCaller,
@@ -477,5 +482,148 @@ describe("generateStructuredAgentResponseWithFallback", () => {
     });
     expect(third).toEqual({ summary: "ok-3" });
     expect(called).toEqual(["opencode:openrouter/openai/gpt-5.4-mini"]);
+  });
+});
+
+describe("silent sentinel and missing-reply recovery guards", () => {
+  it("recognizes explicit silent sentinels and placeholder empty replies", () => {
+    expect(isExplicitSilentSentinel("[SILENT]")).toBe(true);
+    expect(isExplicitSilentSentinel("  `NO_ACTION`  ")).toBe(true);
+    expect(isExplicitSilentSentinel("<silent/>")).toBe(true);
+    expect(isExplicitSilentSentinel("当前一切正常")).toBe(false);
+    expect(isExplicitSilentSentinel("")).toBe(false);
+
+    expect(isPlaceholderEmptyReply("")).toBe(true);
+    expect(isPlaceholderEmptyReply("   ")).toBe(true);
+    expect(isPlaceholderEmptyReply("(no content)")).toBe(true);
+    expect(isPlaceholderEmptyReply("No response requested.")).toBe(true);
+    expect(isPlaceholderEmptyReply("已完成核对")).toBe(false);
+  });
+
+  it("classifies silent background turns accurately while respecting user-facing cards", () => {
+    expect(
+      isSilentBackgroundReply({
+        assistantTexts: ["[SILENT]"],
+        hadUserFacingCardTool: false,
+      }),
+    ).toBe(true);
+    expect(
+      isSilentBackgroundReply({
+        assistantTexts: [],
+        hadUserFacingCardTool: false,
+      }),
+    ).toBe(true);
+    expect(
+      isSilentBackgroundReply({
+        assistantTexts: ["[SILENT]"],
+        hadUserFacingCardTool: true,
+      }),
+    ).toBe(false);
+    expect(
+      isSilentBackgroundReply({
+        assistantTexts: ["发现 1 个卡点需要您确认"],
+        hadUserFacingCardTool: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("triggers missing-reply recovery strictly once for non-canceled foreground tool turns with no visible reply", () => {
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: [],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: ["(no content)"],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(true);
+
+    // Anti-loop guard: already recovered once for this turn.
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: [],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: true,
+      }),
+    ).toBe(false);
+
+    // Do not recover when visible text exists, no tools ran, canceled/failed, background, or silent.
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: ["已查完，问题定位在 config.ts"],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: false,
+        assistantTexts: [],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: [],
+        canceled: true,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: ["[SILENT]"],
+        canceled: false,
+        failed: false,
+        isBackground: false,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecoverMissingFinalReply({
+        hadToolCalls: true,
+        assistantTexts: [],
+        canceled: false,
+        failed: false,
+        isBackground: true,
+        isSilent: false,
+        alreadyRecovered: false,
+      }),
+    ).toBe(false);
+
+    const prompt = buildMissingReplyRecoveryPrompt();
+    expect(prompt).toContain("不要再调用任何工具");
+    expect(prompt).toContain("中文");
   });
 });

@@ -14,7 +14,67 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.get_settings.request" }
   | { type: "main_chat.update_settings.request" }
   | { type: "main_chat.trigger_patrol.request" }
+  | { type: "main_chat.compact.request" }
+  | { type: "main_chat.clear.request" }
+  | { type: "main_chat.new_session.request" }
+  | { type: "main_chat.list_activity.request" }
+  | { type: "main_chat.update_plan_task.request" }
+  | { type: "main_chat.withdraw_plan.request" }
+  | { type: "main_chat.list_tasks.request" }
+  | { type: "main_chat.update_task_scope.request" }
+  | { type: "main_chat.park_task.request" }
+  | { type: "main_chat.review_task.request" }
+  | { type: "main_chat.list_conversations.request" }
+  | { type: "main_chat.create_conversation.request" }
+  | { type: "main_chat.update_conversation.request" }
+  | { type: "main_chat.get_fleet_hosts.request" }
+  | { type: "main_chat.clarify_permission.request" }
+  | { type: "main_chat.list_standing_authorizations.request" }
+  | { type: "main_chat.grant_standing_authorization.request" }
+  | { type: "main_chat.revoke_standing_authorization.request" }
+  | { type: "main_chat.dismiss_rule_suggestion.request" }
 >;
+
+const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
+  MainChatSessionMessage["type"]
+>([
+  "main_chat.ensure.request",
+  "main_chat.list_plans.request",
+  "main_chat.start_plan.request",
+  "main_chat.cancel_plan.request",
+  "main_chat.get_overview.request",
+  "main_chat.answer_decision.request",
+  "main_chat.add_permission_rule.request",
+  "main_chat.remove_rule.request",
+  "main_chat.get_settings.request",
+  "main_chat.update_settings.request",
+  "main_chat.trigger_patrol.request",
+  "main_chat.compact.request",
+  "main_chat.clear.request",
+  "main_chat.new_session.request",
+  "main_chat.list_activity.request",
+  "main_chat.update_plan_task.request",
+  "main_chat.withdraw_plan.request",
+  "main_chat.list_tasks.request",
+  "main_chat.update_task_scope.request",
+  "main_chat.park_task.request",
+  "main_chat.review_task.request",
+  "main_chat.list_conversations.request",
+  "main_chat.create_conversation.request",
+  "main_chat.update_conversation.request",
+  "main_chat.get_fleet_hosts.request",
+  "main_chat.clarify_permission.request",
+  "main_chat.list_standing_authorizations.request",
+  "main_chat.grant_standing_authorization.request",
+  "main_chat.revoke_standing_authorization.request",
+  "main_chat.dismiss_rule_suggestion.request",
+]);
+
+export function isMainChatSessionMessage(
+  msg: SessionInboundMessage,
+): msg is MainChatSessionMessage {
+  return MAIN_CHAT_SESSION_MESSAGE_TYPES.has(msg.type);
+}
 
 type SendFn = (response: SessionOutboundMessage) => void;
 
@@ -22,82 +82,178 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type UnconfiguredResponseBuilderMap = {
+  [K in MainChatSessionMessage["type"]]: (
+    msg: Extract<MainChatSessionMessage, { type: K }>,
+    error: string,
+  ) => SessionOutboundMessage;
+};
+
+const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
+  "main_chat.ensure.request": (msg, error) => ({
+    type: "main_chat.ensure.response",
+    payload: {
+      requestId: msg.requestId,
+      agentId: null,
+      workspaceId: null,
+      created: false,
+      error,
+    },
+  }),
+  "main_chat.list_plans.request": (msg, error) => ({
+    type: "main_chat.list_plans.response",
+    payload: { requestId: msg.requestId, plans: [], error },
+  }),
+  "main_chat.start_plan.request": (msg, error) => ({
+    type: "main_chat.start_plan.response",
+    payload: { requestId: msg.requestId, plan: null, error },
+  }),
+  "main_chat.cancel_plan.request": (msg, error) => ({
+    type: "main_chat.cancel_plan.response",
+    payload: { requestId: msg.requestId, plan: null, error },
+  }),
+  "main_chat.get_overview.request": (msg, error) => ({
+    type: "main_chat.get_overview.response",
+    payload: { requestId: msg.requestId, overview: null, error },
+  }),
+  "main_chat.answer_decision.request": (msg, error) => ({
+    type: "main_chat.answer_decision.response",
+    payload: { requestId: msg.requestId, decision: null, error },
+  }),
+  "main_chat.add_permission_rule.request": (msg, error) => ({
+    type: "main_chat.add_permission_rule.response",
+    payload: { requestId: msg.requestId, rule: null, error },
+  }),
+  "main_chat.remove_rule.request": (msg, error) => ({
+    type: "main_chat.remove_rule.response",
+    payload: { requestId: msg.requestId, removed: false, error },
+  }),
+  "main_chat.get_settings.request": (msg, error) => ({
+    type: "main_chat.get_settings.response",
+    payload: { requestId: msg.requestId, settings: null, error },
+  }),
+  "main_chat.update_settings.request": (msg, error) => ({
+    type: "main_chat.update_settings.response",
+    payload: { requestId: msg.requestId, settings: null, error },
+  }),
+  "main_chat.trigger_patrol.request": (msg, error) => ({
+    type: "main_chat.trigger_patrol.response",
+    payload: { requestId: msg.requestId, result: null, error },
+  }),
+  "main_chat.compact.request": (msg, error) => ({
+    type: "main_chat.compact.response",
+    payload: {
+      requestId: msg.requestId,
+      mainAgentId: msg.mainAgentId ?? null,
+      compaction: null,
+      error,
+    },
+  }),
+  "main_chat.clear.request": (msg, error) => ({
+    type: "main_chat.clear.response",
+    payload: {
+      requestId: msg.requestId,
+      previousAgentId: null,
+      agentId: null,
+      workspaceId: null,
+      migratedPlans: 0,
+      migratedDecisions: 0,
+      migratedChildAgents: 0,
+      error,
+    },
+  }),
+  "main_chat.new_session.request": (msg, error) => ({
+    type: "main_chat.new_session.response",
+    payload: {
+      requestId: msg.requestId,
+      previousAgentId: null,
+      agentId: null,
+      workspaceId: null,
+      handoffSummary: null,
+      migratedPlans: 0,
+      migratedDecisions: 0,
+      migratedChildAgents: 0,
+      error,
+    },
+  }),
+  "main_chat.list_activity.request": (msg, error) => ({
+    type: "main_chat.list_activity.response",
+    payload: {
+      requestId: msg.requestId,
+      activities: [],
+      total: 0,
+      error,
+    },
+  }),
+  "main_chat.update_plan_task.request": (msg, error) => ({
+    type: "main_chat.update_plan_task.response",
+    payload: { requestId: msg.requestId, plan: null, error },
+  }),
+  "main_chat.withdraw_plan.request": (msg, error) => ({
+    type: "main_chat.withdraw_plan.response",
+    payload: { requestId: msg.requestId, plan: null, error },
+  }),
+  "main_chat.list_tasks.request": (msg, error) => ({
+    type: "main_chat.list_tasks.response",
+    payload: { requestId: msg.requestId, tasks: [], error },
+  }),
+  "main_chat.update_task_scope.request": (msg, error) => ({
+    type: "main_chat.update_task_scope.response",
+    payload: { requestId: msg.requestId, task: null, error },
+  }),
+  "main_chat.park_task.request": (msg, error) => ({
+    type: "main_chat.park_task.response",
+    payload: { requestId: msg.requestId, task: null, error },
+  }),
+  "main_chat.review_task.request": (msg, error) => ({
+    type: "main_chat.review_task.response",
+    payload: { requestId: msg.requestId, task: null, receipt: null, rework: null, error },
+  }),
+  "main_chat.list_conversations.request": (msg, error) => ({
+    type: "main_chat.list_conversations.response",
+    payload: { requestId: msg.requestId, conversations: [], error },
+  }),
+  "main_chat.create_conversation.request": (msg, error) => ({
+    type: "main_chat.create_conversation.response",
+    payload: { requestId: msg.requestId, conversation: null, error },
+  }),
+  "main_chat.update_conversation.request": (msg, error) => ({
+    type: "main_chat.update_conversation.response",
+    payload: { requestId: msg.requestId, conversation: null, error },
+  }),
+  "main_chat.get_fleet_hosts.request": (msg, error) => ({
+    type: "main_chat.get_fleet_hosts.response",
+    payload: { requestId: msg.requestId, localServerId: null, hosts: [], error },
+  }),
+  "main_chat.clarify_permission.request": (msg, error) => ({
+    type: "main_chat.clarify_permission.response",
+    payload: { requestId: msg.requestId, clarification: null, error },
+  }),
+  "main_chat.list_standing_authorizations.request": (msg, error) => ({
+    type: "main_chat.list_standing_authorizations.response",
+    payload: { requestId: msg.requestId, authorizations: [], suggestions: [], error },
+  }),
+  "main_chat.grant_standing_authorization.request": (msg, error) => ({
+    type: "main_chat.grant_standing_authorization.response",
+    payload: { requestId: msg.requestId, authorization: null, error },
+  }),
+  "main_chat.revoke_standing_authorization.request": (msg, error) => ({
+    type: "main_chat.revoke_standing_authorization.response",
+    payload: { requestId: msg.requestId, revoked: false, authorization: null, error },
+  }),
+  "main_chat.dismiss_rule_suggestion.request": (msg, error) => ({
+    type: "main_chat.dismiss_rule_suggestion.response",
+    payload: { requestId: msg.requestId, dismissed: false, error },
+  }),
+};
+
 function sendUnconfiguredError(msg: MainChatSessionMessage, send: SendFn): void {
   const error = "Main chat service is not configured on this daemon";
-  switch (msg.type) {
-    case "main_chat.ensure.request":
-      send({
-        type: "main_chat.ensure.response",
-        payload: {
-          requestId: msg.requestId,
-          agentId: null,
-          workspaceId: null,
-          created: false,
-          error,
-        },
-      });
-      return;
-    case "main_chat.list_plans.request":
-      send({
-        type: "main_chat.list_plans.response",
-        payload: { requestId: msg.requestId, plans: [], error },
-      });
-      return;
-    case "main_chat.start_plan.request":
-      send({
-        type: "main_chat.start_plan.response",
-        payload: { requestId: msg.requestId, plan: null, error },
-      });
-      return;
-    case "main_chat.cancel_plan.request":
-      send({
-        type: "main_chat.cancel_plan.response",
-        payload: { requestId: msg.requestId, plan: null, error },
-      });
-      return;
-    case "main_chat.get_overview.request":
-      send({
-        type: "main_chat.get_overview.response",
-        payload: { requestId: msg.requestId, overview: null, error },
-      });
-      return;
-    case "main_chat.answer_decision.request":
-      send({
-        type: "main_chat.answer_decision.response",
-        payload: { requestId: msg.requestId, decision: null, error },
-      });
-      return;
-    case "main_chat.add_permission_rule.request":
-      send({
-        type: "main_chat.add_permission_rule.response",
-        payload: { requestId: msg.requestId, rule: null, error },
-      });
-      return;
-    case "main_chat.remove_rule.request":
-      send({
-        type: "main_chat.remove_rule.response",
-        payload: { requestId: msg.requestId, removed: false, error },
-      });
-      return;
-    case "main_chat.get_settings.request":
-      send({
-        type: "main_chat.get_settings.response",
-        payload: { requestId: msg.requestId, settings: null, error },
-      });
-      return;
-    case "main_chat.update_settings.request":
-      send({
-        type: "main_chat.update_settings.response",
-        payload: { requestId: msg.requestId, settings: null, error },
-      });
-      return;
-    case "main_chat.trigger_patrol.request":
-      send({
-        type: "main_chat.trigger_patrol.response",
-        payload: { requestId: msg.requestId, result: null, error },
-      });
-      return;
-  }
+  const builder = UNCONFIGURED_RESPONSES[msg.type] as (
+    message: MainChatSessionMessage,
+    err: string,
+  ) => SessionOutboundMessage;
+  send(builder(msg, error));
 }
 
 async function handlePlanMessages(
@@ -333,6 +489,702 @@ async function handleStewardConfigMessages(
   }
 }
 
+async function handleLifecycleMessages(
+  service: MainChatService,
+  msg: Extract<
+    MainChatSessionMessage,
+    | { type: "main_chat.compact.request" }
+    | { type: "main_chat.clear.request" }
+    | { type: "main_chat.new_session.request" }
+    | { type: "main_chat.list_activity.request" }
+  >,
+  send: SendFn,
+): Promise<void> {
+  if (msg.type === "main_chat.compact.request") {
+    try {
+      const result = await service.compactMainChat(msg.mainAgentId, {
+        reason: msg.reason,
+        instructions: msg.instructions,
+      });
+      send({
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: msg.requestId,
+          mainAgentId: result.mainAgentId,
+          compaction: result.compaction,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const compaction = await service.getCompactionState(msg.mainAgentId).catch(() => null);
+      send({
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: msg.requestId,
+          mainAgentId: msg.mainAgentId ?? null,
+          compaction,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.clear.request") {
+    try {
+      const result = await service.clearMainChatContext(msg.mainAgentId);
+      send({
+        type: "main_chat.clear.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: result.previousAgentId,
+          agentId: result.agentId,
+          workspaceId: result.workspaceId,
+          migratedPlans: result.migratedPlans,
+          migratedDecisions: result.migratedDecisions,
+          migratedChildAgents: result.migratedChildAgents,
+          error: null,
+        },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.clear.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.new_session.request") {
+    try {
+      const result = await service.startNewMainChatSession(msg.mainAgentId, {
+        carryHandoffSummary: msg.carryHandoffSummary,
+        title: msg.title,
+      });
+      send({
+        type: "main_chat.new_session.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: result.previousAgentId,
+          agentId: result.agentId,
+          workspaceId: result.workspaceId,
+          handoffSummary: result.handoffSummary,
+          migratedPlans: result.migratedPlans,
+          migratedDecisions: result.migratedDecisions,
+          migratedChildAgents: result.migratedChildAgents,
+          error: null,
+        },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.new_session.response",
+        payload: {
+          requestId: msg.requestId,
+          previousAgentId: null,
+          agentId: null,
+          workspaceId: null,
+          handoffSummary: null,
+          migratedPlans: 0,
+          migratedDecisions: 0,
+          migratedChildAgents: 0,
+          error: errorMessage(error),
+        },
+      });
+    }
+    return;
+  }
+
+  try {
+    const result = await service.listActivity({
+      mainAgentId: msg.mainAgentId,
+      limit: msg.limit,
+      includeSilent: msg.includeSilent,
+      kind: msg.kind,
+    });
+    send({
+      type: "main_chat.list_activity.response",
+      payload: {
+        requestId: msg.requestId,
+        activities: result.activities,
+        total: result.total,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_activity.response",
+      payload: {
+        requestId: msg.requestId,
+        activities: [],
+        total: 0,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleTaskLedgerMessages(
+  service: MainChatService,
+  msg: Extract<
+    MainChatSessionMessage,
+    | { type: "main_chat.update_plan_task.request" }
+    | { type: "main_chat.withdraw_plan.request" }
+    | { type: "main_chat.list_tasks.request" }
+    | { type: "main_chat.update_task_scope.request" }
+    | { type: "main_chat.park_task.request" }
+    | { type: "main_chat.review_task.request" }
+  >,
+  send: SendFn,
+): Promise<void> {
+  const unsupported = "Task ledger operation is not enabled on this daemon";
+
+  if (msg.type === "main_chat.update_plan_task.request") {
+    if (!service.updatePlanTask) {
+      send({
+        type: "main_chat.update_plan_task.response",
+        payload: { requestId: msg.requestId, plan: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const plan = await service.updatePlanTask(msg.planId, msg.taskId, msg.patch);
+      send({
+        type: "main_chat.update_plan_task.response",
+        payload: { requestId: msg.requestId, plan, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.update_plan_task.response",
+        payload: { requestId: msg.requestId, plan: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.withdraw_plan.request") {
+    if (!service.withdrawPlan) {
+      send({
+        type: "main_chat.withdraw_plan.response",
+        payload: { requestId: msg.requestId, plan: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const plan = await service.withdrawPlan(msg.planId, msg.reason);
+      send({
+        type: "main_chat.withdraw_plan.response",
+        payload: { requestId: msg.requestId, plan, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.withdraw_plan.response",
+        payload: { requestId: msg.requestId, plan: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.list_tasks.request") {
+    if (!service.listTaskRecords) {
+      send({
+        type: "main_chat.list_tasks.response",
+        payload: { requestId: msg.requestId, tasks: [], error: unsupported },
+      });
+      return;
+    }
+    try {
+      const tasks = await service.listTaskRecords({
+        mainAgentId: msg.mainAgentId,
+        conversationId: msg.conversationId,
+        includeCompleted: msg.includeCompleted,
+      });
+      send({
+        type: "main_chat.list_tasks.response",
+        payload: { requestId: msg.requestId, tasks, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.list_tasks.response",
+        payload: { requestId: msg.requestId, tasks: [], error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.update_task_scope.request") {
+    if (!service.updateTaskScope) {
+      send({
+        type: "main_chat.update_task_scope.response",
+        payload: { requestId: msg.requestId, task: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const task = await service.updateTaskScope({
+        taskId: msg.taskId,
+        goal: msg.goal,
+        doneWhen: msg.doneWhen,
+        outOfBounds: msg.outOfBounds,
+        reason: msg.reason,
+      });
+      send({
+        type: "main_chat.update_task_scope.response",
+        payload: { requestId: msg.requestId, task, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.update_task_scope.response",
+        payload: { requestId: msg.requestId, task: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.park_task.request") {
+    if (!service.parkTask) {
+      send({
+        type: "main_chat.park_task.response",
+        payload: { requestId: msg.requestId, task: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const task = await service.parkTask({
+        taskId: msg.taskId,
+        parked: msg.parked,
+        reason: msg.reason,
+      });
+      send({
+        type: "main_chat.park_task.response",
+        payload: { requestId: msg.requestId, task, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.park_task.response",
+        payload: { requestId: msg.requestId, task: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (!service.reviewTask) {
+    send({
+      type: "main_chat.review_task.response",
+      payload: {
+        requestId: msg.requestId,
+        task: null,
+        receipt: null,
+        rework: null,
+        error: unsupported,
+      },
+    });
+    return;
+  }
+  try {
+    const result = await service.reviewTask({
+      taskId: msg.taskId,
+      verdict: msg.verdict,
+      summary: msg.summary,
+      gaps: msg.gaps,
+      checks: msg.checks,
+      nextSteps: msg.nextSteps,
+      note: msg.note,
+    });
+    send({
+      type: "main_chat.review_task.response",
+      payload: {
+        requestId: msg.requestId,
+        task: result.task,
+        receipt: result.receipt,
+        rework: result.rework,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.review_task.response",
+      payload: {
+        requestId: msg.requestId,
+        task: null,
+        receipt: null,
+        rework: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleMultiConversationAndFleetMessages(
+  service: MainChatService,
+  msg: Extract<
+    MainChatSessionMessage,
+    | { type: "main_chat.list_conversations.request" }
+    | { type: "main_chat.create_conversation.request" }
+    | { type: "main_chat.update_conversation.request" }
+    | { type: "main_chat.get_fleet_hosts.request" }
+  >,
+  send: SendFn,
+): Promise<void> {
+  const unsupported = "Multi-conversation/fleet operation is not enabled on this daemon";
+
+  if (msg.type === "main_chat.list_conversations.request") {
+    if (!service.listConversations) {
+      send({
+        type: "main_chat.list_conversations.response",
+        payload: { requestId: msg.requestId, conversations: [], error: unsupported },
+      });
+      return;
+    }
+    try {
+      const conversations = await service.listConversations({
+        includeArchived: msg.includeArchived,
+      });
+      send({
+        type: "main_chat.list_conversations.response",
+        payload: { requestId: msg.requestId, conversations, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.list_conversations.response",
+        payload: { requestId: msg.requestId, conversations: [], error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.create_conversation.request") {
+    if (!service.createConversation) {
+      send({
+        type: "main_chat.create_conversation.response",
+        payload: { requestId: msg.requestId, conversation: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const conversation = await service.createConversation({
+        kind: msg.kind,
+        title: msg.title,
+        directionSummary: msg.directionSummary,
+        initialPrompt: msg.initialPrompt,
+        provider: msg.provider,
+        model: msg.model,
+        modeId: msg.modeId,
+        thinkingOptionId: msg.thinkingOptionId,
+      });
+      send({
+        type: "main_chat.create_conversation.response",
+        payload: { requestId: msg.requestId, conversation, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.create_conversation.response",
+        payload: { requestId: msg.requestId, conversation: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (msg.type === "main_chat.update_conversation.request") {
+    if (!service.updateConversation) {
+      send({
+        type: "main_chat.update_conversation.response",
+        payload: { requestId: msg.requestId, conversation: null, error: unsupported },
+      });
+      return;
+    }
+    try {
+      const conversation = await service.updateConversation({
+        conversationId: msg.conversationId,
+        title: msg.title,
+        directionSummary: msg.directionSummary,
+        kind: msg.kind,
+        archived: msg.archived,
+      });
+      send({
+        type: "main_chat.update_conversation.response",
+        payload: { requestId: msg.requestId, conversation, error: null },
+      });
+    } catch (error) {
+      send({
+        type: "main_chat.update_conversation.response",
+        payload: { requestId: msg.requestId, conversation: null, error: errorMessage(error) },
+      });
+    }
+    return;
+  }
+
+  if (!service.getFleetHosts) {
+    send({
+      type: "main_chat.get_fleet_hosts.response",
+      payload: { requestId: msg.requestId, localServerId: null, hosts: [], error: unsupported },
+    });
+    return;
+  }
+  try {
+    const result = await service.getFleetHosts({ forceRefresh: msg.forceRefresh });
+    send({
+      type: "main_chat.get_fleet_hosts.response",
+      payload: {
+        requestId: msg.requestId,
+        localServerId: result.localServerId,
+        hosts: result.hosts,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.get_fleet_hosts.response",
+      payload: {
+        requestId: msg.requestId,
+        localServerId: null,
+        hosts: [],
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+type SessionHandlerMap = {
+  [K in MainChatSessionMessage["type"]]: (
+    service: MainChatService,
+    msg: Extract<MainChatSessionMessage, { type: K }>,
+    send: SendFn,
+  ) => Promise<void>;
+};
+
+async function handleClarifyPermission(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.clarify_permission.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.clarifyPermission) {
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: {
+        requestId: msg.requestId,
+        clarification: null,
+        error: "Permission clarification is not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const clarification = await service.clarifyPermission({
+      agentId: msg.agentId,
+      serverId: msg.serverId,
+      permissionRequestId: msg.permissionRequestId,
+      question: msg.question,
+    });
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: { requestId: msg.requestId, clarification, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.clarify_permission.response",
+      payload: { requestId: msg.requestId, clarification: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleListStandingAuthorizations(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.list_standing_authorizations.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.listStandingAuthorizations) {
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: [],
+        suggestions: [],
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const result = await service.listStandingAuthorizations({
+      includeRevoked: msg.includeRevoked,
+    });
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: result.authorizations,
+        suggestions: result.suggestions,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_standing_authorizations.response",
+      payload: {
+        requestId: msg.requestId,
+        authorizations: [],
+        suggestions: [],
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleGrantStandingAuthorization(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.grant_standing_authorization.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.grantStandingAuthorization) {
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        authorization: null,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const authorization = await service.grantStandingAuthorization({
+      scope: msg.scope,
+      serverId: msg.serverId,
+      cwd: msg.cwd,
+      allowSubdirectories: msg.allowSubdirectories,
+      toolName: msg.toolName,
+      commandPrefix: msg.commandPrefix,
+      mode: msg.mode,
+      label: msg.label,
+      reason: msg.reason,
+      suggestionId: msg.suggestionId,
+      expiresAt: msg.expiresAt,
+    });
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: { requestId: msg.requestId, authorization, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.grant_standing_authorization.response",
+      payload: { requestId: msg.requestId, authorization: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRevokeStandingAuthorization(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.revoke_standing_authorization.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.revokeStandingAuthorization) {
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: false,
+        authorization: null,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const result = await service.revokeStandingAuthorization(msg.authorizationId);
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: result.revoked,
+        authorization: result.authorization,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.revoke_standing_authorization.response",
+      payload: {
+        requestId: msg.requestId,
+        revoked: false,
+        authorization: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleDismissRuleSuggestion(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.dismiss_rule_suggestion.request" }>,
+  send: SendFn,
+): Promise<void> {
+  if (!service.dismissRuleSuggestion) {
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: {
+        requestId: msg.requestId,
+        dismissed: false,
+        error: "Standing authorizations are not enabled on this daemon",
+      },
+    });
+    return;
+  }
+  try {
+    const dismissed = await service.dismissRuleSuggestion(msg.suggestionId);
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: { requestId: msg.requestId, dismissed, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.dismiss_rule_suggestion.response",
+      payload: { requestId: msg.requestId, dismissed: false, error: errorMessage(error) },
+    });
+  }
+}
+
+const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
+  "main_chat.ensure.request": handlePlanMessages,
+  "main_chat.list_plans.request": handlePlanMessages,
+  "main_chat.start_plan.request": handlePlanMessages,
+  "main_chat.cancel_plan.request": handlePlanMessages,
+  "main_chat.get_overview.request": handleGovernanceMessages,
+  "main_chat.answer_decision.request": handleGovernanceMessages,
+  "main_chat.add_permission_rule.request": handleGovernanceMessages,
+  "main_chat.remove_rule.request": handleGovernanceMessages,
+  "main_chat.get_settings.request": handleStewardConfigMessages,
+  "main_chat.update_settings.request": handleStewardConfigMessages,
+  "main_chat.trigger_patrol.request": handleStewardConfigMessages,
+  "main_chat.compact.request": handleLifecycleMessages,
+  "main_chat.clear.request": handleLifecycleMessages,
+  "main_chat.new_session.request": handleLifecycleMessages,
+  "main_chat.list_activity.request": handleLifecycleMessages,
+  "main_chat.update_plan_task.request": handleTaskLedgerMessages,
+  "main_chat.withdraw_plan.request": handleTaskLedgerMessages,
+  "main_chat.list_tasks.request": handleTaskLedgerMessages,
+  "main_chat.update_task_scope.request": handleTaskLedgerMessages,
+  "main_chat.park_task.request": handleTaskLedgerMessages,
+  "main_chat.review_task.request": handleTaskLedgerMessages,
+  "main_chat.list_conversations.request": handleMultiConversationAndFleetMessages,
+  "main_chat.create_conversation.request": handleMultiConversationAndFleetMessages,
+  "main_chat.update_conversation.request": handleMultiConversationAndFleetMessages,
+  "main_chat.get_fleet_hosts.request": handleMultiConversationAndFleetMessages,
+  "main_chat.clarify_permission.request": handleClarifyPermission,
+  "main_chat.list_standing_authorizations.request": handleListStandingAuthorizations,
+  "main_chat.grant_standing_authorization.request": handleGrantStandingAuthorization,
+  "main_chat.revoke_standing_authorization.request": handleRevokeStandingAuthorization,
+  "main_chat.dismiss_rule_suggestion.request": handleDismissRuleSuggestion,
+};
+
 export async function handleMainChatSessionMessage(
   service: MainChatService | null,
   msg: MainChatSessionMessage,
@@ -343,23 +1195,10 @@ export async function handleMainChatSessionMessage(
     return;
   }
 
-  switch (msg.type) {
-    case "main_chat.ensure.request":
-    case "main_chat.list_plans.request":
-    case "main_chat.start_plan.request":
-    case "main_chat.cancel_plan.request":
-      await handlePlanMessages(service, msg, send);
-      return;
-    case "main_chat.get_overview.request":
-    case "main_chat.answer_decision.request":
-    case "main_chat.add_permission_rule.request":
-    case "main_chat.remove_rule.request":
-      await handleGovernanceMessages(service, msg, send);
-      return;
-    case "main_chat.get_settings.request":
-    case "main_chat.update_settings.request":
-    case "main_chat.trigger_patrol.request":
-      await handleStewardConfigMessages(service, msg, send);
-      return;
-  }
+  const handler = MAIN_CHAT_MESSAGE_HANDLERS[msg.type] as (
+    svc: MainChatService,
+    message: MainChatSessionMessage,
+    respond: SendFn,
+  ) => Promise<void>;
+  await handler(service, msg, send);
 }

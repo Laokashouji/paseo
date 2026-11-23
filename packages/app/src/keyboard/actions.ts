@@ -42,6 +42,7 @@ export type KeyboardActionId =
   | "workspace.pane.close"
   | "workspace.navigate.index"
   | "workspace.navigate.relative"
+  | "main-chat.open"
   | "sidebar.toggle.left"
   | "sidebar.toggle.right"
   | "sidebar.toggle.both"

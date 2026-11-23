@@ -1,6 +1,6 @@
 import { DiffSession } from "./diff/index.js";
 import type { MainChatService } from "./main-chat/service.js";
-import { handleMainChatSessionMessage } from "./main-chat/session.js";
+import { handleMainChatSessionMessage, isMainChatSessionMessage } from "./main-chat/session.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory, type BackgroundVisibility } from "./agent/directory.js";
@@ -2731,24 +2731,12 @@ export class Session {
   }
 
   private dispatchMainChatMessage(msg: SessionInboundMessage): Promise<void> | undefined {
-    switch (msg.type) {
-      case "main_chat.ensure.request":
-      case "main_chat.list_plans.request":
-      case "main_chat.start_plan.request":
-      case "main_chat.cancel_plan.request":
-      case "main_chat.get_overview.request":
-      case "main_chat.answer_decision.request":
-      case "main_chat.add_permission_rule.request":
-      case "main_chat.remove_rule.request":
-      case "main_chat.get_settings.request":
-      case "main_chat.update_settings.request":
-      case "main_chat.trigger_patrol.request":
-        return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
-          this.emit(response),
-        );
-      default:
-        return undefined;
+    if (!isMainChatSessionMessage(msg)) {
+      return undefined;
     }
+    return handleMainChatSessionMessage(this.mainChatService ?? null, msg, (response) =>
+      this.emit(response),
+    );
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -9197,28 +9185,37 @@ export class Session {
           await receipt.dispatched;
           return;
         }
-        const effectivePrompt = this.mainChatService
-          ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
-          : prompt;
-        const result = await sendPromptToAgent({
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          agentId,
-          prompt: effectivePrompt,
-          messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
-          sessionMode: msg.sessionMode,
-          clearPendingPermissions: true,
-          beforeDispatch,
-          logger: this.sessionLogger,
-        });
-        if (result.disposition === "turn_started") {
-          await waitForAgentRunStartWithTimeout(
-            this.agentManager,
+        const releaseForeground = this.mainChatService?.beginForegroundUserSend(agentId) ?? null;
+        try {
+          const effectivePrompt = this.mainChatService
+            ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
+            : prompt;
+          const result = await sendPromptToAgent({
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
             agentId,
-            result.started,
-            this.delivery.requestSignal,
-          );
+            prompt: effectivePrompt,
+            messageId: msg.messageId,
+            activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+            sessionMode: msg.sessionMode,
+            clearPendingPermissions: true,
+            beforeDispatch,
+            logger: this.sessionLogger,
+          });
+          if (result.disposition === "turn_started") {
+            await waitForAgentRunStartWithTimeout(
+              this.agentManager,
+              agentId,
+              result.started,
+              this.delivery.requestSignal,
+            );
+          }
+        } catch (error) {
+          releaseForeground?.();
+          this.mainChatService?.abortForegroundUserSend(agentId);
+          throw error;
+        } finally {
+          releaseForeground?.();
         }
       };
       const sent = msg.messageId

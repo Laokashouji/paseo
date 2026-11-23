@@ -34,11 +34,101 @@ export interface CollapseTurnsInput {
   getGroupedCalls: (itemId: string) => readonly (ToolCallItem | ThoughtItem)[] | undefined;
   /** The previous fold of the same history, whose unchanged summary rows are reused. */
   previousSummaryRowsByHostId: ReadonlyMap<string, TurnSummaryItem>;
+  /** Fold normal user-initiated turns behind a summary row (default: true). */
+  collapseNormalTurns?: boolean;
+  /** Collapse system-injected Main Chat background turns into a compact single line and hide silent rounds. */
+  collapseBackgroundTurns?: boolean;
 }
 
 const EMPTY_IDS: ReadonlySet<string> = new Set();
 const EMPTY_ROWS: ReadonlyMap<string, TurnSummaryItem> = new Map();
 const EMPTY_HOSTS: ReadonlyMap<string, string> = new Map();
+
+const EXPLICIT_SILENT_SENTINEL_RE =
+  /^(?:`*(?:\[silent\]|silent|no_action|\[no_action\]|<silent\s*\/>|<silent>\s*<\/silent>)`*)[.。!！\s]*$/i;
+
+const PLACEHOLDER_EMPTY_REPLY_RE =
+  /^(?:\(no content\)|no content|no response requested|no response needed|no_response|\[no_response\])[.。!！\s]*$/i;
+
+const MISSING_REPLY_RECOVERY_MARKER = "系统自动补答提醒";
+const MAX_BACKGROUND_LABEL_CHARS = 48;
+
+export function isSystemBackgroundTrigger(item: StreamItem): boolean {
+  if (item.kind !== "tool_call") return false;
+  if (item.payload.source === "agent") {
+    return (
+      item.payload.data.name === "heartbeat" || item.payload.data.callId.startsWith("paseo-system:")
+    );
+  }
+  return item.payload.data.toolName === "heartbeat";
+}
+
+function extractSystemBackgroundText(item: StreamItem): string {
+  if (item.kind !== "tool_call") return "";
+  if (item.payload.source === "agent") {
+    const detail = item.payload.data.detail;
+    if (detail.type === "plain_text") return detail.text ?? "";
+    if (detail.type === "unknown" && typeof detail.input === "string") return detail.input;
+    return "";
+  }
+  return typeof item.payload.data.arguments === "string" ? item.payload.data.arguments : "";
+}
+
+function isMissingReplyRecoveryTrigger(item: StreamItem): boolean {
+  return extractSystemBackgroundText(item).includes(MISSING_REPLY_RECOVERY_MARKER);
+}
+
+export function extractBackgroundTurnLabel(item: StreamItem): string | null {
+  const raw = extractSystemBackgroundText(item);
+  if (!raw.trim()) return null;
+  for (const line of raw.split(/\r?\n/)) {
+    const cleaned = line
+      .replace(/^[#>*\-\s【[]+/, "")
+      .replace(/[】\]\s]+$/, "")
+      .trim();
+    if (!cleaned || cleaned.startsWith("<")) continue;
+    return cleaned.length > MAX_BACKGROUND_LABEL_CHARS
+      ? `${cleaned.slice(0, MAX_BACKGROUND_LABEL_CHARS - 1)}…`
+      : cleaned;
+  }
+  return null;
+}
+
+function getToolCallName(item: ToolCallItem): string {
+  return item.payload.source === "agent" ? item.payload.data.name : item.payload.data.toolName;
+}
+
+export function isSilentBackgroundTurn(
+  bodyItems: readonly StreamItem[],
+  getGroupedCalls: CollapseTurnsInput["getGroupedCalls"],
+): boolean {
+  const assistantTexts: string[] = [];
+  for (const item of bodyItems) {
+    if (item.kind === "tool_call" || item.kind === "thought") {
+      const expanded = getGroupedCalls(item.id) ?? [item];
+      for (const call of expanded) {
+        if (call.kind === "tool_call" && isMainChatInlineCardToolName(getToolCallName(call))) {
+          return false;
+        }
+      }
+      continue;
+    }
+    if (item.kind === "assistant_message") {
+      assistantTexts.push(item.text);
+      continue;
+    }
+    if (item.kind === "plugin" && item.sourceKind === "assistant_message") {
+      return false;
+    }
+  }
+  const combined = assistantTexts
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (combined.length === 0) return true;
+  return EXPLICIT_SILENT_SENTINEL_RE.test(combined) || PLACEHOLDER_EMPTY_REPLY_RE.test(combined);
+}
 
 function summarizeTurn(
   items: readonly StreamItem[],
@@ -72,15 +162,33 @@ function hasSameCounts(a: Record<string, number>, b: Record<string, number>): bo
   return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
 }
 
+function hasSameBackgroundMeta(
+  a: TurnSummaryItem["backgroundMeta"],
+  b: TurnSummaryItem["backgroundMeta"],
+): boolean {
+  return (
+    a === b ||
+    (a !== undefined && b !== undefined && a.label === b.label && a.running === b.running)
+  );
+}
+
 function summaryRow(
   host: StreamItem,
   expanded: boolean,
   tools: OverviewSummary,
   previous: TurnSummaryItem | undefined,
+  options?: {
+    variant?: "default" | "background";
+    backgroundMeta?: TurnSummaryItem["backgroundMeta"];
+  },
 ): TurnSummaryItem {
+  const variant = options?.variant;
+  const backgroundMeta = options?.backgroundMeta;
   if (
     previous &&
     previous.expanded === expanded &&
+    previous.variant === variant &&
+    hasSameBackgroundMeta(previous.backgroundMeta, backgroundMeta) &&
     hasSameWork(previous.tools, tools) &&
     hasSamePosition(previous.timelineCursor, host.timelineCursor)
   ) {
@@ -97,15 +205,23 @@ function summaryRow(
     hostId: host.id,
     expanded,
     tools,
+    ...(variant ? { variant } : {}),
+    ...(backgroundMeta ? { backgroundMeta } : {}),
   };
 }
 
 function staysVisibleWhenCollapsed(item: StreamItem): boolean {
   if (isTurnTrigger(item) || item.kind === "compaction") return true;
   if (item.kind === "tool_call") {
-    const name =
-      item.payload.source === "agent" ? item.payload.data.name : item.payload.data.toolName;
-    return isMainChatInlineCardToolName(name);
+    return isMainChatInlineCardToolName(getToolCallName(item));
+  }
+  return false;
+}
+
+function staysVisibleInCollapsedBackgroundTurn(item: StreamItem): boolean {
+  if (item.kind === "compaction") return true;
+  if (item.kind === "tool_call") {
+    return isMainChatInlineCardToolName(getToolCallName(item));
   }
   return false;
 }
@@ -138,26 +254,81 @@ function findLastReplyIndex(tail: StreamItem[], start: number, end: number): num
  * did before its last message collapses into that row, and the last message stays in the chat.
  * A turn folds only once it is complete, its user message is loaded, and it sent messages or
  * called tools before its reply. Reasoning is revealed only when the turn opens.
+ *
+ * When `collapseBackgroundTurns` is enabled (Main Chat), system-injected background turns fold
+ * into a single compact expandable row and completed silent rounds are suppressed from the stream.
  */
 export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
   const { tail } = input;
+  const collapseNormal = input.collapseNormalTurns ?? true;
+  const collapseBackground = input.collapseBackgroundTurns === true;
+
   const output: StreamItem[] = [];
   const summaryRowsByHostId = new Map<string, TurnSummaryItem>();
   const nestedItemIds = new Set<string>();
   const hostIdByFoldedMessageId = new Map<string, string>();
   const hostIdByHiddenRowId = new Map<string, string>();
+  let mutatedTail = false;
 
-  let runStart = 0;
-  const flushRun = (runEnd: number) => {
-    const host = tail[runStart - 1];
-    const isClosed = runEnd < tail.length || !input.isLatestTurnOpen;
+  const expandCalls = (items: readonly StreamItem[]): StreamItem[] =>
+    items.flatMap<StreamItem>((item) =>
+      item.kind === "tool_call" || item.kind === "thought"
+        ? [...(input.getGroupedCalls(item.id) ?? [item])]
+        : [item],
+    );
+
+  const flushBackgroundRun = (host: StreamItem, body: StreamItem[], isClosed: boolean) => {
+    // Remove the host item that the boundary loop just pushed before this run.
+    if (output.length > 0 && output[output.length - 1] === host) {
+      output.pop();
+    }
+    mutatedTail = true;
+
+    if (isMissingReplyRecoveryTrigger(host)) {
+      // Keep the recovered assistant answer visible while suppressing the internal recovery prompt.
+      output.push(...body);
+      return;
+    }
+
+    if (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) {
+      // Completed silent rounds stay in the `/main/history` activity audit view, not in chat.
+      return;
+    }
+
+    const tools = summarizeTurn(body, input.getGroupedCalls);
+    const expanded = input.expandedHostIds.has(host.id);
+    const summary = summaryRow(
+      host,
+      expanded,
+      tools,
+      input.previousSummaryRowsByHostId.get(host.id),
+      {
+        variant: "background",
+        backgroundMeta: {
+          label: extractBackgroundTurnLabel(host),
+          running: !isClosed,
+        },
+      },
+    );
+    summaryRowsByHostId.set(host.id, summary);
+    const revealed = [host, ...(expanded ? expandCalls(body) : body)];
+    for (const item of revealed) {
+      if (item !== host && staysVisibleInCollapsedBackgroundTurn(item)) continue;
+      hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
+      if (expanded) nestedItemIds.add(item.id);
+      else hostIdByHiddenRowId.set(item.id, host.id);
+    }
+    output.push(
+      summary,
+      ...(expanded ? revealed : body.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
+    );
+  };
+
+  const flushNormalRun = (host: StreamItem | undefined, runEnd: number, isClosed: boolean) => {
     const replyIndex = findLastReplyIndex(tail, runStart, runEnd);
-    if (
-      !host ||
-      (host.kind !== "user_message" && host.kind !== "tool_call") ||
-      !isClosed ||
-      replyIndex <= runStart
-    ) {
+    const isCollapsibleHost =
+      host !== undefined && (host.kind === "user_message" || host.kind === "tool_call");
+    if (!isCollapsibleHost || !isClosed || replyIndex <= runStart) {
       output.push(...tail.slice(runStart, runEnd));
       return;
     }
@@ -175,13 +346,8 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       input.previousSummaryRowsByHostId.get(host.id),
     );
     summaryRowsByHostId.set(host.id, summary);
-    const revealed = expanded
-      ? folded.flatMap<StreamItem>((item) =>
-          item.kind === "tool_call" || item.kind === "thought"
-            ? [...(input.getGroupedCalls(item.id) ?? [item])]
-            : [item],
-        )
-      : folded;
+    mutatedTail = true;
+    const revealed = expanded ? expandCalls(folded) : folded;
     for (const item of revealed) {
       if (staysVisibleWhenCollapsed(item)) continue;
       hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
@@ -193,6 +359,22 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       ...(expanded ? revealed : folded.filter((item) => staysVisibleWhenCollapsed(item))),
     );
     output.push(...tail.slice(replyIndex, runEnd));
+  };
+
+  let runStart = 0;
+  const flushRun = (runEnd: number) => {
+    const host = tail[runStart - 1];
+    const isClosed = runEnd < tail.length || !input.isLatestTurnOpen;
+
+    if (collapseBackground && host && isSystemBackgroundTrigger(host)) {
+      flushBackgroundRun(host, tail.slice(runStart, runEnd), isClosed);
+      return;
+    }
+    if (!collapseNormal) {
+      output.push(...tail.slice(runStart, runEnd));
+      return;
+    }
+    flushNormalRun(host, runEnd, isClosed);
   };
 
   for (let index = 0; index < tail.length; index += 1) {
@@ -207,7 +389,7 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
   }
   flushRun(tail.length);
 
-  if (summaryRowsByHostId.size === 0) {
+  if (summaryRowsByHostId.size === 0 && !mutatedTail) {
     return {
       tail,
       nestedItemIds: EMPTY_IDS,

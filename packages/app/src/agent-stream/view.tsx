@@ -1,6 +1,7 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
 import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -562,6 +563,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const effectiveTurnPresentation = useRetainedValue(turnPresentation, isActive);
     const isTurnActive = effectiveTurnPresentation.isActive;
     const presentStream = useMemo(() => createStreamPresentation(), []);
+    const isMainChatContext = useSessionStore((state) => {
+      const session = state.sessions[resolvedServerId];
+      const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+      return isMainChatAgent(current);
+    });
     const presentation = useMemo(
       () =>
         presentStream({
@@ -573,6 +579,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           expandedTurnHostIds,
           isTurnActive,
           activeTurnId: effectiveTurnPresentation.turnId,
+          collapseBackgroundTurns: isMainChatContext,
         }),
       [
         presentStream,
@@ -584,6 +591,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         expandedTurnHostIds,
         isTurnActive,
         effectiveTurnPresentation.turnId,
+        isMainChatContext,
       ],
     );
     const {
@@ -1571,7 +1579,7 @@ function PermissionActionButton({
   );
 }
 
-function PermissionRequestCard({
+export function PermissionRequestCard({
   permission,
   client,
 }: {

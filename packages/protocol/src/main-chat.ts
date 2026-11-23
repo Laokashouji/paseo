@@ -3,10 +3,16 @@ import type { AgentLabelSource } from "./agent-labels.js";
 
 export const MAIN_CHAT_ROLE_LABEL = "paseo.role";
 export const MAIN_CHAT_ROLE_VALUE = "main";
+export const MAIN_CHAT_FORMER_ROLE_VALUE = "main-former";
+export const MAIN_CHAT_CONVERSATION_ID_LABEL = "paseo.main-chat.conversation-id";
+export const MAIN_CHAT_CONVERSATION_KIND_LABEL = "paseo.main-chat.conversation-kind";
+export const MAIN_CHAT_REPLACED_BY_LABEL = "paseo.main-chat.replaced-by";
 export const MAIN_CHAT_TASK_PLAN_ID_LABEL = "paseo.main-chat.plan-id";
 export const MAIN_CHAT_TASK_ID_LABEL = "paseo.main-chat.task-id";
+export const MAIN_CHAT_TASK_RECORD_ID_LABEL = "paseo.main-chat.task-record-id";
 export const MAIN_CHAT_TASK_MODE_LABEL = "paseo.main-chat.mode";
 export const MAIN_CHAT_TASK_GOAL_LABEL = "paseo.main-chat.goal";
+export const MAIN_CHAT_TASK_QUIET_LABEL = "paseo.main-chat.quiet";
 export const MAIN_CHAT_WORKSPACE_DIR_NAME = "main-chat";
 export const MAIN_CHAT_DEFAULT_TITLE = "对话管理";
 
@@ -220,8 +226,201 @@ export type MainChatTaskMode = z.infer<typeof MainChatTaskModeSchema>;
 export const MainChatTaskIsolationSchema = z.enum(["local", "worktree"]);
 export type MainChatTaskIsolation = z.infer<typeof MainChatTaskIsolationSchema>;
 
-export const MainChatPlanStatusSchema = z.enum(["open", "started", "cancelled"]);
+export const MainChatPlanStatusSchema = z.enum(["open", "started", "cancelled", "withdrawn"]);
 export type MainChatPlanStatus = z.infer<typeof MainChatPlanStatusSchema>;
+
+export const MainChatTaskStatusSchema = z.enum([
+  "open",
+  "running",
+  "needs_you",
+  "awaiting_review",
+  "parked",
+  "completed",
+  "cancelled",
+  "failed",
+]);
+export type MainChatTaskStatus = z.infer<typeof MainChatTaskStatusSchema>;
+
+export const MainChatTaskBriefSchema = z.object({
+  goal: z.string(),
+  doneWhen: z.array(z.string()),
+  outOfBounds: z.array(z.string()),
+  scopeRevision: z.number().int().positive(),
+  updatedAt: z.string(),
+});
+export type MainChatTaskBrief = z.infer<typeof MainChatTaskBriefSchema>;
+
+export const MainChatTaskDecisionActorSchema = z.enum(["user", "supervisor", "leader"]);
+export type MainChatTaskDecisionActor = z.infer<typeof MainChatTaskDecisionActorSchema>;
+
+export const MainChatTaskDecisionEntrySchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  question: z.string(),
+  answer: z.string(),
+  decidedBy: MainChatTaskDecisionActorSchema,
+  createdAt: z.string(),
+});
+export type MainChatTaskDecisionEntry = z.infer<typeof MainChatTaskDecisionEntrySchema>;
+
+export const MainChatTaskReviewVerdictSchema = z.enum(["accept", "rework"]);
+export type MainChatTaskReviewVerdict = z.infer<typeof MainChatTaskReviewVerdictSchema>;
+
+export const MainChatDurationSampleSchema = z.object({
+  id: z.string(),
+  serverId: z.string().nullable(),
+  cwd: z.string().nullable(),
+  mode: MainChatTaskModeSchema,
+  role: z.string().nullable(),
+  provider: z.string().nullable(),
+  durationMinutes: z.number().positive(),
+  completedAt: z.string(),
+});
+export type MainChatDurationSample = z.infer<typeof MainChatDurationSampleSchema>;
+
+export const MainChatConversationKindSchema = z.enum(["main", "leader", "side"]);
+export type MainChatConversationKind = z.infer<typeof MainChatConversationKindSchema>;
+
+export const MainChatConversationRecordSchema = z.object({
+  id: z.string(),
+  kind: MainChatConversationKindSchema,
+  agentId: z.string(),
+  workspaceId: z.string().nullable(),
+  title: z.string(),
+  directionSummary: z.string().nullable(),
+  parentConversationId: z.string().nullable(),
+  serverId: z.string().nullable(),
+  archivedAt: z.string().nullable(),
+  pinnedAsLeaderAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastMessageAt: z.string().nullable(),
+});
+export type MainChatConversationRecord = z.infer<typeof MainChatConversationRecordSchema>;
+
+export const MainChatFleetHostStatusSchema = z.object({
+  serverId: z.string(),
+  label: z.string(),
+  isLocal: z.boolean(),
+  status: z.enum(["online", "connecting", "offline", "error", "degraded"]),
+  agentCount: z.number().int().nonnegative(),
+  needsAttentionCount: z.number().int().nonnegative(),
+  lastSyncedAt: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatFleetHostStatus = z.infer<typeof MainChatFleetHostStatusSchema>;
+
+export const MainChatSupervisionSignalKindSchema = z.enum([
+  "review",
+  "parent_closeout",
+  "pr_merged",
+  "report",
+  "idle",
+  "unjudged",
+  "needs_you",
+  "ask",
+  "stalled",
+  "no_progress",
+  "all_stopped",
+  "timed_out",
+  "interrupted",
+  "failed",
+  "orphaned",
+  "pr_conflict",
+  "draft_pr",
+  "pr_event",
+  "todo_ready",
+  "decision_reply",
+  "check",
+  "escalated",
+  "decide",
+  "leader_stuck",
+  "usage_limit_wake",
+  "transient_retry",
+]);
+export type MainChatSupervisionSignalKind = z.infer<typeof MainChatSupervisionSignalKindSchema>;
+
+export const MainChatSupervisionUrgencySchema = z.enum(["normal", "urgent", "immediate"]);
+export type MainChatSupervisionUrgency = z.infer<typeof MainChatSupervisionUrgencySchema>;
+
+export const MainChatSupervisionSignalSchema = z.object({
+  id: z.string(),
+  kind: MainChatSupervisionSignalKindSchema,
+  urgency: MainChatSupervisionUrgencySchema,
+  taskId: z.string().nullable(),
+  agentId: z.string().nullable(),
+  serverId: z.string().nullable(),
+  conversationId: z.string().nullable(),
+  title: z.string(),
+  summary: z.string(),
+  createdAt: z.string(),
+});
+export type MainChatSupervisionSignal = z.infer<typeof MainChatSupervisionSignalSchema>;
+
+export const MainChatApprovalClarificationSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  serverId: z.string().nullable(),
+  permissionRequestId: z.string(),
+  question: z.string(),
+  answer: z.string().nullable(),
+  proofToken: z.string(),
+  pausedDeadlineAt: z.string(),
+  answeredAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type MainChatApprovalClarification = z.infer<typeof MainChatApprovalClarificationSchema>;
+
+export const MainChatStandingAuthorizationScopeSchema = z.enum(["permission", "auto_start"]);
+export type MainChatStandingAuthorizationScope = z.infer<
+  typeof MainChatStandingAuthorizationScopeSchema
+>;
+
+export const MainChatStandingAuthorizationSchema = z.object({
+  id: z.string(),
+  scope: MainChatStandingAuthorizationScopeSchema,
+  serverId: z.string().nullable(),
+  cwd: z.string().nullable(),
+  allowSubdirectories: z.boolean().optional(),
+  toolName: z.string().nullable(),
+  commandPrefix: z.string().nullable(),
+  mode: MainChatTaskModeSchema.nullable(),
+  label: z.string(),
+  reason: z.string().nullable(),
+  createdAt: z.string(),
+  lastMatchedAt: z.string().nullable(),
+  matchCount: z.number().int().nonnegative(),
+  expiresAt: z.string().nullable(),
+  revokedAt: z.string().nullable(),
+});
+export type MainChatStandingAuthorization = z.infer<typeof MainChatStandingAuthorizationSchema>;
+
+export const MainChatRuleSuggestionSchema = z.object({
+  id: z.string(),
+  scope: MainChatStandingAuthorizationScopeSchema,
+  label: z.string(),
+  reason: z.string(),
+  serverId: z.string().nullable(),
+  cwd: z.string().nullable(),
+  toolName: z.string().nullable(),
+  commandPrefix: z.string().nullable(),
+  mode: MainChatTaskModeSchema.nullable(),
+  observedCount: z.number().int().positive(),
+  dismissedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type MainChatRuleSuggestion = z.infer<typeof MainChatRuleSuggestionSchema>;
+
+export const MainChatNextStepSuggestionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  prompt: z.string(),
+  risky: z.boolean(),
+  reason: z.string().nullable().optional(),
+  targetAgentId: z.string().nullable().optional(),
+  targetTaskId: z.string().nullable().optional(),
+});
+export type MainChatNextStepSuggestion = z.infer<typeof MainChatNextStepSuggestionSchema>;
 
 export const MainChatPlannedTaskSchema = z.object({
   id: z.string(),
@@ -229,6 +428,8 @@ export const MainChatPlannedTaskSchema = z.object({
   goal: z.string(),
   mode: MainChatTaskModeSchema,
   isolation: MainChatTaskIsolationSchema,
+  serverId: z.string().nullable().optional(),
+  hostLabel: z.string().nullable().optional(),
   cwd: z.string().nullable(),
   workspaceId: z.string().nullable(),
   workspaceLabel: z.string(),
@@ -243,18 +444,45 @@ export const MainChatPlannedTaskSchema = z.object({
   agentId: z.string().nullable(),
   startedAt: z.string().nullable(),
   startError: z.string().nullable(),
+  continuesTaskId: z.string().nullable().optional(),
+  continuesWhy: z.string().nullable().optional(),
+  expectedMinutes: z.number().positive().nullable().optional(),
+  quiet: z.boolean().optional(),
+  scopeRevision: z.number().int().positive().optional(),
+  taskRecordId: z.string().nullable().optional(),
 });
 export type MainChatPlannedTask = z.infer<typeof MainChatPlannedTaskSchema>;
+
+export const MainChatPlanTaskPatchSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
+  goal: z.string().min(1).max(4000).optional(),
+  mode: MainChatTaskModeSchema.optional(),
+  isolation: MainChatTaskIsolationSchema.optional(),
+  serverId: z.string().nullable().optional(),
+  cwd: z.string().nullable().optional(),
+  doneWhen: z.array(z.string()).optional(),
+  outOfBounds: z.array(z.string()).optional(),
+  provider: z.string().nullable().optional(),
+  modeId: z.string().nullable().optional(),
+  thinkingOptionId: z.string().nullable().optional(),
+  branchName: z.string().nullable().optional(),
+  baseBranch: z.string().nullable().optional(),
+  quiet: z.boolean().optional(),
+});
+export type MainChatPlanTaskPatch = z.infer<typeof MainChatPlanTaskPatchSchema>;
 
 export const MainChatPlanRecordSchema = z.object({
   id: z.string(),
   mainAgentId: z.string(),
+  conversationId: z.string().nullable().optional(),
   status: MainChatPlanStatusSchema,
   autoStarted: z.boolean(),
   summary: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   cancelledAt: z.string().nullable(),
+  withdrawnAt: z.string().nullable().optional(),
+  withdrawReason: z.string().nullable().optional(),
   tasks: z.array(MainChatPlannedTaskSchema),
 });
 export type MainChatPlanRecord = z.infer<typeof MainChatPlanRecordSchema>;
@@ -314,10 +542,48 @@ export const MainChatDecisionRecordSchema = z.object({
 });
 export type MainChatDecisionRecord = z.infer<typeof MainChatDecisionRecordSchema>;
 
+export const MainChatTaskRecordSchema = z.object({
+  id: z.string(),
+  mainAgentId: z.string(),
+  conversationId: z.string().nullable().optional(),
+  planId: z.string().nullable(),
+  title: z.string(),
+  mode: MainChatTaskModeSchema,
+  isolation: MainChatTaskIsolationSchema,
+  serverId: z.string().nullable().optional(),
+  hostLabel: z.string().nullable().optional(),
+  cwd: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  workspaceLabel: z.string(),
+  status: MainChatTaskStatusSchema,
+  brief: MainChatTaskBriefSchema,
+  agentIds: z.array(z.string()),
+  activeAgentId: z.string().nullable(),
+  continuesTaskId: z.string().nullable().optional(),
+  continuesWhy: z.string().nullable().optional(),
+  supersededByTaskId: z.string().nullable().optional(),
+  expectedMinutes: z.number().positive().nullable().optional(),
+  actualMinutes: z.number().nonnegative().nullable().optional(),
+  quiet: z.boolean().optional(),
+  parkedAt: z.string().nullable().optional(),
+  parkedReason: z.string().nullable().optional(),
+  completedAt: z.string().nullable().optional(),
+  lastActivityAt: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  decisions: z.array(MainChatTaskDecisionEntrySchema).optional(),
+  latestReceipt: MainChatTaskReceiptSchema.nullable().optional(),
+  reworkCount: z.number().int().nonnegative().optional(),
+});
+export type MainChatTaskRecord = z.infer<typeof MainChatTaskRecordSchema>;
+
 export const MainChatAutoStartRuleSchema = z.object({
   id: z.string(),
   cwd: z.string(),
   mode: MainChatTaskModeSchema,
+  serverId: z.string().nullable().optional(),
+  hostLabel: z.string().nullable().optional(),
+  allowSubdirectories: z.boolean().optional(),
   createdAt: z.string(),
 });
 export type MainChatAutoStartRule = z.infer<typeof MainChatAutoStartRuleSchema>;
@@ -333,6 +599,64 @@ export type MainChatPermissionRule = z.infer<typeof MainChatPermissionRuleSchema
 
 export const MainChatRuleKindSchema = z.enum(["auto_start", "permission"]);
 export type MainChatRuleKind = z.infer<typeof MainChatRuleKindSchema>;
+
+export const MainChatActivityKindSchema = z.enum([
+  "background_turn",
+  "silent_turn",
+  "preempted",
+  "compaction",
+  "clear",
+  "handoff",
+  "missing_reply_recovery",
+]);
+export type MainChatActivityKind = z.infer<typeof MainChatActivityKindSchema>;
+
+export const MainChatActivityStatusSchema = z.enum([
+  "queued",
+  "running",
+  "completed",
+  "preempted",
+  "failed",
+  "skipped",
+]);
+export type MainChatActivityStatus = z.infer<typeof MainChatActivityStatusSchema>;
+
+export const MainChatActivityEntrySchema = z.object({
+  id: z.string(),
+  mainAgentId: z.string(),
+  kind: MainChatActivityKindSchema,
+  trigger: z.string(),
+  summary: z.string(),
+  silent: z.boolean(),
+  status: MainChatActivityStatusSchema,
+  createdAt: z.string(),
+  completedAt: z.string().nullable(),
+  preemptedByUser: z.boolean().optional(),
+  relatedAgentId: z.string().nullable().optional(),
+  detail: z.string().nullable().optional(),
+});
+export type MainChatActivityEntry = z.infer<typeof MainChatActivityEntrySchema>;
+
+export const MainChatCompactionStatusSchema = z.enum(["idle", "running", "succeeded", "failed"]);
+export type MainChatCompactionStatus = z.infer<typeof MainChatCompactionStatusSchema>;
+
+export const MainChatCompactionReasonSchema = z.enum(["manual", "idle_precompact"]);
+export type MainChatCompactionReason = z.infer<typeof MainChatCompactionReasonSchema>;
+
+export const MainChatCompactionStrategySchema = z.enum(["native", "handoff_summary"]);
+export type MainChatCompactionStrategy = z.infer<typeof MainChatCompactionStrategySchema>;
+
+export const MainChatCompactionStateSchema = z.object({
+  status: MainChatCompactionStatusSchema,
+  estimatedTokens: z.number().int().nonnegative(),
+  thresholdTokens: z.number().int().positive(),
+  lastCompactedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  summary: z.string().nullable(),
+  reason: MainChatCompactionReasonSchema.nullable().optional(),
+  strategy: MainChatCompactionStrategySchema.nullable().optional(),
+});
+export type MainChatCompactionState = z.infer<typeof MainChatCompactionStateSchema>;
 
 export const MainChatMetricsSchema = z.object({
   autoContinued: z.number().int().nonnegative(),
@@ -352,6 +676,10 @@ export const MainChatMetricsSchema = z.object({
   proactiveWakeups: z.number().int().nonnegative().optional(),
   autoDelegatedQuestions: z.number().int().nonnegative().optional(),
   noProgressNudges: z.number().int().nonnegative().optional(),
+  preemptedTurns: z.number().int().nonnegative().optional(),
+  silentTurns: z.number().int().nonnegative().optional(),
+  missingReplyRecoveries: z.number().int().nonnegative().optional(),
+  compactions: z.number().int().nonnegative().optional(),
 });
 export type MainChatMetrics = z.infer<typeof MainChatMetricsSchema>;
 
@@ -365,6 +693,20 @@ export const MainChatOverviewSchema = z.object({
   triages: z.array(MainChatSessionTriageSchema).optional(),
   lastPatrolAt: z.string().nullable().optional(),
   lastWakeupAt: z.string().nullable().optional(),
+  compaction: MainChatCompactionStateSchema.optional(),
+  recentActivityCount: z.number().int().nonnegative().optional(),
+  backgroundBusy: z.boolean().optional(),
+  queuedBackgroundCount: z.number().int().nonnegative().optional(),
+  tasks: z.array(MainChatTaskRecordSchema).optional(),
+  conversations: z.array(MainChatConversationRecordSchema).optional(),
+  fleetHosts: z.array(MainChatFleetHostStatusSchema).optional(),
+  recentReceipts: z.array(MainChatTaskReceiptSchema).optional(),
+  standingAuthorizations: z.array(MainChatStandingAuthorizationSchema).optional(),
+  ruleSuggestions: z.array(MainChatRuleSuggestionSchema).optional(),
+  pendingClarifications: z.array(MainChatApprovalClarificationSchema).optional(),
+  nextStepSuggestions: z.array(MainChatNextStepSuggestionSchema).optional(),
+  suppressedQuietBadgeCount: z.number().int().nonnegative().optional(),
+  pendingSignalCount: z.number().int().nonnegative().optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -628,6 +970,528 @@ export const MainChatTriggerPatrolResponseSchema = z.object({
 });
 export type MainChatTriggerPatrolResponse = z.infer<typeof MainChatTriggerPatrolResponseSchema>;
 
+export const MainChatCompactRequestSchema = z.object({
+  type: z.literal("main_chat.compact.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+  reason: MainChatCompactionReasonSchema.optional(),
+  instructions: z.string().optional(),
+});
+export type MainChatCompactRequest = z.infer<typeof MainChatCompactRequestSchema>;
+
+export const MainChatCompactResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  mainAgentId: z.string().nullable(),
+  compaction: MainChatCompactionStateSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatCompactResponsePayload = z.infer<typeof MainChatCompactResponsePayloadSchema>;
+
+export const MainChatCompactResponseSchema = z.object({
+  type: z.literal("main_chat.compact.response"),
+  payload: MainChatCompactResponsePayloadSchema,
+});
+export type MainChatCompactResponse = z.infer<typeof MainChatCompactResponseSchema>;
+
+export const MainChatClearRequestSchema = z.object({
+  type: z.literal("main_chat.clear.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+});
+export type MainChatClearRequest = z.infer<typeof MainChatClearRequestSchema>;
+
+export const MainChatClearResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  previousAgentId: z.string().nullable(),
+  agentId: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  migratedPlans: z.number().int().nonnegative(),
+  migratedDecisions: z.number().int().nonnegative(),
+  migratedChildAgents: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type MainChatClearResponsePayload = z.infer<typeof MainChatClearResponsePayloadSchema>;
+
+export const MainChatClearResponseSchema = z.object({
+  type: z.literal("main_chat.clear.response"),
+  payload: MainChatClearResponsePayloadSchema,
+});
+export type MainChatClearResponse = z.infer<typeof MainChatClearResponseSchema>;
+
+export const MainChatNewSessionRequestSchema = z.object({
+  type: z.literal("main_chat.new_session.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+  carryHandoffSummary: z.boolean().optional(),
+  title: z.string().min(1).max(40).optional(),
+});
+export type MainChatNewSessionRequest = z.infer<typeof MainChatNewSessionRequestSchema>;
+
+export const MainChatNewSessionResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  previousAgentId: z.string().nullable(),
+  agentId: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  handoffSummary: z.string().nullable(),
+  migratedPlans: z.number().int().nonnegative(),
+  migratedDecisions: z.number().int().nonnegative(),
+  migratedChildAgents: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type MainChatNewSessionResponsePayload = z.infer<
+  typeof MainChatNewSessionResponsePayloadSchema
+>;
+
+export const MainChatNewSessionResponseSchema = z.object({
+  type: z.literal("main_chat.new_session.response"),
+  payload: MainChatNewSessionResponsePayloadSchema,
+});
+export type MainChatNewSessionResponse = z.infer<typeof MainChatNewSessionResponseSchema>;
+
+export const MainChatListActivityRequestSchema = z.object({
+  type: z.literal("main_chat.list_activity.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  includeSilent: z.boolean().optional(),
+  kind: MainChatActivityKindSchema.optional(),
+});
+export type MainChatListActivityRequest = z.infer<typeof MainChatListActivityRequestSchema>;
+
+export const MainChatListActivityResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  activities: z.array(MainChatActivityEntrySchema),
+  total: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type MainChatListActivityResponsePayload = z.infer<
+  typeof MainChatListActivityResponsePayloadSchema
+>;
+
+export const MainChatListActivityResponseSchema = z.object({
+  type: z.literal("main_chat.list_activity.response"),
+  payload: MainChatListActivityResponsePayloadSchema,
+});
+export type MainChatListActivityResponse = z.infer<typeof MainChatListActivityResponseSchema>;
+
+// ============================================================================
+// M3 Task Ledger & Inline Plan Edit RPC Schemas
+// ============================================================================
+
+export const MainChatUpdatePlanTaskRequestSchema = z.object({
+  type: z.literal("main_chat.update_plan_task.request"),
+  requestId: z.string(),
+  planId: z.string(),
+  taskId: z.string(),
+  patch: MainChatPlanTaskPatchSchema,
+});
+export type MainChatUpdatePlanTaskRequest = z.infer<typeof MainChatUpdatePlanTaskRequestSchema>;
+
+export const MainChatUpdatePlanTaskResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  plan: MainChatPlanRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatUpdatePlanTaskResponsePayload = z.infer<
+  typeof MainChatUpdatePlanTaskResponsePayloadSchema
+>;
+
+export const MainChatUpdatePlanTaskResponseSchema = z.object({
+  type: z.literal("main_chat.update_plan_task.response"),
+  payload: MainChatUpdatePlanTaskResponsePayloadSchema,
+});
+export type MainChatUpdatePlanTaskResponse = z.infer<typeof MainChatUpdatePlanTaskResponseSchema>;
+
+export const MainChatWithdrawPlanRequestSchema = z.object({
+  type: z.literal("main_chat.withdraw_plan.request"),
+  requestId: z.string(),
+  planId: z.string(),
+  reason: z.string().min(1).max(500),
+});
+export type MainChatWithdrawPlanRequest = z.infer<typeof MainChatWithdrawPlanRequestSchema>;
+
+export const MainChatWithdrawPlanResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  plan: MainChatPlanRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatWithdrawPlanResponsePayload = z.infer<
+  typeof MainChatWithdrawPlanResponsePayloadSchema
+>;
+
+export const MainChatWithdrawPlanResponseSchema = z.object({
+  type: z.literal("main_chat.withdraw_plan.response"),
+  payload: MainChatWithdrawPlanResponsePayloadSchema,
+});
+export type MainChatWithdrawPlanResponse = z.infer<typeof MainChatWithdrawPlanResponseSchema>;
+
+export const MainChatListTasksRequestSchema = z.object({
+  type: z.literal("main_chat.list_tasks.request"),
+  requestId: z.string(),
+  mainAgentId: z.string().optional(),
+  conversationId: z.string().optional(),
+  includeCompleted: z.boolean().optional(),
+});
+export type MainChatListTasksRequest = z.infer<typeof MainChatListTasksRequestSchema>;
+
+export const MainChatListTasksResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  tasks: z.array(MainChatTaskRecordSchema),
+  error: z.string().nullable(),
+});
+export type MainChatListTasksResponsePayload = z.infer<
+  typeof MainChatListTasksResponsePayloadSchema
+>;
+
+export const MainChatListTasksResponseSchema = z.object({
+  type: z.literal("main_chat.list_tasks.response"),
+  payload: MainChatListTasksResponsePayloadSchema,
+});
+export type MainChatListTasksResponse = z.infer<typeof MainChatListTasksResponseSchema>;
+
+export const MainChatUpdateTaskScopeRequestSchema = z.object({
+  type: z.literal("main_chat.update_task_scope.request"),
+  requestId: z.string(),
+  taskId: z.string(),
+  goal: z.string().min(1).max(4000).optional(),
+  doneWhen: z.array(z.string()).optional(),
+  outOfBounds: z.array(z.string()).optional(),
+  reason: z.string().max(500).optional(),
+});
+export type MainChatUpdateTaskScopeRequest = z.infer<typeof MainChatUpdateTaskScopeRequestSchema>;
+
+export const MainChatUpdateTaskScopeResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatUpdateTaskScopeResponsePayload = z.infer<
+  typeof MainChatUpdateTaskScopeResponsePayloadSchema
+>;
+
+export const MainChatUpdateTaskScopeResponseSchema = z.object({
+  type: z.literal("main_chat.update_task_scope.response"),
+  payload: MainChatUpdateTaskScopeResponsePayloadSchema,
+});
+export type MainChatUpdateTaskScopeResponse = z.infer<typeof MainChatUpdateTaskScopeResponseSchema>;
+
+export const MainChatParkTaskRequestSchema = z.object({
+  type: z.literal("main_chat.park_task.request"),
+  requestId: z.string(),
+  taskId: z.string(),
+  parked: z.boolean(),
+  reason: z.string().max(500).optional(),
+});
+export type MainChatParkTaskRequest = z.infer<typeof MainChatParkTaskRequestSchema>;
+
+export const MainChatParkTaskResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatParkTaskResponsePayload = z.infer<typeof MainChatParkTaskResponsePayloadSchema>;
+
+export const MainChatParkTaskResponseSchema = z.object({
+  type: z.literal("main_chat.park_task.response"),
+  payload: MainChatParkTaskResponsePayloadSchema,
+});
+export type MainChatParkTaskResponse = z.infer<typeof MainChatParkTaskResponseSchema>;
+
+export const MainChatReviewTaskRequestSchema = z.object({
+  type: z.literal("main_chat.review_task.request"),
+  requestId: z.string(),
+  taskId: z.string(),
+  verdict: MainChatTaskReviewVerdictSchema,
+  summary: z.string().max(4000).optional(),
+  gaps: z.array(z.string()).optional(),
+  checks: z.array(MainChatReceiptCheckSchema).optional(),
+  nextSteps: z.array(z.string()).optional(),
+  note: z.string().max(2000).optional(),
+});
+export type MainChatReviewTaskRequest = z.infer<typeof MainChatReviewTaskRequestSchema>;
+
+export const MainChatReviewTaskResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  receipt: MainChatTaskReceiptSchema.nullable(),
+  rework: MainChatReworkRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatReviewTaskResponsePayload = z.infer<
+  typeof MainChatReviewTaskResponsePayloadSchema
+>;
+
+export const MainChatReviewTaskResponseSchema = z.object({
+  type: z.literal("main_chat.review_task.response"),
+  payload: MainChatReviewTaskResponsePayloadSchema,
+});
+export type MainChatReviewTaskResponse = z.infer<typeof MainChatReviewTaskResponseSchema>;
+
+// ============================================================================
+// M4 Multi-Conversation (Leader / Side) & Cross-Host Fleet RPC Schemas
+// ============================================================================
+
+export const MainChatListConversationsRequestSchema = z.object({
+  type: z.literal("main_chat.list_conversations.request"),
+  requestId: z.string(),
+  includeArchived: z.boolean().optional(),
+});
+export type MainChatListConversationsRequest = z.infer<
+  typeof MainChatListConversationsRequestSchema
+>;
+
+export const MainChatListConversationsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  conversations: z.array(MainChatConversationRecordSchema),
+  error: z.string().nullable(),
+});
+export type MainChatListConversationsResponsePayload = z.infer<
+  typeof MainChatListConversationsResponsePayloadSchema
+>;
+
+export const MainChatListConversationsResponseSchema = z.object({
+  type: z.literal("main_chat.list_conversations.response"),
+  payload: MainChatListConversationsResponsePayloadSchema,
+});
+export type MainChatListConversationsResponse = z.infer<
+  typeof MainChatListConversationsResponseSchema
+>;
+
+export const MainChatCreateConversationRequestSchema = z.object({
+  type: z.literal("main_chat.create_conversation.request"),
+  requestId: z.string(),
+  kind: z.enum(["side", "leader"]),
+  title: z.string().min(1).max(80),
+  directionSummary: z.string().max(1000).nullable().optional(),
+  initialPrompt: z.string().max(8000).optional(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
+});
+export type MainChatCreateConversationRequest = z.infer<
+  typeof MainChatCreateConversationRequestSchema
+>;
+
+export const MainChatCreateConversationResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  conversation: MainChatConversationRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatCreateConversationResponsePayload = z.infer<
+  typeof MainChatCreateConversationResponsePayloadSchema
+>;
+
+export const MainChatCreateConversationResponseSchema = z.object({
+  type: z.literal("main_chat.create_conversation.response"),
+  payload: MainChatCreateConversationResponsePayloadSchema,
+});
+export type MainChatCreateConversationResponse = z.infer<
+  typeof MainChatCreateConversationResponseSchema
+>;
+
+export const MainChatUpdateConversationRequestSchema = z.object({
+  type: z.literal("main_chat.update_conversation.request"),
+  requestId: z.string(),
+  conversationId: z.string(),
+  title: z.string().min(1).max(80).optional(),
+  directionSummary: z.string().max(1000).nullable().optional(),
+  kind: z.enum(["side", "leader"]).optional(),
+  archived: z.boolean().optional(),
+});
+export type MainChatUpdateConversationRequest = z.infer<
+  typeof MainChatUpdateConversationRequestSchema
+>;
+
+export const MainChatUpdateConversationResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  conversation: MainChatConversationRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatUpdateConversationResponsePayload = z.infer<
+  typeof MainChatUpdateConversationResponsePayloadSchema
+>;
+
+export const MainChatUpdateConversationResponseSchema = z.object({
+  type: z.literal("main_chat.update_conversation.response"),
+  payload: MainChatUpdateConversationResponsePayloadSchema,
+});
+export type MainChatUpdateConversationResponse = z.infer<
+  typeof MainChatUpdateConversationResponseSchema
+>;
+
+export const MainChatGetFleetHostsRequestSchema = z.object({
+  type: z.literal("main_chat.get_fleet_hosts.request"),
+  requestId: z.string(),
+  forceRefresh: z.boolean().optional(),
+});
+export type MainChatGetFleetHostsRequest = z.infer<typeof MainChatGetFleetHostsRequestSchema>;
+
+export const MainChatGetFleetHostsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  localServerId: z.string().nullable(),
+  hosts: z.array(MainChatFleetHostStatusSchema),
+  error: z.string().nullable(),
+});
+export type MainChatGetFleetHostsResponsePayload = z.infer<
+  typeof MainChatGetFleetHostsResponsePayloadSchema
+>;
+
+export const MainChatGetFleetHostsResponseSchema = z.object({
+  type: z.literal("main_chat.get_fleet_hosts.response"),
+  payload: MainChatGetFleetHostsResponsePayloadSchema,
+});
+export type MainChatGetFleetHostsResponse = z.infer<typeof MainChatGetFleetHostsResponseSchema>;
+
+// ============================================================================
+// M5 Approval Clarification & Standing Authorizations RPC Schemas
+// ============================================================================
+
+export const MainChatClarifyPermissionRequestSchema = z.object({
+  type: z.literal("main_chat.clarify_permission.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  serverId: z.string().nullable().optional(),
+  permissionRequestId: z.string(),
+  question: z.string().min(1).max(2000),
+});
+export type MainChatClarifyPermissionRequest = z.infer<
+  typeof MainChatClarifyPermissionRequestSchema
+>;
+
+export const MainChatClarifyPermissionResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  clarification: MainChatApprovalClarificationSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatClarifyPermissionResponsePayload = z.infer<
+  typeof MainChatClarifyPermissionResponsePayloadSchema
+>;
+
+export const MainChatClarifyPermissionResponseSchema = z.object({
+  type: z.literal("main_chat.clarify_permission.response"),
+  payload: MainChatClarifyPermissionResponsePayloadSchema,
+});
+export type MainChatClarifyPermissionResponse = z.infer<
+  typeof MainChatClarifyPermissionResponseSchema
+>;
+
+export const MainChatListStandingAuthorizationsRequestSchema = z.object({
+  type: z.literal("main_chat.list_standing_authorizations.request"),
+  requestId: z.string(),
+  includeRevoked: z.boolean().optional(),
+});
+export type MainChatListStandingAuthorizationsRequest = z.infer<
+  typeof MainChatListStandingAuthorizationsRequestSchema
+>;
+
+export const MainChatListStandingAuthorizationsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  authorizations: z.array(MainChatStandingAuthorizationSchema),
+  suggestions: z.array(MainChatRuleSuggestionSchema),
+  error: z.string().nullable(),
+});
+export type MainChatListStandingAuthorizationsResponsePayload = z.infer<
+  typeof MainChatListStandingAuthorizationsResponsePayloadSchema
+>;
+
+export const MainChatListStandingAuthorizationsResponseSchema = z.object({
+  type: z.literal("main_chat.list_standing_authorizations.response"),
+  payload: MainChatListStandingAuthorizationsResponsePayloadSchema,
+});
+export type MainChatListStandingAuthorizationsResponse = z.infer<
+  typeof MainChatListStandingAuthorizationsResponseSchema
+>;
+
+export const MainChatGrantStandingAuthorizationRequestSchema = z.object({
+  type: z.literal("main_chat.grant_standing_authorization.request"),
+  requestId: z.string(),
+  scope: MainChatStandingAuthorizationScopeSchema,
+  serverId: z.string().nullable().optional(),
+  cwd: z.string().nullable().optional(),
+  allowSubdirectories: z.boolean().optional(),
+  toolName: z.string().nullable().optional(),
+  commandPrefix: z.string().nullable().optional(),
+  mode: MainChatTaskModeSchema.nullable().optional(),
+  label: z.string().min(1).max(160).optional(),
+  reason: z.string().max(500).nullable().optional(),
+  suggestionId: z.string().optional(),
+  expiresAt: z.string().nullable().optional(),
+});
+export type MainChatGrantStandingAuthorizationRequest = z.infer<
+  typeof MainChatGrantStandingAuthorizationRequestSchema
+>;
+
+export const MainChatGrantStandingAuthorizationResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  authorization: MainChatStandingAuthorizationSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatGrantStandingAuthorizationResponsePayload = z.infer<
+  typeof MainChatGrantStandingAuthorizationResponsePayloadSchema
+>;
+
+export const MainChatGrantStandingAuthorizationResponseSchema = z.object({
+  type: z.literal("main_chat.grant_standing_authorization.response"),
+  payload: MainChatGrantStandingAuthorizationResponsePayloadSchema,
+});
+export type MainChatGrantStandingAuthorizationResponse = z.infer<
+  typeof MainChatGrantStandingAuthorizationResponseSchema
+>;
+
+export const MainChatRevokeStandingAuthorizationRequestSchema = z.object({
+  type: z.literal("main_chat.revoke_standing_authorization.request"),
+  requestId: z.string(),
+  authorizationId: z.string(),
+});
+export type MainChatRevokeStandingAuthorizationRequest = z.infer<
+  typeof MainChatRevokeStandingAuthorizationRequestSchema
+>;
+
+export const MainChatRevokeStandingAuthorizationResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  revoked: z.boolean(),
+  authorization: MainChatStandingAuthorizationSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatRevokeStandingAuthorizationResponsePayload = z.infer<
+  typeof MainChatRevokeStandingAuthorizationResponsePayloadSchema
+>;
+
+export const MainChatRevokeStandingAuthorizationResponseSchema = z.object({
+  type: z.literal("main_chat.revoke_standing_authorization.response"),
+  payload: MainChatRevokeStandingAuthorizationResponsePayloadSchema,
+});
+export type MainChatRevokeStandingAuthorizationResponse = z.infer<
+  typeof MainChatRevokeStandingAuthorizationResponseSchema
+>;
+
+export const MainChatDismissRuleSuggestionRequestSchema = z.object({
+  type: z.literal("main_chat.dismiss_rule_suggestion.request"),
+  requestId: z.string(),
+  suggestionId: z.string(),
+});
+export type MainChatDismissRuleSuggestionRequest = z.infer<
+  typeof MainChatDismissRuleSuggestionRequestSchema
+>;
+
+export const MainChatDismissRuleSuggestionResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  dismissed: z.boolean(),
+  error: z.string().nullable(),
+});
+export type MainChatDismissRuleSuggestionResponsePayload = z.infer<
+  typeof MainChatDismissRuleSuggestionResponsePayloadSchema
+>;
+
+export const MainChatDismissRuleSuggestionResponseSchema = z.object({
+  type: z.literal("main_chat.dismiss_rule_suggestion.response"),
+  payload: MainChatDismissRuleSuggestionResponsePayloadSchema,
+});
+export type MainChatDismissRuleSuggestionResponse = z.infer<
+  typeof MainChatDismissRuleSuggestionResponseSchema
+>;
+
 export interface MainChatTaskLabelsMeta {
   planId: string | null;
   taskId: string | null;
@@ -637,6 +1501,12 @@ export interface MainChatTaskLabelsMeta {
 
 export function isMainChatLabels(labels: Record<string, unknown> | null | undefined): boolean {
   return labels?.[MAIN_CHAT_ROLE_LABEL] === MAIN_CHAT_ROLE_VALUE;
+}
+
+export function isFormerMainChatLabels(
+  labels: Record<string, unknown> | null | undefined,
+): boolean {
+  return labels?.[MAIN_CHAT_ROLE_LABEL] === MAIN_CHAT_FORMER_ROLE_VALUE;
 }
 
 export function isMainChatAgent(agent: AgentLabelSource | null | undefined): boolean {

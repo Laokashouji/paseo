@@ -3,7 +3,13 @@ import {
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
 } from "@getpaseo/protocol/main-chat";
-import { ArrowUpRight, CheckCircle2, HelpCircle } from "lucide-react-native";
+import {
+  ArrowUpRight,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  HelpCircle,
+} from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -12,12 +18,14 @@ import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { decisionStoreKey, useMainChatOverviewStore } from "./overview-store";
 
 const ThemedHelpIcon = withUnistyles(HelpCircle);
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedChevronRight = withUnistyles(ChevronRight);
 
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 const successIconMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
@@ -26,7 +34,12 @@ const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMute
 export interface MainChatDecisionCardProps {
   serverId: string;
   agentId: string;
-  output: unknown;
+  output?: unknown;
+  /** Optional directly supplied decision record (used inline in MainChatActionBar). */
+  decision?: MainChatDecisionRecord;
+  /** Whether an unanswered card starts expanded (false in chat stream, true in ActionBar). */
+  defaultExpanded?: boolean;
+  onAnswered?: (decision: MainChatDecisionRecord) => void;
 }
 
 const DecisionOptionRow = memo(function DecisionOptionRow({
@@ -80,10 +93,16 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
   serverId,
   agentId,
   output,
+  decision: directDecision,
+  defaultExpanded = true,
+  onAnswered,
 }: MainChatDecisionCardProps) {
   const { t } = useTranslation();
-  const parsed = useMemo(() => parseTaskAskUserToolPayload(output), [output]);
-  const decisionId = parsed?.id ?? null;
+  const parsed = useMemo(
+    () => (directDecision ? null : parseTaskAskUserToolPayload(output)),
+    [directDecision, output],
+  );
+  const decisionId = directDecision?.id ?? parsed?.id ?? null;
 
   const storedDecision = useMainChatOverviewStore((state) =>
     decisionId ? (state.decisionsByKey[decisionStoreKey(serverId, decisionId)] ?? null) : null,
@@ -92,20 +111,32 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
   const answerDecision = useMainChatOverviewStore((state) => state.answerDecision);
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
 
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [submittingId, setSubmittingId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!client || !decisionId || storedDecision) return;
+    if (!client || !decisionId || storedDecision || directDecision) return;
     void loadOverview(serverId, agentId, client);
-  }, [agentId, client, decisionId, loadOverview, serverId, storedDecision]);
+  }, [agentId, client, decisionId, directDecision, loadOverview, serverId, storedDecision]);
 
-  const effective: MainChatDecisionRecord | null = storedDecision ?? parsed;
+  const effective: MainChatDecisionRecord | null = storedDecision ?? directDecision ?? parsed;
+
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+
+  const handleToggle = useCallback(() => {
+    setExpanded((prev) => !prev);
+  }, []);
 
   const handleOpenChild = useCallback(() => {
     if (!effective?.agentId) return;
-    navigateToAgent({ serverId, agentId: effective.agentId });
-  }, [effective?.agentId, serverId]);
+    openMainChatTaskTarget({
+      serverId,
+      agentId: effective.agentId,
+      title: effective.title,
+      taskId: effective.taskId ?? null,
+    });
+  }, [effective?.agentId, effective?.taskId, effective?.title, openMainChatTaskTarget, serverId]);
 
   const handleSelectOption = useCallback(
     (option: MainChatDecisionOption) => {
@@ -118,10 +149,14 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
         {
           decisionId: effective.id,
           optionId: option.id,
-          answer: `${option.label}（${option.leadsTo}）`,
+          answer: option.label,
         },
         client,
       )
+        .then((updated) => {
+          onAnswered?.(updated);
+          return updated;
+        })
         .catch((error) => {
           setSubmitError(error instanceof Error ? error.message : String(error));
         })
@@ -129,19 +164,19 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
           setSubmittingId(null);
         });
     },
-    [agentId, answerDecision, client, effective, serverId, submittingId],
+    [agentId, answerDecision, client, effective, onAnswered, serverId, submittingId],
   );
 
   if (!effective) return null;
 
-  if (effective.answeredAt && effective.answer) {
+  if (effective.answeredAt) {
     return (
-      <View style={styles.compactCard} testID={`main-chat-decision-answered-${effective.id}`}>
+      <View style={styles.compactCard} testID={`main-chat-decision-card-${effective.id}`}>
         <ThemedCheckIcon size={14} uniProps={successIconMapping} />
         <Text style={styles.compactText} numberOfLines={2}>
           {t("mainChat.decisionCard.answeredSummary", {
             title: effective.title,
-            answer: effective.answer,
+            answer: effective.answer ?? "",
           })}
         </Text>
         {effective.agentId ? (
@@ -160,9 +195,46 @@ export const MainChatDecisionCard = memo(function MainChatDecisionCard({
     );
   }
 
+  if (!expanded) {
+    return (
+      <View style={styles.compactCard} testID={`main-chat-decision-card-${effective.id}`}>
+        <PressHighlight
+          onPress={handleToggle}
+          style={styles.compactToggle}
+          highlightStyle={styles.openLinkPressed}
+          accessibilityRole="button"
+          accessibilityLabel={effective.title}
+          testID={`main-chat-decision-expand-${effective.id}`}
+        >
+          <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
+          <ThemedHelpIcon size={14} uniProps={warningIconMapping} />
+          <Text style={styles.compactTitle} numberOfLines={1}>
+            {effective.title} · {effective.question}
+          </Text>
+          <StatusBadge
+            variant="warning"
+            size="xs"
+            label={t("mainChat.decisionCard.needsDecision")}
+          />
+        </PressHighlight>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.card} testID={`main-chat-decision-card-${effective.id}`}>
       <View style={styles.headerRow}>
+        {!defaultExpanded ? (
+          <PressHighlight
+            onPress={handleToggle}
+            style={styles.collapseIconBtn}
+            highlightStyle={styles.openLinkPressed}
+            accessibilityRole="button"
+            accessibilityLabel={effective.title}
+          >
+            <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
+          </PressHighlight>
+        ) : null}
         <ThemedHelpIcon size={14} uniProps={warningIconMapping} />
         <Text style={styles.title} numberOfLines={2}>
           {effective.title}
@@ -221,16 +293,35 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.lg,
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1.5],
     maxWidth: 640,
     width: "100%",
+  },
+  compactToggle: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
+    borderRadius: theme.borderRadius.md,
+    paddingVertical: theme.spacing[0.5],
+  },
+  compactTitle: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foreground,
   },
   compactText: {
     flex: 1,
     minWidth: 0,
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
+  },
+  collapseIconBtn: {
+    padding: 2,
+    borderRadius: theme.borderRadius.sm,
   },
   headerRow: {
     flexDirection: "row",

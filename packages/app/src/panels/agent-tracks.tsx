@@ -24,7 +24,8 @@ import {
 import { ParentAgentPill } from "@/subagents/parent";
 import { SubagentsTrack } from "@/subagents/track";
 import { MainChatBoardPill } from "@/main-chat/board-pill";
-import { MainChatTaskDock } from "@/main-chat/task-dock";
+import { useOpenMainChatTaskTarget } from "@/main-chat/open-task-target";
+import { useMainChatShellContext } from "@/main-chat/shell-context";
 import type { TodoEntry } from "@/types/stream";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTabTarget } from "@/workspace-tabs/model";
@@ -74,6 +75,8 @@ export const AgentTracks = memo(function AgentTracks({
     [serverId, agentId],
   );
   const isCompact = useIsCompactFormFactor();
+  const mainChatShell = useMainChatShellContext();
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
   const canDetachSubagents = useSessionStore(
@@ -95,6 +98,10 @@ export const AgentTracks = memo(function AgentTracks({
   );
   const handleOpenSubagent = useCallback(
     ({ serverId: targetServerId, agentId: subagentId }: AgentAddress) => {
+      if (mainChatShell.inMainChatShell) {
+        openMainChatTaskTarget({ serverId: targetServerId, agentId: subagentId });
+        return;
+      }
       const session = useSessionStore.getState().sessions[targetServerId];
       const agent = session?.agents.get(subagentId) ?? session?.agentDetails.get(subagentId);
       // A subagent in another workspace lives in that workspace's tabs.
@@ -107,7 +114,13 @@ export const AgentTracks = memo(function AgentTracks({
       }
       openSubagentTarget({ kind: "agent", agentId: subagentId });
     },
-    [openSubagentTarget, serverId, workspaceId],
+    [
+      mainChatShell.inMainChatShell,
+      openMainChatTaskTarget,
+      openSubagentTarget,
+      serverId,
+      workspaceId,
+    ],
   );
   const handleOpenProviderSubagent = useCallback(
     (ownerAgentId: string, subagentId: string) => {
@@ -185,7 +198,6 @@ export const AgentTracks = memo(function AgentTracks({
         agentId={agentId}
         onOpenSubagent={handleOpenSubagent}
       />
-      <MainChatTaskDock serverId={serverId} agentId={agentId} onOpenSubagent={handleOpenSubagent} />
       <SubagentsTrack
         serverId={serverId}
         rows={subagentRows}
@@ -203,11 +215,13 @@ export const AgentTracks = memo(function AgentTracks({
         agentId={agentId}
         compact={isCompact}
       />
-      <WorkspaceDiffStatPill
-        serverId={serverId}
-        workspaceId={workspaceId}
-        onPress={handleOpenChanges}
-      />
+      {!mainChatShell.inMainChatShell ? (
+        <WorkspaceDiffStatPill
+          serverId={serverId}
+          workspaceId={workspaceId}
+          onPress={handleOpenChanges}
+        />
+      ) : null}
     </ComposerTrackBar>
   );
 });
