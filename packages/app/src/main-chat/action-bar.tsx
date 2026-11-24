@@ -22,6 +22,7 @@ import {
   Minimize2,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   X,
 } from "lucide-react-native";
@@ -63,6 +64,7 @@ import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
 import { deriveDeliveryGateBadge } from "./task-dag-ui";
 import { useStewardAllowedServerIds } from "./use-steward-roster";
+import { deriveZeroTokenDiagnosticBadge } from "./zero-token-diagnostic-ui";
 
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
 const ThemedAtIcon = withUnistyles(AtSign);
@@ -78,6 +80,7 @@ const ThemedMaximizeIcon = withUnistyles(Maximize2);
 const ThemedMinimizeIcon = withUnistyles(Minimize2);
 const ThemedPauseIcon = withUnistyles(Pause);
 const ThemedPlayIcon = withUnistyles(Play);
+const ThemedRefreshIcon = withUnistyles(RefreshCw);
 const ThemedReworkIcon = withUnistyles(RotateCcw);
 const ThemedXIcon = withUnistyles(X);
 
@@ -85,6 +88,7 @@ const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMute
 const invertedIconMapping = (theme: Theme) => ({ color: theme.colors.surface0 });
 const successIconMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
+const dangerIconMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 
 type SessionStoreState = ReturnType<typeof useSessionStore.getState>;
 
@@ -411,21 +415,45 @@ function renderCompactDockLeadingIndicator(
   );
 }
 
+function resolveDockRuleDiagnostic(entry: CompactDockEntry) {
+  if (entry.kind === "inProgress") return entry.item.ruleDiagnostic;
+  return entry.item.kind === "task" ? entry.item.ruleDiagnostic : null;
+}
+
+function resolveDockRetryTaskId(entry: CompactDockEntry): string | null {
+  if (entry.kind !== "needsYou" || entry.item.kind !== "task") return null;
+  return entry.item.canRetryWithFallback && entry.item.taskId ? entry.item.taskId : null;
+}
+
+function resolveDockRetryButtonLabel(
+  isRetrying: boolean,
+  isCompact: boolean,
+  t: (key: string) => string,
+): string {
+  if (isRetrying) return t("mainChat.modelProfiles.retryFallback.retrying");
+  if (isCompact) return t("mainChat.modelProfiles.retryFallback.buttonCompact");
+  return t("mainChat.modelProfiles.retryFallback.buttonShort");
+}
+
 const CompactStatusDockRow = memo(function CompactStatusDockRow({
   entry,
   isFirst,
   isCompact,
   hiddenCountBadge,
+  busyTaskId,
   onPressNeedsYou,
   onPressInProgress,
+  onRetryWithFallback,
   onDismiss,
 }: {
   entry: CompactDockEntry;
   isFirst: boolean;
   isCompact: boolean;
   hiddenCountBadge: number;
+  busyTaskId: string | null;
   onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
   onPressInProgress: (item: ActionBarTaskItem) => void;
+  onRetryWithFallback?: (taskId: string) => void;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
@@ -440,10 +468,18 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
 
   const isNeedsYou = entry.kind === "needsYou";
   const isFailed = isNeedsYou && entry.item.kind === "task" && entry.item.isFailed;
+  const retryTaskId = resolveDockRetryTaskId(entry);
+  const isRetrying = retryTaskId !== null && busyTaskId === retryTaskId;
+  const handleRetry = useCallback(() => {
+    if (retryTaskId && onRetryWithFallback) {
+      onRetryWithFallback(retryTaskId);
+    }
+  }, [onRetryWithFallback, retryTaskId]);
   const inProgressItem = entry.kind === "inProgress" ? entry.item : null;
   const dockGateBadge = inProgressItem
     ? deriveDeliveryGateBadge(inProgressItem.deliveryGate)
     : null;
+  const dockRuleBadge = deriveZeroTokenDiagnosticBadge(resolveDockRuleDiagnostic(entry));
   const title = entry.item.title;
   const secondaryText = useMemo(() => {
     if (isCompact) return null;
@@ -462,6 +498,7 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
 
   const statusLabel = resolveCompactDockStatusLabel(entry, dockGateBadge, t);
   const leadingIndicator = renderCompactDockLeadingIndicator(entry, isFailed);
+  const retryLabel = resolveDockRetryButtonLabel(isRetrying, isCompact, t);
 
   const rowContainerStyle = useMemo(
     () => [styles.compactDockRow, !isFirst && styles.compactDockRowDivider],
@@ -506,6 +543,15 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
         </View>
 
         <View style={styles.compactDockTrailing}>
+          {dockRuleBadge ? (
+            <View testID={`main-chat-compact-dock-rule-badge-${entry.item.id}`}>
+              <StatusBadge
+                size="xs"
+                variant={dockRuleBadge.variant}
+                label={t(dockRuleBadge.labelKey)}
+              />
+            </View>
+          ) : null}
           {!isCompact && dockGateBadge && !dockGateBadge.isBlocked ? (
             <StatusBadge
               size="xs"
@@ -524,6 +570,23 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
           <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
         </View>
       </PressHighlight>
+
+      {retryTaskId && onRetryWithFallback ? (
+        <PressHighlight
+          onPress={handleRetry}
+          disabled={isRetrying}
+          style={styles.compactDockRetryBtn}
+          highlightStyle={styles.rowPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.modelProfiles.retryFallback.button")}
+          testID={`main-chat-compact-dock-retry-${retryTaskId}`}
+        >
+          <ThemedRefreshIcon size={11} uniProps={dangerIconMapping} />
+          <Text style={styles.compactDockRetryText} numberOfLines={1}>
+            {retryLabel}
+          </Text>
+        </PressHighlight>
+      ) : null}
 
       {isFirst ? (
         <PressHighlight
@@ -545,15 +608,19 @@ const CompactStatusDock = memo(function CompactStatusDock({
   entries,
   hiddenCount,
   isCompact,
+  busyTaskId,
   onPressNeedsYou,
   onPressInProgress,
+  onRetryWithFallback,
   onDismiss,
 }: {
   entries: readonly CompactDockEntry[];
   hiddenCount: number;
   isCompact: boolean;
+  busyTaskId: string | null;
   onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
   onPressInProgress: (item: ActionBarTaskItem) => void;
+  onRetryWithFallback?: (taskId: string) => void;
   onDismiss: () => void;
 }) {
   if (entries.length === 0) return null;
@@ -567,8 +634,10 @@ const CompactStatusDock = memo(function CompactStatusDock({
           isFirst={index === 0}
           isCompact={isCompact}
           hiddenCountBadge={index === entries.length - 1 ? hiddenCount : 0}
+          busyTaskId={busyTaskId}
           onPressNeedsYou={onPressNeedsYou}
           onPressInProgress={onPressInProgress}
+          onRetryWithFallback={onRetryWithFallback}
           onDismiss={onDismiss}
         />
       ))}
@@ -614,15 +683,19 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   mainServerId,
   mainAgentId,
   targetClient,
+  isRetrying,
   onOpen,
   onDirectRoute,
+  onRetryWithFallback,
 }: {
   item: ActionBarNeedsYouItem;
   mainServerId: string;
   mainAgentId: string;
   targetClient: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
+  isRetrying: boolean;
   onOpen: () => void;
   onDirectRoute: () => void;
+  onRetryWithFallback?: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -743,29 +816,91 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
         </View>
       ) : null}
 
-      {item.agentId ? (
-        <View style={styles.inlineActionRow}>
-          <Button
-            variant="secondary"
-            size="sm"
-            leftIcon={ThemedArrowIcon}
-            onPress={onOpen}
-            testID={`main-chat-action-needs-task-open-${item.id}`}
-          >
-            {t("mainChat.openChildAgent")}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={ThemedAtIcon}
-            onPress={onDirectRoute}
-            testID={`main-chat-action-needs-task-direct-${item.id}`}
-          >
-            {t("mainChat.board.talkDirectly")}
-          </Button>
+      <NeedsYouTaskRuleAndActions
+        item={item}
+        isRetrying={isRetrying}
+        onOpen={onOpen}
+        onDirectRoute={onDirectRoute}
+        onRetryWithFallback={onRetryWithFallback}
+      />
+    </View>
+  );
+});
+
+const NeedsYouTaskRuleAndActions = memo(function NeedsYouTaskRuleAndActions({
+  item,
+  isRetrying,
+  onOpen,
+  onDirectRoute,
+  onRetryWithFallback,
+}: {
+  item: Extract<ActionBarNeedsYouItem, { kind: "task" }>;
+  isRetrying: boolean;
+  onOpen: () => void;
+  onDirectRoute: () => void;
+  onRetryWithFallback?: () => void;
+}) {
+  const { t } = useTranslation();
+  const showRetry = Boolean(item.canRetryWithFallback && item.taskId && onRetryWithFallback);
+  const showActionRow = Boolean(item.agentId || showRetry);
+
+  return (
+    <>
+      {item.ruleDiagnostic ? (
+        <View
+          style={styles.inlineRuleDetailBox}
+          testID={`main-chat-action-needs-rule-detail-${item.id}`}
+        >
+          <Text style={styles.inlineDetailLabel}>{t("mainChat.zeroTokenRules.sectionLabel")}</Text>
+          <Text style={styles.inlineRuleDetailText}>{item.ruleDiagnostic.summary}</Text>
+          {item.ruleDiagnostic.errorExcerpt ? (
+            <Text style={styles.inlineSecondaryText} numberOfLines={2}>
+              {`${t("mainChat.zeroTokenRules.errorExcerptLabel")}：${item.ruleDiagnostic.errorExcerpt}`}
+            </Text>
+          ) : null}
         </View>
       ) : null}
-    </View>
+
+      {showActionRow ? (
+        <View style={styles.inlineActionRow}>
+          {showRetry && item.taskId ? (
+            <Button
+              variant="default"
+              size="sm"
+              leftIcon={ThemedRefreshIcon}
+              loading={isRetrying}
+              disabled={isRetrying}
+              onPress={onRetryWithFallback}
+              testID={`main-chat-action-needs-inline-retry-${item.taskId}`}
+            >
+              {t("mainChat.modelProfiles.retryFallback.button")}
+            </Button>
+          ) : null}
+          {item.agentId ? (
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={ThemedArrowIcon}
+                onPress={onOpen}
+                testID={`main-chat-action-needs-task-open-${item.id}`}
+              >
+                {t("mainChat.openChildAgent")}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                leftIcon={ThemedAtIcon}
+                onPress={onDirectRoute}
+                testID={`main-chat-action-needs-task-direct-${item.id}`}
+              >
+                {t("mainChat.board.talkDirectly")}
+              </Button>
+            </>
+          ) : null}
+        </View>
+      ) : null}
+    </>
   );
 });
 
@@ -775,19 +910,100 @@ interface ActionBarDirectTarget {
   title: string;
 }
 
+const NeedsYouRowHeaderActions = memo(function NeedsYouRowHeaderActions({
+  item,
+  retryTaskId,
+  isRetrying,
+  onRetry,
+  onDirectRoute,
+  onOpen,
+}: {
+  item: ActionBarNeedsYouItem;
+  retryTaskId: string | null;
+  isRetrying: boolean;
+  onRetry?: () => void;
+  onDirectRoute: () => void;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!item.agentId && !(retryTaskId && onRetry)) return null;
+
+  return (
+    <View style={styles.taskRowActions}>
+      {retryTaskId && onRetry ? (
+        <PressHighlight
+          onPress={onRetry}
+          disabled={isRetrying}
+          style={styles.inlineRetryBtn}
+          highlightStyle={styles.rowPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.modelProfiles.retryFallback.button")}
+          testID={`main-chat-action-retry-fallback-${retryTaskId}`}
+        >
+          <ThemedRefreshIcon size={12} uniProps={dangerIconMapping} />
+          <Text style={styles.inlineRetryLabel}>
+            {isRetrying
+              ? t("mainChat.modelProfiles.retryFallback.retrying")
+              : t("mainChat.modelProfiles.retryFallback.buttonShort")}
+          </Text>
+        </PressHighlight>
+      ) : null}
+      {item.agentId ? (
+        <>
+          <PressHighlight
+            onPress={onDirectRoute}
+            style={styles.inlineActionBtn}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.board.talkDirectly")}
+            testID={`main-chat-action-direct-${item.id}`}
+          >
+            <ThemedAtIcon size={12} uniProps={mutedIconMapping} />
+            <Text style={styles.inlineActionLabel}>{t("mainChat.board.talkDirectly")}</Text>
+          </PressHighlight>
+          <PressHighlight
+            onPress={onOpen}
+            style={styles.smallIconButton}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.openChildAgent")}
+            testID={`main-chat-action-needs-open-${item.id}`}
+          >
+            <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
+          </PressHighlight>
+        </>
+      ) : null}
+    </View>
+  );
+});
+
+function resolveNeedsYouRowMetaText(item: ActionBarNeedsYouItem): string | null {
+  if (!item.reason) return null;
+  const compactReason = item.reason.replace(/\s+/g, " ").trim();
+  return item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
+}
+
+function resolveNeedsYouRetryTaskId(item: ActionBarNeedsYouItem): string | null {
+  if (item.kind !== "task" || !item.canRetryWithFallback) return null;
+  return item.taskId ?? null;
+}
+
 const NeedsYouRow = memo(function NeedsYouRow({
   item,
   mainServerId,
   mainAgentId,
   expanded,
+  busyTaskId,
   onToggleExpand,
   onOpenTask,
   onDirectRoute,
+  onRetryWithFallback,
 }: {
   item: ActionBarNeedsYouItem;
   mainServerId: string;
   mainAgentId: string;
   expanded: boolean;
+  busyTaskId: string | null;
   onToggleExpand: (id: string) => void;
   onOpenTask: (target: {
     serverId: string;
@@ -797,6 +1013,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
     taskId?: string | null;
   }) => void;
   onDirectRoute: (target: ActionBarDirectTarget) => void;
+  onRetryWithFallback?: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
   const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
@@ -820,13 +1037,19 @@ const NeedsYouRow = memo(function NeedsYouRow({
     });
   }, [item.agentId, item.serverId, item.title, onDirectRoute]);
 
+  const retryTaskId = resolveNeedsYouRetryTaskId(item);
+  const isRetrying = retryTaskId !== null && busyTaskId === retryTaskId;
+  const handleRetry = useCallback(() => {
+    if (retryTaskId && onRetryWithFallback) {
+      onRetryWithFallback(retryTaskId);
+    }
+  }, [onRetryWithFallback, retryTaskId]);
+  const ruleBadge =
+    item.kind === "task" ? deriveZeroTokenDiagnosticBadge(item.ruleDiagnostic) : null;
+
   const kindLabel = t(resolveNeedsYouKindKey(item));
   const isFailedTask = item.kind === "task" && item.isFailed;
-  let metaText: string | null = null;
-  if (item.reason) {
-    const compactReason = item.reason.replace(/\s+/g, " ").trim();
-    metaText = item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
-  }
+  const metaText = resolveNeedsYouRowMetaText(item);
 
   const cardStyle = useMemo(
     () => [styles.needsCard, isFailedTask && styles.needsCardFailed],
@@ -859,6 +1082,15 @@ const NeedsYouRow = memo(function NeedsYouRow({
               {item.kind === "permission" && item.permissions.length > 1 ? (
                 <StatusBadge size="xs" variant="muted" label={`${item.permissions.length}`} />
               ) : null}
+              {ruleBadge ? (
+                <View testID={`main-chat-action-needs-rule-badge-${item.id}`}>
+                  <StatusBadge
+                    size="xs"
+                    variant={ruleBadge.variant}
+                    label={t(ruleBadge.labelKey)}
+                  />
+                </View>
+              ) : null}
             </View>
             {metaText ? (
               <Text style={styles.rowMeta} numberOfLines={1}>
@@ -878,31 +1110,14 @@ const NeedsYouRow = memo(function NeedsYouRow({
           </View>
         </PressHighlight>
 
-        {item.agentId ? (
-          <View style={styles.taskRowActions}>
-            <PressHighlight
-              onPress={handleDirectRoute}
-              style={styles.inlineActionBtn}
-              highlightStyle={styles.rowPressed}
-              accessibilityRole="button"
-              accessibilityLabel={t("mainChat.board.talkDirectly")}
-              testID={`main-chat-action-direct-${item.id}`}
-            >
-              <ThemedAtIcon size={12} uniProps={mutedIconMapping} />
-              <Text style={styles.inlineActionLabel}>{t("mainChat.board.talkDirectly")}</Text>
-            </PressHighlight>
-            <PressHighlight
-              onPress={handleOpen}
-              style={styles.smallIconButton}
-              highlightStyle={styles.rowPressed}
-              accessibilityRole="button"
-              accessibilityLabel={t("mainChat.openChildAgent")}
-              testID={`main-chat-action-needs-open-${item.id}`}
-            >
-              <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
-            </PressHighlight>
-          </View>
-        ) : null}
+        <NeedsYouRowHeaderActions
+          item={item}
+          retryTaskId={retryTaskId}
+          isRetrying={isRetrying}
+          onRetry={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
+          onDirectRoute={handleDirectRoute}
+          onOpen={handleOpen}
+        />
       </View>
 
       {expanded ? (
@@ -912,8 +1127,10 @@ const NeedsYouRow = memo(function NeedsYouRow({
             mainServerId={mainServerId}
             mainAgentId={mainAgentId}
             targetClient={targetClient}
+            isRetrying={isRetrying}
             onOpen={handleOpen}
             onDirectRoute={handleDirectRoute}
+            onRetryWithFallback={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
           />
         </View>
       ) : null}
@@ -958,9 +1175,15 @@ const TaskBucketRowBadges = memo(function TaskBucketRowBadges({
 }) {
   const { t } = useTranslation();
   const gateBadge = deriveDeliveryGateBadge(item.deliveryGate);
+  const ruleBadge = deriveZeroTokenDiagnosticBadge(item.ruleDiagnostic);
 
   return (
     <>
+      {ruleBadge ? (
+        <View testID={`main-chat-action-task-rule-badge-${item.id}`}>
+          <StatusBadge size="xs" variant={ruleBadge.variant} label={t(ruleBadge.labelKey)} />
+        </View>
+      ) : null}
       {item.childrenTotal > 0 ? (
         <StatusBadge
           size="xs"
@@ -1435,6 +1658,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onDirectRoute,
   onParkTask,
   onStartReadyTask,
+  onRetryWithFallback,
   onAcceptReview,
   onSubmitRework,
 }: {
@@ -1462,6 +1686,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
   onStartReadyTask: (taskId: string) => void;
+  onRetryWithFallback: (taskId: string) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
 }) {
@@ -1546,9 +1771,11 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
                 mainServerId={serverId}
                 mainAgentId={agentId}
                 expanded={expandedNeedsIds.has(item.id)}
+                busyTaskId={busyTaskId}
                 onToggleExpand={onToggleNeedsRow}
                 onOpenTask={onOpenTarget}
                 onDirectRoute={onDirectRoute}
+                onRetryWithFallback={onRetryWithFallback}
               />
             ))
           : null}
@@ -1614,6 +1841,7 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const startReadyTask = useMainChatOverviewStore((state) => state.startReadyTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
+  const retryTaskWithFallback = useMainChatOverviewStore((state) => state.retryTaskWithFallback);
 
   const hostLabelsByServerId = useMemo(
     () => Object.fromEntries(hosts.map((host) => [host.serverId, host.label])),
@@ -1651,6 +1879,7 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
     parkTask,
     startReadyTask,
     reviewTask,
+    retryTaskWithFallback,
     sessionSnapshot,
     model,
   };
@@ -1766,8 +1995,15 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   const { t } = useTranslation();
   const toast = useToast();
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();
-  const { client, overviewKey, parkTask, startReadyTask, reviewTask, model } =
-    useMainChatActionBarData(serverId, agentId);
+  const {
+    client,
+    overviewKey,
+    parkTask,
+    startReadyTask,
+    reviewTask,
+    retryTaskWithFallback,
+    model,
+  } = useMainChatActionBarData(serverId, agentId);
   const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
   const drawerExpanded = useMainChatActionBarDrawerStore((state) =>
     Boolean(state.expandedByKey[overviewKey]),
@@ -1981,6 +2217,34 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
     [agentId, busyTaskId, client, serverId, startReadyTask, t, toast],
   );
 
+  const handleRetryWithFallback = useCallback(
+    (taskId: string) => {
+      if (!client || busyTaskId) return;
+      setBusyTaskId(taskId);
+      void retryTaskWithFallback(serverId, agentId, { taskId }, client)
+        .then((res) => {
+          toast.show(
+            t("mainChat.modelProfiles.retryFallback.successToast", {
+              target: res.toModelSpec ?? "",
+            }),
+            { variant: "success" },
+          );
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t("mainChat.modelProfiles.retryFallback.failedToast"),
+          );
+        })
+        .finally(() => {
+          setBusyTaskId(null);
+        });
+    },
+    [agentId, busyTaskId, client, retryTaskWithFallback, serverId, t, toast],
+  );
+
   const handleToggleStale = useCallback(() => {
     setStaleExpanded((prev) => !prev);
   }, []);
@@ -2009,6 +2273,7 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
       onDirectRoute={handleDirectRoute}
       onParkTask={handleParkTask}
       onStartReadyTask={handleStartReadyTask}
+      onRetryWithFallback={handleRetryWithFallback}
       onAcceptReview={handleAcceptReview}
       onSubmitRework={handleSubmitRework}
     />
@@ -2069,12 +2334,12 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   drawerMode = "floating",
 }: MainChatActionBarProps): ReactElement | null {
   const { t } = useTranslation();
+  const toast = useToast();
   const isCompact = useIsCompactMainChatLayout();
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();
-  const { client, overviewKey, loadOverview, sessionSnapshot, model } = useMainChatActionBarData(
-    serverId,
-    agentId,
-  );
+  const { client, overviewKey, loadOverview, retryTaskWithFallback, sessionSnapshot, model } =
+    useMainChatActionBarData(serverId, agentId);
+  const [busyDockTaskId, setBusyDockTaskId] = useState<string | null>(null);
   const openBucket = useMainChatActionBarDrawerStore(
     (state) => state.openBucketByKey[overviewKey] ?? null,
   );
@@ -2144,6 +2409,34 @@ export const MainChatActionBar = memo(function MainChatActionBar({
     setCompactDockCollapsed(overviewKey, false);
   }, [overviewKey, setCompactDockCollapsed]);
 
+  const handleDockRetryWithFallback = useCallback(
+    (taskId: string) => {
+      if (!client || busyDockTaskId) return;
+      setBusyDockTaskId(taskId);
+      void retryTaskWithFallback(serverId, agentId, { taskId }, client)
+        .then((res) => {
+          toast.show(
+            t("mainChat.modelProfiles.retryFallback.successToast", {
+              target: res.toModelSpec ?? "",
+            }),
+            { variant: "success" },
+          );
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t("mainChat.modelProfiles.retryFallback.failedToast"),
+          );
+        })
+        .finally(() => {
+          setBusyDockTaskId(null);
+        });
+    },
+    [agentId, busyDockTaskId, client, retryTaskWithFallback, serverId, t, toast],
+  );
+
   const dockMaxRows = isCompact ? 1 : 2;
   const dockSelection = useMemo(
     () => selectCompactDockEntries(model, dockMaxRows),
@@ -2189,8 +2482,10 @@ export const MainChatActionBar = memo(function MainChatActionBar({
             entries={dockSelection.entries}
             hiddenCount={dockSelection.hiddenCount}
             isCompact={isCompact}
+            busyTaskId={busyDockTaskId}
             onPressNeedsYou={handlePressDockNeedsYou}
             onPressInProgress={handlePressDockInProgress}
+            onRetryWithFallback={client ? handleDockRetryWithFallback : undefined}
             onDismiss={handleDismissCompactDock}
           />
         ) : null}
@@ -2534,6 +2829,54 @@ const styles = StyleSheet.create((theme) => ({
     flexWrap: "wrap",
     gap: theme.spacing[1.5],
     paddingTop: theme.spacing[0.5],
+  },
+  compactDockRetryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: 3,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.statusDanger,
+    backgroundColor: theme.colors.statusDangerTint,
+    flexShrink: 0,
+  },
+  compactDockRetryText: {
+    fontSize: 11,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.statusDanger,
+  },
+  inlineRetryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: 4,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.statusDanger,
+    backgroundColor: theme.colors.statusDangerTint,
+    flexShrink: 0,
+  },
+  inlineRetryLabel: {
+    fontSize: 12,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.statusDanger,
+  },
+  inlineRuleDetailBox: {
+    gap: theme.spacing[0.5],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1.5],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.statusWarning,
+    backgroundColor: theme.colors.statusWarningTint,
+  },
+  inlineRuleDetailText: {
+    fontSize: 12,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foreground,
   },
   taskRowListItem: {
     backgroundColor: "transparent",

@@ -146,7 +146,7 @@ ${manualSessionPolicy}${customGuidanceSection}
 - 例行任务由 Paseo Schedule/Heartbeat 引擎调度，触发与结果会写入主对话后台折叠流；若例行检查没有值得打扰用户的变化，请直接只回复 \`[SILENT]\`。
 
 ## 自助修改配置（审批卡受控）
-- 当用户希望调整主对话配置（例如压缩窗口封顶、空闲预压缩阈值、Prompt Cache 保活、夜间节能、巡检周期、限额备用模型顺序 \`limitFallbacks\` 或个人档案等）时，调用 \`settings_propose_patch\` 生成原生「配置变更审批卡」，清晰展示变更前后的对比并等待用户点击「确认应用」或「拒绝」。
+- 当用户希望调整主对话配置（例如多用途模型槽位 \`modelConfig.slots\`、性能/均衡/经济模型档位 \`modelConfig.activeProfileId\`、通知分级与低打扰策略 \`notificationPolicy.*\`、压缩窗口封顶、空闲预压缩阈值、Prompt Cache 保活、夜间节能、巡检周期、限额备用模型顺序 \`limitFallbacks\` 或个人档案等）时，调用 \`settings_propose_patch\` 生成原生「配置变更审批卡」，清晰展示变更前后的对比并等待用户点击「确认应用」或「拒绝」。
 - \`settings_propose_patch\` 严格受白名单约束且**绝不静默落盘**；在用户点击确认前，请勿声称配置已经生效。
 
 ## 项目复盘教训、交付门禁与任务拆片 DAG

@@ -47,6 +47,7 @@ import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { derivePlanTaskLiveBucket } from "./selectors";
 import { deriveDeliveryGateBadge } from "./task-dag-ui";
 import { TaskDrawerGovernanceStrip } from "./task-drawer-governance-strip";
+import { deriveZeroTokenDiagnosticBadge } from "./zero-token-diagnostic-ui";
 
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -950,6 +951,7 @@ function useTaskDrawerMutations({
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
   const startReadyTask = useMainChatOverviewStore((state) => state.startReadyTask);
+  const retryTaskWithFallback = useMainChatOverviewStore((state) => state.retryTaskWithFallback);
   const [reworkOpen, setReworkOpen] = useState(false);
   const [reworkDraft, setReworkDraft] = useState("");
   const [bypassOpen, setBypassOpen] = useState(false);
@@ -1132,6 +1134,42 @@ function useTaskDrawerMutations({
     [isMutatingTask, mainAgentId, mainClient, resolvedMainServerId, startReadyTask, t, toast],
   );
 
+  const handleRetryWithFallback = useCallback(
+    (taskId: string) => {
+      if (!mainClient || !mainAgentId || isMutatingTask) return;
+      setIsMutatingTask(true);
+      void retryTaskWithFallback(resolvedMainServerId, mainAgentId, { taskId }, mainClient)
+        .then((res) => {
+          toast.show(
+            t("mainChat.modelProfiles.retryFallback.successToast", {
+              target: res.toModelSpec ?? "",
+            }),
+            { variant: "success" },
+          );
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t("mainChat.modelProfiles.retryFallback.failedToast"),
+          );
+        })
+        .finally(() => {
+          setIsMutatingTask(false);
+        });
+    },
+    [
+      isMutatingTask,
+      mainAgentId,
+      mainClient,
+      resolvedMainServerId,
+      retryTaskWithFallback,
+      t,
+      toast,
+    ],
+  );
+
   return {
     reworkOpen,
     reworkDraft,
@@ -1147,6 +1185,7 @@ function useTaskDrawerMutations({
     handleConfirmBypassAccept,
     handleConfirmRework,
     handleStartReadyTask,
+    handleRetryWithFallback,
   };
 }
 
@@ -1225,6 +1264,9 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
   const overviewProjectLessons = useMainChatOverviewStore((state) =>
     overviewKey ? state.overviewsByKey[overviewKey]?.projectLessons : undefined,
   );
+  const overviewTriages = useMainChatOverviewStore((state) =>
+    overviewKey ? state.overviewsByKey[overviewKey]?.triages : undefined,
+  );
   const mainClient = useSessionStore(
     (state) => state.sessions[resolvedMainServerId]?.client ?? null,
   );
@@ -1233,6 +1275,14 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
   const matchedTask = useMemo(
     () => taskRecord ?? resolveTaskRecordForDrawer(overviewTasks, target),
     [overviewTasks, target, taskRecord],
+  );
+  const matchedRuleDiagnostic = useMemo(() => {
+    const matchedTriage = overviewTriages?.find((entry) => entry.agentId === target.agentId);
+    return matchedTriage?.ruleDiagnostic ?? matchedTask?.lastRuleDiagnostic ?? null;
+  }, [matchedTask?.lastRuleDiagnostic, overviewTriages, target.agentId]);
+  const manualDiagnosticBadge = useMemo(
+    () => (matchedTask ? null : deriveZeroTokenDiagnosticBadge(matchedRuleDiagnostic)),
+    [matchedRuleDiagnostic, matchedTask],
   );
 
   const meta = useStoreWithEqualityFn(
@@ -1413,10 +1463,31 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
           task={matchedTask}
           allTasks={overviewTasks}
           projectLessons={overviewProjectLessons}
+          ruleDiagnostic={matchedRuleDiagnostic}
+          isFailed={meta.bucket === "failed" || matchedTask.status === "failed"}
           isMutatingTask={mutations.isMutatingTask}
           onStartReadyTask={mutations.handleStartReadyTask}
+          onRetryWithFallback={
+            mainClient && mainAgentId ? mutations.handleRetryWithFallback : undefined
+          }
           onSelectRelatedTask={handleSelectRelatedTask}
         />
+      ) : null}
+
+      {!matchedTask && manualDiagnosticBadge ? (
+        <View
+          style={styles.manualDiagnosticStrip}
+          testID="main-chat-task-drawer-manual-rule-diagnostic"
+        >
+          <StatusBadge
+            size="xs"
+            variant={manualDiagnosticBadge.variant}
+            label={t(manualDiagnosticBadge.labelKey)}
+          />
+          <Text style={styles.manualDiagnosticText} numberOfLines={2}>
+            {manualDiagnosticBadge.summary}
+          </Text>
+        </View>
       ) : null}
 
       {matchedTask ? (
@@ -1690,6 +1761,23 @@ const styles = StyleSheet.create((theme) => {
     agentTabLabelSelected: {
       color: theme.colors.foreground,
       fontWeight: theme.fontWeight.medium,
+    },
+    manualDiagnosticStrip: {
+      flexDirection: "row",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: theme.spacing[1.5],
+      paddingHorizontal: theme.spacing[3],
+      paddingVertical: theme.spacing[2],
+      borderBottomWidth: theme.borderWidth[1],
+      borderBottomColor: theme.colors.border,
+      backgroundColor: theme.colors.statusWarningTint,
+    },
+    manualDiagnosticText: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 12,
+      color: theme.colors.foreground,
     },
     segmentBar: {
       paddingHorizontal: theme.spacing[3],

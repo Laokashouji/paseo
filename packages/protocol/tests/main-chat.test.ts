@@ -25,6 +25,9 @@ import {
   parseTaskPlanToolOutput,
   parseTaskReworkToolPayload,
   resolveMainChatFleetScope,
+  resolveMainChatModelConfig,
+  resolveMainChatModelSlot,
+  resolveMainChatNotificationPolicy,
   unwrapToolPayloadObject,
 } from "../src/main-chat.js";
 import { SessionInboundMessageSchema } from "../src/messages.js";
@@ -483,5 +486,200 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
     // Plain non-JSON string `output` must NOT clobber the outer object.
     const plainOuter = { title: "保留外层字段", output: "plain log line" };
     expect(unwrapToolPayloadObject(plainOuter)).toEqual(plainOuter);
+  });
+
+  it("validates Wave 4 model slots inheritance, notification policy passthrough floors, and AOT outbound RPCs", () => {
+    const defaults = createDefaultMainChatSettings("conservative");
+    const withMainSlot = mergeMainChatSettings(defaults, {
+      modelConfig: {
+        slots: {
+          main: { provider: "claude", model: "claude-opus-4-6", thinkingOptionId: "high" },
+          subagentDefault: {
+            provider: "claude",
+            model: "claude-sonnet-4-6",
+            thinkingOptionId: "low",
+          },
+        },
+      },
+      notificationPolicy: {
+        mode: "low_distraction",
+        lowDistractionEnabled: true,
+        foldLowPriorityToDigest: true,
+        categoryOverrides: {
+          permission_approval: "silent", // must stay floored at critical
+          task_progress: "silent",
+        },
+      },
+    });
+
+    // Slot inheritance chain: subagentReadonly -> subagentDefault -> main; directionLead -> main.
+    const readonlySlot = resolveMainChatModelSlot({
+      purpose: "subagentReadonly",
+      settings: withMainSlot,
+    });
+    expect(readonlySlot.source).toBe("inherited");
+    expect(readonlySlot.inheritedFrom).toBe("subagentDefault");
+    expect(readonlySlot.binding?.model).toBe("claude-sonnet-4-6");
+
+    const leaderSlot = resolveMainChatModelSlot({
+      purpose: "directionLead",
+      settings: withMainSlot,
+    });
+    expect(leaderSlot.source).toBe("inherited");
+    expect(leaderSlot.inheritedFrom).toBe("main");
+    expect(leaderSlot.binding?.model).toBe("claude-opus-4-6");
+
+    // Atomic profile switch + rollback via mergeMainChatSettings
+    const switched = mergeMainChatSettings(withMainSlot, {
+      modelConfig: { applyProfileId: "economy" },
+    });
+    expect(resolveMainChatModelConfig(switched).activeProfileId).toBe("economy");
+    expect(resolveMainChatModelConfig(switched).rollbackSnapshot?.slots?.main?.model).toBe(
+      "claude-opus-4-6",
+    );
+
+    const rolledBack = mergeMainChatSettings(switched, {
+      modelConfig: { rollbackProfile: true },
+    });
+    expect(resolveMainChatModelConfig(rolledBack).slots?.main?.model).toBe("claude-opus-4-6");
+
+    // Critical passthrough floor: permission_approval cannot be downgraded to silent.
+    const policy = resolveMainChatNotificationPolicy(withMainSlot);
+    expect(policy.lowDistractionEnabled).toBe(true);
+    expect(policy.categoryOverrides?.permission_approval).toBe("critical");
+    expect(policy.categoryOverrides?.task_progress).toBe("silent");
+
+    // Inbound & AOT outbound validation for all 4 Wave 4 RPCs
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.switch_model_profile.request",
+        requestId: "req_mp_1",
+        profileId: "economy",
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.retry_task_with_fallback.request",
+        requestId: "req_retry_1",
+        taskId: "task_failed_1",
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.list_notification_receipts.request",
+        requestId: "req_nrec_1",
+        unreadOnly: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.ack_notification_receipt.request",
+        requestId: "req_nack_1",
+        markAll: true,
+        status: "read",
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.switch_model_profile.response",
+          payload: {
+            requestId: "req_mp_1",
+            settings: switched,
+            activeProfileId: "economy",
+            changedSlots: ["main", "subagentDefault"],
+            event: {
+              id: "mps_1",
+              action: "switch",
+              fromProfileId: "balanced",
+              toProfileId: "economy",
+              changedSlots: ["main", "subagentDefault"],
+              actor: "user",
+              createdAt: "2026-11-25T05:00:00.000Z",
+            },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.retry_task_with_fallback.response",
+          payload: {
+            requestId: "req_retry_1",
+            task: null,
+            previousAgentId: "agent_old",
+            newAgentId: "agent_new",
+            fromModelSpec: "claude/claude-opus-4-6",
+            toModelSpec: "codex/gpt-5.3-codex",
+            fallbackEvent: null,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    const summary = {
+      lowDistractionEnabled: true,
+      mode: "low_distraction" as const,
+      unreadCount: 1,
+      deliveredCount: 1,
+      suppressedQuietCount: 2,
+      suppressedNightCount: 0,
+      foldedDigestCount: 2,
+      criticalPassthroughCount: 1,
+      latestReceiptAt: "2026-11-25T05:00:00.000Z",
+    };
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.list_notification_receipts.response",
+          payload: {
+            requestId: "req_nrec_1",
+            receipts: [
+              {
+                id: "nrec_1",
+                category: "permission_approval",
+                signalKind: "ask",
+                tier: "critical",
+                status: "delivered",
+                channel: "push",
+                title: "需审批权限",
+                summary: "执行 Bash 命令",
+                reason: "关键事件穿透低打扰模式",
+                passthrough: true,
+                createdAt: "2026-11-25T05:00:00.000Z",
+                updatedAt: "2026-11-25T05:00:00.000Z",
+                deliveredAt: "2026-11-25T05:00:01.000Z",
+              },
+            ],
+            summary,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.ack_notification_receipt.response",
+          payload: {
+            requestId: "req_nack_1",
+            updatedCount: 1,
+            receipts: [],
+            summary: { ...summary, unreadCount: 0 },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
   });
 });

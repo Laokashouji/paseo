@@ -57,6 +57,11 @@ import type {
   MainChatResolveSettingsProposalResponsePayload,
   MainChatReviewTaskResponsePayload,
   MainChatRevokeStandingAuthorizationResponsePayload,
+  MainChatAckNotificationReceiptResponsePayload,
+  MainChatListNotificationReceiptsResponsePayload,
+  MainChatNotificationCategory,
+  MainChatNotificationDeliveryStatus,
+  MainChatRetryTaskWithFallbackResponsePayload,
   MainChatRoutineKind,
   MainChatRoutinesCreateResponsePayload,
   MainChatRoutinesDeleteResponsePayload,
@@ -69,6 +74,7 @@ import type {
   MainChatStandingAuthorizationScope,
   MainChatStartPlanResponsePayload,
   MainChatStartReadyTaskResponsePayload,
+  MainChatSwitchModelProfileResponsePayload,
   MainChatTaskMode,
   MainChatTaskReviewVerdict,
   MainChatTriggerPatrolResponsePayload,
@@ -6409,6 +6415,100 @@ export class DaemonClient {
           ...(input.autoStartOnReady !== undefined
             ? { autoStartOnReady: input.autoStartOnReady }
             : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async switchMainChatModelProfile(
+    input: {
+      profileId?: string;
+      rollback?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatSwitchModelProfileResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.switch_model_profile.response">({
+      requestId,
+      message: {
+        type: "main_chat.switch_model_profile.request",
+        ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
+        ...(input.rollback !== undefined ? { rollback: input.rollback } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async retryMainChatTaskWithFallback(
+    input: {
+      taskId: string;
+      provider?: string;
+      model?: string | null;
+      thinkingOptionId?: string | null;
+      reason?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatRetryTaskWithFallbackResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.retry_task_with_fallback.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.retry_task_with_fallback.request",
+          taskId: input.taskId,
+          ...(input.provider !== undefined ? { provider: input.provider } : {}),
+          ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(input.thinkingOptionId !== undefined
+            ? { thinkingOptionId: input.thinkingOptionId }
+            : {}),
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        },
+        timeout: 60000,
+      },
+    );
+  }
+
+  async listMainChatNotificationReceipts(
+    options?: {
+      status?: MainChatNotificationDeliveryStatus;
+      category?: MainChatNotificationCategory;
+      unreadOnly?: boolean;
+      limit?: number;
+    },
+    requestId?: string,
+  ): Promise<MainChatListNotificationReceiptsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_notification_receipts.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.list_notification_receipts.request",
+          ...(options?.status !== undefined ? { status: options.status } : {}),
+          ...(options?.category !== undefined ? { category: options.category } : {}),
+          ...(options?.unreadOnly !== undefined ? { unreadOnly: options.unreadOnly } : {}),
+          ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async ackMainChatNotificationReceipt(
+    input: {
+      receiptId?: string;
+      receiptIds?: string[];
+      markAll?: boolean;
+      status?: "acknowledged" | "read";
+    },
+    requestId?: string,
+  ): Promise<MainChatAckNotificationReceiptResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.ack_notification_receipt.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.ack_notification_receipt.request",
+          ...(input.receiptId !== undefined ? { receiptId: input.receiptId } : {}),
+          ...(input.receiptIds !== undefined ? { receiptIds: input.receiptIds } : {}),
+          ...(input.markAll !== undefined ? { markAll: input.markAll } : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
         },
         timeout: 30000,
       },

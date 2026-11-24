@@ -1,7 +1,9 @@
 import type {
   MainChatDecisionRecord,
+  MainChatNotificationSummary,
   MainChatOverview,
   MainChatPlanRecord,
+  MainChatRuleDiagnostic,
   MainChatSessionTriage,
   MainChatTaskDeliveryGate,
   MainChatTaskDependencyState,
@@ -10,6 +12,7 @@ import type {
 } from "@getpaseo/protocol/main-chat";
 import type { PendingPermission } from "@/types/shared";
 import { deriveTaskDagSummary, orderBucketItemsWithHierarchy } from "./task-dag-ui";
+import { canRetryManagedFailedTask } from "./zero-token-diagnostic-ui";
 
 export const STALE_IN_PROGRESS_THRESHOLD_MS = 48 * 60 * 60 * 1000;
 export const COMPLETED_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -123,6 +126,8 @@ export interface ActionBarTaskNeedsYouItem {
   suggestedAction: string | null;
   goal: string | null;
   isFailed: boolean;
+  canRetryWithFallback: boolean;
+  ruleDiagnostic: MainChatRuleDiagnostic | null;
   taskRecord: MainChatTaskRecord | null;
   updatedAtMs: number;
 }
@@ -159,6 +164,7 @@ export interface ActionBarTaskItem {
   blockedByTitles: string[];
   canStartReady: boolean;
   deliveryGate: MainChatTaskDeliveryGate | null;
+  ruleDiagnostic: MainChatRuleDiagnostic | null;
   taskRecord: MainChatTaskRecord | null;
 }
 
@@ -187,6 +193,7 @@ export interface MainChatActionBarModel {
   completed24h: ActionBarTaskItem[];
   counts: ActionBarCounts;
   projectLessonsCount: number;
+  notificationSummary: MainChatNotificationSummary | null;
 }
 
 function directoryBasename(dirPath: string | null | undefined): string | null {
@@ -469,6 +476,7 @@ function buildTaskItemBase(
   },
 ): ActionBarTaskItem {
   const dag = deriveTaskDagSummary(task, ctx.tasks);
+  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
   return {
     id: `task:${task.id}`,
     serverId: srvId,
@@ -489,6 +497,7 @@ function buildTaskItemBase(
     blockedByTitles: dag.blockedByTitles,
     canStartReady: dag.canStartReady,
     deliveryGate: task.deliveryGate ?? null,
+    ruleDiagnostic: triage?.ruleDiagnostic ?? task.lastRuleDiagnostic ?? null,
     taskRecord: task,
     ...overrides,
   };
@@ -687,6 +696,8 @@ function buildTaskNeedsYouRecord(
   live: ActionBarLiveAgentSnapshot | undefined,
 ): ActionBarTaskNeedsYouItem {
   const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  const isFailed = task.status === "failed" || live?.status === "error";
+  const ruleDiagnostic = triage?.ruleDiagnostic ?? task.lastRuleDiagnostic ?? null;
   return {
     kind: "task",
     id: `task:${task.id}`,
@@ -699,11 +710,18 @@ function buildTaskNeedsYouRecord(
     workspaceLabel: task.workspaceLabel || directoryBasename(task.cwd),
     cwd: firstNonEmptyText(live?.cwd, task.cwd),
     mode: task.mode,
-    reason: firstNonEmptyText(triage?.waitReason, triage?.summary, task.brief.goal),
+    reason: firstNonEmptyText(
+      triage?.waitReason,
+      ruleDiagnostic?.summary,
+      triage?.summary,
+      task.brief.goal,
+    ),
     summary: firstNonEmptyText(triage?.summary),
     suggestedAction: firstNonEmptyText(triage?.suggestedAction),
     goal: firstNonEmptyText(task.brief.goal),
-    isFailed: task.status === "failed" || live?.status === "error",
+    isFailed,
+    canRetryWithFallback: canRetryManagedFailedTask(task, isFailed),
+    ruleDiagnostic,
     taskRecord: task,
     updatedAtMs: resolveTaskActivityMs(task, live),
   };
@@ -766,6 +784,8 @@ function buildLiveAgentNeedsYouRecord(
   linkedTask: MainChatTaskRecord | null,
   triage: MainChatSessionTriage | undefined,
 ): ActionBarTaskNeedsYouItem {
+  const isFailed = agent.status === "error";
+  const ruleDiagnostic = triage?.ruleDiagnostic ?? linkedTask?.lastRuleDiagnostic ?? null;
   return {
     kind: "task",
     id: `agent:${agent.serverId}:${agent.agentId}`,
@@ -780,11 +800,13 @@ function buildLiveAgentNeedsYouRecord(
     workspaceLabel: firstNonEmptyText(linkedTask?.workspaceLabel, directoryBasename(agent.cwd)),
     cwd: firstNonEmptyText(agent.cwd, linkedTask?.cwd),
     mode: linkedTask ? linkedTask.mode : agent.mode,
-    reason: firstNonEmptyText(triage?.waitReason, triage?.summary),
+    reason: firstNonEmptyText(triage?.waitReason, ruleDiagnostic?.summary, triage?.summary),
     summary: firstNonEmptyText(triage?.summary),
     suggestedAction: firstNonEmptyText(triage?.suggestedAction),
     goal: firstNonEmptyText(linkedTask?.brief.goal),
-    isFailed: agent.status === "error",
+    isFailed,
+    canRetryWithFallback: canRetryManagedFailedTask(linkedTask, isFailed),
+    ruleDiagnostic,
     taskRecord: linkedTask,
     updatedAtMs: agent.updatedAtMs,
   };
@@ -930,6 +952,7 @@ function buildFallbackAgentTaskItem(
     blockedByTitles: [],
     canStartReady: false,
     deliveryGate: null,
+    ruleDiagnostic: triage?.ruleDiagnostic ?? null,
     taskRecord: null,
     ...overrides,
   };
@@ -1050,6 +1073,7 @@ export function buildMainChatActionBarModel(
         orderedCompleted24h.length,
     },
     projectLessonsCount: input.overview?.projectLessons?.length ?? 0,
+    notificationSummary: input.overview?.notificationSummary ?? null,
   };
 }
 
