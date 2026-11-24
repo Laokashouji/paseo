@@ -4,6 +4,7 @@ import {
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
   type MainChatIntervals,
+  type MainChatMetrics,
   type MainChatNightModeConfig,
   type MainChatNightModeStatus,
   type MainChatSettings,
@@ -26,6 +27,8 @@ import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-bad
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { overviewStoreKey, useMainChatOverviewStore } from "@/main-chat/overview-store";
+import { findMainChatAgentOnHost } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { StandingAuthPanel } from "@/main-chat/standing-auth-panel";
 import {
@@ -494,6 +497,84 @@ const MainChatMasterCard = memo(function MainChatMasterCard({
   );
 });
 
+function useMainChatSettingsOverviewMetrics(input: {
+  selectedServerId: string | null;
+  mainChatEnabled: boolean;
+  client: ReturnType<typeof useMainChatSettingsHostState>["client"];
+}): {
+  mainChatAgentId: string | null;
+  supervisorMetrics: MainChatMetrics | null;
+  refreshOverview: (targetAgentId?: string | null) => void;
+} {
+  const { selectedServerId, mainChatEnabled, client } = input;
+  const mainChatAgentId = useSessionStore((state) =>
+    selectedServerId
+      ? (findMainChatAgentOnHost(state.sessions[selectedServerId], selectedServerId)?.agentId ??
+        null)
+      : null,
+  );
+  const overviewKey =
+    selectedServerId && mainChatAgentId ? overviewStoreKey(selectedServerId, mainChatAgentId) : "";
+  const overview = useMainChatOverviewStore((state) =>
+    overviewKey ? (state.overviewsByKey[overviewKey] ?? null) : null,
+  );
+  const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
+
+  const refreshOverview = useCallback(
+    (overrideAgentId?: string | null) => {
+      const targetAgentId = overrideAgentId ?? mainChatAgentId;
+      if (
+        !selectedServerId ||
+        !targetAgentId ||
+        !client ||
+        typeof client.getMainChatOverview !== "function"
+      ) {
+        return;
+      }
+      void loadOverview(selectedServerId, targetAgentId, client).catch(() => undefined);
+    },
+    [client, loadOverview, mainChatAgentId, selectedServerId],
+  );
+
+  useEffect(() => {
+    if (!mainChatEnabled) return;
+    refreshOverview();
+  }, [mainChatEnabled, refreshOverview]);
+
+  return {
+    mainChatAgentId,
+    supervisorMetrics: overview?.metrics ?? null,
+    refreshOverview,
+  };
+}
+
+const SupervisorMetricsRow = memo(function SupervisorMetricsRow({
+  metrics,
+}: {
+  metrics: MainChatMetrics | null;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  if (!metrics) return null;
+  return (
+    <View
+      style={[settingsStyles.row, settingsStyles.rowBorder, styles.actionRow]}
+      testID="settings-main-chat-supervisor-metrics"
+    >
+      <View style={styles.rowText}>
+        <Text style={settingsStyles.rowTitle}>{t("mainChat.board.briefHeading")}</Text>
+        <Text style={settingsStyles.rowHint}>
+          {t("mainChat.board.supervisorMetrics", {
+            held: metrics.supervisorHeld,
+            autoContinued: metrics.autoContinued,
+            rework: metrics.reworkCount,
+            interrupts: metrics.interrupts,
+          })}
+        </Text>
+      </View>
+    </View>
+  );
+});
+
 export function MainChatSettingsSection(): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
@@ -519,6 +600,12 @@ export function MainChatSettingsSection(): ReactElement {
 
   const mainChatEnabled = isMainChatEnabled(settings);
   const nightModeConfig = useMemo(() => resolveMainChatNightMode(settings), [settings]);
+  const { mainChatAgentId, supervisorMetrics, refreshOverview } =
+    useMainChatSettingsOverviewMetrics({
+      selectedServerId,
+      mainChatEnabled,
+      client,
+    });
 
   const [titleDraft, setTitleDraft] = useState(settings.title);
   const [intervalDrafts, setIntervalDrafts] = useState<Record<IntervalFieldKey, string>>(() =>
@@ -663,13 +750,14 @@ export function MainChatSettingsSection(): ReactElement {
           forceWakeup: true,
         });
         toast.show(result.summary, { variant: "success" });
+        refreshOverview(ensured.agentId ?? null);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("mainChat.patrolFailed"));
       } finally {
         setPatrolling(false);
       }
     })();
-  }, [client, patrolling, selectedServerId, t, toast, triggerPatrol]);
+  }, [client, patrolling, refreshOverview, selectedServerId, t, toast, triggerPatrol]);
 
   const modelModeOptions = useMemo<SegmentedControlOption<MainChatBackgroundModelMode>[]>(
     () => [
@@ -870,6 +958,8 @@ export function MainChatSettingsSection(): ReactElement {
                   {t("mainChat.actions.triggerPatrolShort")}
                 </Button>
               </View>
+
+              <SupervisorMetricsRow metrics={supervisorMetrics} />
             </View>
           </SettingsSection>
 
@@ -1001,6 +1091,7 @@ export function MainChatSettingsSection(): ReactElement {
             <View style={settingsStyles.card}>
               <StandingAuthPanel
                 serverId={selectedServerId}
+                mainAgentId={mainChatAgentId}
                 client={client}
                 hostLabelsByServerId={hostLabelsByServerId}
                 variant="settings"

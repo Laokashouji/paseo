@@ -16,6 +16,7 @@ import {
   Archive,
   ArrowLeft,
   ArrowUpRight,
+  AtSign,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -74,11 +75,13 @@ import { MainChatShell } from "./main-chat-shell";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
+import { useMainChatRouteStore } from "./route-store";
 import { selectMainChatSidebarSummary } from "./selectors";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const ThemedArrowUpRight = withUnistyles(ArrowUpRight);
+const ThemedAtSign = withUnistyles(AtSign);
 const ThemedCheckCircle = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
@@ -631,6 +634,7 @@ const ConversationTaskRow = memo(function ConversationTaskRow({
   item,
   busyTaskId,
   onOpenTask,
+  onDirectRoute,
   onParkTask,
   onAcceptReview,
 }: {
@@ -638,11 +642,13 @@ const ConversationTaskRow = memo(function ConversationTaskRow({
   item: ActionBarTaskItem;
   busyTaskId: string | null;
   onOpenTask: (item: ActionBarTaskItem) => void;
+  onDirectRoute: (item: ActionBarTaskItem) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
   onAcceptReview: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
   const handleOpen = useCallback(() => onOpenTask(item), [item, onOpenTask]);
+  const handleDirectRoute = useCallback(() => onDirectRoute(item), [item, onDirectRoute]);
   const handlePause = useCallback(() => {
     if (item.taskId) onParkTask(item.taskId, true);
   }, [item.taskId, onParkTask]);
@@ -686,7 +692,7 @@ const ConversationTaskRow = memo(function ConversationTaskRow({
             disabled={isBusy}
             onPress={handlePause}
           >
-            {t("mainChat.actionBar.parkAction")}
+            {t("mainChat.actionBar.pauseAction")}
           </Button>
         ) : null}
         {bucket === "parked" && item.taskId ? (
@@ -711,6 +717,17 @@ const ConversationTaskRow = memo(function ConversationTaskRow({
             {t("mainChat.actionBar.acceptAction")}
           </Button>
         ) : null}
+        {item.agentId ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={ThemedAtSign}
+            onPress={handleDirectRoute}
+            testID={`conversation-action-direct-${item.id}`}
+          >
+            {t("mainChat.board.talkDirectly")}
+          </Button>
+        ) : null}
       </View>
     </View>
   );
@@ -731,22 +748,22 @@ function resolveBucketCapsuleLabel(
     case "parked":
       return t("mainChat.actionBar.capsuleParked", { count });
     case "completed24h":
-      return t("mainChat.actionBar.capsuleCompleted24h", { count });
+      return t("mainChat.actionBar.capsuleCompleted", { count });
   }
 }
 
 function resolveBucketTitleKey(bucket: ActionBarBucketKey): string {
   switch (bucket) {
     case "needsYou":
-      return "mainChat.actionBar.panelTitleNeedsYou";
+      return "mainChat.actionBar.panelNeedsYou";
     case "inProgress":
-      return "mainChat.actionBar.panelTitleInProgress";
+      return "mainChat.actionBar.panelInProgress";
     case "awaitingReview":
-      return "mainChat.actionBar.panelTitleAwaitingReview";
+      return "mainChat.actionBar.panelAwaitingReview";
     case "parked":
-      return "mainChat.actionBar.panelTitleParked";
+      return "mainChat.actionBar.panelParked";
     case "completed24h":
-      return "mainChat.actionBar.panelTitleCompleted24h";
+      return "mainChat.actionBar.panelCompleted";
   }
 }
 
@@ -813,10 +830,12 @@ const ConversationCapsuleButton = memo(function ConversationCapsuleButton({
 
 const ConversationActionBar = memo(function ConversationActionBar({
   serverId,
+  conversationAgentId,
   overviewMainAgentId,
   model,
 }: {
   serverId: string;
+  conversationAgentId: string;
   overviewMainAgentId: string;
   model: MainChatActionBarModel;
 }): ReactElement | null {
@@ -826,6 +845,7 @@ const ConversationActionBar = memo(function ConversationActionBar({
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
+  const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
 
   const [openBucket, setOpenBucket] = useState<ActionBarBucketKey | null>(null);
   const [expandedNeedsIds, setExpandedNeedsIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -886,6 +906,19 @@ const ConversationActionBar = memo(function ConversationActionBar({
       });
     },
     [openMainChatTaskTarget],
+  );
+
+  const handleDirectRouteTaskItem = useCallback(
+    (item: ActionBarTaskItem) => {
+      if (!item.agentId) return;
+      setRouteTarget(serverId, conversationAgentId, {
+        targetServerId: item.serverId,
+        targetAgentId: item.agentId,
+        targetTitle: item.title,
+      });
+      setOpenBucket(null);
+    },
+    [conversationAgentId, serverId, setRouteTarget],
   );
 
   const handleParkTask = useCallback(
@@ -977,6 +1010,7 @@ const ConversationActionBar = memo(function ConversationActionBar({
                     item={item}
                     busyTaskId={busyTaskId}
                     onOpenTask={handleOpenTaskItem}
+                    onDirectRoute={handleDirectRouteTaskItem}
                     onParkTask={handleParkTask}
                     onAcceptReview={handleAcceptReview}
                   />
@@ -1274,6 +1308,7 @@ const ConversationScreenBody = memo(function ConversationScreenBody({
         {actionBarModel ? (
           <ConversationActionBar
             serverId={resolved.serverId}
+            conversationAgentId={resolved.agentId}
             overviewMainAgentId={rootMainAgentId ?? resolved.agentId}
             model={actionBarModel}
           />
