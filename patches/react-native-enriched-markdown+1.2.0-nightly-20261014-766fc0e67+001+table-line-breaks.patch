@@ -1,0 +1,414 @@
+diff --git a/node_modules/react-native-enriched-markdown/android/src/main/java/com/swmansion/enriched/markdown/segments/TableContainerView.kt b/node_modules/react-native-enriched-markdown/android/src/main/java/com/swmansion/enriched/markdown/segments/TableContainerView.kt
+--- a/node_modules/react-native-enriched-markdown/android/src/main/java/com/swmansion/enriched/markdown/segments/TableContainerView.kt
++++ b/node_modules/react-native-enriched-markdown/android/src/main/java/com/swmansion/enriched/markdown/segments/TableContainerView.kt
+@@ -127,12 +127,13 @@
+         val isSectionHead = section.type == NodeType.TableHead
+         section.children.filter { it.type == NodeType.TableRow }.map { row ->
+           row.children.map { cell ->
+-            val isHeader = isSectionHead || cell.type == NodeType.TableHeaderCell
+-            val align = textAlignmentFromString(cell.getAttribute("align"))
++            val expandedCell = expandTableCellLineBreaks(cell)
++            val isHeader = isSectionHead || expandedCell.type == NodeType.TableHeaderCell
++            val align = textAlignmentFromString(expandedCell.getAttribute("align"))
+             TableCellData(
+-              attributedText = renderCellNode(cell, isHeader, align),
+-              plainText = extractPlainText(cell),
+-              markdownText = MarkdownASTSerializer.serializeChildren(cell),
++              attributedText = renderCellNode(expandedCell, isHeader, align),
++              plainText = extractPlainText(expandedCell),
++              markdownText = MarkdownASTSerializer.serializeChildren(expandedCell).replace("\\\n", "<br>"),
+               isHeader = isHeader,
+               alignment = align,
+             )
+@@ -170,7 +171,12 @@
+       }
+   }
+ 
+-  private fun extractPlainText(node: MarkdownASTNode): String = node.content + node.children.joinToString("") { extractPlainText(it) }
++  private fun extractPlainText(node: MarkdownASTNode): String =
++    if (node.type == NodeType.LineBreak) {
++      " "
++    } else {
++      node.content + node.children.joinToString("") { extractPlainText(it) }
++    }
+ 
+   private fun textAlignmentFromString(align: String?): Layout.Alignment =
+     when (align) {
+@@ -433,6 +439,37 @@
+     }
+ 
+   companion object {
++    private val TABLE_LINE_BREAK_REGEX = Regex("[ \\t]*\\u2028[ \\t]*")
++
++    private fun isOpaqueForTableLineBreak(type: NodeType): Boolean =
++      type == NodeType.Code ||
++        type == NodeType.CodeBlock ||
++        type == NodeType.Image ||
++        type == NodeType.Video ||
++        type == NodeType.LatexMathInline ||
++        type == NodeType.LatexMathDisplay
++
++    private fun expandTableCellLineBreaks(node: MarkdownASTNode): MarkdownASTNode {
++      if (node.children.isEmpty() || isOpaqueForTableLineBreak(node.type)) return node
++      var changed = false
++      val newChildren = ArrayList<MarkdownASTNode>(node.children.size)
++      for (child in node.children) {
++        if (child.type == NodeType.Text && child.content.contains('\u2028')) {
++          changed = true
++          val parts = child.content.split(TABLE_LINE_BREAK_REGEX)
++          parts.forEachIndexed { index, part ->
++            if (index > 0) newChildren.add(MarkdownASTNode(NodeType.LineBreak))
++            if (part.isNotEmpty()) newChildren.add(child.copy(content = part))
++          }
++        } else {
++          val expanded = expandTableCellLineBreaks(child)
++          if (expanded !== child) changed = true
++          newChildren.add(expanded)
++        }
++      }
++      return if (changed) node.copy(children = newChildren) else node
++    }
++
+     private class HeaderTypefaceSpan(
+       private val typeface: Typeface,
+     ) : MetricAffectingSpan() {
+@@ -515,8 +552,9 @@
+         node.children.flatMap { section ->
+           section.children.filter { it.type == NodeType.TableRow }.map { row ->
+             row.children.map { cell ->
+-              val isHeader = section.type == NodeType.TableHead || cell.type == NodeType.TableHeaderCell
+-              val paragraph = MarkdownASTNode(NodeType.Paragraph, children = cell.children)
++              val expandedCell = expandTableCellLineBreaks(cell)
++              val isHeader = section.type == NodeType.TableHead || expandedCell.type == NodeType.TableHeaderCell
++              val paragraph = MarkdownASTNode(NodeType.Paragraph, children = expandedCell.children)
+               val cellParagraphStyle = config.tableCellParagraphStyle(tableStyle, isHeader)
+               val styledText =
+                 config.withParagraphOverride(cellParagraphStyle) {
+diff --git a/node_modules/react-native-enriched-markdown/ios/renderer/AttributedRenderer.m b/node_modules/react-native-enriched-markdown/ios/renderer/AttributedRenderer.m
+--- a/node_modules/react-native-enriched-markdown/ios/renderer/AttributedRenderer.m
++++ b/node_modules/react-native-enriched-markdown/ios/renderer/AttributedRenderer.m
+@@ -213,6 +213,20 @@
+   if (!node)
+     return;
+ 
++  if (node.type == MarkdownNodeTypeLineBreak) {
++    NSAttributedString *lineBreak = [[NSAttributedString alloc] initWithString:@"\u2028"
++                                                                  attributes:[context getTextAttributes]];
++    [out appendAttributedString:lineBreak];
++    return;
++  }
++
++  if (node.type == MarkdownNodeTypeSoftBreak) {
++    NSAttributedString *softBreak = [[NSAttributedString alloc] initWithString:@" "
++                                                                  attributes:[context getTextAttributes]];
++    [out appendAttributedString:softBreak];
++    return;
++  }
++
+   id<NodeRenderer> renderer = [_rendererFactory rendererForNodeType:node.type];
+ 
+   if (renderer) {
+diff --git a/node_modules/react-native-enriched-markdown/ios/segments/TableContainerView.m b/node_modules/react-native-enriched-markdown/ios/segments/TableContainerView.m
+--- a/node_modules/react-native-enriched-markdown/ios/segments/TableContainerView.m
++++ b/node_modules/react-native-enriched-markdown/ios/segments/TableContainerView.m
+@@ -49,6 +49,8 @@
+ {
+   if (!node)
+     return @"";
++  if (node.type == MarkdownNodeTypeLineBreak)
++    return @" ";
+   NSMutableString *buffer = [node.content mutableCopy] ?: [NSMutableString string];
+   for (MarkdownASTNode *child in node.children) {
+     [buffer appendString:ENRMTablePlainTextFromNode(child)];
+@@ -56,6 +58,98 @@
+   return [buffer copy];
+ }
+ 
++static BOOL ENRMTableIsOpaqueForLineBreak(MarkdownNodeType type)
++{
++  return type == MarkdownNodeTypeCode || type == MarkdownNodeTypeCodeBlock || type == MarkdownNodeTypeImage ||
++         type == MarkdownNodeTypeVideo || type == MarkdownNodeTypeLatexMathInline ||
++         type == MarkdownNodeTypeLatexMathDisplay;
++}
++
++static NSArray<MarkdownASTNode *> *ENRMTableSplitTextLineBreaks(MarkdownASTNode *textNode)
++{
++  NSString *content = textNode.content;
++  if (!content || [content rangeOfString:@"\u2028"].location == NSNotFound) {
++    return nil;
++  }
++  NSMutableArray<MarkdownASTNode *> *result = [NSMutableArray array];
++  NSUInteger length = content.length;
++  NSUInteger segStart = 0;
++  NSUInteger i = 0;
++  while (i < length) {
++    if ([content characterAtIndex:i] == 0x2028) {
++      NSUInteger segEnd = i;
++      while (segEnd > segStart) {
++        unichar prev = [content characterAtIndex:segEnd - 1];
++        if (prev != ' ' && prev != '\t')
++          break;
++        segEnd--;
++      }
++      if (segEnd > segStart) {
++        MarkdownASTNode *piece = [[MarkdownASTNode alloc] initWithType:MarkdownNodeTypeText];
++        piece.content = [content substringWithRange:NSMakeRange(segStart, segEnd - segStart)];
++        if (textNode.attributes.count > 0) {
++          piece.attributes = [textNode.attributes mutableCopy];
++        }
++        [result addObject:piece];
++      }
++      [result addObject:[[MarkdownASTNode alloc] initWithType:MarkdownNodeTypeLineBreak]];
++      i++;
++      while (i < length) {
++        unichar next = [content characterAtIndex:i];
++        if (next != ' ' && next != '\t')
++          break;
++        i++;
++      }
++      segStart = i;
++    } else {
++      i++;
++    }
++  }
++  if (segStart < length) {
++    MarkdownASTNode *tail = [[MarkdownASTNode alloc] initWithType:MarkdownNodeTypeText];
++    tail.content = [content substringFromIndex:segStart];
++    if (textNode.attributes.count > 0) {
++      tail.attributes = [textNode.attributes mutableCopy];
++    }
++    [result addObject:tail];
++  }
++  return result;
++}
++
++static MarkdownASTNode *ENRMTableExpandLineBreaksInNode(MarkdownASTNode *node)
++{
++  if (!node || node.children.count == 0 || ENRMTableIsOpaqueForLineBreak(node.type)) {
++    return node;
++  }
++  BOOL changed = NO;
++  NSMutableArray<MarkdownASTNode *> *newChildren = [NSMutableArray arrayWithCapacity:node.children.count];
++  for (MarkdownASTNode *child in node.children) {
++    if (child.type == MarkdownNodeTypeText) {
++      NSArray<MarkdownASTNode *> *split = ENRMTableSplitTextLineBreaks(child);
++      if (split) {
++        changed = YES;
++        [newChildren addObjectsFromArray:split];
++        continue;
++      }
++    }
++    MarkdownASTNode *expanded = ENRMTableExpandLineBreaksInNode(child);
++    if (expanded != child) {
++      changed = YES;
++    }
++    [newChildren addObject:expanded];
++  }
++  if (!changed) {
++    return node;
++  }
++  MarkdownASTNode *copy = [[MarkdownASTNode alloc] initWithType:node.type];
++  copy.content = node.content;
++  if (node.attributes.count > 0) {
++    copy.attributes = [node.attributes mutableCopy];
++  }
++  copy.children = newChildren;
++  return copy;
++}
++
+ static StyleConfig *ENRMTableCellConfig(StyleConfig *config, BOOL isHeader)
+ {
+   StyleConfig *cellConfig = [config copy];
+@@ -159,16 +253,19 @@
+ 
+       NSMutableArray<TableCellData *> *rowCells = [NSMutableArray array];
+       for (MarkdownASTNode *cellNode in rowNode.children) {
++        MarkdownASTNode *expandedCellNode = ENRMTableExpandLineBreaksInNode(cellNode);
+         TableCellData *cell = [[TableCellData alloc] init];
+-        cell.isHeader = isSectionHead || (cellNode.type == MarkdownNodeTypeTableHeaderCell);
+-        cell.alignment = ENRMTableTextAlignmentFromString(cellNode.attributes[@"align"]);
+-        cell.plainText = ENRMTablePlainTextFromNode(cellNode);
+-        cell.markdownText = markdownFromASTNodeChildren(cellNode);
++        cell.isHeader = isSectionHead || (expandedCellNode.type == MarkdownNodeTypeTableHeaderCell);
++        cell.alignment = ENRMTableTextAlignmentFromString(expandedCellNode.attributes[@"align"]);
++        cell.plainText = ENRMTablePlainTextFromNode(expandedCellNode);
++        cell.markdownText =
++            [markdownFromASTNodeChildren(expandedCellNode) stringByReplacingOccurrencesOfString:@"\\\n"
++                                                                                    withString:@"<br>"];
+ 
+         StyleConfig *cellConfig = cell.isHeader ? headerCellConfig : bodyCellConfig;
+         cell.attributedText =
+-            ENRMTableRenderCellNode(cellNode, cellConfig, cell.alignment, allowFontScaling, maxFontSizeMultiplier,
+-                                    writingDirectionMode, resolvedLayoutDirection);
++            ENRMTableRenderCellNode(expandedCellNode, cellConfig, cell.alignment, allowFontScaling,
++                                    maxFontSizeMultiplier, writingDirectionMode, resolvedLayoutDirection);
+         [rowCells addObject:cell];
+       }
+       colCount = MAX(colCount, rowCells.count);
+diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/EnrichedMarkdownText.js b/node_modules/react-native-enriched-markdown/lib/module/web/EnrichedMarkdownText.js
+--- a/node_modules/react-native-enriched-markdown/lib/module/web/EnrichedMarkdownText.js
++++ b/node_modules/react-native-enriched-markdown/lib/module/web/EnrichedMarkdownText.js
+@@ -6,7 +6,7 @@
+ import { parseMarkdown, parseMarkdownSync } from "./parseMarkdown.js";
+ import { recognizeTextLinks } from "./recognizeTextLinks.js";
+ import { RenderNode } from "./renderers/index.js";
+-import { indexTaskItems, markInlineImages } from "./utils.js";
++import { indexTaskItems, markInlineImages, splitTableLineBreaks } from "./utils.js";
+ import { loadKaTeX } from "./katex.js";
+ import { ENRM_TEXT_CLASS, ENRM_SELECTION_BG_VAR } from "./globalStyles.js";
+ import { filterNativeOnlyProps } from "./nativeProps.js";
+@@ -69,6 +69,7 @@
+       if (!result) return null;
+       indexTaskItems(result);
+       markInlineImages(result);
++      splitTableLineBreaks(result);
+       return {
+         markdown,
+         ast: recognizeTextLinks(result, linkRecognitionRef.current?.text, linkRecognitionRef.current?.inlineCode)
+@@ -99,6 +100,7 @@
+       if (!cancelled) {
+         indexTaskItems(result);
+         markInlineImages(result);
++        splitTableLineBreaks(result);
+         setParseError(false);
+         setKatex(katexInstance);
+         setParsed({
+diff --git a/node_modules/react-native-enriched-markdown/lib/module/web/utils.js b/node_modules/react-native-enriched-markdown/lib/module/web/utils.js
+--- a/node_modules/react-native-enriched-markdown/lib/module/web/utils.js
++++ b/node_modules/react-native-enriched-markdown/lib/module/web/utils.js
+@@ -60,4 +60,39 @@
+   }
+   node.children?.forEach(stampInlineImages);
+ }
++const TABLE_LINE_BREAK_OPAQUE = new Set(['Code', 'CodeBlock', 'Image', 'Video', 'LatexMathInline', 'LatexMathDisplay']);
++export function splitTableLineBreaks(node) {
++  if (node.type === 'TableCell' || node.type === 'TableHeaderCell') {
++    expandTableCellLineBreaks(node);
++    return;
++  }
++  node.children?.forEach(splitTableLineBreaks);
++}
++function expandTableCellLineBreaks(node) {
++  if (!node.children || node.children.length === 0) return;
++  let updated = null;
++  node.children.forEach((child, index) => {
++    if (TABLE_LINE_BREAK_OPAQUE.has(child.type)) {
++      if (updated) updated.push(child);
++      return;
++    }
++    if (child.type === 'Text' && child.content?.includes('\u2028')) {
++      if (!updated) updated = node.children.slice(0, index);
++      const parts = child.content.split(/[ \t]*\u2028[ \t]*/);
++      parts.forEach((part, partIndex) => {
++        if (partIndex > 0) updated.push({
++          type: 'LineBreak'
++        });
++        if (part.length > 0) updated.push({
++          ...child,
++          content: part
++        });
++      });
++      return;
++    }
++    expandTableCellLineBreaks(child);
++    if (updated) updated.push(child);
++  });
++  if (updated) node.children = updated;
++}
+ //# sourceMappingURL=utils.js.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-enriched-markdown/lib/typescript/src/web/utils.d.ts b/node_modules/react-native-enriched-markdown/lib/typescript/src/web/utils.d.ts
+--- a/node_modules/react-native-enriched-markdown/lib/typescript/src/web/utils.d.ts
++++ b/node_modules/react-native-enriched-markdown/lib/typescript/src/web/utils.d.ts
+@@ -18,4 +18,9 @@
+  * Mutates the AST in-place (safe: called once on the freshly-parsed result).
+  */
+ export declare function markInlineImages(node: ASTNode): void;
++/**
++ * Splits U+2028 line-break markers inside GFM table cells into LineBreak AST
++ * nodes so cells render `<br>` without splitting the Markdown table row.
++ */
++export declare function splitTableLineBreaks(node: ASTNode): void;
+ //# sourceMappingURL=utils.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/react-native-enriched-markdown/src/web/EnrichedMarkdownText.tsx b/node_modules/react-native-enriched-markdown/src/web/EnrichedMarkdownText.tsx
+--- a/node_modules/react-native-enriched-markdown/src/web/EnrichedMarkdownText.tsx
++++ b/node_modules/react-native-enriched-markdown/src/web/EnrichedMarkdownText.tsx
+@@ -16,7 +16,7 @@
+ import { recognizeTextLinks } from './recognizeTextLinks';
+ import { RenderNode } from './renderers';
+ import type { ASTNode, RendererCallbacks, RenderCapabilities } from './types';
+-import { indexTaskItems, markInlineImages } from './utils';
++import { indexTaskItems, markInlineImages, splitTableLineBreaks } from './utils';
+ import { loadKaTeX } from './katex';
+ import type { KaTeXInstance } from './katex';
+ import { ENRM_TEXT_CLASS, ENRM_SELECTION_BG_VAR } from './globalStyles';
+@@ -88,6 +88,7 @@
+       if (!result) return null;
+       indexTaskItems(result);
+       markInlineImages(result);
++      splitTableLineBreaks(result);
+       return {
+         markdown,
+         ast: recognizeTextLinks(
+@@ -139,6 +140,7 @@
+         if (!cancelled) {
+           indexTaskItems(result);
+           markInlineImages(result);
++          splitTableLineBreaks(result);
+ 
+           setParseError(false);
+           setKatex(katexInstance);
+diff --git a/node_modules/react-native-enriched-markdown/src/web/utils.ts b/node_modules/react-native-enriched-markdown/src/web/utils.ts
+--- a/node_modules/react-native-enriched-markdown/src/web/utils.ts
++++ b/node_modules/react-native-enriched-markdown/src/web/utils.ts
+@@ -63,3 +63,49 @@
+   }
+   node.children?.forEach(stampInlineImages);
+ }
++
++const TABLE_LINE_BREAK_OPAQUE: ReadonlySet<string> = new Set([
++  'Code',
++  'CodeBlock',
++  'Image',
++  'Video',
++  'LatexMathInline',
++  'LatexMathDisplay',
++]);
++
++/**
++ * Splits U+2028 line-break markers inside GFM table cells into LineBreak AST
++ * nodes so cells render `<br>` without splitting the Markdown table row.
++ * Code spans and media nodes stay untouched.
++ * Mutates the AST in-place (safe: called once on the freshly-parsed result).
++ */
++export function splitTableLineBreaks(node: ASTNode): void {
++  if (node.type === 'TableCell' || node.type === 'TableHeaderCell') {
++    expandTableCellLineBreaks(node);
++    return;
++  }
++  node.children?.forEach(splitTableLineBreaks);
++}
++
++function expandTableCellLineBreaks(node: ASTNode): void {
++  if (!node.children || node.children.length === 0) return;
++  let updated: ASTNode[] | null = null;
++  node.children.forEach((child, index) => {
++    if (TABLE_LINE_BREAK_OPAQUE.has(child.type)) {
++      if (updated) updated.push(child);
++      return;
++    }
++    if (child.type === 'Text' && child.content?.includes('\u2028')) {
++      if (!updated) updated = node.children!.slice(0, index);
++      const parts = child.content.split(/[ \t]*\u2028[ \t]*/);
++      parts.forEach((part, partIndex) => {
++        if (partIndex > 0) updated!.push({ type: 'LineBreak' });
++        if (part.length > 0) updated!.push({ ...child, content: part });
++      });
++      return;
++    }
++    expandTableCellLineBreaks(child);
++    if (updated) updated.push(child);
++  });
++  if (updated) node.children = updated;
++}
