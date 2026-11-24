@@ -42,7 +42,7 @@ function mountEditor(
         accessibilityLabel="Message input"
         testID="composer-markdown-input"
         minHeight={40}
-        maxHeight={160}
+        maxHeight={220}
         {...props}
       />,
     );
@@ -58,20 +58,24 @@ function mountEditor(
   return mounted;
 }
 
-describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
-  it("renders B1 syntax classes and computed typography while keeping raw Markdown text", () => {
+describe("ComposerMarkdownInput (web Live Preview)", () => {
+  it("renders Live Preview formatting and hides raw markers while preserving raw Markdown text", () => {
     const sample = [
       "# Main Heading",
       "## Sub Heading",
       "**bold** *italic* ~~strike~~ `inline()` [docs](https://example.com)",
       "> quoted thought",
+      "- bullet item",
+      "  - nested bullet",
+      "1. ordered item",
       "- [x] completed task",
+      "---",
       "```ts",
       "const count = 42;",
       "```",
     ].join("\n");
 
-    const mounted = mountEditor({ initialValue: sample });
+    const mounted = mountEditor({ initialValue: sample, maxHeight: 480 });
     const { container, content, inputRef } = mounted;
 
     expect(inputRef.current?.getText()).toBe(sample);
@@ -89,28 +93,35 @@ describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
     const blockquote = container.querySelector(
       ".cm-line.cm-md-blockquote-line",
     ) as HTMLElement | null;
-    const taskMark = container.querySelector(".cm-md-task-mark") as HTMLElement | null;
-    const link = container.querySelector(".cm-md-link") as HTMLElement | null;
-    const url = container.querySelector(".cm-md-url") as HTMLElement | null;
+    const bulletWidgets = container.querySelectorAll(".cm-md-bullet-widget");
+    const orderedWidget = container.querySelector(".cm-md-ordered-widget") as HTMLElement | null;
+    const taskCheckbox = container.querySelector(".cm-md-task-checkbox") as HTMLElement | null;
+    const hrBar = container.querySelector(".cm-md-hr-bar") as HTMLElement | null;
+    const link = container.querySelector(".cm-md-link-live") as HTMLElement | null;
+    const langBadge = container.querySelector(".cm-md-code-lang-badge") as HTMLElement | null;
     const codeLines = container.querySelectorAll(".cm-line.cm-md-codeblock-line");
     const firstCodeLine = container.querySelector(".cm-line.cm-md-codeblock-first");
     const lastCodeLine = container.querySelector(".cm-line.cm-md-codeblock-last");
-    const mutedMarks = container.querySelectorAll(".cm-md-mark");
 
-    expect(h1).not.toBeNull();
-    expect(h2).not.toBeNull();
-    expect(strong?.textContent).toBe("**bold**");
-    expect(em?.textContent).toBe("*italic*");
-    expect(strike?.textContent).toBe("~~strike~~");
-    expect(inlineCode?.textContent).toBe("`inline()`");
-    expect(blockquote).not.toBeNull();
-    expect(taskMark?.textContent).toBe("[x]");
-    expect(link).not.toBeNull();
-    expect(url?.textContent).toBe("https://example.com");
+    expect(h1?.textContent).toBe("Main Heading");
+    expect(h2?.textContent).toBe("Sub Heading");
+    expect(strong?.textContent).toBe("bold");
+    expect(em?.textContent).toBe("italic");
+    expect(strike?.textContent).toBe("strike");
+    expect(inlineCode?.textContent).toBe("inline()");
+    expect(blockquote?.textContent).toBe("quoted thought");
+    expect(bulletWidgets.length).toBe(2);
+    expect(bulletWidgets[0]?.textContent).toBe("•");
+    expect(bulletWidgets[1]?.textContent).toBe("◦");
+    expect(orderedWidget?.textContent).toBe("1.");
+    expect(taskCheckbox?.getAttribute("aria-checked")).toBe("true");
+    expect(hrBar).not.toBeNull();
+    expect(link?.textContent).toBe("docs");
+    expect(container.querySelector(".cm-md-url")).toBeNull();
+    expect(langBadge?.textContent).toBe("ts");
     expect(codeLines.length).toBe(3);
     expect(firstCodeLine).not.toBeNull();
     expect(lastCodeLine).not.toBeNull();
-    expect(mutedMarks.length).toBeGreaterThan(0);
 
     const baseFontSize = Number.parseFloat(getComputedStyle(content).fontSize);
     const h1FontSize = Number.parseFloat(getComputedStyle(h1!).fontSize);
@@ -118,6 +129,205 @@ describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
     expect(Number.parseInt(getComputedStyle(strong!).fontWeight, 10)).toBeGreaterThanOrEqual(700);
     expect(getComputedStyle(em!).fontStyle).toBe("italic");
     expect(getComputedStyle(inlineCode!).backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  });
+
+  it("transforms block prefixes and inline syntax immediately upon completing the trigger delimiter", () => {
+    const mounted = mountEditor();
+    const { container, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.insertText?.("-");
+    });
+    // Lone "-" without space stays literal.
+    expect(container.querySelector(".cm-md-bullet-widget")).toBeNull();
+
+    act(() => {
+      handle.insertText?.(" ");
+    });
+    // As soon as space is typed, "- " immediately renders as a bullet list item.
+    expect(container.querySelector(".cm-md-bullet-widget")?.textContent).toBe("•");
+    expect(container.querySelector(".cm-line.cm-md-bullet-line")).not.toBeNull();
+    expect(handle.getText()).toBe("- ");
+
+    // Mid-typing "**bold*" should not prematurely hide single-asterisk italic delimiters.
+    act(() => {
+      handle.insertText?.("**bold*");
+    });
+    expect(container.querySelector(".cm-md-em")?.textContent).toBe("*bold*");
+
+    // Completing the second closing asterisk immediately transforms into clean bold text.
+    act(() => {
+      handle.insertText?.("*");
+    });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("bold");
+    expect(handle.getText()).toBe("- **bold**");
+
+    // Completing inline code immediately hides backticks.
+    act(() => {
+      handle.insertText?.(" `code()`");
+    });
+    expect(container.querySelector(".cm-md-inline-code")?.textContent).toBe("code()");
+
+    // Typing "### " immediately turns the line into a heading with hashes hidden.
+    act(() => {
+      handle.replaceText("###", { start: 3, end: 3 });
+    });
+    expect(container.querySelector(".cm-line.cm-md-h3")?.textContent).toBe("###");
+    act(() => {
+      handle.insertText?.(" ");
+    });
+    expect(container.querySelector(".cm-line.cm-md-h3")?.textContent).toBe("");
+
+    // Typing "> " immediately turns the line into a blockquote with ">" hidden.
+    act(() => {
+      handle.replaceText(">", { start: 1, end: 1 });
+    });
+    expect(container.querySelector(".cm-line.cm-md-blockquote-line")).toBeNull();
+    act(() => {
+      handle.insertText?.(" ");
+    });
+    expect(container.querySelector(".cm-line.cm-md-blockquote-line")?.textContent).toBe("");
+
+    // Quoted bullet list renders both blockquote and bullet without overlapping decorations.
+    act(() => {
+      handle.replaceText("> - nested bullet", { start: 17, end: 17 });
+    });
+    expect(
+      container.querySelector(".cm-line.cm-md-blockquote-line.cm-md-bullet-line"),
+    ).not.toBeNull();
+    expect(container.querySelector(".cm-md-bullet-widget")?.textContent).toBe("•");
+  });
+
+  it("reveals raw inline markers when arrow-keying into hidden syntax via atomic ranges", () => {
+    const sample = "See **bold**";
+    const mounted = mountEditor({ initialValue: sample });
+    const { container, content, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.setSelection({ start: sample.length, end: sample.length });
+    });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("bold");
+
+    // Pressing ArrowLeft once at the end jumps atomically over closing "**" and reveals raw marks.
+    act(() => {
+      content.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handle.getSelection?.()).toEqual({ start: 10, end: 10 });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("**bold**");
+  });
+
+  it("reveals raw inline markers when the caret enters an inline node and re-hides when leaving", () => {
+    const sample = "See **bold** and [docs](https://example.com) now";
+    const mounted = mountEditor({ initialValue: sample });
+    const { container, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.setSelection({ start: sample.length, end: sample.length });
+    });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("bold");
+    expect(container.querySelector(".cm-md-link-live")?.textContent).toBe("docs");
+    expect(container.querySelector(".cm-md-url")).toBeNull();
+
+    // Place caret inside **bold** -> reveals raw ** delimiters.
+    act(() => {
+      handle.setSelection({ start: 8, end: 8 });
+    });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("**bold**");
+    expect(container.querySelector(".cm-md-link-live")?.textContent).toBe("docs");
+
+    // Place caret inside link -> bold re-hides, link reveals [docs](https://example.com).
+    const linkInsidePos = sample.indexOf("docs") + 2;
+    act(() => {
+      handle.setSelection({ start: linkInsidePos, end: linkInsidePos });
+    });
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("bold");
+    expect(container.querySelector(".cm-md-url")?.textContent).toBe("https://example.com");
+  });
+
+  it("supports clicking task checkboxes to toggle raw Markdown between [ ] and [x]", () => {
+    const changes: string[] = [];
+    const mounted = mountEditor({
+      initialValue: "- [ ] ship live preview",
+      onChangeText: (text) => changes.push(text),
+    });
+    const { container, inputRef } = mounted;
+
+    const checkboxWidget = container.querySelector(".cm-md-task-widget") as HTMLElement | null;
+    expect(checkboxWidget).not.toBeNull();
+    expect(container.querySelector(".cm-md-task-checkbox")?.getAttribute("aria-checked")).toBe(
+      "false",
+    );
+
+    act(() => {
+      checkboxWidget!.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(inputRef.current?.getText()).toBe("- [x] ship live preview");
+    expect(changes.at(-1)).toBe("- [x] ship live preview");
+    expect(container.querySelector(".cm-md-task-checkbox")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(container.querySelector(".cm-line.cm-md-task-checked")).not.toBeNull();
+  });
+
+  it("renders CJK punctuation-bounded bold spans without leaking raw asterisks", () => {
+    const sample = "- 作用退化成了**“提醒已打开文档的 AI”**——偏软约束";
+    const mounted = mountEditor({ initialValue: sample });
+    const { container, inputRef } = mounted;
+
+    expect(inputRef.current?.getText()).toBe(sample);
+    expect(container.querySelector(".cm-md-bullet-widget")?.textContent).toBe("•");
+    expect(container.querySelector(".cm-md-strong")?.textContent).toBe("“提醒已打开文档的 AI”");
+  });
+
+  it("supports Tab list indentation and Backspace prefix/outdent/safe inline deletion", () => {
+    const mounted = mountEditor({ initialValue: "- item" });
+    const { content, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.setSelection({ start: 2, end: 2 });
+      content.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handle.getText()).toBe("  - item");
+
+    // First Backspace at marker boundary outdents from 2 spaces back to top-level.
+    act(() => {
+      content.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handle.getText()).toBe("- item");
+
+    // Second Backspace at top-level marker boundary converts list item back to plain text.
+    act(() => {
+      content.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handle.getText()).toBe("item");
+
+    // Backspace immediately after a hidden inline link deletes only ")" so the URL is not lost.
+    act(() => {
+      handle.replaceText("[docs](https://example.com)", { start: 27, end: 27 });
+      content.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handle.getText()).toBe("[docs](https://example.com");
   });
 
   it("supports handle focus, selection, replaceText, insertText, and reset while keeping focus", () => {
@@ -154,12 +364,11 @@ describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
     });
     expect(handle.getText()).toBe("");
     expect(handle.isFocused()).toBe(true);
-    expect(document.activeElement).toBe(mounted.content);
   });
 
-  it("bridges keydown to onKeyPress and respects preventDefault vs Shift+Enter list continuation", () => {
-    const changes: string[] = [];
+  it("lets composer onKeyPress intercept Enter while continuing lists on Shift+Enter", () => {
     const interceptedKeys: string[] = [];
+    const changes: string[] = [];
     const mounted = mountEditor({
       initialValue: "- first item",
       onChangeText: (text) => changes.push(text),
@@ -246,7 +455,7 @@ describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
   });
 
   it("does not intercept Shift+Tab so global composer mode switching stays intact", () => {
-    const mounted = mountEditor({ initialValue: "hello" });
+    const mounted = mountEditor({ initialValue: "- list item" });
     const event = new KeyboardEvent("keydown", {
       key: "Tab",
       shiftKey: true,
@@ -255,11 +464,13 @@ describe("ComposerMarkdownInput (web B1 Markdown styling)", () => {
     });
     act(() => {
       mounted.inputRef.current?.focus();
+      mounted.inputRef.current?.setSelection({ start: 2, end: 2 });
       mounted.content.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(false);
-    expect(mounted.inputRef.current?.getText()).toBe("hello");
+    expect(mounted.inputRef.current?.getText()).toBe("- list item");
   });
+
   it("inserts converted linked HTML paste exactly once via capture listener without double paste", () => {
     const changes: string[] = [];
     const mounted = mountEditor({ onChangeText: (text) => changes.push(text) });

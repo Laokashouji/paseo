@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeMarkdownNewlineContinuation } from "./markdown-language.web";
+import {
+  computeMarkdownBackspaceEdit,
+  computeMarkdownListIndentEdit,
+  computeMarkdownNewlineContinuation,
+} from "./markdown-language.web";
 
 describe("computeMarkdownNewlineContinuation", () => {
   it("continues bullet lists and preserves indentation", () => {
@@ -70,5 +74,99 @@ describe("computeMarkdownNewlineContinuation", () => {
   it("returns null for ordinary lines", () => {
     expect(computeMarkdownNewlineContinuation("plain text", 10)).toBeNull();
     expect(computeMarkdownNewlineContinuation("# heading", 9)).toBeNull();
+  });
+});
+
+describe("computeMarkdownBackspaceEdit", () => {
+  it("strips top-level list, task, ordered, heading, and blockquote prefixes right after the marker", () => {
+    expect(computeMarkdownBackspaceEdit("- item", 2)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 2,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("- ", 2)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 2,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("- [ ] todo", 6)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 6,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("1. first", 3)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 3,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("### Title", 4)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 4,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("> quoted", 2)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 2,
+      insert: "",
+    });
+  });
+
+  it("outdents indented list items by one level before removing the marker", () => {
+    expect(computeMarkdownBackspaceEdit("  - nested", 4)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 2,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("    - [x] deep", 10)).toEqual({
+      replaceFrom: 2,
+      replaceTo: 4,
+      insert: "",
+    });
+    expect(computeMarkdownBackspaceEdit("\t1. tabbed", 4)).toEqual({
+      replaceFrom: 0,
+      replaceTo: 1,
+      insert: "",
+    });
+  });
+
+  it("removes only the innermost level of nested blockquotes", () => {
+    expect(computeMarkdownBackspaceEdit("> > nested", 4)).toEqual({
+      replaceFrom: 2,
+      replaceTo: 4,
+      insert: "",
+    });
+  });
+
+  it("returns null when caret is inside body text or on an ordinary line", () => {
+    expect(computeMarkdownBackspaceEdit("- item", 3)).toBeNull();
+    expect(computeMarkdownBackspaceEdit("### Title", 5)).toBeNull();
+    expect(computeMarkdownBackspaceEdit("plain text", 5)).toBeNull();
+    expect(computeMarkdownBackspaceEdit("- item", 0)).toBeNull();
+  });
+});
+
+describe("computeMarkdownListIndentEdit", () => {
+  it("indents bullet, ordered, and task list items by two spaces", () => {
+    expect(computeMarkdownListIndentEdit("- item")).toEqual({
+      replaceFrom: 0,
+      replaceTo: 0,
+      insert: "  ",
+    });
+    expect(computeMarkdownListIndentEdit("1. first")).toEqual({
+      replaceFrom: 0,
+      replaceTo: 0,
+      insert: "  ",
+    });
+    expect(computeMarkdownListIndentEdit("  - [ ] todo")).toEqual({
+      replaceFrom: 0,
+      replaceTo: 0,
+      insert: "  ",
+    });
+  });
+
+  it("returns null for non-list lines and respects max nesting depth", () => {
+    expect(computeMarkdownListIndentEdit("plain text")).toBeNull();
+    expect(computeMarkdownListIndentEdit("### heading")).toBeNull();
+    expect(computeMarkdownListIndentEdit("            - too deep")).toBeNull();
   });
 });
