@@ -19,16 +19,17 @@ import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
 import { PressHighlight } from "@/components/ui/press-highlight";
-import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import { useToast } from "@/contexts/toast-context";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import type { HostProfile } from "@/types/host-connection";
-import { buildSettingsHostRoute } from "@/utils/host-routes";
+import { buildMainChatRoute, buildSettingsHostRoute } from "@/utils/host-routes";
 import { EMPTY_FLEET_HOSTS, useMainChatConversationsStore } from "./conversations-store";
+import { MainChatHostGroupsPanel } from "./host-groups-panel";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { useMainChatSettingsStore } from "./settings-store";
+import { useMainChatHostGroups } from "./use-host-groups";
 
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
@@ -422,80 +423,6 @@ export function computeUnlinkedClientHosts(
   return unlinked;
 }
 
-function resolveFleetStatusVariant(status: MainChatFleetHostStatus["status"]): StatusBadgeVariant {
-  switch (status) {
-    case "online":
-      return "success";
-    case "connecting":
-    case "degraded":
-      return "warning";
-    case "error":
-      return "error";
-    case "offline":
-      return "muted";
-  }
-}
-
-function resolveFleetStatusKey(status: MainChatFleetHostStatus["status"]): string {
-  switch (status) {
-    case "online":
-      return "mainChat.fleetSync.status.online";
-    case "connecting":
-      return "mainChat.fleetSync.status.connecting";
-    case "degraded":
-      return "mainChat.fleetSync.status.degraded";
-    case "error":
-      return "mainChat.fleetSync.status.error";
-    case "offline":
-      return "mainChat.fleetSync.status.offline";
-  }
-}
-
-const FleetHostStatusRow = memo(function FleetHostStatusRow({
-  host,
-}: {
-  host: MainChatFleetHostStatus;
-}) {
-  const { t } = useTranslation();
-  return (
-    <View style={styles.hostRow} testID={`main-chat-fleet-host-${host.serverId}`}>
-      <View style={styles.hostRowMain}>
-        <View style={styles.hostTitleRow}>
-          <Text style={styles.hostLabel} numberOfLines={1}>
-            {host.label || host.serverId}
-          </Text>
-          {host.isLocal ? (
-            <StatusBadge size="xs" variant="muted" label={t("mainChat.fleetSync.localBadge")} />
-          ) : null}
-          <StatusBadge
-            size="sm"
-            variant={resolveFleetStatusVariant(host.status)}
-            label={t(resolveFleetStatusKey(host.status))}
-          />
-        </View>
-        {host.error ? (
-          <Text style={styles.hostError} numberOfLines={1}>
-            {host.error}
-          </Text>
-        ) : null}
-      </View>
-
-      <View style={styles.hostMetrics}>
-        <Text style={styles.hostMetricText}>
-          {t("mainChat.fleetSync.agentCount", { count: host.agentCount })}
-        </Text>
-        {host.needsAttentionCount > 0 ? (
-          <StatusBadge
-            size="sm"
-            variant="warning"
-            label={t("mainChat.fleetSync.attentionCount", { count: host.needsAttentionCount })}
-          />
-        ) : null}
-      </View>
-    </View>
-  );
-});
-
 const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
   mainHostLabel,
   unlinkedHosts,
@@ -666,6 +593,30 @@ async function syncAutoCandidatesToMainDaemon(input: {
   return { syncedCount, alreadyLinkedCount, lastError };
 }
 
+function resolveCapsuleSummaryText(input: {
+  activeGroupHostLabel: string | null;
+  groupCount: number;
+  unmanagedCount: number;
+  totalCount: number;
+  onlineCount: number;
+  t: (key: string, params?: Record<string, unknown>) => string;
+}): string {
+  if (input.activeGroupHostLabel) {
+    return input.t("mainChat.groups.capsuleActiveGroup", {
+      host: input.activeGroupHostLabel,
+      total: input.totalCount,
+      online: input.onlineCount,
+    });
+  }
+  if (input.groupCount === 0) {
+    return input.t("mainChat.groups.capsuleNoGroup", { count: input.unmanagedCount });
+  }
+  return input.t("mainChat.fleetSync.capsuleSummary", {
+    total: input.totalCount,
+    online: input.onlineCount,
+  });
+}
+
 export interface HostSyncBannerProps {
   serverId: string | null;
   mainAgentId?: string | null;
@@ -675,10 +626,8 @@ export interface HostSyncBannerProps {
  * Multi-host fleet overview capsule bar & non-blocking guidance banner for client-paired hosts
  * that have not yet been linked into the Main Chat daemon's `ConnectedHosts`.
  */
-export const HostSyncBanner = memo(function HostSyncBanner({
-  serverId,
-  mainAgentId,
-}: HostSyncBannerProps): ReactElement | null {
+function useBannerFleetSync(params: { serverId: string | null; mainAgentId: string | null }) {
+  const { serverId, mainAgentId } = params;
   const { t } = useTranslation();
   const toast = useToast();
   const clientHosts = useHosts();
@@ -722,7 +671,6 @@ export const HostSyncBanner = memo(function HostSyncBanner({
   const refreshFleetHosts = useMainChatConversationsStore((state) => state.refreshFleetHosts);
   const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
 
-  const [expanded, setExpanded] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [savingScope, setSavingScope] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -802,12 +750,6 @@ export const HostSyncBanner = memo(function HostSyncBanner({
       ),
     [clientHosts, effectiveFleetScope, effectiveMainServerId, fleetHosts, observedConnectedHosts],
   );
-
-  const onlineCount = useMemo(
-    () => fleetHosts.filter((host) => host.status === "online").length,
-    [fleetHosts],
-  );
-
   const autoSyncableHosts = useMemo(
     () => unlinkedHosts.filter((item) => item.canAutoSync),
     [unlinkedHosts],
@@ -816,18 +758,6 @@ export const HostSyncBanner = memo(function HostSyncBanner({
     () => unlinkedHosts.filter((item) => !item.canAutoSync),
     [unlinkedHosts],
   );
-
-  const handleToggleExpanded = useCallback(() => {
-    setExpanded((prev) => !prev);
-  }, []);
-
-  const handleRefreshFleet = useCallback(() => {
-    if (!serverId || !client || loadingFleetHosts) return;
-    if (typeof client.getMainChatFleetHosts !== "function") return;
-    void refreshFleetHosts(serverId, client, { forceRefresh: true }).catch((error) => {
-      toast.error(error instanceof Error ? error.message : t("mainChat.fleetSync.syncFailed"));
-    });
-  }, [client, loadingFleetHosts, refreshFleetHosts, serverId, t, toast]);
 
   const handleOpenSettings = useCallback(() => {
     if (!serverId) return;
@@ -956,109 +886,220 @@ export const HostSyncBanner = memo(function HostSyncBanner({
     unlinkedHosts.length,
   ]);
 
-  if (!serverId || (fleetHosts.length === 0 && unlinkedHosts.length === 0)) {
+  return {
+    client,
+    fleetHosts,
+    mainHostLabel,
+    loadingFleetHosts,
+    dismissedNotice,
+    unlinkedHosts,
+    autoSyncableHosts,
+    manualOnlyHosts,
+    syncing,
+    savingScope,
+    syncError,
+    refreshFleetHosts,
+    handleOpenSettings,
+    handleDismiss,
+    handleReopenNotice,
+    handleSetLocalOnly,
+    handleSyncNow,
+  };
+}
+
+interface HostSyncCapsuleBarProps {
+  capsuleSummaryText: string;
+  onlineCount: number;
+  groupCount: number;
+  expanded: boolean;
+  showReopenUnlinked: boolean;
+  unlinkedCount: number;
+  refreshDisabled: boolean;
+  onToggleExpanded: () => void;
+  onReopenNotice: () => void;
+  onRefreshFleet: () => void;
+}
+
+const HostSyncCapsuleBar = memo(function HostSyncCapsuleBar({
+  capsuleSummaryText,
+  onlineCount,
+  groupCount,
+  expanded,
+  showReopenUnlinked,
+  unlinkedCount,
+  refreshDisabled,
+  onToggleExpanded,
+  onReopenNotice,
+  onRefreshFleet,
+}: HostSyncCapsuleBarProps): ReactElement {
+  const { t } = useTranslation();
+
+  return (
+    <View style={styles.capsuleRow} testID="main-chat-fleet-capsule-bar">
+      <PressHighlight
+        onPress={onToggleExpanded}
+        style={styles.capsuleButton}
+        highlightStyle={styles.controlPressed}
+        accessibilityRole="button"
+        accessibilityLabel={t("mainChat.fleetSync.expandLabel")}
+        testID="main-chat-fleet-capsule-toggle"
+      >
+        <ThemedServer size={13} uniProps={mutedIconMapping} />
+        <View
+          style={[
+            styles.statusDot,
+            onlineCount > 0 ? styles.statusDotOnline : styles.statusDotOffline,
+          ]}
+        />
+        <Text style={styles.capsuleText} numberOfLines={1}>
+          {capsuleSummaryText}
+        </Text>
+        {groupCount > 1 ? (
+          <Text style={styles.capsuleMeta} numberOfLines={1}>
+            · {t("mainChat.groups.capsuleGroupCount", { count: groupCount })}
+          </Text>
+        ) : null}
+        {expanded ? (
+          <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
+        ) : (
+          <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
+        )}
+      </PressHighlight>
+
+      <View style={styles.capsuleTrailing}>
+        {showReopenUnlinked ? (
+          <PressHighlight
+            onPress={onReopenNotice}
+            style={styles.unlinkedChip}
+            highlightStyle={styles.controlPressed}
+            accessibilityRole="button"
+            testID="main-chat-fleet-reopen-unlinked"
+          >
+            <Text style={styles.unlinkedChipText} numberOfLines={1}>
+              {t("mainChat.fleetSync.unlinkedPill", { count: unlinkedCount })}
+            </Text>
+          </PressHighlight>
+        ) : null}
+
+        <PressHighlight
+          onPress={onRefreshFleet}
+          disabled={refreshDisabled}
+          style={styles.refreshButton}
+          highlightStyle={styles.controlPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.fleetSync.refreshLabel")}
+          testID="main-chat-fleet-refresh"
+        >
+          <ThemedRefreshCw size={13} uniProps={mutedIconMapping} />
+        </PressHighlight>
+      </View>
+    </View>
+  );
+});
+
+export const HostSyncBanner = memo(function HostSyncBanner({
+  serverId,
+  mainAgentId,
+}: HostSyncBannerProps): ReactElement | null {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const normalizedMainAgentId = mainAgentId ?? null;
+  const fleetSync = useBannerFleetSync({ serverId, mainAgentId: normalizedMainAgentId });
+
+  const handleSelectGroup = useCallback((ownerServerId: string) => {
+    router.push(buildMainChatRoute(ownerServerId));
+  }, []);
+
+  const groupsController = useMainChatHostGroups({
+    activeGroupServerId: serverId,
+    activeMainAgentId: normalizedMainAgentId,
+    onSelectGroup: handleSelectGroup,
+  });
+
+  const { groups, unmanaged, legacyConflicts } = groupsController.partition;
+  const activeGroup = useMemo(
+    () => groups.find((group) => group.ownerServerId === serverId) ?? groups[0] ?? null,
+    [groups, serverId],
+  );
+
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const autoExpanded = groups.length === 0 || legacyConflicts.length > 0;
+  const expanded = userExpanded ?? autoExpanded;
+
+  const totalCount = activeGroup?.totalCount ?? fleetSync.fleetHosts.length;
+  const onlineCount =
+    activeGroup?.onlineCount ??
+    fleetSync.fleetHosts.filter((host) => host.status === "online").length;
+
+  const handleToggleExpanded = useCallback(() => {
+    setUserExpanded((prev) => !(prev ?? autoExpanded));
+  }, [autoExpanded]);
+
+  const handleRefreshFleet = useCallback(() => {
+    if (groups.length > 0) {
+      groupsController.refreshAll();
+      return;
+    }
+    if (!serverId || !fleetSync.client || fleetSync.loadingFleetHosts) return;
+    if (typeof fleetSync.client.getMainChatFleetHosts !== "function") return;
+    void fleetSync
+      .refreshFleetHosts(serverId, fleetSync.client, { forceRefresh: true })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : t("mainChat.fleetSync.syncFailed"));
+      });
+  }, [fleetSync, groups.length, groupsController, serverId, t, toast]);
+
+  if (groups.length === 0 && unmanaged.length === 0 && fleetSync.fleetHosts.length === 0) {
     return null;
   }
 
+  const capsuleSummaryText = resolveCapsuleSummaryText({
+    activeGroupHostLabel: activeGroup?.ownerHostLabel ?? null,
+    groupCount: groups.length,
+    unmanagedCount: unmanaged.length,
+    totalCount,
+    onlineCount,
+    t,
+  });
+  const refreshDisabled =
+    fleetSync.loadingFleetHosts ||
+    groupsController.refreshing ||
+    (groups.length === 0 && !fleetSync.client);
+
   return (
     <View style={styles.container} testID="main-chat-host-sync-banner">
-      <View style={styles.capsuleRow} testID="main-chat-fleet-capsule-bar">
-        <PressHighlight
-          onPress={handleToggleExpanded}
-          style={styles.capsuleButton}
-          highlightStyle={styles.controlPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.fleetSync.expandLabel")}
-          testID="main-chat-fleet-capsule-toggle"
-        >
-          <ThemedServer size={13} uniProps={mutedIconMapping} />
-          <View
-            style={[
-              styles.statusDot,
-              onlineCount > 0 ? styles.statusDotOnline : styles.statusDotOffline,
-            ]}
-          />
-          <Text style={styles.capsuleText} numberOfLines={1}>
-            {t("mainChat.fleetSync.capsuleSummary", {
-              total: fleetHosts.length,
-              online: onlineCount,
-            })}
-          </Text>
-          {expanded ? (
-            <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
-          ) : (
-            <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
-          )}
-        </PressHighlight>
-
-        <View style={styles.capsuleTrailing}>
-          {unlinkedHosts.length > 0 && dismissedNotice ? (
-            <PressHighlight
-              onPress={handleReopenNotice}
-              style={styles.unlinkedChip}
-              highlightStyle={styles.controlPressed}
-              accessibilityRole="button"
-              testID="main-chat-fleet-reopen-unlinked"
-            >
-              <Text style={styles.unlinkedChipText} numberOfLines={1}>
-                {t("mainChat.fleetSync.unlinkedPill", { count: unlinkedHosts.length })}
-              </Text>
-            </PressHighlight>
-          ) : null}
-
-          <PressHighlight
-            onPress={handleRefreshFleet}
-            disabled={loadingFleetHosts || !client}
-            style={styles.refreshButton}
-            highlightStyle={styles.controlPressed}
-            accessibilityRole="button"
-            accessibilityLabel={t("mainChat.fleetSync.refreshLabel")}
-            testID="main-chat-fleet-refresh"
-          >
-            <ThemedRefreshCw size={13} uniProps={mutedIconMapping} />
-          </PressHighlight>
-        </View>
-      </View>
+      <HostSyncCapsuleBar
+        capsuleSummaryText={capsuleSummaryText}
+        onlineCount={onlineCount}
+        groupCount={groups.length}
+        expanded={expanded}
+        showReopenUnlinked={fleetSync.unlinkedHosts.length > 0 && fleetSync.dismissedNotice}
+        unlinkedCount={fleetSync.unlinkedHosts.length}
+        refreshDisabled={refreshDisabled}
+        onToggleExpanded={handleToggleExpanded}
+        onReopenNotice={fleetSync.handleReopenNotice}
+        onRefreshFleet={handleRefreshFleet}
+      />
 
       {expanded ? (
-        <View style={styles.hostList} testID="main-chat-fleet-host-list">
-          {fleetHosts.map((host) => (
-            <FleetHostStatusRow key={host.serverId} host={host} />
-          ))}
-          {unlinkedHosts.map((candidate) => (
-            <View
-              key={`unlinked:${candidate.serverId}`}
-              style={styles.hostRow}
-              testID={`main-chat-fleet-unlinked-row-${candidate.serverId}`}
-            >
-              <View style={styles.hostTitleRow}>
-                <Text style={styles.hostLabel} numberOfLines={1}>
-                  {candidate.label}
-                </Text>
-                <StatusBadge
-                  size="sm"
-                  variant="muted"
-                  label={t("mainChat.fleetSync.readOnlyBadge")}
-                />
-              </View>
-            </View>
-          ))}
+        <View style={styles.groupsContainer} testID="main-chat-fleet-host-list">
+          <MainChatHostGroupsPanel controller={groupsController} />
         </View>
       ) : null}
 
-      {unlinkedHosts.length > 0 && !dismissedNotice ? (
+      {fleetSync.unlinkedHosts.length > 0 && !fleetSync.dismissedNotice ? (
         <UnlinkedClientHostNotice
-          mainHostLabel={mainHostLabel}
-          unlinkedHosts={unlinkedHosts}
-          syncing={syncing}
-          savingScope={savingScope}
-          syncError={syncError}
-          hasAutoSyncable={autoSyncableHosts.length > 0}
-          hasManualOnly={manualOnlyHosts.length > 0}
-          onSyncNow={handleSyncNow}
-          onSetLocalOnly={handleSetLocalOnly}
-          onOpenSettings={handleOpenSettings}
-          onDismiss={handleDismiss}
+          mainHostLabel={fleetSync.mainHostLabel}
+          unlinkedHosts={fleetSync.unlinkedHosts}
+          syncing={fleetSync.syncing}
+          savingScope={fleetSync.savingScope}
+          syncError={fleetSync.syncError}
+          hasAutoSyncable={fleetSync.autoSyncableHosts.length > 0}
+          hasManualOnly={fleetSync.manualOnlyHosts.length > 0}
+          onSyncNow={fleetSync.handleSyncNow}
+          onSetLocalOnly={fleetSync.handleSetLocalOnly}
+          onOpenSettings={fleetSync.handleOpenSettings}
+          onDismiss={fleetSync.handleDismiss}
         />
       ) : null}
     </View>
@@ -1097,6 +1138,14 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontWeight: theme.fontWeight.medium,
     flexShrink: 1,
+  },
+  capsuleMeta: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    flexShrink: 0,
+  },
+  groupsContainer: {
+    paddingTop: theme.spacing[0.5],
   },
   capsuleTrailing: {
     flexDirection: "row",

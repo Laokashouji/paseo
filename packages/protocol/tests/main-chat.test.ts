@@ -14,6 +14,7 @@ import {
   createDefaultMainChatSettings,
   isFormerMainChatLabels,
   isHostAllowedInFleetScope,
+  isMainChatEnabled,
   isMainChatLabels,
   mergeMainChatSettings,
   normalizeMainChatFleetScope,
@@ -192,18 +193,25 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
     expect(MainChatOverviewSchema.safeParse(m2Overview).success).toBe(true);
   });
 
-  it("supports backward-compatible fleetScope settings, normalization, and host scope checks", () => {
+  it("supports backward-compatible fleetScope settings, opt-in defaults, normalization, and host scope checks", () => {
     const defaults = createDefaultMainChatSettings();
+    expect(defaults.enabled).toBe(false);
+    expect(isMainChatEnabled(undefined)).toBe(false);
+    expect(isMainChatEnabled(null)).toBe(false);
+    expect(isMainChatEnabled(defaults)).toBe(false);
+    expect(isMainChatEnabled({ enabled: true })).toBe(true);
+    expect(isMainChatEnabled({})).toBe(true);
+
     expect(resolveMainChatFleetScope(defaults)).toEqual({
-      mode: "all_connected",
+      mode: "local_only",
       hostServerIds: [],
     });
 
-    // Legacy settings without fleetScope remain valid and default to all_connected
+    // Legacy settings without fleetScope remain valid and normalize safely to local_only
     const { fleetScope: _omitted, ...legacySettings } = defaults;
     const parsedLegacy = MainChatSettingsSchema.parse(legacySettings);
     expect(resolveMainChatFleetScope(parsedLegacy)).toEqual({
-      mode: "all_connected",
+      mode: "local_only",
       hostServerIds: [],
     });
 
@@ -228,7 +236,11 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
     expect(isHostAllowedInFleetScope(localOnlyScope, "srv_imac", "srv_imac")).toBe(true);
     expect(isHostAllowedInFleetScope(localOnlyScope, "srv_imac", "srv_macbook")).toBe(false);
 
-    expect(isHostAllowedInFleetScope(undefined, "srv_devbox", "srv_any")).toBe(true);
+    // Explicit all_connected remains valid and allows remote hosts
+    const allConnectedScope = { mode: "all_connected" as const, hostServerIds: [] };
+    expect(isHostAllowedInFleetScope(allConnectedScope, "srv_devbox", "srv_any")).toBe(true);
+    expect(isHostAllowedInFleetScope(undefined, "srv_devbox", "srv_devbox")).toBe(true);
+    expect(isHostAllowedInFleetScope(undefined, "srv_devbox", "srv_any")).toBe(false);
 
     // mergeMainChatSettings preserves fleetScope across style/title patches and merges partial updates
     const scoped = mergeMainChatSettings(defaults, {

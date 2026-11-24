@@ -49,6 +49,7 @@ import {
   type MainChatSettingsPatch,
   type MainChatStandingAuthorization,
   type MainChatStandingAuthorizationScope,
+  type MainChatSupervisionSignal,
   type MainChatTaskDecisionActor,
   type MainChatTaskDecisionEntry,
   type MainChatTaskIsolation,
@@ -113,6 +114,7 @@ import {
   createApprovalClarificationRecord,
   createClarificationProofStore,
   recordManualApprovalObservation,
+  type ApprovalInterceptionEntry,
   type BuildClarificationAnswerInput,
 } from "./safety.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
@@ -487,6 +489,8 @@ export interface MainChatService {
     authorization: MainChatStandingAuthorization | null;
   }>;
   dismissRuleSuggestion(suggestionId: string): Promise<boolean>;
+  listPendingSignals?: (conversationId?: string | null) => MainChatSupervisionSignal[];
+  listTrackedApprovals?: () => ApprovalInterceptionEntry[];
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -850,6 +854,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
     },
+    isHostAllowed: isHostAllowedForSteward,
+    getRemoteAgent: (serverId, agentId) => fleetBridge.getCachedRemoteAgent(serverId, agentId),
+    listRemoteAgents: () => fleetBridge.listCachedRemoteAgents(),
+    respondRemotePermission: (serverId, agentId, requestId, response) =>
+      fleetBridge.respondPermissionOnTargetHost(serverId, agentId, requestId, response),
     onAgentEvent: (event) => {
       if (event.type === "agent_removed") {
         lastCumulativeCostByAgent.delete(event.agentId);
@@ -3159,6 +3168,21 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         onInvalidateSnapshot: () => {
           contextSnapshots.invalidateCache();
         },
+        onPermissionRequested: (event) => {
+          if (!event.isLocal) {
+            supervisor.handleRemotePermissionRequested(event);
+          }
+        },
+        onPermissionResolved: (event) => {
+          if (event.serverId !== deps.serverId) {
+            supervisor.handleRemotePermissionResolved(event);
+          }
+        },
+        onAgentsChanged: (event) => {
+          if (event.serverId !== deps.serverId) {
+            supervisor.handleRemoteAgentsChanged(event);
+          }
+        },
       });
     }
     turnQueue.start();
@@ -3195,11 +3219,36 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
   }
 
+  async function maybeMigrateLegacyDefaultOptIn(): Promise<void> {
+    if (store.isOptInMigrated()) return;
+    const settings = store.getSettings();
+    const currentScope = resolveMainChatFleetScope(settings, deps.serverId);
+    const hasExistingMainChat = (await findExistingMainChat()) !== null;
+    const hasExplicitRemoteScope =
+      currentScope.mode === "allowlist" && currentScope.hostServerIds.length > 0;
+    const hasRealActivity =
+      hasExistingMainChat ||
+      hasExplicitRemoteScope ||
+      store.listTasks({ includeCompleted: true }).length > 0 ||
+      store.listPlans().length > 0 ||
+      store.listReceipts().length > 0 ||
+      store.getTokenUsageSummary(getNowMs()).allTime.turns > 0;
+
+    if (isMainChatEnabled(settings) && !hasRealActivity) {
+      await store.completeOptInMigration({ disableDefault: true });
+      logger.info("Migrated unused legacy main-chat host to opt-in unmanaged state");
+      return;
+    }
+
+    await store.completeOptInMigration({ disableDefault: false });
+  }
+
   return {
     async start() {
       serviceStarted = true;
       await store.load();
       await conversationManager.load();
+      await maybeMigrateLegacyDefaultOptIn();
       syncRuntimeEnabledState();
     },
 
@@ -3266,6 +3315,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
       if (scopeChanged) {
         fleetAggregator.reconcileScope();
+        supervisor.reconcileRemoteHostScope();
         contextSnapshots.invalidateCache();
       }
       syncRuntimeEnabledState();
@@ -4331,6 +4381,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async dismissRuleSuggestion(suggestionId) {
       await store.load();
       return store.dismissRuleSuggestion(suggestionId, new Date(getNowMs()).toISOString());
+    },
+
+    listPendingSignals(conversationId) {
+      return supervisor.listPendingSignals(conversationId);
+    },
+
+    listTrackedApprovals() {
+      return supervisor.getApprovalTracker().list();
     },
   };
 }

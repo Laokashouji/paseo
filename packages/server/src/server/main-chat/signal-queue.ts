@@ -394,6 +394,7 @@ export interface SupervisionSignalQueue {
   removeByAgentId(agentId: string): number;
   removeByTaskId(taskId: string): number;
   clearBucket(conversationId: string | null): void;
+  start(): void;
   stop(): void;
 }
 
@@ -793,6 +794,16 @@ export function createSupervisionSignalQueue(
       clearBucketTimer(bucket);
       bucket.pending.clear();
       bucket.gatherOpenedAtMs = null;
+    },
+
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      for (const bucket of buckets.values()) {
+        if (bucket.pending.size > 0) {
+          armBucketTimer(bucket);
+        }
+      }
     },
 
     stop() {

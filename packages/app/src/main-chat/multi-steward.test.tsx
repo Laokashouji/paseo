@@ -465,6 +465,7 @@ describe("Multi-Steward store & pure domain helpers", () => {
 
   it("builds roster with default ordering, disabled exclusion, offline cache retention, and stable accent tones", () => {
     const devSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "工作管家",
       fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
     });
@@ -472,6 +473,7 @@ describe("Multi-Steward store & pure domain helpers", () => {
       enabled: false,
     });
     const imacSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "家里管家",
       fleetScope: { mode: "local_only", hostServerIds: [] },
     });
@@ -572,14 +574,17 @@ describe("Multi-Steward store & pure domain helpers", () => {
     ];
     const capableServerIds = new Set(["srv_devbox", "srv_mac", "srv_imac"]);
     const devSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "工作管家",
       fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac", "srv_mini"] },
     });
     const macSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "MacBook 管家",
       fleetScope: { mode: "local_only", hostServerIds: [] },
     });
     const imacSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "家里管家",
       fleetScope: { mode: "allowlist", hostServerIds: ["srv_mini"] },
     });
@@ -792,6 +797,7 @@ describe("Multi-Steward frontend host isolation", () => {
 describe("Multi-Steward UI — Sidebar Hero switcher & Settings management", () => {
   it("hides switcher for a single steward and shows switcher + cross-steward alert dot for >=2 stewards", () => {
     const devSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "工作管家",
       fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
     });
@@ -826,6 +832,7 @@ describe("Multi-Steward UI — Sidebar Hero switcher & Settings management", () 
 
     // Add second enabled steward (iMac) with a pending permission
     const imacSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
+      enabled: true,
       title: "家里管家",
       fleetScope: { mode: "local_only", hostServerIds: [] },
     });
@@ -885,21 +892,12 @@ describe("Multi-Steward UI — Sidebar Hero switcher & Settings management", () 
     expect(mockRouterPush).toHaveBeenCalledWith("/main?serverId=srv_imac");
   });
 
-  it("renders conflicts banner, one-click disable, fleet scope mode/host toggling with auto-sync, and workspace filter switch", async () => {
-    const devSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
-      title: "工作管家",
-      fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
-    });
-    const macSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
-      title: "MacBook 管家",
-      fleetScope: { mode: "local_only", hostServerIds: [] },
-    });
-    const imacSettings = mergeMainChatSettings(createDefaultMainChatSettings("conservative"), {
-      title: "家里管家",
-      fleetScope: { mode: "local_only", hostServerIds: [] },
-    });
+  it("organizes hosts into main-chat groups by host name: cold start unmanaged -> promote -> join -> switch -> leave -> disband confirm, plus legacy conflict resolution", async () => {
+    // 1. Cold start: all 3 hosts default to disabled (Unmanaged group), 0 conflicts
+    const devSettings = createDefaultMainChatSettings("conservative");
+    const macSettings = createDefaultMainChatSettings("conservative");
+    const imacSettings = createDefaultMainChatSettings("conservative");
 
-    // DevBox has NOT yet linked srv_mac in daemon ConnectedHosts (client-only host with directTcp)
     const devMock = makeFakeClient(devSettings, []);
     const macMock = makeFakeClient(macSettings, []);
     const imacMock = makeFakeClient(imacSettings, []);
@@ -941,11 +939,7 @@ describe("Multi-Steward UI — Sidebar Hero switcher & Settings management", () 
       },
     });
     useMainChatConversationsStore.setState({
-      fleetHostsByServerId: {
-        srv_devbox: [makeFleetHost("srv_devbox", "DevBox", { isLocal: true })],
-        srv_mac: [makeFleetHost("srv_mac", "MacBook", { isLocal: true })],
-        srv_imac: [makeFleetHost("srv_imac", "iMac", { isLocal: true })],
-      },
+      fleetHostsByServerId: {},
       availableRemoteHostsByServerId: {
         srv_devbox: [],
         srv_mac: [],
@@ -955,53 +949,102 @@ describe("Multi-Steward UI — Sidebar Hero switcher & Settings management", () 
 
     const view = renderWithProviders(<MainChatSettingsSection />);
 
-    // Conflict banner detects MacBook running local steward while managed by DevBox
-    expect(view.getByTestId("settings-steward-conflicts-banner")).toBeTruthy();
-    expect(view.getByTestId("settings-steward-conflict-srv_mac")).toBeTruthy();
+    // All hosts start in Unmanaged group with zero conflicts
+    expect(view.getByTestId("main-chat-unmanaged-group")).toBeTruthy();
+    expect(view.getByTestId("main-chat-unmanaged-host-srv_devbox")).toBeTruthy();
+    expect(view.getByTestId("main-chat-unmanaged-host-srv_mac")).toBeTruthy();
+    expect(view.getByTestId("main-chat-unmanaged-host-srv_imac")).toBeTruthy();
+    expect(view.queryByTestId("main-chat-group-card-srv_devbox")).toBeNull();
 
-    // One-click disable local steward on MacBook
-    fireEvent.click(view.getByTestId("settings-steward-conflict-disable-srv_mac"));
-    await waitFor(() => {
-      expect(macMock.spies.updateMainChatSettings).toHaveBeenCalledWith({ enabled: false });
-    });
-
-    // Toggle sidebar workspace filter preference
-    expect(useMainChatStewardStore.getState().filterWorkspacesByActiveSteward).toBe(false);
-    fireEvent.click(view.getByTestId("settings-steward-filter-workspaces"));
-    expect(useMainChatStewardStore.getState().filterWorkspacesByActiveSteward).toBe(true);
-
-    // Switch DevBox fleet scope mode to local_only (preserves prior allowlist ids non-destructively)
-    fireEvent.click(view.getByTestId("settings-fleet-scope-mode-local_only"));
+    // 2. Promote DevBox -> creates DevBox group; unmanaged hosts show "Join DevBox" (by host name, never generic "对话管理"!)
+    fireEvent.click(view.getByTestId("main-chat-host-promote-srv_devbox"));
     await waitFor(() => {
       expect(devMock.spies.updateMainChatSettings).toHaveBeenCalledWith({
-        fleetScope: { mode: "local_only", hostServerIds: ["srv_mac"] },
+        enabled: true,
+        fleetScope: { mode: "local_only", hostServerIds: [] },
       });
-      expect(view.queryByTestId("settings-fleet-scope-host-srv_imac")).toBeNull();
-      expect(devMock.spies.getMainChatFleetHosts).toHaveBeenCalled();
-    });
-    // Wait for scopeBusy to release after refreshFleetHosts resolves
-    await waitFor(() => {
-      expect(
-        view.getByTestId("settings-fleet-scope-mode-allowlist").getAttribute("aria-disabled"),
-      ).not.toBe("true");
+      expect(view.getByTestId("main-chat-group-card-srv_devbox")).toBeTruthy();
     });
 
-    // Switch back to allowlist and check an unlinked client-only host (srv_imac) -> auto-calls addHost + updates fleetScope
-    fireEvent.click(view.getByTestId("settings-fleet-scope-mode-allowlist"));
-    await waitFor(() => {
-      expect(view.getByTestId("settings-fleet-scope-host-srv_imac")).toBeTruthy();
-      expect(
-        view.getByTestId("settings-fleet-scope-host-srv_imac").getAttribute("aria-disabled"),
-      ).not.toBe("true");
-    });
+    const joinMacBtn = view.getByTestId("main-chat-host-join-srv_mac-srv_devbox");
+    expect(joinMacBtn.textContent).toContain('"host":"DevBox"');
+    expect(joinMacBtn.textContent).not.toContain("对话管理");
 
-    fireEvent.click(view.getByTestId("settings-fleet-scope-host-srv_imac"));
+    // 3. Join MacBook to DevBox -> auto-links via addHost + updates DevBox allowlist
+    fireEvent.click(joinMacBtn);
     await waitFor(() => {
       expect(devMock.spies.addHost).toHaveBeenCalledWith(
-        expect.objectContaining({ label: "iMac" }),
+        expect.objectContaining({ label: "MacBook" }),
       );
       expect(devMock.spies.updateMainChatSettings).toHaveBeenCalledWith({
-        fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac", "srv_imac"] },
+        fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
+      });
+      expect(view.getByTestId("main-chat-group-host-srv_devbox-srv_mac")).toBeTruthy();
+    });
+
+    // 4. Owner DevBox clicking "Leave" while MacBook is still inside shows inline disband confirmation
+    await waitFor(() => {
+      expect(
+        view.getByTestId("main-chat-host-leave-srv_devbox").getAttribute("aria-disabled"),
+      ).not.toBe("true");
+    });
+    fireEvent.click(view.getByTestId("main-chat-host-leave-srv_devbox"));
+    expect(view.getByTestId("main-chat-group-disband-confirm-srv_devbox")).toBeTruthy();
+    fireEvent.click(view.getByTestId("main-chat-group-disband-cancel-srv_devbox"));
+    expect(view.queryByTestId("main-chat-group-disband-confirm-srv_devbox")).toBeNull();
+
+    // 5. Promote iMac as a second main chat -> clicking DevBox group header switches active steward; Advanced Settings reveals workspace filter toggle
+    fireEvent.click(view.getByTestId("main-chat-host-promote-srv_imac"));
+    await waitFor(() => {
+      expect(view.getByTestId("main-chat-group-card-srv_imac")).toBeTruthy();
+      expect(
+        view.getByTestId("main-chat-host-leave-srv_mac").getAttribute("aria-disabled"),
+      ).not.toBe("true");
+    });
+
+    fireEvent.click(view.getByTestId("main-chat-group-header-srv_devbox"));
+    expect(useMainChatStewardStore.getState().activeStewardServerId).toBe("srv_devbox");
+
+    // Workspace filter lives inside collapsible Advanced Settings when >=2 groups exist
+    expect(view.queryByTestId("settings-main-chat-filter-workspaces-toggle")).toBeNull();
+    fireEvent.click(view.getByTestId("settings-main-chat-advanced-toggle"));
+    expect(useMainChatStewardStore.getState().filterWorkspacesByActiveSteward).toBe(false);
+    fireEvent.click(view.getByTestId("settings-main-chat-filter-workspaces-toggle"));
+    expect(useMainChatStewardStore.getState().filterWorkspacesByActiveSteward).toBe(true);
+
+    // 6. Remote member MacBook clicks "Leave" -> returns to Unmanaged and now sees multi-group Join Picker listing DevBox & iMac
+    fireEvent.click(view.getByTestId("main-chat-host-leave-srv_mac"));
+    await waitFor(() => {
+      expect(devMock.spies.updateMainChatSettings).toHaveBeenCalledWith({
+        fleetScope: { mode: "local_only", hostServerIds: [] },
+      });
+      expect(view.getByTestId("main-chat-host-join-picker-srv_mac")).toBeTruthy();
+    });
+
+    // 7. Legacy conflict from an un-upgraded daemon still surfaces one-click disable resolution
+    const conflictMac = mergeMainChatSettings(macSettings, {
+      enabled: true,
+      fleetScope: { mode: "local_only", hostServerIds: [] },
+    });
+    const conflictDev = mergeMainChatSettings(devSettings, {
+      enabled: true,
+      fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
+    });
+    useMainChatSettingsStore.setState({
+      settingsByServerId: {
+        srv_devbox: conflictDev,
+        srv_mac: conflictMac,
+        srv_imac: imacSettings,
+      },
+    });
+    await waitFor(() => {
+      expect(view.getByTestId("main-chat-legacy-conflict-srv_mac")).toBeTruthy();
+    });
+    fireEvent.click(view.getByTestId("main-chat-conflict-disable-srv_mac"));
+    await waitFor(() => {
+      expect(macMock.spies.updateMainChatSettings).toHaveBeenCalledWith({
+        enabled: false,
+        fleetScope: { mode: "local_only", hostServerIds: [] },
       });
     });
   });

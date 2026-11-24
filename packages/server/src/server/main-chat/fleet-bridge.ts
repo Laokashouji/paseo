@@ -78,6 +78,8 @@ export interface FleetAggregatorLike {
   ): Promise<void>;
   subscribe(listener: (event: FleetAggregatorEvent) => void): () => void;
   listAvailableRemoteHosts?: () => AggregatedHostSummary[];
+  getCachedRemoteAgent?: (serverId: string, agentId: string) => AggregatedHostAgent | null;
+  listCachedRemoteAgents?: () => AggregatedHostAgent[];
 }
 
 export interface CollectMultiHostFleetOptions {
@@ -215,6 +217,8 @@ export interface MainChatFleetBridge {
     options?: ReadHostAgentTailOptions,
   ): Promise<CrossHostAgentTailMessage[]>;
   cancelTargetAgent(serverId: string | null | undefined, agentId: string): Promise<void>;
+  getCachedRemoteAgent(serverId: string, agentId: string): AggregatedHostAgent | null;
+  listCachedRemoteAgents(): AggregatedHostAgent[];
   subscribeFleetEvents(handlers: FleetBridgeEventHandlers): () => void;
 }
 
@@ -429,7 +433,7 @@ function translateHostError(error: unknown, serverId: string, operation: string)
         message = `未找到已接入的远端主机 ${targetId}，无法${opLabel}。请先在主对话设置中将该主机接入 ConnectedHosts。`;
         break;
       case "host_out_of_scope":
-        message = `目标主机 ${targetId} 不在本管家配置的管辖主机范围内，无法${opLabel}。如需操作该主机，请先在「设置 → 对话管理 → 管辖主机范围」中将其勾选纳入。`;
+        message = `目标主机 ${targetId} 未纳入当前主对话组，无法${opLabel}。如需操作该主机，请先在主对话主机分组面板中将其加入当前组。`;
         break;
       case "timeout":
         message = `向主机 ${targetId} ${opLabel}超时，请先核对目标主机状态，避免重复触发。`;
@@ -657,6 +661,16 @@ export function createMainChatFleetBridge(deps: MainChatFleetBridgeDeps): MainCh
       } catch (error) {
         throw translateHostError(error, target.serverId, "cancelTargetAgent");
       }
+    },
+
+    getCachedRemoteAgent(serverId, agentId) {
+      return deps.fleetAggregator.getCachedRemoteAgent?.(serverId, agentId) ?? null;
+    },
+
+    listCachedRemoteAgents() {
+      const excludedIds = buildExclusionSet();
+      const raw = deps.fleetAggregator.listCachedRemoteAgents?.() ?? [];
+      return raw.filter((agent) => !isExcludedConversationAgent(agent, excludedIds));
     },
 
     subscribeFleetEvents(handlers) {

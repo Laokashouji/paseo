@@ -375,13 +375,14 @@ function useMainChatEnsureController(params: {
   client: DaemonClient | null;
   existing: MainChatAgentRef | null;
   supportsMainChat: boolean;
+  settingsLoaded: boolean;
   isDisabled: boolean;
 }): {
   ensureState: EnsureState;
   startWithSelection: (selection: { provider: AgentProvider; model?: string }) => void;
   resetError: () => void;
 } {
-  const { targetServerId, client, existing, supportsMainChat, isDisabled } = params;
+  const { targetServerId, client, existing, supportsMainChat, settingsLoaded, isDisabled } = params;
   const { t } = useTranslation();
   const [ensureState, setEnsureState] = useState<EnsureState>({ kind: "idle" });
 
@@ -412,6 +413,9 @@ function useMainChatEnsureController(params: {
   const startWithSelection = useCallback(
     (selection: { provider: AgentProvider; model?: string }) => {
       if (!targetServerId || !client || !supportsMainChat || isDisabled) {
+        return;
+      }
+      if (!settingsLoaded && typeof client.getMainChatSettings === "function") {
         return;
       }
       const requestedServerId = targetServerId;
@@ -449,7 +453,7 @@ function useMainChatEnsureController(params: {
           });
         });
     },
-    [client, isDisabled, supportsMainChat, t, targetServerId],
+    [client, isDisabled, settingsLoaded, supportsMainChat, t, targetServerId],
   );
 
   const resetError = useCallback(() => {
@@ -571,6 +575,7 @@ function useMainChatTargetSession(routeServerId: string | null) {
     hasDirectorySnapshot,
     connectionStatus,
     configuredTitle: settings?.title,
+    settingsLoaded: settings !== undefined,
     isDisabled: settings !== undefined && !isMainChatEnabled(settings),
     effectiveOverrideRef,
     updateSettings,
@@ -590,6 +595,7 @@ function resolveMainChatScreenNavServerId(
 
 function resolveMainChatNeedsFirstSetup(input: {
   isDisabled: boolean;
+  waitingForSettings: boolean;
   resolvedRef: MainChatAgentRef | null;
   targetServerId: string | null;
   hasClient: boolean;
@@ -597,13 +603,14 @@ function resolveMainChatNeedsFirstSetup(input: {
   connectionStatus: string;
   hasDirectorySnapshot: boolean;
 }): boolean {
-  if (input.isDisabled || input.resolvedRef) return false;
+  if (input.isDisabled || input.waitingForSettings || input.resolvedRef) return false;
   if (!input.targetServerId || !input.hasClient || !input.supportsMainChat) return false;
   return input.connectionStatus !== "connecting" && input.hasDirectorySnapshot;
 }
 
 function resolveMainChatEnsuringState(input: {
   isDisabled: boolean;
+  waitingForSettings: boolean;
   ensureKind: string;
   targetServerId: string | null;
   connectionStatus: string;
@@ -611,7 +618,7 @@ function resolveMainChatEnsuringState(input: {
   hasDirectorySnapshot: boolean;
 }): boolean {
   if (input.isDisabled) return false;
-  if (input.ensureKind === "ensuring") return true;
+  if (input.ensureKind === "ensuring" || input.waitingForSettings) return true;
   return Boolean(
     input.targetServerId &&
     (input.connectionStatus === "connecting" ||
@@ -629,6 +636,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
     hasDirectorySnapshot,
     connectionStatus,
     configuredTitle,
+    settingsLoaded,
     isDisabled,
     effectiveOverrideRef,
     updateSettings,
@@ -643,6 +651,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
     client,
     existing: summary.existing,
     supportsMainChat: summary.supportsMainChat,
+    settingsLoaded,
     isDisabled,
   });
 
@@ -697,8 +706,13 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
   }, []);
 
   const displayTitle = configuredTitle?.trim() || summary.displayTitle;
+  const waitingForSettings =
+    !resolvedRef &&
+    !settingsLoaded &&
+    Boolean(targetServerId && client && typeof client.getMainChatSettings === "function");
   const needsFirstSetup = resolveMainChatNeedsFirstSetup({
     isDisabled,
+    waitingForSettings,
     resolvedRef,
     targetServerId,
     hasClient: client !== null,
@@ -708,6 +722,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
   });
   const isEnsuring = resolveMainChatEnsuringState({
     isDisabled,
+    waitingForSettings,
     ensureKind: ensureState.kind,
     targetServerId,
     connectionStatus,
@@ -757,9 +772,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
       activePane={activePane}
       onActivePaneChange={setActivePane}
     >
-      {!isDisabled && resolvedRef ? (
-        <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef.agentId} />
-      ) : null}
+      <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef?.agentId ?? null} />
       {body}
     </MainChatShell>
   );

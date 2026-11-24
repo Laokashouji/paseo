@@ -47,6 +47,7 @@ describe("night-mode pure evaluation", () => {
 
   it("transitions from throttled to auto-hibernating after idle threshold in night window", () => {
     const settings = createDefaultMainChatSettings("conservative");
+    settings.enabled = true;
     settings.nightMode = {
       enabled: true,
       startHour: 23,
@@ -345,6 +346,7 @@ describe("main-chat global disable, night hibernation, and turn token accounting
   it("records foreground, direction, and OpenCode cumulative-cost delta usage via RPC", async () => {
     const harness = makeServiceHarness(localTimeMs(2026, 11, 23, 15, 0));
     await harness.service.start();
+    await harness.service.updateSettings({ enabled: true });
 
     const main = await harness.service.ensureMainChat();
     const mainAgent = harness.agents.get(main.agentId)!;
@@ -451,6 +453,7 @@ describe("main-chat global disable, night hibernation, and turn token accounting
         type: "main_chat.update_settings.request",
         requestId: "req_s1",
         patch: {
+          enabled: true,
           nightMode: {
             enabled: true,
             startHour: 23,

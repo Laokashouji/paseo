@@ -351,7 +351,7 @@ describe("Main Chat custom style presets UI", () => {
   });
 
   it("renders a single compact style selector card, creates from template, edits, deletes, and resets to default", async () => {
-    const initial = createDefaultMainChatSettings("conservative");
+    const initial = { ...createDefaultMainChatSettings("conservative"), enabled: true };
     const { client, updateMainChatSettings } = makeStatefulClient(initial);
     seedSession("srv_1", client);
     useMainChatSettingsStore.setState({ settingsByServerId: { srv_1: initial } });
@@ -463,6 +463,7 @@ describe("Main Chat custom style presets UI", () => {
     const custom = makeCustomPreset();
     const tweaked = mergeMainChatSettings(
       mergeMainChatSettings(createDefaultMainChatSettings(), {
+        enabled: true,
         upsertCustomPreset: custom,
         applyPresetId: custom.id,
       }),
@@ -509,6 +510,7 @@ describe("Main Chat custom style presets UI", () => {
   it("shows custom preset in MainChatShell header switcher and MainChatHeroRow submenu", async () => {
     const custom = makeCustomPreset();
     const withCustom = mergeMainChatSettings(createDefaultMainChatSettings(), {
+      enabled: true,
       upsertCustomPreset: custom,
       applyPresetId: custom.id,
     });

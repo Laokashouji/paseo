@@ -339,7 +339,10 @@ function seedHost(overrides?: {
   updateMainChatSettings?: ReturnType<typeof vi.fn>;
   resetMainChatUsage?: ReturnType<typeof vi.fn>;
 }) {
-  let currentSettings = overrides?.settings ?? createDefaultMainChatSettings("conservative");
+  let currentSettings = overrides?.settings ?? {
+    ...createDefaultMainChatSettings("conservative"),
+    enabled: true,
+  };
   const usage = overrides?.usage ?? makeUsageFixture();
   const ensureMainChat =
     overrides?.ensureMainChat ??
@@ -662,7 +665,7 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
     });
   });
 
-  it("renders master toggle, token usage dashboard, and night mode controls in MainChatSettingsSection", async () => {
+  it("renders grouped host controls, collapsible advanced settings with token usage & night mode, and leave-group disable", async () => {
     const { updateMainChatSettings, resetMainChatUsage } = seedHost();
 
     const view = render(
@@ -673,7 +676,12 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
       </ToastApiProvider>,
     );
 
-    // Token usage KPI cards and source breakdown render
+    // Advanced settings collapsed by default to keep Settings focused
+    expect(view.queryByTestId("settings-main-chat-usage-today")).toBeNull();
+    expect(view.queryByTestId("settings-main-chat-night-mode")).toBeNull();
+
+    // Expanding Advanced Settings reveals token usage dashboard & night mode controls
+    fireEvent.click(view.getByTestId("settings-main-chat-advanced-toggle"));
     expect(view.getByTestId("settings-main-chat-usage-today").textContent).toContain("30.0K");
     expect(view.getByTestId("settings-main-chat-usage-all").textContent).toContain("140K");
     expect(view.getByTestId("settings-main-chat-usage-source-foreground")).toBeTruthy();
@@ -687,17 +695,19 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
       expect(resetMainChatUsage).toHaveBeenCalledTimes(1);
     });
 
-    // Night mode panel & master toggle present
-    expect(view.getByTestId("settings-main-chat-enabled-toggle")).toBeTruthy();
+    // Night mode panel present inside Advanced Settings
     expect(view.getByTestId("settings-main-chat-night-enabled")).toBeTruthy();
 
-    // Turning off master switch hides operational settings while keeping token usage card visible
-    fireEvent.click(view.getByTestId("settings-main-chat-enabled-toggle"));
+    // Leaving management on owner host turns off Main Chat and hides operational settings
+    fireEvent.click(view.getByTestId("main-chat-host-leave-srv_1"));
     await waitFor(() => {
-      expect(updateMainChatSettings).toHaveBeenCalledWith({ enabled: false });
+      expect(updateMainChatSettings).toHaveBeenCalledWith({
+        enabled: false,
+        fleetScope: { mode: "local_only", hostServerIds: [] },
+      });
     });
-    expect(view.getByTestId("settings-main-chat-usage-card")).toBeTruthy();
     expect(view.queryByTestId("settings-main-chat-night-mode")).toBeNull();
+    expect(view.getByTestId("main-chat-unmanaged-host-srv_1")).toBeTruthy();
   });
 
   it("does not auto-create Main Chat with a default model on first entry and waits for manual model selection", async () => {
@@ -738,8 +748,8 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
       // Must show first-time setup UI and NEVER auto-call ensureMainChat()
       expect(view.getByTestId("main-chat-first-setup")).toBeTruthy();
       expect(ensureMainChat).not.toHaveBeenCalled();
-      // Host sync banner stays hidden until Main Chat is initialized
-      expect(view.queryByTestId("main-chat-host-sync-banner")).toBeNull();
+      // Host group orchestration capsule remains accessible on /main during first setup
+      expect(view.getByTestId("main-chat-host-sync-banner")).toBeTruthy();
       // Start button stays disabled until the user explicitly chooses a model
       const startButton = view.getByTestId("main-chat-first-setup-start");
       expect(startButton.getAttribute("aria-disabled")).toBe("true");

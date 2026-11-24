@@ -285,6 +285,12 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
       stalledCheckIntervalMs: 60_000,
     });
 
+    const rawStart = service.start.bind(service);
+    service.start = async () => {
+      await rawStart();
+      await service.updateSettings({ enabled: true });
+    };
+
     return {
       service,
       agents,

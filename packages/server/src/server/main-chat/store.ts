@@ -127,6 +127,7 @@ type PersistedMainChatTokenUsage = z.infer<typeof PersistedMainChatTokenUsageSch
 
 const PersistedMainChatStateSchema = z.object({
   version: z.literal(1),
+  optInMigrated: z.boolean().optional(),
   settings: MainChatSettingsSchema.optional(),
   plans: z.record(z.string(), MainChatPlanRecordSchema).optional(),
   tasks: z.array(MainChatTaskRecordSchema).optional(),
@@ -154,6 +155,7 @@ const PersistedMainChatStateSchema = z.object({
 
 interface MainChatStateFile {
   version: 1;
+  optInMigrated: boolean;
   settings: MainChatSettings;
   plans: Record<string, MainChatPlanRecord>;
   tasks: MainChatTaskRecord[];
@@ -363,6 +365,7 @@ function emptyMetrics(): MainChatFullMetrics {
 function emptyState(): MainChatStateFile {
   return {
     version: 1,
+    optInMigrated: true,
     settings: createDefaultMainChatSettings("conservative"),
     plans: {},
     tasks: [],
@@ -488,6 +491,8 @@ export interface RecordMainChatTokenUsageInput {
 
 export interface MainChatStore {
   load(): Promise<void>;
+  isOptInMigrated(): boolean;
+  completeOptInMigration(options?: { disableDefault?: boolean }): Promise<MainChatSettings>;
   getSettings(): MainChatSettings;
   updateSettings(patch: MainChatSettingsPatch): Promise<MainChatSettings>;
   getPlan(planId: string): MainChatPlanRecord | null;
@@ -809,6 +814,7 @@ function hydratePersistedState(
   const permissionRules = data.permissionRules ?? [];
   return {
     version: 1,
+    optInMigrated: data.optInMigrated === true,
     settings: hydrateSettings(data.settings),
     plans: data.plans ?? {},
     tasks: pruneTaskRecordList(data.tasks ?? [], MAX_RETAINED_TASKS),
@@ -911,6 +917,22 @@ export function createMainChatStore(
       }
     },
 
+    isOptInMigrated() {
+      return state.optInMigrated;
+    },
+
+    async completeOptInMigration(options) {
+      state.optInMigrated = true;
+      if (options?.disableDefault) {
+        state.settings = mergeMainChatSettings(state.settings, {
+          enabled: false,
+          fleetScope: { mode: "local_only", hostServerIds: [] },
+        });
+      }
+      await persist();
+      return this.getSettings();
+    },
+
     getSettings() {
       const customPresets = resolveMainChatCustomPresets(state.settings);
       const activePresetId = resolveActiveMainChatStylePresetId({
@@ -931,6 +953,7 @@ export function createMainChatStore(
     },
 
     async updateSettings(patch) {
+      state.optInMigrated = true;
       state.settings = mergeMainChatSettings(state.settings, patch);
       await persist();
       return this.getSettings();
