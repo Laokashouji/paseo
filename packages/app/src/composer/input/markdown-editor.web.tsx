@@ -21,6 +21,8 @@ import {
   composerMarkdownDecorations,
   createComposerMarkdownLanguageExtension,
   createComposerMarkdownTheme,
+  handleMarkdownBackspace,
+  indentMarkdownListItem,
   insertMarkdownNewline,
   type ComposerMarkdownTheme,
 } from "./markdown-language.web";
@@ -344,6 +346,8 @@ const ComposerMarkdownEditorBase = forwardRef<EditingTextInputHandle, InternalPr
             keymap.of([
               { key: "Enter", run: insertMarkdownNewline },
               { key: "Shift-Enter", run: insertMarkdownNewline },
+              { key: "Backspace", run: handleMarkdownBackspace },
+              { key: "Tab", run: indentMarkdownListItem },
               ...defaultKeymap,
               ...historyKeymap,
             ]),
@@ -571,7 +575,9 @@ const composerMarkdownAppearance = (theme: Theme) => ({
     foreground: theme.colors.foreground,
     foregroundMuted: theme.colors.foregroundMuted,
     foregroundExtraMuted: theme.colors.foregroundExtraMuted,
+    accent: theme.colors.accent,
     accentBright: theme.colors.accentBright,
+    accentForeground: theme.colors.accentForeground,
     border: theme.colors.border,
     codeBackground: theme.colors.surface2,
     selection: theme.colors.terminal.selectionBackground,
