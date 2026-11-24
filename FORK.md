@@ -168,6 +168,7 @@ paseo daemon restart
 | 能力 A6 | [【能力】输入框 Markdown 实时语法样式与用户消息渲染](https://bytedance.larkoffice.com/wiki/XTqSwA5vXiswJ3kMTwTcsq3qnIe) | `feat/composer-markdown` | `XTqSwA5vXiswJ3kMTwTcsq3qnIe` | `D7NvdEldbolDPCxn3h2cZ15anPf` |
 | 能力 A7 | [【能力】双源更新公告（Fork + 上游混排）与发版联动](https://bytedance.larkoffice.com/wiki/EpHzwpv9EiI29tkVjmOcTYiAn4g) | `feat/fork-changelog`、`FORK_CHANGELOG.md` | `EpHzwpv9EiI29tkVjmOcTYiAn4g` | `XAm3dHuHhoDJKZx3HMGcTW29n3b` |
 | 能力 A8 | [【能力】原生主对话（Main Chat）](https://bytedance.larkoffice.com/wiki/CKnOwMZ4Ai9cGOkAFH0cOoIXnnh) | `feat/main-chat` | `CKnOwMZ4Ai9cGOkAFH0cOoIXnnh` | `OSZTdPGEDo8bLBx1xS3cUjZNnsf` |
+| 能力 A9 | [【能力】侧边栏导航区高度调节与溢出二级菜单](https://bytedance.larkoffice.com/wiki/VD1Nw6iMoiehUUkC316cZzyDnYc) | `feat/sidebar-nav-overflow` | `VD1Nw6iMoiehUUkC316cZzyDnYc` | `XtTRdcdoXoY4JPxw8xIcYlN0nyb` |
 | 工程 B1 | [【工程】Fork 架构与上游同步机制](https://bytedance.larkoffice.com/wiki/DlKSwCe61iiBtGkI2ygcdpg9nJg) | `fork-infra`、`FORK.md` | `DlKSwCe61iiBtGkI2ygcdpg9nJg` | `O6IIdIOBEoDCwzxE1cvceaXZnuy` |
 | 指南 B2 | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre) | `scripts/fork/*`、`.github/workflows/fork-release.yml` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
 | 演进 B3 | [【演进】版本记录、路线图与文档维护规范](https://bytedance.larkoffice.com/wiki/SnOUwoR0miYuYVkt5ENcPU3Ynnd) | `fork-v*` 标签、`FORK_CHANGELOG.md`、路线图 | `SnOUwoR0miYuYVkt5ENcPU3Ynnd` | `VL42dzHpAor2OyxY4rdcd2cInwx` |
