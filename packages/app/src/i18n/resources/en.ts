@@ -3562,6 +3562,68 @@ export const en = {
         demoteShort: "Unpin",
       },
     },
+    stewards: {
+      switcherLabel: "Switch steward",
+      switcherHeading: "Stewards",
+      defaultBadge: "Default",
+      offlineBadge: "Offline",
+      onlineBadge: "Online",
+      disabledBadge: "Off",
+      localOnlySummary: "Local only ({{host}})",
+      managedHostsSummary: "Manages {{hosts}}",
+      otherNeedsYouHint: "{{count}} waiting in another steward",
+      needsYouCount: "{{count}} waiting",
+      manageAction: "Manage stewards & host scopes…",
+      setDefaultAction: "Set as default",
+      setDefaultToast: 'Default steward set to "{{title}}"',
+      switchedToast: 'Switched to "{{title}}"',
+      commandOpenNamed: 'Open "{{title}}" ({{host}})',
+      roster: {
+        sectionTitle: "Steward roster",
+        sectionDescription:
+          "Each enabled daemon runs an independent steward with its own memory, style, and host scope. Click a host to configure it below.",
+        configuredBadge: "Editing",
+        activeBadge: "Active",
+        enableHint: "Click to configure and enable on this host",
+        filterWorkspacesTitle: "Filter sidebar workspaces by active steward",
+        filterWorkspacesHint:
+          "Off by default so all hosts remain visible in Workspaces. Turn on to show only hosts managed by the current steward.",
+      },
+      scope: {
+        sectionTitle: "Managed host scope",
+        sectionDescription:
+          "Choose which hosts this steward can observe, supervise, and dispatch tasks to. Changing scope takes effect immediately without affecting regular sessions.",
+        modeLocalOnly: "Local only",
+        modeAllowlist: "Selected hosts",
+        modeAllConnected: "All connected",
+        modeLocalOnlyHint: "Only supervises and dispatches tasks on this host ({{host}}).",
+        modeAllowlistHint:
+          "Only supervises this host plus the remote hosts checked below. Unchecked hosts stay isolated even if connected in hosts.json.",
+        modeAllConnectedHint:
+          "Supervises this host plus every remote host enabled in this daemon's ConnectedHosts.",
+        localLockedHint: "Always included (steward host)",
+        linkedConnectedHint: "Connected on this daemon",
+        clientOnlyHint: "Paired in client only · checking will sync connection automatically",
+        clientManualOnlyHint:
+          "Local-only endpoint · add this host in daemon Host Settings before selecting",
+        otherOwnerBadge: 'Managed by "{{steward}}"',
+        emptyRemoteHosts: "No other hosts found yet.",
+        savedToast: "Managed host scope updated",
+        syncedAndAddedToast: 'Synced "{{host}}" and added to this steward',
+        syncFailedToast: 'Could not sync "{{host}}": {{error}}',
+      },
+      conflicts: {
+        title: "Host ownership conflict detected",
+        localAndRemoteDescription:
+          '"{{host}}" has its own local steward enabled while also managed by {{stewards}}. Running two stewards on one host causes duplicate supervision.',
+        duplicateManagedDescription:
+          '"{{host}}" is simultaneously managed by {{stewards}}. Keep each host under one steward to avoid duplicate supervision.',
+        disableLocalButton: 'Turn off "{{host}}" local steward',
+        removeFromRemoteButton: 'Remove from "{{steward}}"',
+        resolvedDisableToast: 'Disabled local steward on "{{host}}" (now execution-only)',
+        resolvedRemoveToast: 'Removed "{{host}}" from "{{steward}}"',
+      },
+    },
     fleetSync: {
       capsuleSummary: "{{total}} fleet hosts · {{online}} online",
       capsuleSingleOnline: "{{total}} fleet host",

@@ -44,6 +44,7 @@ import {
 } from "./mention-sources";
 import { MainChatNextStepsBar } from "./next-steps-bar";
 import { MainChatQueuePanel } from "./queue-panel";
+import { useStewardAllowedServerIds } from "./use-steward-roster";
 import { useMainChatQueueStore } from "./queue-store";
 
 const ThemedPlusIcon = withUnistyles(Plus);
@@ -265,6 +266,8 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
     return map;
   }, [hosts]);
 
+  const allowedServerIds = useStewardAllowedServerIds(serverId);
+
   const pickerSources = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
@@ -273,9 +276,10 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
           ? collectMainChatMentionSources({
               sessions: state.sessions,
               excludeAgentId: agentId,
+              allowedServerIds,
             })
           : EMPTY_PICKER_SOURCES,
-      [activePickerKind, agentId],
+      [activePickerKind, agentId, allowedServerIds],
     ),
     equal,
   );

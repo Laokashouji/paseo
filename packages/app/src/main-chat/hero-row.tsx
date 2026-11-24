@@ -7,6 +7,7 @@ import {
 import { router, usePathname } from "expo-router";
 import equal from "fast-deep-equal";
 import {
+  ChevronDown,
   ChevronRight,
   Ellipsis,
   History,
@@ -77,14 +78,21 @@ import {
 } from "./lifecycle-actions";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
+import type { StewardAccentTone } from "./steward-store";
 import {
   buildMainChatStylePresetItems,
   findActiveMainChatStylePresetItem,
   formatSwitchedMainChatPresetToast,
   type MainChatStylePresetListItem,
 } from "./style-presets";
+import {
+  useMainChatRosterSync,
+  useMainChatStewardRoster,
+  type MainChatStewardRosterItemWithActivity,
+} from "./use-steward-roster";
 
 const ThemedSparkles = withUnistyles(Sparkles);
+const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedHistory = withUnistyles(History);
@@ -109,22 +117,26 @@ const proactiveIcon = <ThemedZap size={14} uniProps={mutedIconMapping} />;
 const SELECTED_STATE = { selected: true } as const;
 const ARCHIVE_GUARD_ACTIONS = ["workspace.archive"] as const;
 
-/** Returns true when at least one connected host supports Main Chat and it has not been globally disabled. */
+/** Returns true when at least one connected host has an enabled Main Chat steward. */
 export function useShouldShowMainChatHero(): boolean {
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
   const preferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
+  const { roster, activeServerId } = useMainChatStewardRoster({
+    fallbackPreferredServerId: preferredServerId,
+  });
+  const effectivePreferred = activeServerId ?? preferredServerId;
   const hostState = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
       (state) => {
-        const summary = selectMainChatSidebarSummary(state, preferredServerId);
+        const summary = selectMainChatSidebarSummary(state, effectivePreferred);
         return {
           supportsMainChat: summary.supportsMainChat,
           targetServerId: summary.targetServerId,
         };
       },
-      [preferredServerId],
+      [effectivePreferred],
     ),
     equal,
   );
@@ -159,6 +171,9 @@ export function useShouldShowMainChatHero(): boolean {
     settings,
   ]);
 
+  if (roster.length > 0) {
+    return true;
+  }
   return hostState.supportsMainChat && isMainChatEnabled(settings);
 }
 
@@ -200,6 +215,23 @@ function HeroStatusMark({
   return <View style={styles.dotIdle} />;
 }
 
+function resolveStewardToneBadgeStyle(tone: StewardAccentTone | undefined) {
+  switch (tone) {
+    case "blue":
+      return styles.iconBadgeToneBlue;
+    case "green":
+      return styles.iconBadgeToneGreen;
+    case "orange":
+      return styles.iconBadgeToneOrange;
+    case "pink":
+      return styles.iconBadgeTonePink;
+    case "indigo":
+      return styles.iconBadgeToneIndigo;
+    default:
+      return null;
+  }
+}
+
 const HeroRowContent = memo(function HeroRowContent({
   displayTitle,
   isSelected,
@@ -210,6 +242,8 @@ const HeroRowContent = memo(function HeroRowContent({
   hasUnsentDraft,
   secondLineText,
   nightPowerState,
+  accentTone,
+  otherNeedsYouCount,
 }: {
   displayTitle: string;
   isSelected: boolean;
@@ -220,12 +254,19 @@ const HeroRowContent = memo(function HeroRowContent({
   hasUnsentDraft: boolean;
   secondLineText: string;
   nightPowerState: MainChatNightModeStatus["state"] | undefined;
+  accentTone?: StewardAccentTone;
+  otherNeedsYouCount?: number;
 }) {
   const isNightQuiet = nightPowerState === "throttled" || nightPowerState === "hibernating";
+  const toneStyle = resolveStewardToneBadgeStyle(accentTone);
+  const showOtherStewardAlert = (otherNeedsYouCount ?? 0) > 0;
   return (
     <>
-      <View style={[styles.iconBadge, isSelected && styles.iconBadgeSelected]}>
+      <View style={[styles.iconBadge, toneStyle, isSelected && styles.iconBadgeSelected]}>
         <ThemedSparkles size={18} uniProps={accentForegroundIconMapping} />
+        {showOtherStewardAlert ? (
+          <View style={styles.otherStewardAlertDot} testID="sidebar-main-chat-other-steward-dot" />
+        ) : null}
         <View style={[styles.iconStatusOverlay, isSelected && styles.iconStatusOverlaySelected]}>
           {isNightQuiet && !isRunning && needsYouCount === 0 ? (
             <ThemedMoon size={9} uniProps={accentColorIconMapping} />
@@ -715,21 +756,166 @@ function useMainChatHeroActions(input: {
   };
 }
 
+function formatStewardRosterItemDescription(
+  item: MainChatStewardRosterItemWithActivity,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const parts: string[] = [];
+  if (!item.online) {
+    parts.push(t("mainChat.stewards.offlineBadge"));
+  }
+  if (item.managedHostLabels.length <= 1) {
+    parts.push(t("mainChat.stewards.localOnlySummary", { host: item.hostLabel }));
+  } else {
+    parts.push(
+      t("mainChat.stewards.managedHostsSummary", {
+        hosts: item.managedHostLabels.join(" · "),
+      }),
+    );
+  }
+  if (item.needsYouCount > 0) {
+    parts.push(t("mainChat.stewards.needsYouCount", { count: item.needsYouCount }));
+  }
+  return parts.join(" · ");
+}
+
+const StewardSwitcherItem = memo(function StewardSwitcherItem({
+  item,
+  selected,
+  onSelectSteward,
+}: {
+  item: MainChatStewardRosterItemWithActivity;
+  selected: boolean;
+  onSelectSteward: (item: MainChatStewardRosterItemWithActivity) => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  const handleSelect = useCallback(() => {
+    onSelectSteward(item);
+  }, [item, onSelectSteward]);
+
+  const dotStyle = resolveStewardToneBadgeStyle(item.accentTone);
+  const titleWithTags = item.isDefault
+    ? `${item.title} · ${t("mainChat.stewards.defaultBadge")}`
+    : item.title;
+  const leading = useMemo(
+    () => (
+      <View
+        style={[styles.stewardAvatarDot, dotStyle, !item.online && styles.stewardAvatarDotOffline]}
+      >
+        <Text style={styles.stewardAvatarLetter}>{item.title.slice(0, 1) || "管"}</Text>
+      </View>
+    ),
+    [dotStyle, item.online, item.title],
+  );
+
+  return (
+    <DropdownMenuItem
+      selected={selected}
+      showSelectedCheck
+      leading={leading}
+      description={formatStewardRosterItemDescription(item, t)}
+      onSelect={handleSelect}
+      testID={`steward-switcher-item-${item.serverId}`}
+    >
+      {titleWithTags}
+    </DropdownMenuItem>
+  );
+});
+
+const StewardSwitcherMenu = memo(function StewardSwitcherMenu({
+  roster,
+  activeServerId,
+  otherNeedsYouCount,
+  onSelectSteward,
+  onOpenSettings,
+}: {
+  roster: readonly MainChatStewardRosterItemWithActivity[];
+  activeServerId: string | null;
+  otherNeedsYouCount: number;
+  onSelectSteward: (item: MainChatStewardRosterItemWithActivity) => void;
+  onOpenSettings: () => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  return (
+    <DropdownMenu compactMode="sheet">
+      <DropdownMenuTrigger
+        hitSlop={6}
+        style={styles.switcherButton}
+        accessibilityRole="button"
+        accessibilityLabel={t("mainChat.stewards.switcherLabel")}
+        testID="sidebar-main-chat-steward-switcher"
+      >
+        <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
+        {otherNeedsYouCount > 0 ? (
+          <View style={styles.switcherBadge} testID="sidebar-main-chat-switcher-other-count">
+            <Text style={styles.switcherBadgeText}>
+              {otherNeedsYouCount > 99 ? "99+" : `+${otherNeedsYouCount}`}
+            </Text>
+          </View>
+        ) : null}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        width={268}
+        sheetTitle={t("mainChat.stewards.switcherHeading")}
+      >
+        <DropdownMenuLabel>{t("mainChat.stewards.switcherHeading")}</DropdownMenuLabel>
+        {roster.map((item) => (
+          <StewardSwitcherItem
+            key={item.serverId}
+            item={item}
+            selected={item.serverId === activeServerId}
+            onSelectSteward={onSelectSteward}
+          />
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          leading={settingsIcon}
+          onSelect={onOpenSettings}
+          testID="steward-switcher-manage"
+        >
+          {t("mainChat.stewards.manageAction")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+});
+
 function useMainChatHeroData() {
+  useMainChatRosterSync();
+
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
+  const fallbackPreferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
+  const {
+    roster,
+    activeServerId,
+    activeSteward,
+    activeAllowedServerIds,
+    hasMultipleStewards,
+    otherNeedsYouCount,
+    selectSteward,
+  } = useMainChatStewardRoster({
+    fallbackPreferredServerId,
+  });
+
+  const preferredServerId = activeServerId ?? fallbackPreferredServerId;
+  const strictServerId = roster.length > 0;
 
   const summaryBase = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId),
-      [preferredServerId],
+      (state) =>
+        selectMainChatSidebarSummary(state, preferredServerId, null, {
+          allowedServerIds: activeAllowedServerIds,
+          strictServerId,
+        }),
+      [activeAllowedServerIds, preferredServerId, strictServerId],
     ),
     equal,
   );
 
-  const targetServerId = summaryBase.targetServerId;
+  const targetServerId = activeServerId ?? summaryBase.targetServerId;
   const client = useSessionStore((state) =>
     targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
   );
@@ -759,17 +945,63 @@ function useMainChatHeroData() {
     return record.input.text.replace(/\s+/g, " ").trim();
   });
 
+  const displayTitle = settings?.title?.trim() || activeSteward?.title || summaryBase.displayTitle;
+
   return {
     summaryBase,
     targetServerId,
     client,
     settings,
     unsentDraftText,
-    enabled: isMainChatEnabled(settings),
+    enabled: roster.length > 0 ? true : isMainChatEnabled(settings),
+    supportsAnySteward: roster.length > 0 || summaryBase.supportsMainChat,
     nightPowerState: nightModeStatus?.state,
-    displayTitle: settings?.title?.trim() || summaryBase.displayTitle,
+    displayTitle,
+    roster,
+    activeSteward,
+    hasMultipleStewards,
+    otherNeedsYouCount,
+    selectSteward,
   };
 }
+
+const HeroTrailingPrimary = memo(function HeroTrailingPrimary({
+  hasMultipleStewards,
+  roster,
+  activeServerId,
+  otherNeedsYouCount,
+  shortcutKeys,
+  onSelectSteward,
+  onOpenSettings,
+}: {
+  hasMultipleStewards: boolean;
+  roster: readonly MainChatStewardRosterItemWithActivity[];
+  activeServerId: string | null;
+  otherNeedsYouCount: number;
+  shortcutKeys: ReturnType<typeof useShortcutKeys>;
+  onSelectSteward: (item: MainChatStewardRosterItemWithActivity) => void;
+  onOpenSettings: () => void;
+}): ReactElement {
+  if (hasMultipleStewards) {
+    return (
+      <StewardSwitcherMenu
+        roster={roster}
+        activeServerId={activeServerId}
+        otherNeedsYouCount={otherNeedsYouCount}
+        onSelectSteward={onSelectSteward}
+        onOpenSettings={onOpenSettings}
+      />
+    );
+  }
+  if (shortcutKeys) {
+    return (
+      <View style={styles.shortcutSlot}>
+        <Shortcut chord={shortcutKeys} />
+      </View>
+    );
+  }
+  return <ThemedChevronRight size={14} uniProps={mutedIconMapping} />;
+});
 
 /**
  * Sticky, non-collapsible top-of-sidebar entry for the primary Main Chat assistant.
@@ -796,8 +1028,14 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
     settings,
     unsentDraftText,
     enabled,
+    supportsAnySteward,
     nightPowerState,
     displayTitle,
+    roster,
+    activeSteward,
+    hasMultipleStewards,
+    otherNeedsYouCount,
+    selectSteward,
   } = useMainChatHeroData();
   const isSelected = isMainChatPathname(pathname);
 
@@ -828,14 +1066,29 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
 
   const handleOpen = useCallback(() => {
     onBeforeNavigate?.();
-    if (pathname === buildMainChatRoute()) return;
-    router.push(buildMainChatRoute());
-  }, [onBeforeNavigate, pathname]);
+    const targetRoute = hasMultipleStewards
+      ? buildMainChatRoute(targetServerId)
+      : buildMainChatRoute();
+    if (!hasMultipleStewards && pathname === targetRoute) return;
+    router.push(targetRoute);
+  }, [hasMultipleStewards, onBeforeNavigate, pathname, targetServerId]);
+
+  const handleSelectSteward = useCallback(
+    (item: MainChatStewardRosterItemWithActivity) => {
+      selectSteward(item.serverId);
+      toast.show(t("mainChat.stewards.switchedToast", { title: item.title }), { variant: "info" });
+      if (isSelected) {
+        onBeforeNavigate?.();
+        router.push(buildMainChatRoute(item.serverId));
+      }
+    },
+    [isSelected, onBeforeNavigate, selectSteward, t, toast],
+  );
 
   const handleOpenHistory = useCallback(() => {
     onBeforeNavigate?.();
-    router.push(buildMainChatHistoryRoute());
-  }, [onBeforeNavigate]);
+    router.push(buildMainChatHistoryRoute(hasMultipleStewards ? targetServerId : undefined));
+  }, [hasMultipleStewards, onBeforeNavigate, targetServerId]);
 
   const handleOpenSettings = useCallback(() => {
     onBeforeNavigate?.();
@@ -851,9 +1104,25 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
     isRowHovered || isNative || isCompact || isSelected,
   );
 
-  const subtitle = useMemo(() => formatHeroSubtitle(summaryBase, t), [summaryBase, t]);
+  const subtitle = useMemo(() => {
+    const baseStatus = formatHeroSubtitle(summaryBase, t);
+    if (!hasMultipleStewards || !activeSteward) {
+      return baseStatus;
+    }
+    const scopeChip =
+      activeSteward.managedHostLabels.length <= 1
+        ? activeSteward.hostLabel
+        : activeSteward.managedHostLabels.slice(0, 2).join(" · ");
+    if (!activeSteward.online) {
+      return `${scopeChip} · ${t("mainChat.stewards.offlineBadge")}`;
+    }
+    if (summaryBase.totalActiveCount === 0 && summaryBase.needsYouCount === 0) {
+      return scopeChip;
+    }
+    return `${scopeChip} · ${baseStatus}`;
+  }, [activeSteward, hasMultipleStewards, summaryBase, t]);
 
-  if (!summaryBase.supportsMainChat || !enabled) {
+  if (!supportsAnySteward || !enabled) {
     return null;
   }
 
@@ -900,17 +1169,21 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
                 hasUnsentDraft={hasUnsentDraft}
                 secondLineText={secondLineText}
                 nightPowerState={nightPowerState}
+                accentTone={hasMultipleStewards ? activeSteward?.accentTone : undefined}
+                otherNeedsYouCount={hasMultipleStewards ? otherNeedsYouCount : 0}
               />
             </PressHighlight>
 
             <View style={styles.trailing}>
-              {shortcutKeys ? (
-                <View style={styles.shortcutSlot}>
-                  <Shortcut chord={shortcutKeys} />
-                </View>
-              ) : (
-                <ThemedChevronRight size={14} uniProps={mutedIconMapping} />
-              )}
+              <HeroTrailingPrimary
+                hasMultipleStewards={hasMultipleStewards}
+                roster={roster}
+                activeServerId={targetServerId}
+                otherNeedsYouCount={otherNeedsYouCount}
+                shortcutKeys={shortcutKeys}
+                onSelectSteward={handleSelectSteward}
+                onOpenSettings={handleOpenSettings}
+              />
               <MainChatHeroMenu
                 visible={showKebab}
                 open={menuProps.open}
@@ -1036,6 +1309,68 @@ const styles = StyleSheet.create((theme) => ({
   },
   iconBadgeSelected: {
     backgroundColor: theme.colors.accentBright,
+  },
+  iconBadgeToneBlue: {
+    backgroundColor: "#2563eb",
+  },
+  iconBadgeToneGreen: {
+    backgroundColor: "#16a34a",
+  },
+  iconBadgeToneOrange: {
+    backgroundColor: "#ea580c",
+  },
+  iconBadgeTonePink: {
+    backgroundColor: "#db2777",
+  },
+  iconBadgeToneIndigo: {
+    backgroundColor: "#4f46e5",
+  },
+  otherStewardAlertDot: {
+    position: "absolute",
+    right: -3,
+    top: -3,
+    width: 9,
+    height: 9,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusDanger,
+    borderWidth: 1.5,
+    borderColor: theme.colors.surface2,
+  },
+  switcherButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: theme.spacing[1.5],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.md,
+    backgroundColor: theme.colors.surface3,
+  },
+  switcherBadge: {
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusDanger,
+  },
+  switcherBadgeText: {
+    fontSize: 9,
+    fontWeight: theme.fontWeight.bold,
+    color: "#ffffff",
+  },
+  stewardAvatarDot: {
+    width: 20,
+    height: 20,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stewardAvatarDotOffline: {
+    opacity: 0.45,
+  },
+  stewardAvatarLetter: {
+    fontSize: 10,
+    fontWeight: theme.fontWeight.bold,
+    color: "#ffffff",
   },
   iconStatusOverlay: {
     position: "absolute",

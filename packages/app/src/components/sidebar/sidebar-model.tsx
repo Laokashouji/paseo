@@ -15,6 +15,7 @@ import {
   type SidebarGroupMode,
 } from "@/stores/sidebar-view-store";
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
+import { useStewardWorkspaceHostFilters } from "@/main-chat/use-steward-roster";
 import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
 import { buildSidebarProjection } from "./sidebar-projection";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
@@ -59,7 +60,11 @@ export function SidebarModelProvider({
 }) {
   const { t } = useTranslation();
   const modelActive = active !== false || keyboardNavigationActive;
-  const list = useSidebarWorkspacesList({ enabled: modelActive });
+  const stewardWorkspaceHostFilters = useStewardWorkspaceHostFilters();
+  const list = useSidebarWorkspacesList({
+    enabled: modelActive,
+    hostFilters: stewardWorkspaceHostFilters,
+  });
   const showBackground = useSidebarViewStore((state) => state.showBackground);
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const labelFilter = useSidebarViewStore((state) => state.labelFilter);

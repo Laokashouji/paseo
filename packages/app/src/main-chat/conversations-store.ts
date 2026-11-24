@@ -2,6 +2,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
   MainChatConversationRecord,
   MainChatFleetHostStatus,
+  MainChatFleetScope,
   MainChatOverview,
 } from "@getpaseo/protocol/main-chat";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -18,6 +19,7 @@ export const MainChatDirectionsPersistedStateSchema = z.strictObject({
   sectionCollapsed: z.boolean(),
   recentSideCollapsed: z.boolean(),
   dismissedFleetSyncNotice: z.boolean(),
+  dismissedFleetSyncNoticeByServerId: z.record(z.string(), z.boolean()).optional(),
 });
 
 export type MainChatDirectionsPersistedState = z.infer<
@@ -46,6 +48,8 @@ export interface UpdateMainChatConversationInput {
 export interface RefreshFleetHostsResult {
   localServerId: string | null;
   hosts: MainChatFleetHostStatus[];
+  fleetScope?: MainChatFleetScope;
+  availableRemoteHosts?: MainChatFleetHostStatus[];
 }
 
 export interface MainChatConversationsStoreState {
@@ -53,6 +57,8 @@ export interface MainChatConversationsStoreState {
   loadingConversationsByServerId: Record<string, boolean | undefined>;
   conversationsErrorByServerId: Record<string, string | null | undefined>;
   fleetHostsByServerId: Record<string, MainChatFleetHostStatus[] | undefined>;
+  availableRemoteHostsByServerId: Record<string, MainChatFleetHostStatus[] | undefined>;
+  fleetScopeByServerId: Record<string, MainChatFleetScope | undefined>;
   localServerIdByServerId: Record<string, string | null | undefined>;
   loadingFleetHostsByServerId: Record<string, boolean | undefined>;
   fleetHostsErrorByServerId: Record<string, string | null | undefined>;
@@ -60,6 +66,7 @@ export interface MainChatConversationsStoreState {
   sectionCollapsed: boolean;
   recentSideCollapsed: boolean;
   dismissedFleetSyncNotice: boolean;
+  dismissedFleetSyncNoticeByServerId: Record<string, boolean>;
 
   hydrateFromOverview: (serverId: string, overview: MainChatOverview | null | undefined) => void;
   refreshConversations: (
@@ -106,18 +113,22 @@ export interface MainChatConversationsStoreState {
   setSectionCollapsed: (collapsed: boolean) => void;
   toggleRecentSideCollapsed: () => void;
   setRecentSideCollapsed: (collapsed: boolean) => void;
-  setDismissedFleetSyncNotice: (dismissed: boolean) => void;
+  setDismissedFleetSyncNotice: (dismissed: boolean, serverId?: string | null) => void;
   reset: () => void;
 }
 
 export const EMPTY_CONVERSATIONS: readonly MainChatConversationRecord[] = [];
 export const EMPTY_FLEET_HOSTS: readonly MainChatFleetHostStatus[] = [];
 
-const INITIAL_PERSISTED_STATE: MainChatDirectionsPersistedState = {
+const INITIAL_PERSISTED_STATE: Omit<
+  MainChatDirectionsPersistedState,
+  "dismissedFleetSyncNoticeByServerId"
+> & { dismissedFleetSyncNoticeByServerId: Record<string, boolean> } = {
   expandedDirectionIds: {},
   sectionCollapsed: false,
   recentSideCollapsed: false,
   dismissedFleetSyncNotice: false,
+  dismissedFleetSyncNoticeByServerId: {},
 };
 
 function parseTimestampMs(value: string | null | undefined): number {
@@ -284,6 +295,7 @@ function mergePersistedDirectionsState(
     sectionCollapsed: parsed.data.sectionCollapsed,
     recentSideCollapsed: parsed.data.recentSideCollapsed,
     dismissedFleetSyncNotice: parsed.data.dismissedFleetSyncNotice,
+    dismissedFleetSyncNoticeByServerId: parsed.data.dismissedFleetSyncNoticeByServerId ?? {},
   };
 }
 
@@ -294,6 +306,8 @@ export const useMainChatConversationsStore = create<MainChatConversationsStoreSt
       loadingConversationsByServerId: {},
       conversationsErrorByServerId: {},
       fleetHostsByServerId: {},
+      availableRemoteHostsByServerId: {},
+      fleetScopeByServerId: {},
       localServerIdByServerId: {},
       loadingFleetHostsByServerId: {},
       fleetHostsErrorByServerId: {},
@@ -487,12 +501,32 @@ export const useMainChatConversationsStore = create<MainChatConversationsStoreSt
           const result: RefreshFleetHostsResult = {
             localServerId: response.localServerId,
             hosts: response.hosts,
+            ...(response.fleetScope ? { fleetScope: response.fleetScope } : {}),
+            ...(response.availableRemoteHosts
+              ? { availableRemoteHosts: response.availableRemoteHosts }
+              : {}),
           };
           set((state) => ({
             fleetHostsByServerId: {
               ...state.fleetHostsByServerId,
               [serverId]: response.hosts,
             },
+            ...(response.availableRemoteHosts
+              ? {
+                  availableRemoteHostsByServerId: {
+                    ...state.availableRemoteHostsByServerId,
+                    [serverId]: response.availableRemoteHosts,
+                  },
+                }
+              : {}),
+            ...(response.fleetScope
+              ? {
+                  fleetScopeByServerId: {
+                    ...state.fleetScopeByServerId,
+                    [serverId]: response.fleetScope,
+                  },
+                }
+              : {}),
             localServerIdByServerId: {
               ...state.localServerIdByServerId,
               [serverId]: response.localServerId,
@@ -566,7 +600,20 @@ export const useMainChatConversationsStore = create<MainChatConversationsStoreSt
         );
       },
 
-      setDismissedFleetSyncNotice(dismissed) {
+      setDismissedFleetSyncNotice(dismissed, serverId) {
+        if (serverId) {
+          set((state) =>
+            Boolean(state.dismissedFleetSyncNoticeByServerId[serverId]) === dismissed
+              ? state
+              : {
+                  dismissedFleetSyncNoticeByServerId: {
+                    ...state.dismissedFleetSyncNoticeByServerId,
+                    [serverId]: dismissed,
+                  },
+                },
+          );
+          return;
+        }
         set((state) =>
           state.dismissedFleetSyncNotice === dismissed
             ? state
@@ -580,6 +627,8 @@ export const useMainChatConversationsStore = create<MainChatConversationsStoreSt
           loadingConversationsByServerId: {},
           conversationsErrorByServerId: {},
           fleetHostsByServerId: {},
+          availableRemoteHostsByServerId: {},
+          fleetScopeByServerId: {},
           localServerIdByServerId: {},
           loadingFleetHostsByServerId: {},
           fleetHostsErrorByServerId: {},
@@ -595,6 +644,7 @@ export const useMainChatConversationsStore = create<MainChatConversationsStoreSt
         sectionCollapsed: state.sectionCollapsed,
         recentSideCollapsed: state.recentSideCollapsed,
         dismissedFleetSyncNotice: state.dismissedFleetSyncNotice,
+        dismissedFleetSyncNoticeByServerId: state.dismissedFleetSyncNoticeByServerId,
       }),
       merge: mergePersistedDirectionsState,
     },

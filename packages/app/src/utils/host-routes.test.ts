@@ -220,8 +220,14 @@ describe("global routes", () => {
 
   it("builds and parses /main route family helpers", () => {
     expect(buildMainChatRoute()).toBe("/main");
+    expect(buildMainChatRoute("srv_imac")).toBe("/main?serverId=srv_imac");
+    expect(buildMainChatRoute("   ")).toBe("/main");
     expect(buildMainChatHistoryRoute()).toBe("/main/history");
+    expect(buildMainChatHistoryRoute("srv_imac")).toBe("/main/history?serverId=srv_imac");
     expect(buildMainChatConversationRoute("srv_1:conv/42")).toBe("/main/c/srv_1%3Aconv%2F42");
+    expect(buildMainChatConversationRoute("conv_1", "srv_imac")).toBe(
+      "/main/c/conv_1?serverId=srv_imac",
+    );
     expect(() => buildMainChatConversationRoute("   ")).toThrow();
 
     expect(isMainChatPathname("/main")).toBe(true);

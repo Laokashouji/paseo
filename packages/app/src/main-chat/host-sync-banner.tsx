@@ -4,7 +4,11 @@ import {
   serializeConnectionUriForStorage,
   serializeRelayConnectionUri,
 } from "@getpaseo/protocol/daemon-endpoints";
-import type { MainChatFleetHostStatus } from "@getpaseo/protocol/main-chat";
+import {
+  resolveMainChatFleetScope,
+  type MainChatFleetHostStatus,
+  type MainChatFleetScope,
+} from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import {
   ChevronDown,
@@ -30,6 +34,7 @@ import type { HostProfile } from "@/types/host-connection";
 import { buildSettingsHostRoute } from "@/utils/host-routes";
 import { EMPTY_FLEET_HOSTS, useMainChatConversationsStore } from "./conversations-store";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
+import { useMainChatSettingsStore } from "./settings-store";
 
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
@@ -59,6 +64,7 @@ function isLoopbackAddress(host: string): boolean {
 }
 
 function serializeRelayHostConnection(host: HostProfile): string | null {
+  if (!Array.isArray(host.connections)) return null;
   for (const conn of host.connections) {
     if (conn.type !== "relay") continue;
     const endpoint = conn.relayEndpoint.trim();
@@ -86,6 +92,7 @@ function serializeRelayHostConnection(host: HostProfile): string | null {
 }
 
 function serializeDirectTcpHostConnection(host: HostProfile): string | null {
+  if (!Array.isArray(host.connections)) return null;
   for (const conn of host.connections) {
     if (conn.type !== "directTcp") continue;
     const endpoint = conn.endpoint.trim();
@@ -117,6 +124,7 @@ export function buildSyncConnectionString(host: HostProfile): string | null {
 }
 
 function isRoutedViaMainHost(host: HostProfile, mainServerId: string): boolean {
+  if (!Array.isArray(host.connections)) return false;
   const routedId = `via:${mainServerId}`;
   return host.connections.some(
     (conn) =>
@@ -127,14 +135,25 @@ function isRoutedViaMainHost(host: HostProfile, mainServerId: string): boolean {
 /**
  * Computes frontend-only hosts present in `HostRuntimeStore` that are not yet linked to the Main
  * Chat daemon's `ConnectedHosts` fleet. Always excludes the main daemon itself and `via:<main>`
- * routed hosts.
+ * routed hosts. When `fleetScope` is configured:
+ * - `local_only`: returns no unlinked hosts (steward intentionally manages only its local host).
+ * - `allowlist`: only surfaces hosts explicitly listed in `fleetScope.hostServerIds` that are not
+ *   yet linked in the daemon's `ConnectedHosts`.
+ * - `all_connected` (or omitted): surfaces all unlinked client hosts.
  */
 export function computeUnlinkedClientHosts(
   clientHosts: readonly HostProfile[],
   mainDaemonFleetHosts: readonly MainChatFleetHostStatus[],
   mainServerId: string | null,
+  fleetScope?: MainChatFleetScope | null,
 ): UnlinkedClientHostCandidate[] {
   if (!mainServerId) return [];
+
+  if (fleetScope?.mode === "local_only") {
+    return [];
+  }
+
+  const allowlistSet = fleetScope?.mode === "allowlist" ? new Set(fleetScope.hostServerIds) : null;
 
   const linkedIds = new Set<string>([mainServerId]);
   for (const host of mainDaemonFleetHosts) {
@@ -144,6 +163,7 @@ export function computeUnlinkedClientHosts(
   const unlinked: UnlinkedClientHostCandidate[] = [];
   for (const host of clientHosts) {
     if (!host.serverId || linkedIds.has(host.serverId)) continue;
+    if (allowlistSet && !allowlistSet.has(host.serverId)) continue;
     if (isRoutedViaMainHost(host, mainServerId)) continue;
     const syncConnection = buildSyncConnectionString(host);
     unlinked.push({
@@ -382,10 +402,22 @@ export const HostSyncBanner = memo(function HostSyncBanner({
   const localServerId = useMainChatConversationsStore((state) =>
     serverId ? (state.localServerIdByServerId[serverId] ?? null) : null,
   );
+  const storeSettings = useMainChatSettingsStore((state) =>
+    serverId ? state.settingsByServerId[serverId] : undefined,
+  );
+  const storeFleetScope = useMainChatConversationsStore((state) =>
+    serverId ? state.fleetScopeByServerId[serverId] : undefined,
+  );
   const loadingFleetHosts = useMainChatConversationsStore((state) =>
     serverId ? Boolean(state.loadingFleetHostsByServerId[serverId]) : false,
   );
-  const dismissedNotice = useMainChatConversationsStore((state) => state.dismissedFleetSyncNotice);
+  const dismissedNotice = useMainChatConversationsStore((state) =>
+    serverId
+      ? Boolean(
+          state.dismissedFleetSyncNoticeByServerId[serverId] ?? state.dismissedFleetSyncNotice,
+        )
+      : state.dismissedFleetSyncNotice,
+  );
   const setDismissedNotice = useMainChatConversationsStore(
     (state) => state.setDismissedFleetSyncNotice,
   );
@@ -397,10 +429,22 @@ export const HostSyncBanner = memo(function HostSyncBanner({
 
   const fleetHosts = storeFleetHosts ?? overviewFleetHosts ?? EMPTY_FLEET_HOSTS;
   const effectiveMainServerId = localServerId ?? serverId;
+  const effectiveFleetScope = useMemo(
+    () =>
+      storeFleetScope ??
+      (storeSettings ? resolveMainChatFleetScope(storeSettings, effectiveMainServerId) : null),
+    [effectiveMainServerId, storeFleetScope, storeSettings],
+  );
 
   const unlinkedHosts = useMemo(
-    () => computeUnlinkedClientHosts(clientHosts, fleetHosts, effectiveMainServerId),
-    [clientHosts, effectiveMainServerId, fleetHosts],
+    () =>
+      computeUnlinkedClientHosts(
+        clientHosts,
+        fleetHosts,
+        effectiveMainServerId,
+        effectiveFleetScope,
+      ),
+    [clientHosts, effectiveFleetScope, effectiveMainServerId, fleetHosts],
   );
 
   const onlineCount = useMemo(
@@ -435,12 +479,12 @@ export const HostSyncBanner = memo(function HostSyncBanner({
   }, [serverId]);
 
   const handleDismiss = useCallback(() => {
-    setDismissedNotice(true);
-  }, [setDismissedNotice]);
+    setDismissedNotice(true, serverId);
+  }, [serverId, setDismissedNotice]);
 
   const handleReopenNotice = useCallback(() => {
-    setDismissedNotice(false);
-  }, [setDismissedNotice]);
+    setDismissedNotice(false, serverId);
+  }, [serverId, setDismissedNotice]);
 
   const handleSyncNow = useCallback(() => {
     if (!serverId || syncing) return;

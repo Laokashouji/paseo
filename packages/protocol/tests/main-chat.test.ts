@@ -10,8 +10,14 @@ import {
   MainChatListActivityRequestSchema,
   MainChatNewSessionRequestSchema,
   MainChatOverviewSchema,
+  MainChatSettingsSchema,
+  createDefaultMainChatSettings,
   isFormerMainChatLabels,
+  isHostAllowedInFleetScope,
   isMainChatLabels,
+  mergeMainChatSettings,
+  normalizeMainChatFleetScope,
+  resolveMainChatFleetScope,
 } from "../src/main-chat.js";
 import { SessionInboundMessageSchema } from "../src/messages.js";
 import { validateWSOutboundMessage } from "../src/validation/ws-outbound.js";
@@ -184,5 +190,121 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
       queuedBackgroundCount: 2,
     };
     expect(MainChatOverviewSchema.safeParse(m2Overview).success).toBe(true);
+  });
+
+  it("supports backward-compatible fleetScope settings, normalization, and host scope checks", () => {
+    const defaults = createDefaultMainChatSettings();
+    expect(resolveMainChatFleetScope(defaults)).toEqual({
+      mode: "all_connected",
+      hostServerIds: [],
+    });
+
+    // Legacy settings without fleetScope remain valid and default to all_connected
+    const { fleetScope: _omitted, ...legacySettings } = defaults;
+    const parsedLegacy = MainChatSettingsSchema.parse(legacySettings);
+    expect(resolveMainChatFleetScope(parsedLegacy)).toEqual({
+      mode: "all_connected",
+      hostServerIds: [],
+    });
+
+    // Normalize deduplicates, trims, and strips local serverId
+    expect(
+      normalizeMainChatFleetScope(
+        { mode: "allowlist", hostServerIds: [" srv_macbook ", "srv_devbox", "srv_macbook", ""] },
+        "srv_devbox",
+      ),
+    ).toEqual({
+      mode: "allowlist",
+      hostServerIds: ["srv_macbook"],
+    });
+
+    // Host scope checks: local host is always allowed
+    const allowlistScope = { mode: "allowlist" as const, hostServerIds: ["srv_macbook"] };
+    expect(isHostAllowedInFleetScope(allowlistScope, "srv_devbox", "srv_devbox")).toBe(true);
+    expect(isHostAllowedInFleetScope(allowlistScope, "srv_devbox", "srv_macbook")).toBe(true);
+    expect(isHostAllowedInFleetScope(allowlistScope, "srv_devbox", "srv_imac")).toBe(false);
+
+    const localOnlyScope = { mode: "local_only" as const, hostServerIds: ["srv_macbook"] };
+    expect(isHostAllowedInFleetScope(localOnlyScope, "srv_imac", "srv_imac")).toBe(true);
+    expect(isHostAllowedInFleetScope(localOnlyScope, "srv_imac", "srv_macbook")).toBe(false);
+
+    expect(isHostAllowedInFleetScope(undefined, "srv_devbox", "srv_any")).toBe(true);
+
+    // mergeMainChatSettings preserves fleetScope across style/title patches and merges partial updates
+    const scoped = mergeMainChatSettings(defaults, {
+      title: "工作管家",
+      fleetScope: { mode: "allowlist", hostServerIds: ["srv_macbook"] },
+    });
+    expect(scoped.fleetScope).toEqual({ mode: "allowlist", hostServerIds: ["srv_macbook"] });
+
+    const afterStyleSwitch = mergeMainChatSettings(scoped, { applyPreset: "proactive" });
+    expect(afterStyleSwitch.fleetScope).toEqual({
+      mode: "allowlist",
+      hostServerIds: ["srv_macbook"],
+    });
+
+    const switchedToLocalOnly = mergeMainChatSettings(afterStyleSwitch, {
+      fleetScope: { mode: "local_only" },
+    });
+    expect(switchedToLocalOnly.fleetScope).toEqual({
+      mode: "local_only",
+      hostServerIds: ["srv_macbook"],
+    });
+  });
+
+  it("validates get_fleet_hosts outbound payloads with optional fleetScope and availableRemoteHosts", () => {
+    const hostRow = {
+      serverId: "srv_macbook",
+      label: "MacBook",
+      isLocal: false,
+      status: "online" as const,
+      agentCount: 2,
+      needsAttentionCount: 1,
+      lastSyncedAt: "2026-11-24T05:00:00.000Z",
+      error: null,
+    };
+
+    const withScope = validateWSOutboundMessage({
+      type: "session",
+      message: {
+        type: "main_chat.get_fleet_hosts.response",
+        payload: {
+          requestId: "req_hosts_1",
+          localServerId: "srv_devbox",
+          hosts: [hostRow],
+          fleetScope: { mode: "allowlist", hostServerIds: ["srv_macbook"] },
+          availableRemoteHosts: [
+            hostRow,
+            {
+              serverId: "srv_imac",
+              label: "iMac",
+              isLocal: false,
+              status: "online",
+              agentCount: 0,
+              needsAttentionCount: 0,
+              lastSyncedAt: null,
+              error: null,
+            },
+          ],
+          error: null,
+        },
+      },
+    });
+    expect(withScope.success).toBe(true);
+
+    // Legacy response without new optional fields still validates
+    const legacy = validateWSOutboundMessage({
+      type: "session",
+      message: {
+        type: "main_chat.get_fleet_hosts.response",
+        payload: {
+          requestId: "req_hosts_2",
+          localServerId: "srv_devbox",
+          hosts: [hostRow],
+          error: null,
+        },
+      },
+    });
+    expect(legacy.success).toBe(true);
   });
 });

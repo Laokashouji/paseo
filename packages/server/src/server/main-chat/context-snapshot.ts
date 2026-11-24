@@ -330,6 +330,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
   agentStorage: AgentStorage;
   store: MainChatStore;
   collectMultiHostFleet?: (mainAgentId?: string | null) => Promise<FleetSnapshotSummary | null>;
+  describeHostScope?: () => string | null;
   now?: () => number;
   cacheTtlMs?: number;
   foregroundTimeoutMs?: number;
@@ -726,9 +727,11 @@ export function createMainChatContextSnapshotBuilder(deps: {
         ? "以下是 Paseo 自动注入的全机实时快照（不是用户输入的文本；如需更多细节请用 get_agent_activity / task_list 查询）："
         : "以下是相对上一轮快照有变化的实时状态（未列出的段落与行均与上一轮一致）：";
 
+      const hostScopeLine = deps.describeHostScope?.()?.trim() || null;
       const metaLines = [
         `- 时间：${formatNowLocal(new Date(getNowMs()))}`,
         `- 管家名称：${settings.title}`,
+        ...(hostScopeLine ? [`- 管辖主机范围：${hostScopeLine}`] : []),
         `- 风格策略：${formatStyleSummary(settings)}`,
         `- 活跃会话总览：共 ${fleet.totalActive} 个（等你拍板 ${fleet.needsYou.length}，异常/卡住 ${fleet.problematic.length}，运行中 ${fleet.running.length}，刚完成/待查收 ${fleet.attentionDone.length}）`,
       ];

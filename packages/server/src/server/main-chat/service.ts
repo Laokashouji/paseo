@@ -17,8 +17,11 @@ import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   extractMainChatPermissionRuleCandidate,
   getMainChatTaskMetaFromLabels,
+  isHostAllowedInFleetScope,
   isMainChatEnabled,
   isMainChatLabels,
+  normalizeMainChatFleetScope,
+  resolveMainChatFleetScope,
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatApprovalClarification,
@@ -30,6 +33,7 @@ import {
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
   type MainChatFleetHostStatus,
+  type MainChatFleetScope,
   type MainChatNightModeStatus,
   type MainChatOverview,
   type MainChatPatrolResult,
@@ -86,6 +90,7 @@ import {
 } from "./context-snapshot.js";
 import {
   createMainChatConversationManager,
+  isMainChatConversationLabels,
   type MainChatConversationManager,
 } from "./conversations.js";
 import { createMainChatFleetAggregator, type FleetConnectedHosts } from "./fleet-aggregator.js";
@@ -430,7 +435,11 @@ export interface MainChatService {
   getFleetHosts(options?: { forceRefresh?: boolean }): Promise<{
     localServerId: string | null;
     hosts: MainChatFleetHostStatus[];
+    fleetScope?: MainChatFleetScope;
+    availableRemoteHosts?: MainChatFleetHostStatus[];
   }>;
+  isManagedConversationAgent?(agentId: string): boolean;
+  isHostAllowedForSteward?(targetServerId: string): boolean;
   // M5 Approval Clarification & Standing Authorizations
   clarifyPermission(input: {
     agentId: string;
@@ -537,12 +546,58 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
     : undefined;
 
+  function isHostAllowedForSteward(targetServerId: string): boolean {
+    return isHostAllowedInFleetScope(store.getSettings().fleetScope, deps.serverId, targetServerId);
+  }
+
+  function isManagedConversationAgent(agentId: string): boolean {
+    const trimmed = agentId.trim();
+    if (!trimmed) return false;
+    const live = deps.agentManager.getAgent(trimmed);
+    if (live && (isMainChatLabels(live.labels) || isMainChatConversationLabels(live.labels))) {
+      return true;
+    }
+    return conversationManager.getConversationByAgentId(trimmed) !== null;
+  }
+
+  function describeHostScope(): string {
+    const scope = resolveMainChatFleetScope(store.getSettings(), deps.serverId);
+    if (scope.mode === "local_only") {
+      return `仅本机（${localHostLabel}）`;
+    }
+    const labelByServerId = new Map<string, string>();
+    for (const host of connectedHostsProxy?.listKnownHosts() ?? []) {
+      const id = host.serverId ?? host.registrationId;
+      if (id && id !== deps.serverId) {
+        labelByServerId.set(id, host.label?.trim() || host.targetDescription || id);
+      }
+    }
+    for (const handle of connectedHostsProxy?.listAcceptedHosts() ?? []) {
+      if (handle.serverId !== deps.serverId) {
+        labelByServerId.set(handle.serverId, handle.label?.trim() || handle.serverId);
+      }
+    }
+    if (scope.mode === "allowlist") {
+      if (scope.hostServerIds.length === 0) {
+        return `仅本机（${localHostLabel}）`;
+      }
+      const remoteLabels = scope.hostServerIds.map((id) => labelByServerId.get(id) ?? id);
+      return `${localHostLabel}（本机）、${remoteLabels.join("、")}`;
+    }
+    const allRemoteLabels = Array.from(labelByServerId.values());
+    if (allRemoteLabels.length === 0) {
+      return `本机（${localHostLabel}）`;
+    }
+    return `${localHostLabel}（本机）及全部已连主机（${allRemoteLabels.join("、")}）`;
+  }
+
   const fleetAggregator = createMainChatFleetAggregator({
     localServerId: deps.serverId,
     localLabel: localHostLabel,
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     connectedHosts: connectedHostsProxy,
+    isHostAllowed: isHostAllowedForSteward,
     logger,
   });
 
@@ -662,11 +717,23 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     agentStorage: deps.agentStorage,
     store,
     collectMultiHostFleet: async (mainAgentId) => {
+      const scope = resolveMainChatFleetScope(store.getSettings(), deps.serverId);
+      if (scope.mode === "local_only") return null;
       const known = connectedHostsProxy?.listKnownHosts() ?? [];
-      if (known.length === 0) return null;
+      const accepted = connectedHostsProxy?.listAcceptedHosts() ?? [];
+      const hasAllowedRemote =
+        known.some((host) => {
+          const id = host.serverId ?? host.registrationId;
+          return id !== deps.serverId && isHostAllowedForSteward(id);
+        }) ||
+        accepted.some(
+          (handle) => handle.serverId !== deps.serverId && isHostAllowedForSteward(handle.serverId),
+        );
+      if (!hasAllowedRemote) return null;
       const collection = await fleetBridge.collectMultiHostFleet({ mainAgentId });
       return collection.summary;
     },
+    describeHostScope,
     now: getNowMs,
     cacheTtlMs: deps.snapshotCacheTtlMs,
     foregroundTimeoutMs: deps.snapshotForegroundTimeoutMs,
@@ -3059,7 +3126,30 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async updateSettings(patch) {
       await store.load();
       const previous = store.getSettings();
-      const updated = await store.updateSettings(patch);
+      const previousScope = resolveMainChatFleetScope(previous, deps.serverId);
+      const normalizedPatch: MainChatSettingsPatch = patch.fleetScope
+        ? {
+            ...patch,
+            fleetScope: normalizeMainChatFleetScope(
+              {
+                mode: patch.fleetScope.mode ?? previousScope.mode,
+                hostServerIds: patch.fleetScope.hostServerIds ?? previousScope.hostServerIds,
+              },
+              deps.serverId,
+            ),
+          }
+        : patch;
+      const updated = await store.updateSettings(normalizedPatch);
+      const updatedScope = resolveMainChatFleetScope(updated, deps.serverId);
+      const scopeChanged =
+        previousScope.mode !== updatedScope.mode ||
+        previousScope.hostServerIds.length !== updatedScope.hostServerIds.length ||
+        previousScope.hostServerIds.some((id, index) => updatedScope.hostServerIds[index] !== id);
+
+      if (scopeChanged) {
+        fleetAggregator.reconcileScope();
+        contextSnapshots.invalidateCache();
+      }
       syncRuntimeEnabledState();
       supervisor.refreshSchedule();
 
@@ -3954,8 +4044,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     },
 
     async getFleetHosts(options) {
-      return fleetBridge.getFleetHosts(options);
+      await store.load();
+      const result = await fleetBridge.getFleetHosts(options);
+      return {
+        ...result,
+        fleetScope: resolveMainChatFleetScope(store.getSettings(), deps.serverId),
+      };
     },
+
+    isManagedConversationAgent,
+    isHostAllowedForSteward,
 
     async clarifyPermission(input) {
       await store.load();

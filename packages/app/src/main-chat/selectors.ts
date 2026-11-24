@@ -136,9 +136,17 @@ function resolveTargetMainChatHost(
   };
 }
 
+function isServerAllowedInScope(
+  serverId: string,
+  allowedServerIds?: ReadonlySet<string> | null,
+): boolean {
+  return !allowedServerIds || allowedServerIds.size === 0 || allowedServerIds.has(serverId);
+}
+
 function summarizeFleetActivity(
   state: SessionStoreState,
   mainRef: MainChatAgentRef | null,
+  allowedServerIds?: ReadonlySet<string> | null,
 ): {
   isMainRunning: boolean;
   needsYouCount: number;
@@ -150,28 +158,30 @@ function summarizeFleetActivity(
   let runningCount = 0;
   let attentionCount = 0;
   let totalActiveCount = 0;
-  const activeAgentIds = new Set<string>();
-  const needsYouAgentIds = new Set<string>();
+  const activeAgentKeys = new Set<string>();
+  const needsYouAgentKeys = new Set<string>();
 
   for (const [serverId, session] of Object.entries(state.sessions)) {
+    if (!isServerAllowedInScope(serverId, allowedServerIds)) continue;
     for (const agent of session.agents.values()) {
       if (agent.archivedAt || agent.background) continue;
       const running =
         agent.turn.phase === "open" ||
         isAgentRunning({ status: agent.status, backgroundWork: agent.backgroundWork });
+      const agentKey = `${serverId}:${agent.id}`;
 
       if (isMainChatAgent(agent)) {
         if (mainRef && serverId === mainRef.serverId && agent.id === mainRef.agentId) {
           isMainRunning = running;
+          activeAgentKeys.add(agentKey);
         }
-        activeAgentIds.add(agent.id);
         continue;
       }
 
       totalActiveCount += 1;
-      activeAgentIds.add(agent.id);
+      activeAgentKeys.add(agentKey);
       if (agent.pendingPermissions.length > 0 || agent.attentionReason === "permission") {
-        needsYouAgentIds.add(agent.id);
+        needsYouAgentKeys.add(agentKey);
       } else if (running) {
         runningCount += 1;
       } else if (agent.requiresAttention || agent.status === "error") {
@@ -180,18 +190,84 @@ function summarizeFleetActivity(
     }
 
     for (const perm of session.pendingPermissions.values()) {
-      if (activeAgentIds.has(perm.agentId)) {
-        needsYouAgentIds.add(perm.agentId);
+      const agentKey = `${serverId}:${perm.agentId}`;
+      if (activeAgentKeys.has(agentKey)) {
+        needsYouAgentKeys.add(agentKey);
       }
     }
   }
 
   return {
     isMainRunning,
-    needsYouCount: needsYouAgentIds.size,
+    needsYouCount: needsYouAgentKeys.size,
     runningCount,
     attentionCount,
     totalActiveCount,
+  };
+}
+
+export interface SelectMainChatSidebarSummaryOptions {
+  allowedServerIds?: ReadonlySet<string> | null;
+  /** When true, strictly target `preferredServerId` instead of falling back to other hosts. */
+  strictServerId?: boolean;
+}
+
+export function selectStewardActivitySummary(
+  state: SessionStoreState,
+  stewardServerId: string,
+  allowedServerIds?: ReadonlySet<string> | null,
+): {
+  existing: MainChatAgentRef | null;
+  isMainRunning: boolean;
+  needsYouCount: number;
+  runningCount: number;
+  attentionCount: number;
+  totalActiveCount: number;
+} {
+  const session = state.sessions[stewardServerId];
+  const existing = findMainChatAgentOnHost(session, stewardServerId);
+  const scope =
+    allowedServerIds && allowedServerIds.size > 0 ? allowedServerIds : new Set([stewardServerId]);
+  const activity = summarizeFleetActivity(state, existing, scope);
+  return {
+    existing,
+    ...activity,
+  };
+}
+
+function resolveSidebarTarget(
+  state: SessionStoreState,
+  preferredServerId: string | null,
+  strictServerId: boolean,
+): { existing: MainChatAgentRef | null; targetServerId: string | null } {
+  if (strictServerId && preferredServerId) {
+    return {
+      targetServerId: preferredServerId,
+      existing: findMainChatAgentOnHost(state.sessions[preferredServerId], preferredServerId),
+    };
+  }
+  const orderedIds = resolveOrderedServerIds(state, preferredServerId);
+  return resolveTargetMainChatHost(state, orderedIds);
+}
+
+function resolveExistingMainChatMeta(
+  state: SessionStoreState,
+  existing: MainChatAgentRef | null,
+  targetServerId: string | null,
+  configuredTitle?: string | null,
+): { supportsMainChat: boolean; displayTitle: string; hostLabel: string | null } {
+  const targetSession = targetServerId ? state.sessions[targetServerId] : undefined;
+  const supportsMainChat =
+    existing !== null || targetSession?.serverInfo?.features?.mainChat === true;
+  const existingAgent = existing
+    ? (state.sessions[existing.serverId]?.agents.get(existing.agentId) ??
+      state.sessions[existing.serverId]?.agentDetails.get(existing.agentId))
+    : undefined;
+  return {
+    supportsMainChat,
+    displayTitle:
+      configuredTitle?.trim() || existingAgent?.title?.trim() || MAIN_CHAT_DEFAULT_TITLE,
+    hostLabel: targetSession?.serverInfo?.hostname?.trim() || null,
   };
 }
 
@@ -199,22 +275,20 @@ export function selectMainChatSidebarSummary(
   state: SessionStoreState,
   preferredServerId: string | null,
   configuredTitle?: string | null,
+  options?: SelectMainChatSidebarSummaryOptions,
 ): MainChatSidebarSummary {
-  const orderedIds = resolveOrderedServerIds(state, preferredServerId);
-  const { existing, targetServerId } = resolveTargetMainChatHost(state, orderedIds);
-  const targetSession = targetServerId ? state.sessions[targetServerId] : undefined;
-  const supportsMainChat =
-    existing !== null || targetSession?.serverInfo?.features?.mainChat === true;
-
-  const existingAgent = existing
-    ? (state.sessions[existing.serverId]?.agents.get(existing.agentId) ??
-      state.sessions[existing.serverId]?.agentDetails.get(existing.agentId))
-    : undefined;
-  const displayTitle =
-    configuredTitle?.trim() || existingAgent?.title?.trim() || MAIN_CHAT_DEFAULT_TITLE;
-  const hostLabel = targetSession?.serverInfo?.hostname?.trim() || null;
-
-  const activity = summarizeFleetActivity(state, existing);
+  const { existing, targetServerId } = resolveSidebarTarget(
+    state,
+    preferredServerId,
+    Boolean(options?.strictServerId),
+  );
+  const { supportsMainChat, displayTitle, hostLabel } = resolveExistingMainChatMeta(
+    state,
+    existing,
+    targetServerId,
+    configuredTitle,
+  );
+  const activity = summarizeFleetActivity(state, existing, options?.allowedServerIds);
 
   return {
     existing,
@@ -313,6 +387,21 @@ function toDockTaskItem(
   };
 }
 
+function countPendingPermissionsByHostAgent(
+  state: SessionStoreState,
+  allowedServerIds?: ReadonlySet<string> | null,
+): Map<string, number> {
+  const pendingByHostAndAgent = new Map<string, number>();
+  for (const [hostId, hostSession] of Object.entries(state.sessions)) {
+    if (!isServerAllowedInScope(hostId, allowedServerIds)) continue;
+    for (const perm of hostSession.pendingPermissions.values()) {
+      const key = `${hostId}:${perm.agentId}`;
+      pendingByHostAndAgent.set(key, (pendingByHostAndAgent.get(key) ?? 0) + 1);
+    }
+  }
+  return pendingByHostAndAgent;
+}
+
 /**
  * Returns tasks dispatched from this main chat FIRST, followed by manually started working,
  * waiting, failed, or unread-attention sessions across connected hosts (mirroring Persona's
@@ -322,24 +411,19 @@ export function selectMainChatDockTasks(
   state: SessionStoreState,
   serverId: string,
   mainAgentId: string,
+  allowedServerIds?: ReadonlySet<string> | null,
 ): MainChatDockTaskItem[] {
   const session = state.sessions[serverId];
   if (!session) return [];
   const currentAgent = session.agents.get(mainAgentId) ?? session.agentDetails.get(mainAgentId);
   if (!isMainChatAgent(currentAgent)) return [];
 
-  const pendingByHostAndAgent = new Map<string, number>();
-  for (const [hostId, hostSession] of Object.entries(state.sessions)) {
-    for (const perm of hostSession.pendingPermissions.values()) {
-      const key = `${hostId}:${perm.agentId}`;
-      pendingByHostAndAgent.set(key, (pendingByHostAndAgent.get(key) ?? 0) + 1);
-    }
-  }
-
+  const pendingByHostAndAgent = countPendingPermissionsByHostAgent(state, allowedServerIds);
   const managedTasks: MainChatDockTaskItem[] = [];
   const manualTasks: MainChatDockTaskItem[] = [];
 
   for (const [hostId, hostSession] of Object.entries(state.sessions)) {
+    if (!isServerAllowedInScope(hostId, allowedServerIds)) continue;
     for (const agent of hostSession.agents.values()) {
       if (agent.archivedAt || agent.background || isMainChatAgent(agent)) continue;
       const parent = getParentAddressFromLabels(agent.labels, hostId);

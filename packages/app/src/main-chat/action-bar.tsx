@@ -50,6 +50,7 @@ import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
+import { useStewardAllowedServerIds } from "./use-steward-roster";
 
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
 const ThemedAtIcon = withUnistyles(AtSign);
@@ -154,6 +155,7 @@ function selectActionBarSessionSnapshot(
   state: SessionStoreState,
   serverId: string,
   mainAgentId: string,
+  allowedServerIds?: ReadonlySet<string> | null,
 ): ActionBarSessionSnapshot {
   const mainSession = state.sessions[serverId];
   const currentAgent =
@@ -166,6 +168,9 @@ function selectActionBarSessionSnapshot(
   const pendingPermissions: ActionBarPendingPermissionInput[] = [];
 
   for (const [hostId, hostSession] of Object.entries(state.sessions)) {
+    if (allowedServerIds && allowedServerIds.size > 0 && !allowedServerIds.has(hostId)) {
+      continue;
+    }
     for (const agent of hostSession.agents.values()) {
       liveAgents.push(buildLiveAgentSnapshot(hostId, agent, serverId, mainAgentId));
     }
@@ -1023,12 +1028,13 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const toast = useToast();
   const hosts = useHosts();
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+  const allowedServerIds = useStewardAllowedServerIds(serverId);
 
   const sessionSnapshot = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectActionBarSessionSnapshot(state, serverId, agentId),
-      [agentId, serverId],
+      (state) => selectActionBarSessionSnapshot(state, serverId, agentId, allowedServerIds),
+      [agentId, allowedServerIds, serverId],
     ),
     equal,
   );

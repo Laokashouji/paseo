@@ -19,9 +19,15 @@ export interface OpenMainChatDrawerInput {
 interface MainChatDrawerStoreState {
   activeTarget: MainChatDrawerTarget | null;
   lastTarget: MainChatDrawerTarget | null;
+  activeStewardServerId: string | null;
+  lastTargetByStewardServerId: Record<string, MainChatDrawerTarget | undefined>;
   openTask: (input: OpenMainChatDrawerInput) => void;
   closeDrawer: () => void;
   toggleDrawer: (fallbackTarget?: OpenMainChatDrawerInput | null) => void;
+  setActiveStewardContext: (
+    stewardServerId: string | null,
+    allowedServerIds?: ReadonlySet<string> | null,
+  ) => void;
   reset: () => void;
 }
 
@@ -44,14 +50,24 @@ function normalizeDrawerTarget(input: OpenMainChatDrawerInput): MainChatDrawerTa
 export const useMainChatDrawerStore = create<MainChatDrawerStoreState>((set) => ({
   activeTarget: null,
   lastTarget: null,
+  activeStewardServerId: null,
+  lastTargetByStewardServerId: {},
 
   openTask(input) {
     const target = normalizeDrawerTarget(input);
     if (!target) return;
-    set({
+    set((state) => ({
       activeTarget: target,
       lastTarget: target,
-    });
+      ...(state.activeStewardServerId
+        ? {
+            lastTargetByStewardServerId: {
+              ...state.lastTargetByStewardServerId,
+              [state.activeStewardServerId]: target,
+            },
+          }
+        : {}),
+    }));
   },
 
   closeDrawer() {
@@ -63,8 +79,13 @@ export const useMainChatDrawerStore = create<MainChatDrawerStoreState>((set) => 
       if (state.activeTarget !== null) {
         return { activeTarget: null };
       }
+      const stewardLast = state.activeStewardServerId
+        ? state.lastTargetByStewardServerId[state.activeStewardServerId]
+        : null;
       const next =
-        state.lastTarget ?? (fallbackTarget ? normalizeDrawerTarget(fallbackTarget) : null);
+        stewardLast ??
+        state.lastTarget ??
+        (fallbackTarget ? normalizeDrawerTarget(fallbackTarget) : null);
       if (!next) {
         return state;
       }
@@ -75,7 +96,40 @@ export const useMainChatDrawerStore = create<MainChatDrawerStoreState>((set) => 
     });
   },
 
+  setActiveStewardContext(stewardServerId, allowedServerIds) {
+    const normalized = stewardServerId?.trim() || null;
+    set((state) => {
+      if (state.activeStewardServerId === normalized) {
+        if (
+          state.activeTarget &&
+          allowedServerIds &&
+          allowedServerIds.size > 0 &&
+          !allowedServerIds.has(state.activeTarget.serverId)
+        ) {
+          return { activeTarget: null };
+        }
+        return state;
+      }
+      const shouldCloseActive =
+        state.activeTarget !== null &&
+        (!allowedServerIds ||
+          allowedServerIds.size === 0 ||
+          !allowedServerIds.has(state.activeTarget.serverId));
+      const nextLast = normalized ? (state.lastTargetByStewardServerId[normalized] ?? null) : null;
+      return {
+        activeStewardServerId: normalized,
+        activeTarget: shouldCloseActive ? null : state.activeTarget,
+        lastTarget: nextLast,
+      };
+    });
+  },
+
   reset() {
-    set({ activeTarget: null, lastTarget: null });
+    set({
+      activeTarget: null,
+      lastTarget: null,
+      activeStewardServerId: null,
+      lastTargetByStewardServerId: {},
+    });
   },
 }));

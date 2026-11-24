@@ -44,9 +44,12 @@ import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspac
 import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
+import { MainChatFleetScopePanel } from "./fleet-scope-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
+import { MainChatStewardConflictsBanner, MainChatStewardRosterPanel } from "./steward-roster-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
+import { useMainChatSettingsMultiSteward } from "./use-steward-settings";
 
 const ThemedPower = withUnistyles(Power);
 const ThemedRadar = withUnistyles(Radar);
@@ -575,6 +578,85 @@ const SupervisorMetricsRow = memo(function SupervisorMetricsRow({
   );
 });
 
+const MainChatStewardTopSections = memo(function MainChatStewardTopSections({
+  multiSteward,
+  selectedServerId,
+  onSelectHost,
+}: {
+  multiSteward: ReturnType<typeof useMainChatSettingsMultiSteward>;
+  selectedServerId: string | null;
+  onSelectHost: (serverId: string) => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  return (
+    <>
+      <MainChatStewardConflictsBanner
+        conflicts={multiSteward.conflicts}
+        busyKey={multiSteward.conflictBusyKey}
+        onDisableLocalSteward={multiSteward.handleDisableLocalSteward}
+        onRemoveFromRemoteSteward={multiSteward.handleRemoveFromRemoteSteward}
+      />
+
+      {multiSteward.rosterEntries.length > 1 ? (
+        <SettingsSection
+          title={t("mainChat.stewards.roster.sectionTitle")}
+          info={t("mainChat.stewards.roster.sectionDescription")}
+          testID="settings-main-chat-steward-roster"
+        >
+          <MainChatStewardRosterPanel
+            entries={multiSteward.rosterEntries}
+            selectedServerId={selectedServerId}
+            activeStewardServerId={multiSteward.activeStewardServerId}
+            filterWorkspacesByActiveSteward={multiSteward.filterWorkspacesByActiveSteward}
+            onSelectHost={onSelectHost}
+            onSetDefault={multiSteward.handleSetDefault}
+            onToggleFilterWorkspaces={multiSteward.setFilterWorkspacesByActiveSteward}
+          />
+        </SettingsSection>
+      ) : null}
+    </>
+  );
+});
+
+const MainChatFleetScopeSection = memo(function MainChatFleetScopeSection({
+  visible,
+  selectedServerId,
+  selectedHostLabel,
+  fleetScope,
+  multiSteward,
+  saving,
+}: {
+  visible: boolean;
+  selectedServerId: string | null;
+  selectedHostLabel: string | undefined;
+  fleetScope: MainChatSettings["fleetScope"];
+  multiSteward: ReturnType<typeof useMainChatSettingsMultiSteward>;
+  saving: boolean;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  if (!visible || !selectedServerId) return null;
+  return (
+    <SettingsSection
+      title={t("mainChat.stewards.scope.sectionTitle")}
+      info={t("mainChat.stewards.scope.sectionDescription")}
+      testID="settings-main-chat-fleet-scope"
+    >
+      <MainChatFleetScopePanel
+        selectedServerId={selectedServerId}
+        selectedHostLabel={selectedHostLabel ?? selectedServerId}
+        fleetScope={fleetScope}
+        availableRemoteHosts={multiSteward.selectedAvailableRemoteHosts}
+        inScopeHosts={multiSteward.selectedInScopeHosts}
+        clientHosts={multiSteward.clientHosts}
+        otherOwnerNamesByTargetServerId={multiSteward.otherOwnerNamesByTargetServerId}
+        saving={saving || multiSteward.scopeBusy}
+        onChangeMode={multiSteward.handleChangeFleetScopeMode}
+        onToggleRemoteHost={multiSteward.handleToggleRemoteHost}
+      />
+    </SettingsSection>
+  );
+});
+
 export function MainChatSettingsSection(): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
@@ -649,6 +731,14 @@ export function MainChatSettingsSection(): ReactElement {
     },
     [client, selectedServerId, t, toast, updateSettings],
   );
+
+  const multiSteward = useMainChatSettingsMultiSteward({
+    capableHosts,
+    selectedServerId,
+    selectedClient: client,
+    selectedSettings: settings,
+    onApplyPatch: applyPatch,
+  });
 
   const handleSaveTitle = useCallback(() => {
     const trimmed = titleDraft.trim();
@@ -856,6 +946,12 @@ export function MainChatSettingsSection(): ReactElement {
 
   return (
     <>
+      <MainChatStewardTopSections
+        multiSteward={multiSteward}
+        selectedServerId={selectedServerId}
+        onSelectHost={handleSelectHost}
+      />
+
       <SettingsSection
         title={t("mainChat.settings.master.title")}
         info={t("mainChat.settings.master.description")}
@@ -873,6 +969,15 @@ export function MainChatSettingsSection(): ReactElement {
           onToggleEnabled={handleToggleMasterEnabled}
         />
       </SettingsSection>
+
+      <MainChatFleetScopeSection
+        visible={mainChatEnabled}
+        selectedServerId={selectedServerId}
+        selectedHostLabel={selectedHostDisplay?.label}
+        fleetScope={settings.fleetScope}
+        multiSteward={multiSteward}
+        saving={saving}
+      />
 
       <SettingsSection
         title={t("mainChat.usage.sectionTitle")}

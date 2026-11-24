@@ -133,6 +133,22 @@ export const MainChatTokenUsageSummarySchema = z.object({
 export type MainChatTokenUsageSummary = z.infer<typeof MainChatTokenUsageSummarySchema>;
 
 export const MAIN_CHAT_MAX_CUSTOM_STYLE_PRESETS = 32;
+export const MAIN_CHAT_MAX_FLEET_SCOPE_HOSTS = 64;
+
+export const MainChatFleetScopeModeSchema = z.enum(["all_connected", "local_only", "allowlist"]);
+export type MainChatFleetScopeMode = z.infer<typeof MainChatFleetScopeModeSchema>;
+
+export const MainChatFleetScopeSchema = z.object({
+  mode: MainChatFleetScopeModeSchema,
+  hostServerIds: z.array(z.string().min(1)).max(MAIN_CHAT_MAX_FLEET_SCOPE_HOSTS),
+});
+export type MainChatFleetScope = z.infer<typeof MainChatFleetScopeSchema>;
+
+export const MainChatFleetScopePatchSchema = z.object({
+  mode: MainChatFleetScopeModeSchema.optional(),
+  hostServerIds: z.array(z.string().min(1)).max(MAIN_CHAT_MAX_FLEET_SCOPE_HOSTS).optional(),
+});
+export type MainChatFleetScopePatch = z.infer<typeof MainChatFleetScopePatchSchema>;
 
 export const MainChatCustomStylePresetSchema = z.object({
   id: z.string().trim().min(1).max(64),
@@ -159,6 +175,7 @@ export const MainChatSettingsSchema = z.object({
   intervals: MainChatIntervalsSchema,
   capabilities: MainChatCapabilitiesSchema,
   nightMode: MainChatNightModeConfigSchema.optional(),
+  fleetScope: MainChatFleetScopeSchema.optional(),
 });
 export type MainChatSettings = z.infer<typeof MainChatSettingsSchema>;
 
@@ -179,6 +196,7 @@ export const MainChatSettingsPatchSchema = z.object({
   intervals: MainChatIntervalsSchema.partial().optional(),
   capabilities: MainChatCapabilitiesSchema.partial().optional(),
   nightMode: MainChatNightModeConfigSchema.partial().optional(),
+  fleetScope: MainChatFleetScopePatchSchema.optional(),
 });
 export type MainChatSettingsPatch = z.infer<typeof MainChatSettingsPatchSchema>;
 
@@ -364,9 +382,7 @@ export function isBuiltInMainChatStylePresetId(id: string): id is MainChatStyle 
   return id === "conservative" || id === "proactive";
 }
 
-function normalizeCustomStylePreset(
-  preset: MainChatCustomStylePreset,
-): MainChatCustomStylePreset {
+function normalizeCustomStylePreset(preset: MainChatCustomStylePreset): MainChatCustomStylePreset {
   const description = preset.description?.trim();
   const customGuidance = preset.customGuidance?.trim();
   const updatedAt = preset.updatedAt?.trim();
@@ -542,6 +558,68 @@ export function createMainChatCustomPresetId(
   return `custom-${Date.now().toString(36)}`;
 }
 
+export function createDefaultMainChatFleetScope(): MainChatFleetScope {
+  return {
+    mode: "all_connected",
+    hostServerIds: [],
+  };
+}
+
+export function normalizeMainChatFleetScope(
+  scope: Partial<MainChatFleetScope> | null | undefined,
+  localServerId?: string | null,
+): MainChatFleetScope {
+  const mode: MainChatFleetScopeMode =
+    scope?.mode === "local_only" || scope?.mode === "allowlist" || scope?.mode === "all_connected"
+      ? scope.mode
+      : "all_connected";
+  const normalizedLocalId = localServerId?.trim() || null;
+  const seen = new Set<string>();
+  const hostServerIds: string[] = [];
+  for (const rawId of scope?.hostServerIds ?? []) {
+    const trimmed = rawId.trim();
+    if (!trimmed) continue;
+    if (normalizedLocalId && trimmed === normalizedLocalId) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    hostServerIds.push(trimmed);
+    if (hostServerIds.length >= MAIN_CHAT_MAX_FLEET_SCOPE_HOSTS) break;
+  }
+  return {
+    mode,
+    hostServerIds,
+  };
+}
+
+export function resolveMainChatFleetScope(
+  settings: Pick<MainChatSettings, "fleetScope"> | null | undefined,
+  localServerId?: string | null,
+): MainChatFleetScope {
+  return normalizeMainChatFleetScope(settings?.fleetScope, localServerId);
+}
+
+export function isHostAllowedInFleetScope(
+  scope: MainChatFleetScope | null | undefined,
+  localServerId: string | null | undefined,
+  targetServerId: string | null | undefined,
+): boolean {
+  const normalizedTarget = targetServerId?.trim() || null;
+  if (!normalizedTarget) return false;
+  const normalizedLocal = localServerId?.trim() || null;
+  if (normalizedLocal && normalizedTarget === normalizedLocal) {
+    return true;
+  }
+  const resolved = normalizeMainChatFleetScope(scope, normalizedLocal);
+  switch (resolved.mode) {
+    case "local_only":
+      return false;
+    case "allowlist":
+      return resolved.hostServerIds.includes(normalizedTarget);
+    case "all_connected":
+      return true;
+  }
+}
+
 export function createDefaultMainChatSettings(
   style: MainChatStyle = "conservative",
 ): MainChatSettings {
@@ -556,6 +634,7 @@ export function createDefaultMainChatSettings(
     intervals: preset.intervals,
     capabilities: preset.capabilities,
     nightMode: createDefaultMainChatNightMode(),
+    fleetScope: createDefaultMainChatFleetScope(),
   };
 }
 
@@ -605,9 +684,10 @@ export function mergeMainChatSettings(
 ): MainChatSettings {
   const nextCustomPresets = applyCustomPresetMutations(current, patch);
   const currentNightMode = resolveMainChatNightMode(current);
+  const currentFleetScope = resolveMainChatFleetScope(current);
   const requestedPresetId = patch.resetStyleToDefault
     ? "conservative"
-    : (patch.applyPresetId?.trim() || patch.applyPreset || null);
+    : patch.applyPresetId?.trim() || patch.applyPreset || null;
 
   let base: MainChatSettings;
   if (requestedPresetId) {
@@ -623,6 +703,7 @@ export function mergeMainChatSettings(
         intervals: builtin.intervals,
         capabilities: builtin.capabilities,
         nightMode: currentNightMode,
+        fleetScope: currentFleetScope,
       };
     } else {
       const custom = nextCustomPresets.find((entry) => entry.id === requestedPresetId);
@@ -639,6 +720,7 @@ export function mergeMainChatSettings(
         intervals: { ...custom.intervals },
         capabilities: { ...custom.capabilities },
         nightMode: currentNightMode,
+        fleetScope: currentFleetScope,
       };
     }
   } else {
@@ -653,8 +735,14 @@ export function mergeMainChatSettings(
       activePresetId: resolvedActiveId,
       customPresets: nextCustomPresets,
       nightMode: currentNightMode,
+      fleetScope: currentFleetScope,
     };
   }
+
+  const nextFleetScope = normalizeMainChatFleetScope({
+    mode: patch.fleetScope?.mode ?? resolveMainChatFleetScope(base).mode,
+    hostServerIds: patch.fleetScope?.hostServerIds ?? resolveMainChatFleetScope(base).hostServerIds,
+  });
 
   const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
   return MainChatSettingsSchema.parse({
@@ -679,6 +767,7 @@ export function mergeMainChatSettings(
       ...resolveMainChatNightMode(base),
       ...patch.nightMode,
     },
+    fleetScope: nextFleetScope,
   });
 }
 
@@ -1797,6 +1886,8 @@ export const MainChatGetFleetHostsResponsePayloadSchema = z.object({
   requestId: z.string(),
   localServerId: z.string().nullable(),
   hosts: z.array(MainChatFleetHostStatusSchema),
+  fleetScope: MainChatFleetScopeSchema.optional(),
+  availableRemoteHosts: z.array(MainChatFleetHostStatusSchema).optional(),
   error: z.string().nullable(),
 });
 export type MainChatGetFleetHostsResponsePayload = z.infer<

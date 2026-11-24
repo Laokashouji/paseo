@@ -603,6 +603,7 @@ export function collectMainChatMentionSources(input: {
   sessions: Readonly<Record<string, SessionState>>;
   hostLabelsByServerId?: Readonly<Record<string, string>>;
   excludeAgentId?: string;
+  allowedServerIds?: ReadonlySet<string> | null;
 }): Omit<MainChatMentionSourceCollection, "skills"> {
   const hosts: MainChatMentionHostSource[] = [];
   const workspaces: MainChatMentionWorkspaceSource[] = [];
@@ -610,6 +611,13 @@ export function collectMainChatMentionSources(input: {
   const sessions: MainChatMentionSessionSource[] = [];
 
   for (const [serverId, session] of Object.entries(input.sessions)) {
+    if (
+      input.allowedServerIds &&
+      input.allowedServerIds.size > 0 &&
+      !input.allowedServerIds.has(serverId)
+    ) {
+      continue;
+    }
     const hostLabel = resolveHostDisplayLabel(serverId, session, input.hostLabelsByServerId);
     hosts.push({
       serverId,
