@@ -1,5 +1,5 @@
 import { syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import type { Range, SelectionRange, Text } from "@codemirror/state";
+import type { ChangeDesc, Range, SelectionRange, Text } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -85,6 +85,7 @@ const CJK_PUNCT_BOUNDARY_RE = /[　-〿＀-￯“”‘’—…]/;
 const CJK_FALLBACK_STRONG_RE = /\*\*([^*\n]+?)\*\*/g;
 const LEADING_WHITESPACE_ONLY_RE = /^[ \t]*$/;
 const BLOCKQUOTE_PREFIX_RE = /^([ \t]*(?:>[ \t]?)+)/;
+const PENDING_PARAGRAPH_LIST_PREFIX_RE = /^( *)(1[.)]|[-*+])([ \t]+)$/;
 
 const BULLET_GLYPHS = ["•", "◦", "▪"] as const;
 const PAIRED_INLINE_STYLE: Record<string, Decoration> = {
@@ -256,6 +257,8 @@ export interface MarkdownLivePreviewState {
   decorations: DecorationSet;
   atomicRanges: DecorationSet;
   inlineHiddenMarks: Array<{ from: number; to: number }>;
+  appliedReplaces: Array<{ from: number; to: number }>;
+  deferredForComposition: boolean;
 }
 
 function measureVisualIndent(whitespace: string): number {
@@ -447,6 +450,83 @@ function decorateCloseFenceLine(
   }
 }
 
+function decoratePendingSetextBullet(ctx: LivePreviewContext, setextMark: SyntaxNode): boolean {
+  const { doc, markRanges } = ctx;
+  if (doc.sliceString(setextMark.from, setextMark.to) !== "-") return false;
+
+  const markLine = doc.lineAt(setextMark.from);
+  const trailingText = doc.sliceString(setextMark.to, markLine.to);
+  const hasTrailingSpace = trailingText.length > 0 && isHorizontalSpace(trailingText[0]);
+  if (hasTrailingSpace && LEADING_WHITESPACE_ONLY_RE.test(trailingText)) {
+    // CommonMark parses `paragraph\n- ` as a Setext H2 underline until content follows.
+    // Preview a lone `-` followed by horizontal space as an empty bullet item so the
+    // preceding paragraph does not flash into H2 and IME input never duplicates the marker.
+    const leadingText = markLine.text.slice(0, setextMark.from - markLine.from);
+    const leadingIsWhitespace = LEADING_WHITESPACE_ONLY_RE.test(leadingText);
+    const indentDepth = leadingIsWhitespace ? Math.floor(measureVisualIndent(leadingText) / 2) : 0;
+    const depth = Math.min(MAX_LIST_DEPTH, indentDepth);
+    const replaceFrom = leadingIsWhitespace ? markLine.from : setextMark.from;
+    if (!ctx.decoratedListLines.has(markLine.number)) {
+      decorateListPrefixLine(ctx, {
+        lineFrom: markLine.from,
+        lineNumber: markLine.number,
+        markFrom: setextMark.from,
+        markTo: setextMark.to,
+        replaceFrom,
+        prefixTo: setextMark.to + 1,
+        depth,
+        leadingIsWhitespace,
+        isOrdered: false,
+      });
+    }
+    return true;
+  }
+
+  if (!hasTrailingSpace && ctx.hasActiveLine(markLine.from, markLine.to)) {
+    // Hold off turning the preceding paragraph into H2 while actively typing a lone `-`
+    // (user may be about to press Space for a bullet list or a second `-` for Setext H2).
+    markRanges.push(LIST_MARK_DECORATION.range(setextMark.from, setextMark.to));
+    return true;
+  }
+
+  return false;
+}
+
+function decorateSetextHeadingNode(
+  ctx: LivePreviewContext,
+  node: SyntaxNodeRef,
+  headingDecoration: Decoration,
+  visibleFrom: number,
+  visibleTo: number,
+): void {
+  const { markRanges, decoratedHeadingLines } = ctx;
+  const setextMark = node.node.getChild("HeaderMark");
+  if (
+    node.name === "SetextHeading2" &&
+    setextMark &&
+    decoratePendingSetextBullet(ctx, setextMark)
+  ) {
+    return;
+  }
+
+  const blockEnd = Math.max(node.from, (setextMark?.from ?? node.to) - 1);
+  forEachBlockLine(
+    ctx.view,
+    node.from,
+    blockEnd,
+    visibleFrom,
+    visibleTo,
+    (lineFrom, _lineTo, lineNumber) => {
+      if (decoratedHeadingLines.has(lineNumber)) return;
+      decoratedHeadingLines.add(lineNumber);
+      markRanges.push(headingDecoration.range(lineFrom));
+    },
+  );
+  if (setextMark && setextMark.from < setextMark.to) {
+    markRanges.push(MARK_DECORATION.range(setextMark.from, setextMark.to));
+  }
+}
+
 function decorateHeadingNode(
   ctx: LivePreviewContext,
   node: SyntaxNodeRef,
@@ -456,23 +536,7 @@ function decorateHeadingNode(
 ): void {
   const { doc, markRanges, decoratedHeadingLines } = ctx;
   if (node.name.startsWith("Setext")) {
-    const setextMark = node.node.getChild("HeaderMark");
-    const blockEnd = Math.max(node.from, (setextMark?.from ?? node.to) - 1);
-    forEachBlockLine(
-      ctx.view,
-      node.from,
-      blockEnd,
-      visibleFrom,
-      visibleTo,
-      (lineFrom, _lineTo, lineNumber) => {
-        if (decoratedHeadingLines.has(lineNumber)) return;
-        decoratedHeadingLines.add(lineNumber);
-        markRanges.push(headingDecoration.range(lineFrom));
-      },
-    );
-    if (setextMark && setextMark.from < setextMark.to) {
-      markRanges.push(MARK_DECORATION.range(setextMark.from, setextMark.to));
-    }
+    decorateSetextHeadingNode(ctx, node, headingDecoration, visibleFrom, visibleTo);
     return;
   }
 
@@ -517,6 +581,163 @@ function countListAncestors(node: SyntaxNode): number {
     cursor = cursor.parent;
   }
   return count;
+}
+
+function findAncestorNode(node: SyntaxNode, name: string): SyntaxNode | null {
+  let cursor = node.parent;
+  while (cursor) {
+    if (cursor.name === name) return cursor;
+    cursor = cursor.parent;
+  }
+  return null;
+}
+
+function decorateListPrefixLine(
+  ctx: LivePreviewContext,
+  options: {
+    lineFrom: number;
+    lineNumber: number;
+    markFrom: number;
+    markTo: number;
+    replaceFrom: number;
+    prefixTo: number;
+    depth: number;
+    leadingIsWhitespace: boolean;
+    isOrdered: boolean;
+  },
+): void {
+  const {
+    lineFrom,
+    lineNumber,
+    markFrom,
+    markTo,
+    replaceFrom,
+    prefixTo,
+    depth,
+    leadingIsWhitespace,
+    isOrdered,
+  } = options;
+  ctx.decoratedListLines.add(lineNumber);
+
+  if (isOrdered) {
+    const markerText = ctx.doc.sliceString(markFrom, markTo);
+    const olWidth = `${Math.max(1.75, markerText.length * 0.62 + 0.55).toFixed(2)}em`;
+    ctx.markRanges.push(
+      Decoration.line({
+        class: "cm-md-list-line cm-md-ordered-line",
+        attributes: leadingIsWhitespace
+          ? { style: `--cm-list-depth: ${depth}; --cm-ol-width: ${olWidth};` }
+          : { style: `--cm-ol-width: ${olWidth};` },
+      }).range(lineFrom),
+    );
+    if (!ctx.shouldRevealBlockPrefix(replaceFrom, prefixTo)) {
+      ctx.queueReplace(
+        replaceFrom,
+        prefixTo,
+        Decoration.replace({ widget: new OrderedListMarkerWidget(markerText) }),
+        true,
+      );
+    } else {
+      ctx.markRanges.push(LIST_MARK_DECORATION.range(markFrom, markTo));
+    }
+    return;
+  }
+
+  ctx.markRanges.push(
+    Decoration.line({
+      class: "cm-md-list-line cm-md-bullet-line",
+      attributes: leadingIsWhitespace ? { style: `--cm-list-depth: ${depth};` } : undefined,
+    }).range(lineFrom),
+  );
+  if (!ctx.shouldRevealBlockPrefix(replaceFrom, prefixTo)) {
+    ctx.queueReplace(
+      replaceFrom,
+      prefixTo,
+      Decoration.replace({ widget: new BulletWidget(depth) }),
+      true,
+    );
+  } else {
+    ctx.markRanges.push(LIST_MARK_DECORATION.range(markFrom, markTo));
+  }
+}
+
+/**
+ * CommonMark forbids empty list items from interrupting a preceding paragraph, so lines like
+ * `paragraph\n1. ` or `paragraph\n* ` stay inside the Paragraph node until content is typed.
+ * Preview those pending list prefixes immediately so formatting matches what CommonMark will
+ * produce as soon as the user starts typing the item body.
+ */
+function decoratePendingParagraphListLines(
+  ctx: LivePreviewContext,
+  node: SyntaxNodeRef,
+  visibleFrom: number,
+  visibleTo: number,
+): void {
+  const firstLineNumber = ctx.doc.lineAt(node.from).number;
+  const clampedEnd = Math.max(node.from, node.to > node.from ? node.to - 1 : node.to);
+  if (firstLineNumber === ctx.doc.lineAt(clampedEnd).number) return;
+
+  const isInsideBlockquote = findAncestorNode(node.node, "Blockquote") !== null;
+  const parentListItem = findAncestorNode(node.node, "ListItem");
+  let parentContentColumn = 0;
+  if (parentListItem) {
+    const parentMark = parentListItem.getChild("ListMark");
+    if (parentMark) {
+      const parentLine = ctx.doc.lineAt(parentMark.from);
+      const parentQuoteMatch = isInsideBlockquote
+        ? BLOCKQUOTE_PREFIX_RE.exec(parentLine.text)
+        : null;
+      const parentQuoteLen = parentQuoteMatch ? parentQuoteMatch[1].length : 0;
+      parentContentColumn = Math.max(0, parentMark.to - parentLine.from - parentQuoteLen + 1);
+    }
+  }
+  const maxIndent = parentContentColumn + 3;
+  const ancestorListCount = parentListItem ? countListAncestors(node.node) : 0;
+
+  forEachBlockLine(
+    ctx.view,
+    node.from,
+    node.to,
+    visibleFrom,
+    visibleTo,
+    (lineFrom, lineTo, lineNumber, isFirst) => {
+      if (isFirst || ctx.decoratedListLines.has(lineNumber)) return;
+      const lineText = ctx.doc.sliceString(lineFrom, lineTo);
+      const quoteMatch = isInsideBlockquote ? BLOCKQUOTE_PREFIX_RE.exec(lineText) : null;
+      const quotePrefixLen = quoteMatch ? quoteMatch[1].length : 0;
+      const rest = lineText.slice(quotePrefixLen);
+      const match = PENDING_PARAGRAPH_LIST_PREFIX_RE.exec(rest);
+      if (!match) return;
+
+      const [, indentSpaces, marker] = match;
+      if (indentSpaces.length > maxIndent) return;
+
+      const markFrom = lineFrom + quotePrefixLen + indentSpaces.length;
+      const markTo = markFrom + marker.length;
+      const prefixTo = markTo + 1;
+      const leadingText = lineText.slice(0, markFrom - lineFrom);
+      const leadingIsWhitespace = LEADING_WHITESPACE_ONLY_RE.test(leadingText);
+      const indentDepth = leadingIsWhitespace
+        ? Math.floor(measureVisualIndent(leadingText) / 2)
+        : 0;
+      const nestedDepth =
+        parentListItem && indentSpaces.length >= parentContentColumn ? ancestorListCount : 0;
+      const depth = Math.min(MAX_LIST_DEPTH, Math.max(nestedDepth, indentDepth));
+      const replaceFrom = leadingIsWhitespace ? lineFrom : markFrom;
+
+      decorateListPrefixLine(ctx, {
+        lineFrom,
+        lineNumber,
+        markFrom,
+        markTo,
+        replaceFrom,
+        prefixTo,
+        depth,
+        leadingIsWhitespace,
+        isOrdered: marker[0] === "1",
+      });
+    },
+  );
 }
 
 function decorateTaskListItem(
@@ -602,49 +823,17 @@ function decorateListItemNode(ctx: LivePreviewContext, node: SyntaxNodeRef): voi
     return;
   }
 
-  ctx.decoratedListLines.add(line.number);
-  const prefixTo = listMark.to + 1;
-  const isOrdered = node.node.parent?.name === "OrderedList";
-  if (isOrdered) {
-    const markerText = ctx.doc.sliceString(listMark.from, listMark.to);
-    const olWidth = `${Math.max(1.75, markerText.length * 0.62 + 0.55).toFixed(2)}em`;
-    ctx.markRanges.push(
-      Decoration.line({
-        class: "cm-md-list-line cm-md-ordered-line",
-        attributes: leadingIsWhitespace
-          ? { style: `--cm-list-depth: ${depth}; --cm-ol-width: ${olWidth};` }
-          : { style: `--cm-ol-width: ${olWidth};` },
-      }).range(line.from),
-    );
-    if (!ctx.shouldRevealBlockPrefix(replaceFrom, prefixTo)) {
-      ctx.queueReplace(
-        replaceFrom,
-        prefixTo,
-        Decoration.replace({ widget: new OrderedListMarkerWidget(markerText) }),
-        true,
-      );
-    } else {
-      ctx.markRanges.push(LIST_MARK_DECORATION.range(listMark.from, listMark.to));
-    }
-    return;
-  }
-
-  ctx.markRanges.push(
-    Decoration.line({
-      class: "cm-md-list-line cm-md-bullet-line",
-      attributes: leadingIsWhitespace ? { style: `--cm-list-depth: ${depth};` } : undefined,
-    }).range(line.from),
-  );
-  if (!ctx.shouldRevealBlockPrefix(replaceFrom, prefixTo)) {
-    ctx.queueReplace(
-      replaceFrom,
-      prefixTo,
-      Decoration.replace({ widget: new BulletWidget(depth) }),
-      true,
-    );
-  } else {
-    ctx.markRanges.push(LIST_MARK_DECORATION.range(listMark.from, listMark.to));
-  }
+  decorateListPrefixLine(ctx, {
+    lineFrom: line.from,
+    lineNumber: line.number,
+    markFrom: listMark.from,
+    markTo: listMark.to,
+    replaceFrom,
+    prefixTo: listMark.to + 1,
+    depth,
+    leadingIsWhitespace,
+    isOrdered: node.node.parent?.name === "OrderedList",
+  });
 }
 
 function decorateBlockquoteNode(
@@ -843,6 +1032,11 @@ function decorateSyntaxNode(
     return;
   }
 
+  if (name === "Paragraph") {
+    decoratePendingParagraphListLines(ctx, node, visibleFrom, visibleTo);
+    return;
+  }
+
   if (name === "Table" || name === "TableHeader") {
     const tableDecoration =
       name === "TableHeader" ? TABLE_HEADER_LINE_DECORATION : TABLE_LINE_DECORATION;
@@ -907,12 +1101,58 @@ function decorateCjkBoldFallbacks(
   }
 }
 
-export function buildMarkdownLivePreview(view: EditorView): MarkdownLivePreviewState {
+function mapIntactRanges(
+  ranges: ReadonlyArray<{ from: number; to: number }>,
+  changes: ChangeDesc,
+): Array<{ from: number; to: number }> {
+  if (ranges.length === 0 || changes.empty) {
+    return ranges.map((range) => ({ from: range.from, to: range.to }));
+  }
+  const mapped: Array<{ from: number; to: number }> = [];
+  for (const range of ranges) {
+    let corrupted = false;
+    changes.iterChangedRanges((fromA, toA) => {
+      if (corrupted) return;
+      // Any edit overlapping the range or inserting strictly inside it invalidates the
+      // pre-existing DOM widget; pure insertions right before/after the range keep it intact.
+      if (
+        (fromA < range.to && toA > range.from) ||
+        (fromA === toA && fromA > range.from && fromA < range.to)
+      ) {
+        corrupted = true;
+      }
+    });
+    if (corrupted) continue;
+    const from = changes.mapPos(range.from, 1);
+    const to = changes.mapPos(range.to, -1);
+    if (from < to) {
+      mapped.push({ from, to });
+    }
+  }
+  return mapped;
+}
+
+export function buildMarkdownLivePreview(
+  view: EditorView,
+  preCompositionReplaces?: ReadonlyArray<{ from: number; to: number }>,
+): MarkdownLivePreviewState {
   const { state } = view;
   const { doc, selection } = state;
   const isFocused = view.hasFocus;
-  const isComposing = view.composing;
+  const isComposing = view.composing || view.compositionStarted;
   const tree = syntaxTree(state);
+
+  let deferredForComposition = false;
+  const isNewReplaceOnComposingLine = (from: number, to: number): boolean => {
+    if (!isComposing) return false;
+    if (preCompositionReplaces?.some((range) => range.from === from && range.to === to)) {
+      return false;
+    }
+    const line = doc.lineAt(from);
+    if (!selectionTouchesRange(selection.ranges, line.from, line.to)) return false;
+    deferredForComposition = true;
+    return true;
+  };
 
   const ctx: LivePreviewContext = {
     view,
@@ -929,11 +1169,18 @@ export function buildMarkdownLivePreview(view: EditorView): MarkdownLivePreviewS
     decoratedHeadingLines: new Set<number>(),
     hasActiveLine: (lineFrom, lineTo) =>
       isFocused && selectionTouchesRange(selection.ranges, lineFrom, lineTo),
-    shouldRevealBlockPrefix: (prefixFrom, prefixTo) =>
-      isFocused &&
-      selection.ranges.some(
-        (range) => range.empty && range.head > prefixFrom && range.head < prefixTo,
-      ),
+    shouldRevealBlockPrefix: (prefixFrom, prefixTo) => {
+      // Do not introduce a brand-new replace decoration on an actively composing line:
+      // CodeMirror preserves the composing DOM TextNode verbatim, which would render both
+      // the new widget and the raw prefix text side by side (e.g. "1. 1. pinyin").
+      if (isNewReplaceOnComposingLine(prefixFrom, prefixTo)) return true;
+      return (
+        isFocused &&
+        selection.ranges.some(
+          (range) => range.empty && range.head > prefixFrom && range.head < prefixTo,
+        )
+      );
+    },
     shouldRevealInlineNode: (from, to) => {
       if (!isFocused) return false;
       if (isComposing && selectionTouchesRange(selection.ranges, from, to)) return true;
@@ -943,6 +1190,7 @@ export function buildMarkdownLivePreview(view: EditorView): MarkdownLivePreviewS
       if (from >= to || from < 0 || to > doc.length) return;
       // ViewPlugin replace decorations cannot cross line breaks.
       if (doc.lineAt(from).number !== doc.lineAt(to).number) return;
+      if (isNewReplaceOnComposingLine(from, to)) return;
       ctx.replaceEntries.push({ from, to, decoration, atomic });
       if (isInlineClosingMark) ctx.inlineHiddenMarks.push({ from, to });
     },
@@ -960,10 +1208,12 @@ export function buildMarkdownLivePreview(view: EditorView): MarkdownLivePreviewS
   // Ensure replace decorations are strictly non-overlapping so CodeMirror never throws.
   ctx.replaceEntries.sort((a, b) => a.from - b.from || b.to - a.to);
   const atomicRanges: Range<Decoration>[] = [];
+  const appliedReplaces: Array<{ from: number; to: number }> = [];
   let lastReplaceTo = -1;
   for (const entry of ctx.replaceEntries) {
     if (entry.from < lastReplaceTo) continue;
     lastReplaceTo = entry.to;
+    appliedReplaces.push({ from: entry.from, to: entry.to });
     ctx.markRanges.push(entry.decoration.range(entry.from, entry.to));
     if (entry.atomic) {
       atomicRanges.push(ATOMIC_RANGE_DECORATION.range(entry.from, entry.to));
@@ -974,6 +1224,8 @@ export function buildMarkdownLivePreview(view: EditorView): MarkdownLivePreviewS
     decorations: Decoration.set(ctx.markRanges, true),
     atomicRanges: Decoration.set(atomicRanges, true),
     inlineHiddenMarks: ctx.inlineHiddenMarks,
+    appliedReplaces,
+    deferredForComposition,
   };
 }
 
@@ -986,19 +1238,30 @@ const composerMarkdownLivePreviewPlugin = ViewPlugin.fromClass(
     decorations: DecorationSet;
     atomicRanges: DecorationSet;
     inlineHiddenMarks: Array<{ from: number; to: number }>;
+    private preCompositionReplaces: Array<{ from: number; to: number }>;
     private wasComposing: boolean;
+    private deferredForComposition: boolean;
+    private destroyed = false;
 
     constructor(view: EditorView) {
-      this.wasComposing = view.composing;
+      this.wasComposing = view.composing || view.compositionStarted;
       const preview = buildMarkdownLivePreview(view);
       this.decorations = preview.decorations;
       this.atomicRanges = preview.atomicRanges;
       this.inlineHiddenMarks = preview.inlineHiddenMarks;
+      this.preCompositionReplaces = preview.appliedReplaces;
+      this.deferredForComposition = preview.deferredForComposition;
     }
 
     update(update: ViewUpdate) {
-      const composingChanged = this.wasComposing !== update.view.composing;
-      this.wasComposing = update.view.composing;
+      const isComposing = update.view.composing || update.view.compositionStarted;
+      const composingChanged = this.wasComposing !== isComposing;
+      this.wasComposing = isComposing;
+
+      if (isComposing && update.docChanged) {
+        this.preCompositionReplaces = mapIntactRanges(this.preCompositionReplaces, update.changes);
+      }
+
       if (
         update.docChanged ||
         update.selectionSet ||
@@ -1007,15 +1270,50 @@ const composerMarkdownLivePreviewPlugin = ViewPlugin.fromClass(
         composingChanged ||
         syntaxTree(update.startState) !== syntaxTree(update.state)
       ) {
-        const preview = buildMarkdownLivePreview(update.view);
+        const preview = buildMarkdownLivePreview(
+          update.view,
+          isComposing ? this.preCompositionReplaces : undefined,
+        );
         this.decorations = preview.decorations;
         this.atomicRanges = preview.atomicRanges;
         this.inlineHiddenMarks = preview.inlineHiddenMarks;
+        this.deferredForComposition = preview.deferredForComposition;
+        if (!isComposing) {
+          this.preCompositionReplaces = preview.appliedReplaces;
+        }
       }
+    }
+
+    schedulePostCompositionRefresh(view: EditorView) {
+      if (!this.deferredForComposition) return;
+      // Wait two microtasks so CodeMirror's own compositionend observer and its
+      // pending-mutation flush run first; only dispatch a refresh if still deferred.
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          if (
+            this.destroyed ||
+            !this.deferredForComposition ||
+            view.composing ||
+            view.compositionStarted
+          ) {
+            return;
+          }
+          view.dispatch({});
+        });
+      });
+    }
+
+    destroy() {
+      this.destroyed = true;
     }
   },
   {
     decorations: (plugin) => plugin.decorations,
+    eventObservers: {
+      compositionend(_event, view) {
+        this.schedulePostCompositionRefresh(view);
+      },
+    },
   },
 );
 
