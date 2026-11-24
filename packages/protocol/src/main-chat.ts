@@ -14,8 +14,70 @@ export const MAIN_CHAT_TASK_MODE_LABEL = "paseo.main-chat.mode";
 export const MAIN_CHAT_TASK_GOAL_LABEL = "paseo.main-chat.goal";
 export const MAIN_CHAT_TASK_QUIET_LABEL = "paseo.main-chat.quiet";
 export const MAIN_CHAT_WORKSPACE_DIR_NAME = "main-chat";
+export const MAIN_CHAT_MEMORY_DIR_NAME = "memory";
 export const MAIN_CHAT_DEFAULT_TITLE = "对话管理";
 export const MAIN_CHAT_COMPACT_WINDOW_RATIO = 0.8;
+export const MAIN_CHAT_ABOUT_ME_MAX_CHARS = 4000;
+export const MAIN_CHAT_OWNER_ALIAS_MAX_CHARS = 40;
+export const MAIN_CHAT_OWNER_ALIASES_MAX_COUNT = 12;
+export const MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS = 4000;
+export const MAIN_CHAT_MEMORY_PATH_MAX_CHARS = 180;
+export const MAIN_CHAT_MEMORY_FILE_MAX_BYTES = 64 * 1024;
+export const MAIN_CHAT_MEMORY_CONTEXT_TOTAL_BUDGET_BYTES = 12 * 1024;
+export const MAIN_CHAT_MEMORY_PROFILE_BUDGET_BYTES = 4096;
+export const MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES = 4096;
+export const MAIN_CHAT_MEMORY_FILES_BUDGET_BYTES = 4096;
+
+export const MainChatBackgroundTurnKindSchema = z.enum([
+  "patrol",
+  "supervision",
+  "relay",
+  "briefing",
+  "compaction",
+  "recovery",
+  "system",
+]);
+export type MainChatBackgroundTurnKind = z.infer<typeof MainChatBackgroundTurnKindSchema>;
+
+export const MainChatBackgroundTurnMetadataSchema = z.object({
+  foldable: z.boolean(),
+  kind: MainChatBackgroundTurnKindSchema,
+  trigger: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  activityId: z.string().nullable().optional(),
+  quiet: z.boolean().optional(),
+});
+export type MainChatBackgroundTurnMetadata = z.infer<typeof MainChatBackgroundTurnMetadataSchema>;
+
+export const MainChatProfileSchema = z.object({
+  aboutMe: z.string().max(MAIN_CHAT_ABOUT_ME_MAX_CHARS),
+  ownerAliases: z
+    .array(z.string().trim().min(1).max(MAIN_CHAT_OWNER_ALIAS_MAX_CHARS))
+    .max(MAIN_CHAT_OWNER_ALIASES_MAX_COUNT),
+  updatedAt: z.string().nullable().optional(),
+});
+export type MainChatProfile = z.infer<typeof MainChatProfileSchema>;
+
+export const MainChatProfilePatchSchema = z.object({
+  aboutMe: z.string().max(MAIN_CHAT_ABOUT_ME_MAX_CHARS).optional(),
+  ownerAliases: z
+    .array(z.string().trim().min(1).max(MAIN_CHAT_OWNER_ALIAS_MAX_CHARS))
+    .max(MAIN_CHAT_OWNER_ALIASES_MAX_COUNT)
+    .optional(),
+});
+export type MainChatProfilePatch = z.infer<typeof MainChatProfilePatchSchema>;
+
+export const MainChatMemoryFileMetaSchema = z.object({
+  path: z.string().min(1).max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS),
+  bytes: z.number().int().nonnegative(),
+  updatedAt: z.string(),
+});
+export type MainChatMemoryFileMeta = z.infer<typeof MainChatMemoryFileMetaSchema>;
+
+export const MainChatMemoryFileContentSchema = MainChatMemoryFileMetaSchema.extend({
+  content: z.string(),
+});
+export type MainChatMemoryFileContent = z.infer<typeof MainChatMemoryFileContentSchema>;
 
 export const MainChatStyleSchema = z.enum(["conservative", "proactive"]);
 export type MainChatStyle = z.infer<typeof MainChatStyleSchema>;
@@ -166,6 +228,9 @@ export type MainChatCustomStylePreset = z.infer<typeof MainChatCustomStylePreset
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   autoCompactEnabled: z.boolean().optional(),
+  mainBackgroundFolded: z.boolean().optional(),
+  mainTasksQuiet: z.boolean().optional(),
+  profile: MainChatProfileSchema.optional(),
   title: z.string().trim().min(1).max(40),
   style: MainChatStyleSchema,
   activePresetId: z.string().trim().min(1).max(64).optional(),
@@ -193,6 +258,9 @@ export const MainChatSettingsPatchSchema = z.object({
   resetStyleToDefault: z.boolean().optional(),
   enabled: z.boolean().optional(),
   autoCompactEnabled: z.boolean().optional(),
+  mainBackgroundFolded: z.boolean().optional(),
+  mainTasksQuiet: z.boolean().optional(),
+  profile: MainChatProfilePatchSchema.optional(),
   title: z.string().trim().min(1).max(40).optional(),
   style: MainChatStyleSchema.optional(),
   backgroundModel: MainChatBackgroundModelConfigSchema.partial().optional(),
@@ -333,6 +401,63 @@ export function isMainChatAutoCompactEnabled(
   settings: Pick<MainChatSettings, "autoCompactEnabled"> | null | undefined,
 ): boolean {
   return settings?.autoCompactEnabled !== false;
+}
+
+export function isMainChatBackgroundFolded(
+  settings: Pick<MainChatSettings, "mainBackgroundFolded"> | null | undefined,
+): boolean {
+  return settings?.mainBackgroundFolded !== false;
+}
+
+export function isMainChatTasksQuiet(
+  settings: Pick<MainChatSettings, "mainTasksQuiet"> | null | undefined,
+): boolean {
+  return settings?.mainTasksQuiet !== false;
+}
+
+export function createDefaultMainChatProfile(): MainChatProfile {
+  return {
+    aboutMe: "",
+    ownerAliases: [],
+    updatedAt: null,
+  };
+}
+
+export function normalizeMainChatProfile(
+  profile: Partial<MainChatProfile> | null | undefined,
+): MainChatProfile {
+  const rawAboutMe = typeof profile?.aboutMe === "string" ? profile.aboutMe : "";
+  const aboutMe =
+    rawAboutMe.length > MAIN_CHAT_ABOUT_ME_MAX_CHARS
+      ? rawAboutMe.slice(0, MAIN_CHAT_ABOUT_ME_MAX_CHARS)
+      : rawAboutMe;
+  const seen = new Set<string>();
+  const ownerAliases: string[] = [];
+  for (const rawAlias of profile?.ownerAliases ?? []) {
+    if (typeof rawAlias !== "string") continue;
+    const trimmed = rawAlias.trim().slice(0, MAIN_CHAT_OWNER_ALIAS_MAX_CHARS);
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ownerAliases.push(trimmed);
+    if (ownerAliases.length >= MAIN_CHAT_OWNER_ALIASES_MAX_COUNT) break;
+  }
+  const updatedAt =
+    typeof profile?.updatedAt === "string" && profile.updatedAt.trim().length > 0
+      ? profile.updatedAt.trim()
+      : null;
+  return {
+    aboutMe,
+    ownerAliases,
+    updatedAt,
+  };
+}
+
+export function resolveMainChatProfile(
+  settings: Pick<MainChatSettings, "profile"> | null | undefined,
+): MainChatProfile {
+  return normalizeMainChatProfile(settings?.profile);
 }
 
 export function resolveMainChatNightMode(
@@ -637,6 +762,9 @@ export function createDefaultMainChatSettings(
   return {
     enabled: false,
     autoCompactEnabled: true,
+    mainBackgroundFolded: true,
+    mainTasksQuiet: true,
+    profile: createDefaultMainChatProfile(),
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
     activePresetId: preset.style,
@@ -689,79 +817,98 @@ function applyCustomPresetMutations(
   return nextCustomPresets;
 }
 
-export function mergeMainChatSettings(
+function resolveMergeBaseSettings(
   current: MainChatSettings,
   patch: MainChatSettingsPatch,
+  nextCustomPresets: MainChatCustomStylePreset[],
 ): MainChatSettings {
-  const nextCustomPresets = applyCustomPresetMutations(current, patch);
   const currentNightMode = resolveMainChatNightMode(current);
   const currentFleetScope = resolveMainChatFleetScope(current);
+  const currentProfile = resolveMainChatProfile(current);
+  const shared = {
+    enabled: isMainChatEnabled(current),
+    autoCompactEnabled: isMainChatAutoCompactEnabled(current),
+    mainBackgroundFolded: isMainChatBackgroundFolded(current),
+    mainTasksQuiet: isMainChatTasksQuiet(current),
+    profile: currentProfile,
+    customPresets: nextCustomPresets,
+    nightMode: currentNightMode,
+    fleetScope: currentFleetScope,
+  };
+
   const requestedPresetId = patch.resetStyleToDefault
     ? "conservative"
     : patch.applyPresetId?.trim() || patch.applyPreset || null;
 
-  let base: MainChatSettings;
-  if (requestedPresetId) {
-    if (isBuiltInMainChatStylePresetId(requestedPresetId)) {
-      const builtin = getMainChatStylePreset(requestedPresetId);
-      base = {
-        enabled: isMainChatEnabled(current),
-        autoCompactEnabled: isMainChatAutoCompactEnabled(current),
-        title: current.title,
-        style: builtin.style,
-        activePresetId: requestedPresetId,
-        customPresets: nextCustomPresets,
-        backgroundModel: { ...current.backgroundModel },
-        intervals: builtin.intervals,
-        capabilities: builtin.capabilities,
-        nightMode: currentNightMode,
-        fleetScope: currentFleetScope,
-      };
-    } else {
-      const custom = nextCustomPresets.find((entry) => entry.id === requestedPresetId);
-      if (!custom) {
-        throw new Error(`Style preset "${requestedPresetId}" not found`);
-      }
-      base = {
-        enabled: isMainChatEnabled(current),
-        autoCompactEnabled: isMainChatAutoCompactEnabled(current),
-        title: current.title,
-        style: custom.baseStyle,
-        activePresetId: custom.id,
-        customPresets: nextCustomPresets,
-        backgroundModel: { ...current.backgroundModel },
-        intervals: { ...custom.intervals },
-        capabilities: { ...custom.capabilities },
-        nightMode: currentNightMode,
-        fleetScope: currentFleetScope,
-      };
-    }
-  } else {
+  if (!requestedPresetId) {
     const resolvedActiveId = resolveActiveMainChatStylePresetId({
       style: current.style,
       activePresetId: current.activePresetId,
       customPresets: nextCustomPresets,
     });
-    base = {
+    return {
       ...current,
-      enabled: isMainChatEnabled(current),
-      autoCompactEnabled: isMainChatAutoCompactEnabled(current),
+      ...shared,
       activePresetId: resolvedActiveId,
-      customPresets: nextCustomPresets,
-      nightMode: currentNightMode,
-      fleetScope: currentFleetScope,
     };
   }
+
+  if (isBuiltInMainChatStylePresetId(requestedPresetId)) {
+    const builtin = getMainChatStylePreset(requestedPresetId);
+    return {
+      ...shared,
+      title: current.title,
+      style: builtin.style,
+      activePresetId: requestedPresetId,
+      backgroundModel: { ...current.backgroundModel },
+      intervals: builtin.intervals,
+      capabilities: builtin.capabilities,
+    };
+  }
+
+  const custom = nextCustomPresets.find((entry) => entry.id === requestedPresetId);
+  if (!custom) {
+    throw new Error(`Style preset "${requestedPresetId}" not found`);
+  }
+  return {
+    ...shared,
+    title: current.title,
+    style: custom.baseStyle,
+    activePresetId: custom.id,
+    backgroundModel: { ...current.backgroundModel },
+    intervals: { ...custom.intervals },
+    capabilities: { ...custom.capabilities },
+  };
+}
+
+export function mergeMainChatSettings(
+  current: MainChatSettings,
+  patch: MainChatSettingsPatch,
+): MainChatSettings {
+  const nextCustomPresets = applyCustomPresetMutations(current, patch);
+  const base = resolveMergeBaseSettings(current, patch, nextCustomPresets);
+  const currentProfile = resolveMainChatProfile(current);
 
   const nextFleetScope = normalizeMainChatFleetScope({
     mode: patch.fleetScope?.mode ?? resolveMainChatFleetScope(base).mode,
     hostServerIds: patch.fleetScope?.hostServerIds ?? resolveMainChatFleetScope(base).hostServerIds,
   });
 
+  const nextProfile = patch.profile
+    ? normalizeMainChatProfile({
+        aboutMe: patch.profile.aboutMe ?? currentProfile.aboutMe,
+        ownerAliases: patch.profile.ownerAliases ?? currentProfile.ownerAliases,
+        updatedAt: new Date().toISOString(),
+      })
+    : resolveMainChatProfile(base);
+
   const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
   return MainChatSettingsSchema.parse({
     enabled: patch.enabled ?? base.enabled ?? true,
     autoCompactEnabled: patch.autoCompactEnabled ?? base.autoCompactEnabled ?? true,
+    mainBackgroundFolded: patch.mainBackgroundFolded ?? base.mainBackgroundFolded ?? true,
+    mainTasksQuiet: patch.mainTasksQuiet ?? base.mainTasksQuiet ?? true,
+    profile: nextProfile,
     title: nextTitle,
     style: patch.style ?? base.style,
     activePresetId: base.activePresetId,
@@ -854,6 +1001,7 @@ export const MainChatConversationRecordSchema = z.object({
   workspaceId: z.string().nullable(),
   title: z.string(),
   directionSummary: z.string().nullable(),
+  notes: z.string().max(MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS).nullable().optional(),
   parentConversationId: z.string().nullable(),
   serverId: z.string().nullable(),
   archivedAt: z.string().nullable(),
@@ -1846,6 +1994,7 @@ export const MainChatCreateConversationRequestSchema = z.object({
   kind: z.enum(["side", "leader"]),
   title: z.string().min(1).max(80),
   directionSummary: z.string().max(1000).nullable().optional(),
+  notes: z.string().max(MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS).nullable().optional(),
   initialPrompt: z.string().max(8000).optional(),
   provider: z.string().optional(),
   model: z.string().optional(),
@@ -1879,6 +2028,7 @@ export const MainChatUpdateConversationRequestSchema = z.object({
   conversationId: z.string(),
   title: z.string().min(1).max(80).optional(),
   directionSummary: z.string().max(1000).nullable().optional(),
+  notes: z.string().max(MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS).nullable().optional(),
   kind: z.enum(["side", "leader"]).optional(),
   archived: z.boolean().optional(),
 });
@@ -2118,6 +2268,98 @@ export const MainChatResetUsageResponseSchema = z.object({
 });
 export type MainChatResetUsageResponse = z.infer<typeof MainChatResetUsageResponseSchema>;
 
+// ============================================================================
+// P0-1 Memory Files CRUD RPC Schemas
+// ============================================================================
+
+export const MainChatMemoryListRequestSchema = z.object({
+  type: z.literal("main_chat.memory_list.request"),
+  requestId: z.string(),
+});
+export type MainChatMemoryListRequest = z.infer<typeof MainChatMemoryListRequestSchema>;
+
+export const MainChatMemoryListResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  files: z.array(MainChatMemoryFileMetaSchema),
+  error: z.string().nullable(),
+});
+export type MainChatMemoryListResponsePayload = z.infer<
+  typeof MainChatMemoryListResponsePayloadSchema
+>;
+
+export const MainChatMemoryListResponseSchema = z.object({
+  type: z.literal("main_chat.memory_list.response"),
+  payload: MainChatMemoryListResponsePayloadSchema,
+});
+export type MainChatMemoryListResponse = z.infer<typeof MainChatMemoryListResponseSchema>;
+
+export const MainChatMemoryReadRequestSchema = z.object({
+  type: z.literal("main_chat.memory_read.request"),
+  requestId: z.string(),
+  path: z.string().min(1).max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS),
+});
+export type MainChatMemoryReadRequest = z.infer<typeof MainChatMemoryReadRequestSchema>;
+
+export const MainChatMemoryReadResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  file: MainChatMemoryFileContentSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatMemoryReadResponsePayload = z.infer<
+  typeof MainChatMemoryReadResponsePayloadSchema
+>;
+
+export const MainChatMemoryReadResponseSchema = z.object({
+  type: z.literal("main_chat.memory_read.response"),
+  payload: MainChatMemoryReadResponsePayloadSchema,
+});
+export type MainChatMemoryReadResponse = z.infer<typeof MainChatMemoryReadResponseSchema>;
+
+export const MainChatMemoryWriteRequestSchema = z.object({
+  type: z.literal("main_chat.memory_write.request"),
+  requestId: z.string(),
+  path: z.string().min(1).max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS),
+  content: z.string(),
+});
+export type MainChatMemoryWriteRequest = z.infer<typeof MainChatMemoryWriteRequestSchema>;
+
+export const MainChatMemoryWriteResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  file: MainChatMemoryFileMetaSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatMemoryWriteResponsePayload = z.infer<
+  typeof MainChatMemoryWriteResponsePayloadSchema
+>;
+
+export const MainChatMemoryWriteResponseSchema = z.object({
+  type: z.literal("main_chat.memory_write.response"),
+  payload: MainChatMemoryWriteResponsePayloadSchema,
+});
+export type MainChatMemoryWriteResponse = z.infer<typeof MainChatMemoryWriteResponseSchema>;
+
+export const MainChatMemoryDeleteRequestSchema = z.object({
+  type: z.literal("main_chat.memory_delete.request"),
+  requestId: z.string(),
+  path: z.string().min(1).max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS),
+});
+export type MainChatMemoryDeleteRequest = z.infer<typeof MainChatMemoryDeleteRequestSchema>;
+
+export const MainChatMemoryDeleteResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  deleted: z.boolean(),
+  error: z.string().nullable(),
+});
+export type MainChatMemoryDeleteResponsePayload = z.infer<
+  typeof MainChatMemoryDeleteResponsePayloadSchema
+>;
+
+export const MainChatMemoryDeleteResponseSchema = z.object({
+  type: z.literal("main_chat.memory_delete.response"),
+  payload: MainChatMemoryDeleteResponsePayloadSchema,
+});
+export type MainChatMemoryDeleteResponse = z.infer<typeof MainChatMemoryDeleteResponseSchema>;
+
 export interface MainChatTaskLabelsMeta {
   planId: string | null;
   taskId: string | null;
@@ -2137,6 +2379,22 @@ export function isFormerMainChatLabels(
 
 export function isMainChatAgent(agent: AgentLabelSource | null | undefined): boolean {
   return Boolean(agent && isMainChatLabels(agent.labels));
+}
+
+export function isMainChatTaskQuietLabels(
+  labels: Record<string, unknown> | null | undefined,
+): boolean {
+  return labels?.[MAIN_CHAT_TASK_QUIET_LABEL] === "true";
+}
+
+export function getMainChatBackgroundTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): MainChatBackgroundTurnMetadata | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const raw = metadata.mainChatBackground;
+  if (!raw || typeof raw !== "object") return null;
+  const parsed = MainChatBackgroundTurnMetadataSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
 }
 
 /**

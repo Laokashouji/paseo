@@ -1,5 +1,6 @@
 import {
   MAIN_CHAT_DEFAULT_TITLE,
+  MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
   isMainChatLabels,
   resolveActiveMainChatStylePreset,
   type MainChatDecisionRecord,
@@ -11,6 +12,7 @@ import {
   type MainChatTaskDecisionEntry,
 } from "@getpaseo/protocol/main-chat";
 import { formatMainChatSessionLink, type FleetSnapshotSummary } from "./context-snapshot.js";
+import { assembleMainChatMemoryContext } from "./memory.js";
 import { formatSupervisionDigest } from "./signal-queue.js";
 import { formatTaskDecisionsPromptSection } from "./task-ledger.js";
 
@@ -19,11 +21,19 @@ export function appendMainChatSystemPrompt(
   opening: { purpose?: string; labels?: Record<string, string> } | undefined,
   existing: string[] | undefined,
   settings?: MainChatSettings | null,
+  memoryContext?: string | null,
 ): string[] | undefined {
-  if ((opening?.purpose ?? "interactive") !== "interactive" || !isMainChatLabels(opening?.labels)) {
+  if ((opening?.purpose ?? "interactive") !== "interactive") {
     return existing;
   }
-  return [buildMainChatSystemPrompt(settings), ...(existing ?? [])];
+  if (isMainChatLabels(opening?.labels)) {
+    return [buildMainChatSystemPrompt(settings, memoryContext), ...(existing ?? [])];
+  }
+  const trimmedMemory = memoryContext?.trim();
+  if (trimmedMemory) {
+    return [...(existing ?? []), trimmedMemory];
+  }
+  return existing;
 }
 
 function formatStylePolicyDescription(settings?: MainChatSettings | null): {
@@ -57,7 +67,10 @@ function formatStylePolicyDescription(settings?: MainChatSettings | null): {
  * System prompt appended natively by the daemon whenever an agent carries
  * `paseo.role=main`.
  */
-export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): string {
+export function buildMainChatSystemPrompt(
+  settings?: MainChatSettings | null,
+  memoryContext?: string | null,
+): string {
   const title = settings?.title?.trim() || MAIN_CHAT_DEFAULT_TITLE;
   const activePreset = resolveActiveMainChatStylePreset(settings);
   const style = settings?.style ?? activePreset.baseStyle;
@@ -123,7 +136,12 @@ ${manualSessionPolicy}${customGuidanceSection}
 - **边界与克制**：
   - 简单问答、一句结论不要强行套卡片；核心结论仍须写在卡片外的简短正文中。
   - 派任务、改范围、任务拍板与高风险审批仍严格走 \`task_plan\` / \`task_ask_user\` / 原生权限审批，**不要用声明式卡片替代**。
-  - **严禁**在卡片中收集密码、Token、API Key 等敏感凭证（协议已禁止 \`secret\` 字段与原始 HTML）。`;
+  - **严禁**在卡片中收集密码、Token、API Key 等敏感凭证（协议已禁止 \`secret\` 字段与原始 HTML）。
+
+## 个人档案、方向笔记与常驻记忆
+- 你可以使用 \`memory_list\` / \`memory_read\` / \`memory_write\` / \`memory_delete\` 管理 \`~/.paseo/main-chat/memory/\` 下的轻量 Markdown 记忆文件（仅允许相对路径），用于沉淀长期偏好、项目背景与常用约定；请勿写入密钥、Token 等敏感凭据。${
+    memoryContext?.trim() ? `\n\n${memoryContext.trim()}` : ""
+  }`;
 }
 
 export interface MainChatPatrolSignalItem {
@@ -239,6 +257,10 @@ export function buildMainChatInitialBriefingPrompt(input: {
 export interface BuildWorkerInitialPromptOptions {
   brief?: MainChatTaskBrief | null;
   decisions?: readonly MainChatTaskDecisionEntry[];
+  directionNotes?: {
+    title?: string | null;
+    notes?: string | null;
+  } | null;
   continuesFrom?: {
     taskId: string;
     reason?: string | null;
@@ -301,6 +323,20 @@ export function buildWorkerInitialPrompt(
   const decisionsSection = formatTaskDecisionsPromptSection(options?.decisions);
   if (decisionsSection) {
     lines.push("", decisionsSection);
+  }
+
+  if (options?.directionNotes?.notes?.trim()) {
+    const assembledNotes = assembleMainChatMemoryContext({
+      directionTitle: options.directionNotes.title,
+      directionNotes: options.directionNotes.notes,
+      budget: {
+        totalMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+        directionNotesMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+      },
+    });
+    if (assembledNotes.text) {
+      lines.push("", assembledNotes.text);
+    }
   }
 
   lines.push(

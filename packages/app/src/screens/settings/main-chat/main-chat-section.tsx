@@ -2,7 +2,9 @@ import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import {
   createDefaultMainChatSettings,
   isMainChatAutoCompactEnabled,
+  isMainChatBackgroundFolded,
   isMainChatEnabled,
+  isMainChatTasksQuiet,
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
   type MainChatIntervals,
@@ -53,6 +55,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute } from "@/utils/host-routes";
+import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
@@ -1112,6 +1115,30 @@ export function MainChatSettingsSection(): ReactElement {
     [applyPatch, t],
   );
 
+  const handleBackgroundFoldedToggle = useCallback(
+    (nextValue: boolean) => {
+      void applyPatch(
+        { mainBackgroundFolded: nextValue },
+        nextValue
+          ? t("mainChat.quietFold.backgroundFoldedEnabledToast")
+          : t("mainChat.quietFold.backgroundFoldedDisabledToast"),
+      );
+    },
+    [applyPatch, t],
+  );
+
+  const handleTasksQuietToggle = useCallback(
+    (nextValue: boolean) => {
+      void applyPatch(
+        { mainTasksQuiet: nextValue },
+        nextValue
+          ? t("mainChat.quietFold.tasksQuietEnabledToast")
+          : t("mainChat.quietFold.tasksQuietDisabledToast"),
+      );
+    },
+    [applyPatch, t],
+  );
+
   const handleRefreshUsage = useCallback(() => {
     if (!selectedServerId || !client) return;
     void loadUsage(selectedServerId, client).catch((error) => {
@@ -1373,6 +1400,63 @@ export function MainChatSettingsSection(): ReactElement {
             disabled={saving}
             onRefreshOverview={refreshOverview}
           />
+
+          <SettingsSection
+            title={t("mainChat.quietFold.sectionTitle")}
+            info={t("mainChat.quietFold.sectionDescription")}
+            testID="settings-main-chat-quiet-fold"
+          >
+            <View style={settingsStyles.card}>
+              <View style={[settingsStyles.row, styles.switchRow]}>
+                <View style={styles.rowText}>
+                  <Text style={settingsStyles.rowTitle}>
+                    {t("mainChat.quietFold.backgroundFoldedLabel")}
+                  </Text>
+                  <Text style={settingsStyles.rowHint}>
+                    {t("mainChat.quietFold.backgroundFoldedHint")}
+                  </Text>
+                </View>
+                <Switch
+                  value={isMainChatBackgroundFolded(settings)}
+                  onValueChange={handleBackgroundFoldedToggle}
+                  disabled={saving}
+                  accessibilityLabel={t("mainChat.quietFold.backgroundFoldedLabel")}
+                  testID="settings-main-chat-background-folded"
+                />
+              </View>
+              <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.switchRow]}>
+                <View style={styles.rowText}>
+                  <Text style={settingsStyles.rowTitle}>
+                    {t("mainChat.quietFold.tasksQuietLabel")}
+                  </Text>
+                  <Text style={settingsStyles.rowHint}>
+                    {t("mainChat.quietFold.tasksQuietHint")}
+                  </Text>
+                </View>
+                <Switch
+                  value={isMainChatTasksQuiet(settings)}
+                  onValueChange={handleTasksQuietToggle}
+                  disabled={saving}
+                  accessibilityLabel={t("mainChat.quietFold.tasksQuietLabel")}
+                  testID="settings-main-chat-tasks-quiet"
+                />
+              </View>
+            </View>
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.memoryProfile.sectionTitle")}
+            info={t("mainChat.memoryProfile.sectionDescription")}
+            testID="settings-main-chat-memory-profile"
+          >
+            <MainChatMemoryProfilePanel
+              serverId={selectedServerId}
+              client={client}
+              settings={settings}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
 
           <View style={styles.advancedWrap}>
             <PressHighlight

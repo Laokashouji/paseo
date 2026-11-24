@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
+  MAIN_CHAT_MEMORY_PATH_MAX_CHARS,
   MainChatDecisionOptionSchema,
   MainChatDecisionRecordSchema,
+  MainChatMemoryFileContentSchema,
+  MainChatMemoryFileMetaSchema,
   MainChatPlanRecordSchema,
   MainChatReceiptCheckSchema,
   MainChatReworkRecordSchema,
@@ -86,8 +89,9 @@ const TaskPlanItemInputSchema = z.object({
   quiet: z
     .boolean()
     .optional()
-    .default(true)
-    .describe("静默任务标记，默认为 true（减少后台过程打扰，仅在需要拍板或验收时提醒）。"),
+    .describe(
+      "静默任务标记；未显式传入时默认继承主对话全局开关 mainTasksQuiet（减少后台过程打扰，仅在需要拍板或验收时提醒）。",
+    ),
 });
 
 export function registerMainChatTools(options: {
@@ -503,6 +507,102 @@ export function registerMainChatTools(options: {
           rework: outcome.rework,
           guidance,
         }),
+      });
+    },
+  });
+
+  register({
+    name: "memory_list",
+    title: "List persistent main-chat memory files",
+    description:
+      "列出 ~/.paseo/main-chat/memory/ 下的全部轻量记忆文件元数据（路径、大小、更新时间）。",
+    inputSchema: z.object({}),
+    outputSchema: {
+      files: z.array(MainChatMemoryFileMetaSchema),
+    },
+    async handler() {
+      const files = await mainChatService.listMemoryFiles();
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ files }),
+      });
+    },
+  });
+
+  register({
+    name: "memory_read",
+    title: "Read a persistent main-chat memory file",
+    description:
+      "读取 ~/.paseo/main-chat/memory/ 下指定相对路径的记忆文件（仅允许相对路径，禁止目录穿越）。",
+    inputSchema: z.object({
+      path: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS)
+        .describe("相对记忆目录的文件路径，例如 MEMORY.md 或 projects/paseo.md。"),
+    }),
+    outputSchema: {
+      file: MainChatMemoryFileContentSchema,
+    },
+    async handler(rawInput) {
+      const input = rawInput as { path: string };
+      const file = await mainChatService.readMemoryFile(input.path);
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ file }),
+      });
+    },
+  });
+
+  register({
+    name: "memory_write",
+    title: "Write a persistent main-chat memory file",
+    description:
+      "新建或更新 ~/.paseo/main-chat/memory/ 下的轻量记忆文件（仅允许相对路径，禁止写入敏感凭据或目录穿越）。",
+    inputSchema: z.object({
+      path: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS)
+        .describe("相对记忆目录的文件路径，例如 MEMORY.md 或 prefs/coding.md。"),
+      content: z.string().describe("要写入的 Markdown 或纯文本内容。"),
+    }),
+    outputSchema: {
+      file: MainChatMemoryFileMetaSchema,
+    },
+    async handler(rawInput) {
+      const input = rawInput as { path: string; content: string };
+      const file = await mainChatService.writeMemoryFile(input.path, input.content);
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ file }),
+      });
+    },
+  });
+
+  register({
+    name: "memory_delete",
+    title: "Delete a persistent main-chat memory file",
+    description: "删除 ~/.paseo/main-chat/memory/ 下指定相对路径的记忆文件。",
+    inputSchema: z.object({
+      path: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_MEMORY_PATH_MAX_CHARS)
+        .describe("要删除的相对文件路径。"),
+    }),
+    outputSchema: {
+      deleted: z.boolean(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as { path: string };
+      const result = await mainChatService.deleteMemoryFile(input.path);
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ deleted: result.deleted }),
       });
     },
   });

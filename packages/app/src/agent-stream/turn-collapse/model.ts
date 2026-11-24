@@ -1,4 +1,8 @@
-import { isMainChatInlineCardToolName } from "@getpaseo/protocol/main-chat";
+import {
+  getMainChatBackgroundTurnMetadata,
+  isMainChatInlineCardToolName,
+  type MainChatBackgroundTurnMetadata,
+} from "@getpaseo/protocol/main-chat";
 import { isTurnBoundary, isTurnTrigger } from "../turn-membership";
 import {
   getStreamItemMessageId,
@@ -106,11 +110,20 @@ function extractLegacyMainChatUserMessageSystemText(text: string): string | null
   return null;
 }
 
+function getStructuredBackgroundTurnMeta(item: StreamItem): MainChatBackgroundTurnMetadata | null {
+  if (item.kind !== "tool_call" || item.payload.source !== "agent") return null;
+  return getMainChatBackgroundTurnMetadata(item.payload.data.metadata);
+}
+
 export function isSystemBackgroundTrigger(item: StreamItem): boolean {
   if (item.kind === "user_message") {
     return extractLegacyMainChatUserMessageSystemText(item.text) !== null;
   }
   if (item.kind !== "tool_call") return false;
+  const structuredMeta = getStructuredBackgroundTurnMeta(item);
+  if (structuredMeta?.foldable) {
+    return true;
+  }
   if (item.payload.source === "agent") {
     return (
       item.payload.data.name === "heartbeat" || item.payload.data.callId.startsWith("paseo-system:")
@@ -134,10 +147,19 @@ function extractSystemBackgroundText(item: StreamItem): string {
 }
 
 function isMissingReplyRecoveryTrigger(item: StreamItem): boolean {
+  const structuredMeta = getStructuredBackgroundTurnMeta(item);
+  if (structuredMeta?.kind === "recovery") return true;
   return extractSystemBackgroundText(item).includes(MISSING_REPLY_RECOVERY_MARKER);
 }
 
 export function extractBackgroundTurnLabel(item: StreamItem): string | null {
+  const structuredMeta = getStructuredBackgroundTurnMeta(item);
+  const explicitLabel = structuredMeta?.label?.replace(/\s+/g, " ").trim();
+  if (explicitLabel) {
+    return explicitLabel.length > MAX_BACKGROUND_LABEL_CHARS
+      ? `${explicitLabel.slice(0, MAX_BACKGROUND_LABEL_CHARS - 1)}…`
+      : explicitLabel;
+  }
   const raw = extractSystemBackgroundText(item);
   if (!raw.trim()) return null;
   for (const line of raw.split(/\r?\n/)) {
@@ -259,7 +281,11 @@ function hasSameBackgroundMeta(
 ): boolean {
   return (
     a === b ||
-    (a !== undefined && b !== undefined && a.label === b.label && a.running === b.running)
+    (a !== undefined &&
+      b !== undefined &&
+      a.label === b.label &&
+      a.running === b.running &&
+      a.kind === b.kind)
   );
 }
 
@@ -396,6 +422,7 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
     const processItems = replyIndex >= 0 ? body.slice(0, replyIndex) : body;
     const conclusionItems = replyIndex >= 0 ? body.slice(replyIndex) : [];
 
+    const structuredMeta = getStructuredBackgroundTurnMeta(host);
     const tools = summarizeTurn(processItems, input.getGroupedCalls);
     const expanded = input.expandedHostIds.has(host.id);
     const summary = summaryRow(
@@ -408,6 +435,7 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
         backgroundMeta: {
           label: extractBackgroundTurnLabel(host),
           running: !isClosed,
+          ...(structuredMeta?.kind ? { kind: structuredMeta.kind } : {}),
         },
       },
     );

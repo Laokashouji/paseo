@@ -1,3 +1,4 @@
+import { getMainChatBackgroundTurnMetadata } from "@getpaseo/protocol/main-chat";
 import { continuesTimelineTurn, isTimelineTurnTrigger } from "@getpaseo/protocol/timeline-turn";
 import type { StreamItem } from "@/types/stream";
 
@@ -37,6 +38,13 @@ export function belongsToTurn(item: StreamItem, turnId: string | null): boolean 
 
 /** Inputs that start a turn when older history has no canonical turn IDs. */
 export function isTurnTrigger(item: StreamItem): boolean {
+  if (
+    item.kind === "tool_call" &&
+    item.payload.source === "agent" &&
+    getMainChatBackgroundTurnMetadata(item.payload.data.metadata)?.foldable === true
+  ) {
+    return true;
+  }
   return isTimelineTurnTrigger(
     item.kind === "tool_call" && item.payload.source === "agent"
       ? { type: item.kind, ...item.payload.data }

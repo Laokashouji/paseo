@@ -38,6 +38,10 @@ import type {
   MainChatListPlansResponsePayload,
   MainChatListStandingAuthorizationsResponsePayload,
   MainChatListTasksResponsePayload,
+  MainChatMemoryDeleteResponsePayload,
+  MainChatMemoryListResponsePayload,
+  MainChatMemoryReadResponsePayload,
+  MainChatMemoryWriteResponsePayload,
   MainChatNewSessionResponsePayload,
   MainChatParkTaskResponsePayload,
   MainChatPlanTaskPatch,
@@ -5708,6 +5712,7 @@ export class DaemonClient {
       kind: "side" | "leader";
       title: string;
       directionSummary?: string | null;
+      notes?: string | null;
       initialPrompt?: string;
       provider?: string;
       model?: string;
@@ -5725,6 +5730,7 @@ export class DaemonClient {
         ...(input.directionSummary !== undefined
           ? { directionSummary: input.directionSummary }
           : {}),
+        ...(input.notes !== undefined ? { notes: input.notes } : {}),
         ...(input.initialPrompt !== undefined ? { initialPrompt: input.initialPrompt } : {}),
         ...(input.provider ? { provider: input.provider } : {}),
         ...(input.model ? { model: input.model } : {}),
@@ -5740,6 +5746,7 @@ export class DaemonClient {
       conversationId: string;
       title?: string;
       directionSummary?: string | null;
+      notes?: string | null;
       kind?: "side" | "leader";
       archived?: boolean;
     },
@@ -5754,6 +5761,7 @@ export class DaemonClient {
         ...(input.directionSummary !== undefined
           ? { directionSummary: input.directionSummary }
           : {}),
+        ...(input.notes !== undefined ? { notes: input.notes } : {}),
         ...(input.kind !== undefined ? { kind: input.kind } : {}),
         ...(input.archived !== undefined ? { archived: input.archived } : {}),
       },
@@ -5906,6 +5914,60 @@ export class DaemonClient {
       requestId,
       message: {
         type: "main_chat.reset_usage.request",
+      },
+      timeout: 30000,
+    });
+  }
+
+  async listMainChatMemoryFiles(requestId?: string): Promise<MainChatMemoryListResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.memory_list.response">({
+      requestId,
+      message: {
+        type: "main_chat.memory_list.request",
+      },
+      timeout: 30000,
+    });
+  }
+
+  async readMainChatMemoryFile(
+    path: string,
+    requestId?: string,
+  ): Promise<MainChatMemoryReadResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.memory_read.response">({
+      requestId,
+      message: {
+        type: "main_chat.memory_read.request",
+        path,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async writeMainChatMemoryFile(
+    path: string,
+    content: string,
+    requestId?: string,
+  ): Promise<MainChatMemoryWriteResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.memory_write.response">({
+      requestId,
+      message: {
+        type: "main_chat.memory_write.request",
+        path,
+        content,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async deleteMainChatMemoryFile(
+    path: string,
+    requestId?: string,
+  ): Promise<MainChatMemoryDeleteResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.memory_delete.response">({
+      requestId,
+      message: {
+        type: "main_chat.memory_delete.request",
+        path,
       },
       timeout: 30000,
     });

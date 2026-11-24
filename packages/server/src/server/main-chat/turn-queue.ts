@@ -3,6 +3,7 @@ import {
   isMainChatInlineCardToolName,
   isMainChatLabels,
   type MainChatActivityEntry,
+  type MainChatBackgroundTurnKind,
 } from "@getpaseo/protocol/main-chat";
 import type { AgentManager, AgentManagerEvent } from "../agent/agent-manager.js";
 import type { AgentProvider, AgentUsage } from "../agent/agent-sdk-types.js";
@@ -121,6 +122,27 @@ interface PerMainAgentState {
 
 function makeActivityId(): string {
   return `act_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function inferBackgroundTurnKindFromTrigger(trigger: string): MainChatBackgroundTurnKind {
+  const normalized = trigger.trim().toLowerCase();
+  if (normalized.includes("patrol")) return "patrol";
+  if (
+    normalized.includes("supervis") ||
+    normalized.includes("wakeup") ||
+    normalized.includes("signal")
+  ) {
+    return "supervision";
+  }
+  if (normalized.includes("leader_progress") || normalized.includes("relay")) {
+    return "relay";
+  }
+  if (normalized.includes("briefing")) return "briefing";
+  if (normalized.includes("compact")) return "compaction";
+  if (normalized.includes("recovery") || normalized.includes("missing_reply")) {
+    return "recovery";
+  }
+  return "system";
 }
 
 function combineAssistantTexts(texts: readonly string[]): string {
@@ -529,7 +551,13 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     try {
       const dispatch = await sendPreparedPromptToAgent({
         agentId: mainAgentId,
-        prompt: formatSystemNotificationPrompt(prompt),
+        prompt: formatSystemNotificationPrompt(prompt, {
+          kind: inferBackgroundTurnKindFromTrigger(request.trigger),
+          trigger: request.trigger,
+          label: request.summary,
+          activityId,
+          quiet: true,
+        }),
         agentManager: deps.agentManager,
         agentStorage: deps.agentStorage,
         logger: deps.logger,
