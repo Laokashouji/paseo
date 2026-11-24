@@ -7,11 +7,13 @@ import {
   GitPullRequest,
   MessageSquareCode,
   MousePointer2,
+  Quote,
 } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { WorkspaceComposerAttachment } from "@/attachments/types";
 import { getFileTypeLabel } from "@/attachments/file-types";
+import { parseSideQuestionQuoteTextAttachmentTitle } from "@/attachments/side-question-quote";
 import { isPullRequestContextAttachment } from "@/attachments/workspace-attachment-utils";
 import { getForgePresentation } from "@/git/forge";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
@@ -86,7 +88,7 @@ export function getAgentAttachmentPillContent(
         title: attachment.title,
         subtitle: `Issue #${attachment.number}`,
       };
-    case "text":
+    case "text": {
       if (attachment.externalResource) {
         return {
           icon: attachmentGithubIssueIcon,
@@ -94,11 +96,20 @@ export function getAgentAttachmentPillContent(
           subtitle: `${attachment.externalResource.providerLabel} ${attachment.externalResource.identifier}`,
         };
       }
+      const sideQuestionQuoteTitle = parseSideQuestionQuoteTextAttachmentTitle(attachment.title);
+      if (sideQuestionQuoteTitle) {
+        return {
+          icon: attachmentQuoteIcon,
+          title: sideQuestionQuoteTitle,
+          subtitle: t("sideQuestion.quoteSubtitle"),
+        };
+      }
       return {
         icon: attachmentFileIcon,
         title: attachment.title ?? t("message.attachments.textAttachment"),
         subtitle: getTextAttachmentSubtitle(attachment, t),
       };
+    }
     case "uploaded_file":
       return {
         icon: attachmentFileIcon,
@@ -145,6 +156,7 @@ const ThemedAttachmentGitPullRequest = withUnistyles(GitPullRequest);
 const ThemedAttachmentCircleDot = withUnistyles(CircleDot);
 const ThemedAttachmentMessageSquareCode = withUnistyles(MessageSquareCode);
 const ThemedAttachmentMousePointer = withUnistyles(MousePointer2);
+const ThemedAttachmentQuote = withUnistyles(Quote);
 
 const iconForegroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -162,4 +174,7 @@ const attachmentFileIcon = (
 );
 const attachmentBrowserIcon = (
   <ThemedAttachmentMousePointer size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
+);
+const attachmentQuoteIcon = (
+  <ThemedAttachmentQuote size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
 );

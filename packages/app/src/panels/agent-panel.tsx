@@ -96,6 +96,10 @@ import { WorkspaceDraftComposer } from "@/composer/draft/workspace-tab";
 import { type DraftConversation, useDraftTimeline } from "@/composer/draft/timeline";
 import { AgentTracks } from "@/panels/agent-tracks";
 import {
+  appendSideQuestionQuoteAttachment,
+  createSideQuestionQuoteAttachment,
+} from "@/attachments/side-question-quote";
+import {
   buildSideQuestionForkDraft,
   buildSideQuestionForkTitle,
   SideQuestionCard,
@@ -1053,6 +1057,59 @@ function ChatAgentContent({
   );
 }
 
+function useSideQuestionPanelActions({
+  serverId,
+  workspaceId,
+  agentId,
+  agentInputDraft,
+  composerEditingSession,
+  toastApi,
+}: {
+  serverId: string;
+  workspaceId: string;
+  agentId: string;
+  agentInputDraft: AgentInputDraft;
+  composerEditingSession: ComposerEditingSession;
+  toastApi: ToastApi;
+}) {
+  const handleQuoteSideQuestionToComposer = useCallback(
+    (turn: SideQuestionTurnEntry) => {
+      const quote = createSideQuestionQuoteAttachment({
+        turnId: turn.id,
+        question: turn.question,
+        response: turn.response ?? "",
+      });
+      if (!quote) return;
+      agentInputDraft.setAttachments((prev) => appendSideQuestionQuoteAttachment(prev, quote));
+      useSideQuestionStore.getState().minimize(serverId, agentId);
+      requestAnimationFrame(() => composerEditingSession.focus());
+    },
+    [agentId, agentInputDraft, composerEditingSession, serverId],
+  );
+  const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
+  const handleForkFromSideQuestion = useCallback(
+    (turn: SideQuestionTurnEntry) => {
+      const currentAgent = resolveChatAgentFromSession(
+        useSessionStore.getState(),
+        serverId,
+        agentId,
+      );
+      if (!currentAgent) return;
+      useSideQuestionStore.getState().minimize(serverId, agentId);
+      void sideQuestionForkAgent({
+        agentId,
+        agent: currentAgent,
+        workspaceId,
+        target: "tab",
+        title: buildSideQuestionForkTitle(turn),
+        initialDraftText: buildSideQuestionForkDraft(turn),
+      });
+    },
+    [agentId, serverId, sideQuestionForkAgent, workspaceId],
+  );
+  return { handleQuoteSideQuestionToComposer, handleForkFromSideQuestion };
+}
+
 const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   serverId,
   workspaceId,
@@ -1221,37 +1278,15 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     onAttentionInputFocus();
     return false;
   }, [onAttentionInputFocus]);
-  const handleInsertSideQuestionToComposer = useCallback(
-    (text: string) => {
-      const existing = agentInputDraft.textSource.getSnapshot();
-      const next = existing.trim().length > 0 ? `${existing}\n\n${text}` : text;
-      agentInputDraft.replaceText(next);
-      useSideQuestionStore.getState().minimize(serverId, agentId);
-      requestAnimationFrame(() => composerEditingSession.focus());
-    },
-    [agentId, agentInputDraft, composerEditingSession, serverId],
-  );
-  const sideQuestionForkAgent = useForkAgent({ serverId, toast: toastApi });
-  const handleForkFromSideQuestion = useCallback(
-    (turn: SideQuestionTurnEntry) => {
-      const currentAgent = resolveChatAgentFromSession(
-        useSessionStore.getState(),
-        serverId,
-        agentId,
-      );
-      if (!currentAgent) return;
-      useSideQuestionStore.getState().minimize(serverId, agentId);
-      void sideQuestionForkAgent({
-        agentId,
-        agent: currentAgent,
-        workspaceId,
-        target: "tab",
-        title: buildSideQuestionForkTitle(turn),
-        initialDraftText: buildSideQuestionForkDraft(turn),
-      });
-    },
-    [agentId, serverId, sideQuestionForkAgent, workspaceId],
-  );
+  const { handleQuoteSideQuestionToComposer, handleForkFromSideQuestion } =
+    useSideQuestionPanelActions({
+      serverId,
+      workspaceId,
+      agentId,
+      agentInputDraft,
+      composerEditingSession,
+      toastApi,
+    });
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1279,21 +1314,21 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         />
       </RenderProfile>
       {hasActiveComposer && !draft ? (
-        <SideQuestionCard
-          serverId={serverId}
-          agentId={agentId}
-          onInsertToComposer={handleInsertSideQuestionToComposer}
-          onForkToBranch={handleForkFromSideQuestion}
-        />
-      ) : null}
-      {hasActiveComposer && !draft ? (
-        <AgentTracks
-          serverId={serverId}
-          workspaceId={workspaceId}
-          agentId={agentId}
-          parentAgentId={parentPillAgentId}
-          toast={toastApi}
-        />
+        <>
+          <SideQuestionCard
+            serverId={serverId}
+            agentId={agentId}
+            onQuoteToComposer={handleQuoteSideQuestionToComposer}
+            onForkToBranch={handleForkFromSideQuestion}
+          />
+          <AgentTracks
+            serverId={serverId}
+            workspaceId={workspaceId}
+            agentId={agentId}
+            parentAgentId={parentPillAgentId}
+            toast={toastApi}
+          />
+        </>
       ) : null}
     </View>
   );
