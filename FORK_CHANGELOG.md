@@ -2,6 +2,12 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.526 - 2026-11-25
+
+- **主对话上下文压缩窗口封顶、Prompt Cache 定时保活与空闲 `/compact` 单行折叠修复**：「设置 → 对话管理」新增「上下文压缩与缓存保活」面板，支持配置压缩窗口封顶（默认 `400k tokens`，支持 `100k–10000k` 自定义或「不封顶」跟随模型窗口，空闲达到有效窗口 80% 触发后台静默预压缩）、空闲预压缩等待分钟数（默认 `10` 分钟，`1–240` 分钟可调），以及覆盖主对话与常驻方向主管的 Prompt Cache 定时保活策略（默认每 `55` 分钟刷新一次、单段空闲上限 `24` 次，夜间休眠或用户活跃时自动让路）；同步修复空闲预压缩 `/compact` 轮次的折叠渲染，稳定收敛为单行紧凑摘要条（点击原地展开），避免裸 `/compact` 或静默回复直接暴露。
+- **主对话与 Schedule/Heartbeat 例行任务联动（Routines）**：复用 Paseo Schedule/Heartbeat 引擎，统一管理归属于主对话与常驻方向主管的周期巡检任务（固定间隔或 5 段 Cron 表达式）及一次性提醒，执行结果自动写入主对话后台折叠流（新增 `routine` / `cache_keepalive` 分类胶囊），主对话重建时自动重绑目标会话；「设置 → 对话管理」新增「定时例行任务（Routines）」面板（支持新建、暂停/恢复、立即执行与二次确认删除），并向主对话开放 3 个 MCP 工具（`routine_list` / `routine_create` / `routine_manage`）与 6 个 WebSocket RPC（`main_chat.routines_*`）。
+- **主对话自助改配置审批卡与限额自动切备用模型（`limitFallbacks`）**：新增 `settings_propose_patch` MCP 工具与 2 个 WebSocket RPC（`main_chat.list_settings_proposals` / `main_chat.resolve_settings_proposal`），仅放行白名单内可提议配置项，主对话提交建议后在消息流内渲染带「变更前 / 变更后」逐项对比的「配置变更审批卡」，绝不静默落盘，经用户点击「确认应用」后原子生效；「设置 → 对话管理」新增「限额自动切备用模型（Fallback）」面板（支持最多 8 个有序备用模型、上下排序与近期切换记录），在遇到 429 / Rate Limit / Quota / Usage Limit 限额错误时按序自动切至下一个可用模型并防止循环，严格限定仅作用于主对话与管家受管子任务，绝不触碰用户手动会话、已取消轮次或 handoff 中断会话。
+
 ## 0.17.525 - 2026-11-25
 
 - **主对话个人档案、方向笔记与常驻记忆目录**：在「设置 → 对话管理」新增「档案与记忆」面板，支持维护个人档案（`aboutMe` 上限 4000 字 + 最多 12 个称呼/别名）、各常驻方向主管独立笔记（上限 4000 字）以及 `~/.paseo/main-chat/memory/` 下的轻量记忆文件（支持在线列表、新建、编辑与二次确认删除）；服务端按确定性字节预算（总计 12 KB：档案 4 KB、方向笔记 4 KB、优先 `MEMORY.md` 的常驻文件 4 KB）自动装配至主对话、方向主管及其下属子 Agent 上下文，并暴露 4 个 MCP 工具（`memory_list` / `memory_read` / `memory_write` / `memory_delete`）与 4 个 WebSocket RPC（`main_chat.memory_*`），严格拦截路径穿越、符号链接逃逸、非法后缀与超大文件（单文件上限 64 KB）。
