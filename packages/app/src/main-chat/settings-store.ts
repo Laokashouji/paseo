@@ -1,5 +1,6 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
+  MainChatCacheKeepaliveStatus,
   MainChatNightModeStatus,
   MainChatPatrolResult,
   MainChatSettings,
@@ -11,6 +12,7 @@ import { create } from "zustand";
 interface MainChatSettingsStoreState {
   settingsByServerId: Record<string, MainChatSettings | undefined>;
   nightModeStatusByServerId: Record<string, MainChatNightModeStatus | undefined>;
+  cacheKeepaliveStatusByServerId: Record<string, MainChatCacheKeepaliveStatus | undefined>;
   usageByServerId: Record<string, MainChatTokenUsageSummary | undefined>;
   usageLoadingByServerId: Record<string, boolean | undefined>;
   loadingByServerId: Record<string, boolean | undefined>;
@@ -32,11 +34,13 @@ interface MainChatSettingsStoreState {
     serverId: string,
     settings: MainChatSettings,
     nightModeStatus?: MainChatNightModeStatus,
+    cacheKeepaliveStatus?: MainChatCacheKeepaliveStatus,
   ) => void;
   hydrateTelemetry: (
     serverId: string,
     input: {
       nightModeStatus?: MainChatNightModeStatus;
+      cacheKeepaliveStatus?: MainChatCacheKeepaliveStatus;
       tokenUsage?: MainChatTokenUsageSummary;
     },
   ) => void;
@@ -45,12 +49,13 @@ interface MainChatSettingsStoreState {
 export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set) => ({
   settingsByServerId: {},
   nightModeStatusByServerId: {},
+  cacheKeepaliveStatusByServerId: {},
   usageByServerId: {},
   usageLoadingByServerId: {},
   loadingByServerId: {},
   lastPatrolByServerId: {},
 
-  hydrateSettings(serverId, settings, nightModeStatus) {
+  hydrateSettings(serverId, settings, nightModeStatus, cacheKeepaliveStatus) {
     set((state) => ({
       settingsByServerId: {
         ...state.settingsByServerId,
@@ -64,6 +69,14 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
             },
           }
         : {}),
+      ...(cacheKeepaliveStatus
+        ? {
+            cacheKeepaliveStatusByServerId: {
+              ...state.cacheKeepaliveStatusByServerId,
+              [serverId]: cacheKeepaliveStatus,
+            },
+          }
+        : {}),
     }));
   },
 
@@ -74,6 +87,14 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
             nightModeStatusByServerId: {
               ...state.nightModeStatusByServerId,
               [serverId]: input.nightModeStatus,
+            },
+          }
+        : {}),
+      ...(input.cacheKeepaliveStatus
+        ? {
+            cacheKeepaliveStatusByServerId: {
+              ...state.cacheKeepaliveStatusByServerId,
+              [serverId]: input.cacheKeepaliveStatus,
             },
           }
         : {}),
@@ -99,6 +120,7 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
       }
       const settings = response.settings;
       const nightModeStatus = response.nightModeStatus;
+      const cacheKeepaliveStatus = response.cacheKeepaliveStatus;
       set((state) => ({
         settingsByServerId: {
           ...state.settingsByServerId,
@@ -109,6 +131,14 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
               nightModeStatusByServerId: {
                 ...state.nightModeStatusByServerId,
                 [serverId]: nightModeStatus,
+              },
+            }
+          : {}),
+        ...(cacheKeepaliveStatus
+          ? {
+              cacheKeepaliveStatusByServerId: {
+                ...state.cacheKeepaliveStatusByServerId,
+                [serverId]: cacheKeepaliveStatus,
               },
             }
           : {}),
@@ -128,6 +158,7 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
     }
     const settings = response.settings;
     const nightModeStatus = response.nightModeStatus;
+    const cacheKeepaliveStatus = response.cacheKeepaliveStatus;
     set((state) => ({
       settingsByServerId: {
         ...state.settingsByServerId,
@@ -138,6 +169,14 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
             nightModeStatusByServerId: {
               ...state.nightModeStatusByServerId,
               [serverId]: nightModeStatus,
+            },
+          }
+        : {}),
+      ...(cacheKeepaliveStatus
+        ? {
+            cacheKeepaliveStatusByServerId: {
+              ...state.cacheKeepaliveStatusByServerId,
+              [serverId]: cacheKeepaliveStatus,
             },
           }
         : {}),

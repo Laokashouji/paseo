@@ -1595,8 +1595,12 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     finishSubscriptions: () => finishSubscriptions,
     terminalManager,
+    scheduleService,
     logger,
   });
+  scheduleService.setAgentScheduleExecutor((schedule, runId) =>
+    mainChatService.executeScheduledAgentRoutine(schedule, runId),
+  );
   agentManager.setMainChatSettingsReader(() => mainChatService.getCurrentSettings());
   agentManager.setMainChatMemoryContextReader((opening) =>
     mainChatService.assembleMemoryContextForAgent(opening),

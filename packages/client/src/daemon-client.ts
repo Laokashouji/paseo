@@ -16,6 +16,7 @@ import {
 } from "@getpaseo/protocol/binary-frames/index";
 import { messageTooLargeError } from "./daemon-client-transport-utils.js";
 import type { HostAdd, HostUpdate, HostDirectory } from "@getpaseo/protocol/hosts";
+import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
 import type {
   MainChatActivityKind,
   MainChatAddPermissionRuleResponsePayload,
@@ -36,6 +37,7 @@ import type {
   MainChatListActivityResponsePayload,
   MainChatListConversationsResponsePayload,
   MainChatListPlansResponsePayload,
+  MainChatListSettingsProposalsResponsePayload,
   MainChatListStandingAuthorizationsResponsePayload,
   MainChatListTasksResponsePayload,
   MainChatMemoryDeleteResponsePayload,
@@ -48,8 +50,16 @@ import type {
   MainChatReceiptCheck,
   MainChatRemoveRuleResponsePayload,
   MainChatResetUsageResponsePayload,
+  MainChatResolveSettingsProposalResponsePayload,
   MainChatReviewTaskResponsePayload,
   MainChatRevokeStandingAuthorizationResponsePayload,
+  MainChatRoutineKind,
+  MainChatRoutinesCreateResponsePayload,
+  MainChatRoutinesDeleteResponsePayload,
+  MainChatRoutinesListResponsePayload,
+  MainChatRoutinesPauseResponsePayload,
+  MainChatRoutinesResumeResponsePayload,
+  MainChatRoutinesRunOnceResponsePayload,
   MainChatRuleKind,
   MainChatSettingsPatch,
   MainChatStandingAuthorizationScope,
@@ -5971,6 +5981,156 @@ export class DaemonClient {
       },
       timeout: 30000,
     });
+  }
+
+  async listMainChatRoutines(
+    options?: { conversationId?: string; includeCompleted?: boolean },
+    requestId?: string,
+  ): Promise<MainChatRoutinesListResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_list.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_list.request",
+        ...(options?.conversationId !== undefined
+          ? { conversationId: options.conversationId }
+          : {}),
+        ...(options?.includeCompleted !== undefined
+          ? { includeCompleted: options.includeCompleted }
+          : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async createMainChatRoutine(
+    input: {
+      name?: string;
+      prompt: string;
+      kind?: MainChatRoutineKind;
+      cadence?: ScheduleCadence;
+      runAt?: string;
+      delayMinutes?: number;
+      conversationId?: string;
+      maxRuns?: number | null;
+      expiresAt?: string | null;
+      runOnCreate?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatRoutinesCreateResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_create.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_create.request",
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        prompt: input.prompt,
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(input.cadence !== undefined ? { cadence: input.cadence } : {}),
+        ...(input.runAt !== undefined ? { runAt: input.runAt } : {}),
+        ...(input.delayMinutes !== undefined ? { delayMinutes: input.delayMinutes } : {}),
+        ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+        ...(input.maxRuns !== undefined ? { maxRuns: input.maxRuns } : {}),
+        ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+        ...(input.runOnCreate !== undefined ? { runOnCreate: input.runOnCreate } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async pauseMainChatRoutine(
+    routineId: string,
+    requestId?: string,
+  ): Promise<MainChatRoutinesPauseResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_pause.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_pause.request",
+        routineId,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async resumeMainChatRoutine(
+    routineId: string,
+    requestId?: string,
+  ): Promise<MainChatRoutinesResumeResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_resume.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_resume.request",
+        routineId,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async runMainChatRoutineOnce(
+    routineId: string,
+    requestId?: string,
+  ): Promise<MainChatRoutinesRunOnceResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_run_once.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_run_once.request",
+        routineId,
+      },
+      timeout: 120000,
+    });
+  }
+
+  async deleteMainChatRoutine(
+    routineId: string,
+    requestId?: string,
+  ): Promise<MainChatRoutinesDeleteResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.routines_delete.response">({
+      requestId,
+      message: {
+        type: "main_chat.routines_delete.request",
+        routineId,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async listMainChatSettingsProposals(
+    options?: { mainAgentId?: string; includeResolved?: boolean },
+    requestId?: string,
+  ): Promise<MainChatListSettingsProposalsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_settings_proposals.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.list_settings_proposals.request",
+          ...(options?.mainAgentId !== undefined ? { mainAgentId: options.mainAgentId } : {}),
+          ...(options?.includeResolved !== undefined
+            ? { includeResolved: options.includeResolved }
+            : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async resolveMainChatSettingsProposal(
+    input: {
+      proposalId: string;
+      decision: "approve" | "reject";
+      note?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatResolveSettingsProposalResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.resolve_settings_proposal.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.resolve_settings_proposal.request",
+          proposalId: input.proposalId,
+          decision: input.decision,
+          ...(input.note !== undefined ? { note: input.note } : {}),
+        },
+        timeout: 30000,
+      },
+    );
   }
 
   async checkoutGithubSetAutoMerge(

@@ -146,6 +146,7 @@ export function buildLeaderSystemPrompt(conversation: StaticConversationPromptTa
     "- 阶段性里程碑完成或方向关键状态变化时，调用 `leader_progress` 向主对话提交简洁汇总（结论先行，避免高频刷屏）。",
     "- 遇到产品取舍、架构分叉、范围变更、高风险操作（合并、发布、删除数据、对外发送消息）或超出本方向授权的红线事项时，必须调用 `ask_escalate` 一次性结构化升级为主对话待拍板卡，明确给出背景、2-4 个互斥方案、你的推荐项及必须由用户拍板的理由。",
     "- 需要与主对话或其他方向主管核对依赖时，使用 `conversation_read` 与 `conversation_send` 精简协作，不发无意义往返消息。",
+    "- 本方向需要周期例行巡检或一次性提醒时，可使用 `routine_list` / `routine_create` / `routine_manage` 管理归属本方向的定时任务。",
   );
 
   return sections.join("\n");

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
   ChevronRight,
+  Clock,
   CornerDownLeft,
   Radar,
   Sparkles,
@@ -19,6 +20,7 @@ import type { Theme } from "@/styles/theme";
 import type { TurnSummaryItem } from "@/types/stream";
 
 const ThemedRadar = withUnistyles(Radar);
+const ThemedClock = withUnistyles(Clock);
 const ThemedCornerDownLeft = withUnistyles(CornerDownLeft);
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -44,6 +46,10 @@ function resolveBackgroundKindLabelKey(
       return "mainChat.backgroundTurn.kindBriefing";
     case "compaction":
       return "mainChat.backgroundTurn.kindCompaction";
+    case "routine":
+      return "mainChat.backgroundTurn.kindRoutine";
+    case "cache_keepalive":
+      return "mainChat.backgroundTurn.kindCacheKeepalive";
     default:
       return "mainChat.backgroundTurn.completed";
   }
@@ -53,7 +59,10 @@ function renderBackgroundIcon(kind: MainChatBackgroundTurnKind | undefined) {
   if (kind === "relay") {
     return <ThemedCornerDownLeft size={14} uniProps={mutedIconMapping} />;
   }
-  if (kind === "briefing" || kind === "compaction") {
+  if (kind === "routine") {
+    return <ThemedClock size={14} uniProps={mutedIconMapping} />;
+  }
+  if (kind === "briefing" || kind === "compaction" || kind === "cache_keepalive") {
     return <ThemedSparkles size={14} uniProps={mutedIconMapping} />;
   }
   return <ThemedRadar size={14} uniProps={mutedIconMapping} />;

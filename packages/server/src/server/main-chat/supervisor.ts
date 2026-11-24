@@ -66,6 +66,7 @@ import {
   classifyMainChatTurnError,
   heuristicTriageAssistantReply,
   isCancelledTurnError,
+  isLimitFallbackError,
   isNoProgressToolCall,
   isSubstantiveProgressToolCall,
   parseUsageLimitWakeAt,
@@ -102,6 +103,8 @@ export interface MainChatSupervisorDependencies {
   isLeaderConversationActive?: (conversationId: string) => boolean;
   onPatrolTick?: () => Promise<void> | void;
   onAgentEvent?: (event: AgentManagerEvent) => void;
+  onTryLimitFallback?: (agent: ManagedAgent, errorMessage: string) => Promise<boolean>;
+  onAgentTurnCompleted?: (agent: ManagedAgent) => void;
   isHostAllowed?: (serverId: string) => boolean;
   getRemoteAgent?: (serverId: string, agentId: string) => AggregatedHostAgent | null;
   listRemoteAgents?: () => AggregatedHostAgent[];
@@ -1459,12 +1462,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
   }
 
-  function handleTurnFailed(agent: ManagedAgent, errorMessage: string): void {
-    if (isCancelledTurnError(errorMessage)) {
-      clearTimerMapEntry(pendingRetryTimers, agent.id);
-      return;
-    }
-
+  function finalizeTurnFailed(agent: ManagedAgent, errorMessage: string): void {
     const settings = deps.store.getSettings();
     const managed = isManagedChildAgent(agent);
     const route = resolveTaskRouteForAgent(agent);
@@ -1511,6 +1509,35 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       quiet: route.quiet,
       escalatedToUser: errorClass === "user",
     });
+  }
+
+  function handleTurnFailed(agent: ManagedAgent, errorMessage: string): void {
+    if (isCancelledTurnError(errorMessage)) {
+      clearTimerMapEntry(pendingRetryTimers, agent.id);
+      return;
+    }
+
+    // Only steward-managed subtasks may attempt limitFallbacks; user manual sessions NEVER auto-switch models.
+    if (
+      deps.onTryLimitFallback &&
+      isManagedChildAgent(agent) &&
+      isLimitFallbackError(errorMessage)
+    ) {
+      void deps
+        .onTryLimitFallback(agent, errorMessage)
+        .then((switched) => {
+          if (!switched) {
+            finalizeTurnFailed(agent, errorMessage);
+          }
+          return switched;
+        })
+        .catch(() => {
+          finalizeTurnFailed(agent, errorMessage);
+        });
+      return;
+    }
+
+    finalizeTurnFailed(agent, errorMessage);
   }
 
   function recordToolCallForLoopDetection(
@@ -1952,6 +1979,23 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
   }
 
+  function handleMainChatStreamEvent(
+    agent: ManagedAgent,
+    streamEvent: Extract<AgentManagerEvent, { type: "agent_stream" }>["event"],
+  ): void {
+    if (streamEvent.type === "turn_completed") {
+      deps.onAgentTurnCompleted?.(agent);
+      return;
+    }
+    if (
+      streamEvent.type === "turn_failed" &&
+      deps.onTryLimitFallback &&
+      isLimitFallbackError(streamEvent.error)
+    ) {
+      void deps.onTryLimitFallback(agent, streamEvent.error).catch(() => undefined);
+    }
+  }
+
   function handleManagerEvent(event: AgentManagerEvent): void {
     deps.turnQueue.handleEvent(event);
     deps.onAgentEvent?.(event);
@@ -1974,6 +2018,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     stalledNudgedAtByAgent.delete(event.agentId);
 
     const agent = deps.agentManager.getAgent(event.agentId);
+    if (agent && isMainChatLabels(agent.labels) && !agent.background && !agent.internal) {
+      handleMainChatStreamEvent(agent, event.event);
+      return;
+    }
     if (!isObservedFleetAgent(agent)) return;
     lastFleetOrUserActivityAtMs = Math.max(lastFleetOrUserActivityAtMs, now);
 
@@ -2002,6 +2050,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
 
     if (event.event.type === "turn_completed") {
+      deps.onAgentTurnCompleted?.(agent);
       clearTimerMapEntry(pendingRetryTimers, event.agentId);
       transientRetriesByAgent.delete(event.agentId);
       transientEscalatedAgents.delete(event.agentId);

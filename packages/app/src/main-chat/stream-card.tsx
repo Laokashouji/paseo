@@ -1,4 +1,5 @@
 import {
+  isSettingsProposePatchToolName,
   isTaskAskUserToolName,
   isTaskCompleteToolName,
   isTaskPlanToolName,
@@ -15,6 +16,7 @@ import { MainChatHandoffCard } from "./handoff-card";
 import { MainChatPlanCard } from "./plan-card";
 import { MainChatReceiptCard } from "./receipt-card";
 import { MainChatReworkCard } from "./rework-card";
+import { MainChatSettingsProposalCard } from "./settings-proposal-card";
 
 function firstNonEmptyString(...values: unknown[]): string | null {
   for (const value of values) {
@@ -133,6 +135,15 @@ export function renderMainChatInlineToolCard(input: {
         agentId={input.agentId}
         output={input.toolOutput}
         defaultExpanded={false}
+      />
+    );
+  }
+  if (isSettingsProposePatchToolName(input.toolName)) {
+    return (
+      <MainChatSettingsProposalCard
+        serverId={input.serverId}
+        agentId={input.agentId}
+        output={input.toolOutput}
       />
     );
   }

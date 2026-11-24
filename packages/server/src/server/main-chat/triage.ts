@@ -54,10 +54,19 @@ const USAGE_LIMIT_PATTERNS = [
   /usage limit/i,
   /usage_limit/i,
   /quota reached/i,
-  /rate limit reset/i,
+  /quota exceeded/i,
+  /insufficient_quota/i,
+  /over quota/i,
+  /rate limit/i,
+  /rate_limit/i,
+  /rate-limit/i,
+  /too many requests/i,
   /limit will reset/i,
   /resets? in \d+/i,
+  /额度上限|额度耗尽|达到限额|触发限流|频率限制/,
 ];
+
+const LIMIT_FALLBACK_EXTRA_PATTERNS = [/\b429\b/, /\bquota\b/i];
 
 const TRANSIENT_PATTERNS = [
   /\b(408|429|500|502|503|504|529)\b/,
@@ -88,6 +97,21 @@ export function classifyMainChatTurnError(message: string): MainChatErrorClass {
   if (USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(message))) return "usage_limit";
   if (TRANSIENT_PATTERNS.some((pattern) => pattern.test(message))) return "transient";
   return "user";
+}
+
+/**
+ * Detects rate-limit, quota, HTTP 429, and usage-limit failures eligible for `limitFallbacks`
+ * automatic backup model switching, strictly excluding user/auth errors and cancellations.
+ */
+export function isLimitFallbackError(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  if (isCancelledTurnError(trimmed)) return false;
+  if (USER_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
+  return (
+    USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(trimmed)) ||
+    LIMIT_FALLBACK_EXTRA_PATTERNS.some((pattern) => pattern.test(trimmed))
+  );
 }
 
 function clampUsageLimitDelay(ms: number): number {

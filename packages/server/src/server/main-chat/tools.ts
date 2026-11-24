@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   MAIN_CHAT_MEMORY_PATH_MAX_CHARS,
+  MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS,
   MainChatDecisionOptionSchema,
   MainChatDecisionRecordSchema,
   MainChatMemoryFileContentSchema,
@@ -8,6 +9,9 @@ import {
   MainChatPlanRecordSchema,
   MainChatReceiptCheckSchema,
   MainChatReworkRecordSchema,
+  MainChatRoutineKindSchema,
+  MainChatRoutineRecordSchema,
+  MainChatSettingsProposalRecordSchema,
   MainChatTaskIsolationSchema,
   MainChatTaskModeSchema,
   MainChatTaskReceiptSchema,
@@ -15,6 +19,7 @@ import {
   MainChatTaskReviewVerdictSchema,
   isMainChatLabels,
 } from "@getpaseo/protocol/main-chat";
+import { ScheduleCadenceSchema } from "@getpaseo/protocol/schedule/types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import type { AgentManager } from "../agent/agent-manager.js";
 import { isPaseoToolEnabled } from "../agent/paseo-tool-policy.js";
@@ -606,4 +611,252 @@ export function registerMainChatTools(options: {
       });
     },
   });
+
+  register({
+    name: "routine_list",
+    title: "List main-chat and leader scheduled routines",
+    description:
+      "列出归属于主对话或常驻方向主管的周期例行任务与一次性提醒（底层复用 Paseo Schedule/Heartbeat 引擎）。",
+    inputSchema: z.object({
+      conversationId: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("可选按对话 ID 过滤；不传则返回全部主对话与方向主管的例行任务。"),
+      includeCompleted: z.boolean().optional().describe("是否包含已完成的例行任务，默认 true。"),
+    }),
+    outputSchema: {
+      routines: z.array(MainChatRoutineRecordSchema),
+    },
+    async handler(rawInput) {
+      const input = rawInput as { conversationId?: string; includeCompleted?: boolean };
+      const routines = await mainChatService.listRoutines({
+        conversationId: input.conversationId,
+        includeCompleted: input.includeCompleted,
+      });
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ routines }),
+      });
+    },
+  });
+
+  register({
+    name: "routine_create",
+    title: "Create a scheduled routine or one-shot reminder",
+    description:
+      "为主对话或常驻方向主管创建周期例行任务（every/cron）或一次性提醒（one_shot，使用 delayMinutes 或 runAt），执行结果会写入主对话后台折叠流。",
+    inputSchema: z.object({
+      name: z
+        .string()
+        .trim()
+        .min(1)
+        .max(80)
+        .optional()
+        .describe("简短例行任务名称（例如：每日早报巡检）。"),
+      prompt: z.string().trim().min(1).describe("触发时要执行的任务指令或提醒内容。"),
+      kind: MainChatRoutineKindSchema.optional().describe(
+        '"recurring" 表示周期任务，"one_shot" 表示一次性提醒（maxRuns=1）。',
+      ),
+      everyMinutes: z
+        .number()
+        .int()
+        .positive()
+        .max(43_200)
+        .optional()
+        .describe("周期任务的间隔分钟数（与 cron 二选一）。"),
+      cron: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe('标准 5 段 cron 表达式（例如 "0 9 * * 1-5"）。'),
+      timezone: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("可选 IANA 时区，例如 Asia/Shanghai。"),
+      cadence: ScheduleCadenceSchema.optional().describe("可选直接传入结构化 ScheduleCadence。"),
+      delayMinutes: z
+        .number()
+        .int()
+        .positive()
+        .max(43_200)
+        .optional()
+        .describe("一次性提醒的延迟分钟数（例如 30 表示 30 分钟后提醒）。"),
+      runAt: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("一次性提醒的 ISO 8601 绝对时间（必须晚于当前时间）。"),
+      conversationId: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("归属对话 ID；主对话默认 conv_main，方向主管默认归属自身方向。"),
+      maxRuns: z.number().int().positive().nullable().optional().describe("可选最大执行次数上限。"),
+      expiresAt: z.string().nullable().optional().describe("可选过期时间 ISO 字符串。"),
+      runOnCreate: z.boolean().optional().describe("是否创建后立即执行一次，默认 false。"),
+    }),
+    outputSchema: {
+      routine: MainChatRoutineRecordSchema,
+      guidance: z.string(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as {
+        name?: string;
+        prompt: string;
+        kind?: "recurring" | "one_shot";
+        everyMinutes?: number;
+        cron?: string;
+        timezone?: string;
+        cadence?: z.infer<typeof ScheduleCadenceSchema>;
+        delayMinutes?: number;
+        runAt?: string;
+        conversationId?: string;
+        maxRuns?: number | null;
+        expiresAt?: string | null;
+        runOnCreate?: boolean;
+      };
+      let cadence = input.cadence;
+      if (!cadence && input.cron) {
+        cadence = {
+          type: "cron",
+          expression: input.cron,
+          ...(input.timezone ? { timezone: input.timezone } : {}),
+        };
+      } else if (!cadence && input.everyMinutes) {
+        cadence = { type: "every", everyMs: input.everyMinutes * 60_000 };
+      }
+      const targetConversationId =
+        input.conversationId ??
+        (isLeaderCaller ? (conversationMeta?.conversationId ?? undefined) : undefined);
+      const routine = await mainChatService.createRoutine({
+        name: input.name,
+        prompt: input.prompt,
+        kind: input.kind,
+        cadence,
+        delayMinutes: input.delayMinutes,
+        runAt: input.runAt,
+        conversationId: targetConversationId,
+        maxRuns: input.maxRuns,
+        expiresAt: input.expiresAt,
+        runOnCreate: input.runOnCreate,
+      });
+      const guidance = `已创建${routine.kind === "one_shot" ? "一次性提醒" : "周期例行任务"}「${routine.name ?? routine.id}」（id=${routine.id}），下次触发时间：${routine.nextRunAt ?? "待排期"}。`;
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({ routine, guidance }),
+      });
+    },
+  });
+
+  register({
+    name: "routine_manage",
+    title: "Pause, resume, run once, or delete a main-chat routine",
+    description:
+      "对归属主对话或方向主管的例行任务执行暂停（pause）、恢复（resume）、立即执行一次（run_once）或删除（delete）。",
+    inputSchema: z.object({
+      routineId: z.string().trim().min(1).describe("例行任务 ID。"),
+      action: z.enum(["pause", "resume", "run_once", "delete"]).describe("操作类型。"),
+    }),
+    outputSchema: {
+      routine: MainChatRoutineRecordSchema.nullable(),
+      deleted: z.boolean(),
+      guidance: z.string(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as {
+        routineId: string;
+        action: "pause" | "resume" | "run_once" | "delete";
+      };
+      if (input.action === "delete") {
+        const res = await mainChatService.deleteRoutine(input.routineId);
+        return addModelVisibleStructuredContent({
+          content: [],
+          structuredContent: ensureValidJson({
+            routine: null,
+            deleted: res.deleted,
+            guidance: `已删除例行任务 ${input.routineId}。`,
+          }),
+        });
+      }
+      let routine: Awaited<ReturnType<typeof mainChatService.pauseRoutine>>;
+      let actionLabel: string;
+      if (input.action === "pause") {
+        routine = await mainChatService.pauseRoutine(input.routineId);
+        actionLabel = "暂停";
+      } else if (input.action === "resume") {
+        routine = await mainChatService.resumeRoutine(input.routineId);
+        actionLabel = "恢复";
+      } else {
+        routine = await mainChatService.runRoutineOnce(input.routineId);
+        actionLabel = "立即执行一次";
+      }
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({
+          routine,
+          deleted: false,
+          guidance: `已对例行任务「${routine.name ?? routine.id}」执行${actionLabel}，当前状态：${routine.status}。`,
+        }),
+      });
+    },
+  });
+
+  if (isMainChatLabels(caller.labels)) {
+    register({
+      name: "settings_propose_patch",
+      title: "Propose an allowlisted main-chat settings patch for user approval",
+      description: `在主对话流生成原生「配置变更审批卡」，提议修改白名单内的主对话配置（绝不静默落盘，必须等待用户点击确认应用或拒绝）。允许的配置键：${MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS.join(", ")}。`,
+      inputSchema: z.object({
+        title: z
+          .string()
+          .trim()
+          .min(1)
+          .max(80)
+          .optional()
+          .describe("简短的配置变更提案标题（例如：调整压缩窗口封顶至 400k）。"),
+        reason: z.string().trim().min(1).max(400).describe("一句话说明为什么要调整这些配置。"),
+        changes: z
+          .record(z.string(), z.unknown())
+          .describe(
+            "键为白名单配置项（如 compaction.windowCapTokens、cacheKeepalive.enabled、limitFallbacks、nightMode.enabled 等），值为期望的新值。",
+          ),
+      }),
+      outputSchema: {
+        proposal: MainChatSettingsProposalRecordSchema.nullable(),
+        noOpSummary: z.string().nullable(),
+        guidance: z.string(),
+      },
+      async handler(rawInput) {
+        const input = rawInput as {
+          title?: string;
+          reason: string;
+          changes: Record<string, unknown>;
+        };
+        const result = await mainChatService.proposeSettingsPatch({
+          mainAgentId: callerAgentId,
+          title: input.title,
+          reason: input.reason,
+          changes: input.changes,
+        });
+        const guidance = result.proposal
+          ? `已在主对话流展示「配置变更审批卡」（id=${result.proposal.id}），请用一两句话说明变更内容并提示用户点击「确认应用」或「拒绝」；绝不要声称配置已生效。`
+          : (result.noOpSummary ?? "配置无变化。");
+        return addModelVisibleStructuredContent({
+          content: [],
+          structuredContent: ensureValidJson({
+            proposal: result.proposal,
+            noOpSummary: result.noOpSummary,
+            guidance,
+          }),
+        });
+      },
+    });
+  }
 }

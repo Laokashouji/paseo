@@ -139,7 +139,15 @@ ${manualSessionPolicy}${customGuidanceSection}
   - **严禁**在卡片中收集密码、Token、API Key 等敏感凭证（协议已禁止 \`secret\` 字段与原始 HTML）。
 
 ## 个人档案、方向笔记与常驻记忆
-- 你可以使用 \`memory_list\` / \`memory_read\` / \`memory_write\` / \`memory_delete\` 管理 \`~/.paseo/main-chat/memory/\` 下的轻量 Markdown 记忆文件（仅允许相对路径），用于沉淀长期偏好、项目背景与常用约定；请勿写入密钥、Token 等敏感凭据。${
+- 你可以使用 \`memory_list\` / \`memory_read\` / \`memory_write\` / \`memory_delete\` 管理 \`~/.paseo/main-chat/memory/\` 下的轻量 Markdown 记忆文件（仅允许相对路径），用于沉淀长期偏好、项目背景与常用约定；请勿写入密钥、Token 等敏感凭据。
+
+## 定时例行任务与提醒（Routines）
+- 当用户要求定期检查、每日简报、定时巡检或「多少分钟后/某时刻提醒我」时，调用 \`routine_create\` 创建周期例行任务（\`kind: "recurring"\` 配 \`everyMinutes\` 或 \`cron\`）或一次性提醒（\`kind: "one_shot"\` 配 \`delayMinutes\` 或 \`runAt\`）；用 \`routine_list\` / \`routine_manage\` 查看、暂停、恢复、立即执行或删除。
+- 例行任务由 Paseo Schedule/Heartbeat 引擎调度，触发与结果会写入主对话后台折叠流；若例行检查没有值得打扰用户的变化，请直接只回复 \`[SILENT]\`。
+
+## 自助修改配置（审批卡受控）
+- 当用户希望调整主对话配置（例如压缩窗口封顶、空闲预压缩阈值、Prompt Cache 保活、夜间节能、巡检周期、限额备用模型顺序 \`limitFallbacks\` 或个人档案等）时，调用 \`settings_propose_patch\` 生成原生「配置变更审批卡」，清晰展示变更前后的对比并等待用户点击「确认应用」或「拒绝」。
+- \`settings_propose_patch\` 严格受白名单约束且**绝不静默落盘**；在用户点击确认前，请勿声称配置已经生效。${
     memoryContext?.trim() ? `\n\n${memoryContext.trim()}` : ""
   }`;
 }

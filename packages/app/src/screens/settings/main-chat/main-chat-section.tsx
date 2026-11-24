@@ -8,6 +8,7 @@ import {
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
   type MainChatIntervals,
+  type MainChatLimitFallbackEvent,
   type MainChatMetrics,
   type MainChatNightModeConfig,
   type MainChatSettings,
@@ -55,8 +56,11 @@ import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute } from "@/utils/host-routes";
+import { MainChatCostControlPanel } from "./cost-control-panel";
+import { MainChatLimitFallbacksPanel } from "./limit-fallbacks-panel";
 import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
+import { MainChatRoutinesPanel } from "./routines-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
 
@@ -202,6 +206,7 @@ const patrolIconBusy = <ThemedSpinner size="small" uniProps={mutedIconMapping} /
 
 const EXPANDED_STATE = { expanded: true } as const;
 const COLLAPSED_STATE = { expanded: false } as const;
+const EMPTY_LIMIT_FALLBACK_EVENTS: readonly MainChatLimitFallbackEvent[] = [];
 
 function useMainChatSettingsHostState() {
   const hosts = useHosts();
@@ -245,6 +250,9 @@ function useMainChatSettingsHostState() {
   );
   const nightModeStatus = useMainChatSettingsStore((state) =>
     selectedServerId ? state.nightModeStatusByServerId[selectedServerId] : undefined,
+  );
+  const cacheKeepaliveStatus = useMainChatSettingsStore((state) =>
+    selectedServerId ? (state.cacheKeepaliveStatusByServerId[selectedServerId] ?? null) : null,
   );
   const usageSummary = useMainChatSettingsStore((state) =>
     selectedServerId ? (state.usageByServerId[selectedServerId] ?? null) : null,
@@ -297,6 +305,7 @@ function useMainChatSettingsHostState() {
     client,
     settings,
     nightModeStatus,
+    cacheKeepaliveStatus,
     usageSummary,
     usageLoading,
     isLoading,
@@ -424,6 +433,7 @@ function useMainChatSettingsOverviewMetrics(input: {
 }): {
   mainChatAgentId: string | null;
   supervisorMetrics: MainChatMetrics | null;
+  recentLimitFallbacks: readonly MainChatLimitFallbackEvent[];
   refreshOverview: (targetAgentId?: string | null) => void;
 } {
   const { selectedServerId, mainChatEnabled, client } = input;
@@ -464,6 +474,7 @@ function useMainChatSettingsOverviewMetrics(input: {
   return {
     mainChatAgentId,
     supervisorMetrics: overview?.metrics ?? null,
+    recentLimitFallbacks: overview?.recentLimitFallbacks ?? EMPTY_LIMIT_FALLBACK_EVENTS,
     refreshOverview,
   };
 }
@@ -996,6 +1007,7 @@ export function MainChatSettingsSection(): ReactElement {
     client,
     settings,
     nightModeStatus,
+    cacheKeepaliveStatus,
     usageSummary,
     usageLoading,
     isLoading,
@@ -1046,7 +1058,7 @@ export function MainChatSettingsSection(): ReactElement {
 
   const mainChatEnabled = isMainChatEnabled(settings);
   const nightModeConfig = useMemo(() => resolveMainChatNightMode(settings), [settings]);
-  const { mainChatAgentId, supervisorMetrics, refreshOverview } =
+  const { mainChatAgentId, supervisorMetrics, recentLimitFallbacks, refreshOverview } =
     useMainChatSettingsOverviewMetrics({
       selectedServerId,
       mainChatEnabled,
@@ -1453,6 +1465,42 @@ export function MainChatSettingsSection(): ReactElement {
               serverId={selectedServerId}
               client={client}
               settings={settings}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.costControl.sectionTitle")}
+            info={t("mainChat.costControl.sectionDescription")}
+            testID="settings-main-chat-cost-control"
+          >
+            <MainChatCostControlPanel
+              serverId={selectedServerId}
+              settings={settings}
+              cacheKeepaliveStatus={cacheKeepaliveStatus}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.routines.sectionTitle")}
+            info={t("mainChat.routines.sectionDescription")}
+            testID="settings-main-chat-routines"
+          >
+            <MainChatRoutinesPanel serverId={selectedServerId} client={client} disabled={saving} />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.limitFallbacks.sectionTitle")}
+            info={t("mainChat.limitFallbacks.sectionDescription")}
+            testID="settings-main-chat-limit-fallbacks"
+          >
+            <MainChatLimitFallbacksPanel
+              serverId={selectedServerId}
+              settings={settings}
+              recentEvents={recentLimitFallbacks}
               disabled={saving}
               onApplyPatch={applyPatch}
             />

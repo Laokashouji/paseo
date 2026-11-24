@@ -394,6 +394,42 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
         : [item],
     );
 
+  const flushCompactionBackgroundRun = (
+    host: StreamItem,
+    body: StreamItem[],
+    isClosed: boolean,
+  ) => {
+    const tools = summarizeTurn(body, input.getGroupedCalls);
+    const expanded = input.expandedHostIds.has(host.id);
+    const summary = summaryRow(
+      host,
+      expanded,
+      tools,
+      input.previousSummaryRowsByHostId.get(host.id),
+      {
+        variant: "background",
+        backgroundMeta: {
+          label: extractBackgroundTurnLabel(host),
+          running: !isClosed,
+          kind: "compaction",
+        },
+      },
+    );
+    summaryRowsByHostId.set(host.id, summary);
+
+    const revealedItems = [host, ...(expanded ? expandCalls(body) : body)];
+    for (const item of revealedItems) {
+      hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
+      if (expanded) nestedItemIds.add(item.id);
+      else hostIdByHiddenRowId.set(item.id, host.id);
+    }
+    output.push(summary, ...(expanded ? revealedItems : []));
+  };
+
+  const shouldSuppressSilentBackgroundRun = (body: StreamItem[], isClosed: boolean): boolean =>
+    (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) ||
+    hasExplicitSilentReplyOnly(body, input.getGroupedCalls);
+
   const flushBackgroundRun = (host: StreamItem, body: StreamItem[], isClosed: boolean) => {
     // Remove the host item that the boundary loop just pushed before this run.
     if (output.length > 0 && output[output.length - 1] === host) {
@@ -410,10 +446,16 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       return;
     }
 
-    if (
-      (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) ||
-      hasExplicitSilentReplyOnly(body, input.getGroupedCalls)
-    ) {
+    const structuredMeta = getStructuredBackgroundTurnMeta(host);
+
+    // Compaction turns (native idle_precompact /compact or checkpoint summaries) always render as a
+    // single compact summary bar that expands in place, never hanging raw /compact or silent replies.
+    if (structuredMeta?.kind === "compaction") {
+      flushCompactionBackgroundRun(host, body, isClosed);
+      return;
+    }
+
+    if (shouldSuppressSilentBackgroundRun(body, isClosed)) {
       // Silent rounds stay in the `/main/history` activity audit view and are completely hidden in chat.
       return;
     }
@@ -422,7 +464,6 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
     const processItems = replyIndex >= 0 ? body.slice(0, replyIndex) : body;
     const conclusionItems = replyIndex >= 0 ? body.slice(replyIndex) : [];
 
-    const structuredMeta = getStructuredBackgroundTurnMeta(host);
     const tools = summarizeTurn(processItems, input.getGroupedCalls);
     const expanded = input.expandedHostIds.has(host.id);
     const summary = summaryRow(
