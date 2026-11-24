@@ -757,6 +757,15 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
       },
     });
 
+    useMainChatSettingsStore.setState({
+      settingsByServerId: {
+        srv_main: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          fleetScope: { mode: "allowlist", hostServerIds: ["srv_mac"] },
+        },
+      },
+    });
     useMainChatOverviewStore.setState({
       overviewsByKey: {
         [overviewStoreKey("srv_main", "agent_main")]: makeOverview({
@@ -1070,6 +1079,15 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
       })),
     });
     seedSessions({ mainClient: client });
+    useMainChatSettingsStore.setState({
+      settingsByServerId: {
+        srv_main: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          fleetScope: { mode: "all_connected", hostServerIds: [] },
+        },
+      },
+    });
     useMainChatConversationsStore.setState({
       fleetHostsByServerId: { srv_main: fleetHosts },
       localServerIdByServerId: { srv_main: "srv_main" },
@@ -1082,11 +1100,11 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
     expect(view.getByTestId("main-chat-fleet-capsule-bar")).toBeTruthy();
     expect(view.getByTestId("main-chat-unlinked-hosts-banner")).toBeTruthy();
 
-    // Expand host status list
+    // Expand grouped host panel
     fireEvent.click(view.getByTestId("main-chat-fleet-capsule-toggle"));
-    expect(view.getByTestId("main-chat-fleet-host-srv_main")).toBeTruthy();
-    expect(view.getByTestId("main-chat-fleet-host-srv_linked")).toBeTruthy();
-    expect(view.getByTestId("main-chat-fleet-unlinked-row-srv_mac_relay")).toBeTruthy();
+    expect(view.getByTestId("main-chat-group-host-srv_main-srv_main")).toBeTruthy();
+    expect(view.getByTestId("main-chat-group-host-srv_main-srv_linked")).toBeTruthy();
+    expect(view.getByTestId("main-chat-unmanaged-host-srv_mac_relay")).toBeTruthy();
 
     // Click one-click sync -> calls client.addHost with deterministic sourceKey/metadata and refreshes fleet hosts
     fireEvent.click(view.getByTestId("main-chat-fleet-sync-now"));
@@ -1099,6 +1117,9 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
       });
       expect(client.getMainChatFleetHosts).toHaveBeenCalledWith({ forceRefresh: true });
       expect(toastShowSpy).toHaveBeenCalled();
+      expect(view.getByTestId("main-chat-fleet-dismiss").getAttribute("aria-disabled")).not.toBe(
+        "true",
+      );
     });
 
     // Dismiss hides banner and exposes reopen chip on capsule bar
@@ -1223,6 +1244,15 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
 
     mockHostsState.value = clientHosts;
     seedSessions({ mainClient: client });
+    useMainChatSettingsStore.setState({
+      settingsByServerId: {
+        srv_main: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          fleetScope: { mode: "all_connected", hostServerIds: [] },
+        },
+      },
+    });
     useMainChatConversationsStore.setState({
       fleetHostsByServerId: { srv_main: localOnlyFleet },
       localServerIdByServerId: { srv_main: "srv_main" },

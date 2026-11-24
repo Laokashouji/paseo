@@ -7,13 +7,12 @@ import {
   type MainChatIntervals,
   type MainChatMetrics,
   type MainChatNightModeConfig,
-  type MainChatNightModeStatus,
   type MainChatSettings,
   type MainChatSettingsPatch,
 } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import equal from "fast-deep-equal";
-import { Power, Radar } from "lucide-react-native";
+import { ChevronDown, ChevronRight, Radar } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -24,16 +23,18 @@ import { SettingsSection } from "@/components/settings/headings/settings-section
 import { Button } from "@/components/ui/button";
 import { FormTextInput } from "@/components/ui/form-field";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { PressHighlight } from "@/components/ui/press-highlight";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import { SelectField, type SelectFieldOption } from "@/components/ui/select-field";
-import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { MainChatHostGroupsPanel } from "@/main-chat/host-groups-panel";
 import { overviewStoreKey, useMainChatOverviewStore } from "@/main-chat/overview-store";
 import { findMainChatAgentOnHost } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { StandingAuthPanel } from "@/main-chat/standing-auth-panel";
+import { useMainChatStewardStore } from "@/main-chat/steward-store";
 import {
   MAIN_CHAT_CAPABILITY_FIELDS,
   MAIN_CHAT_INTERVAL_FIELDS,
@@ -42,6 +43,7 @@ import {
   type MainChatIntervalFieldKey,
   type MainChatIntervalFieldSpec,
 } from "@/main-chat/style-presets";
+import { useMainChatHostGroups } from "@/main-chat/use-host-groups";
 import { buildSelectableProviderSelectorProviders } from "@/provider-selection/provider-selection";
 import { useHosts } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
@@ -49,14 +51,12 @@ import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute } from "@/utils/host-routes";
-import { MainChatFleetScopePanel } from "./fleet-scope-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
-import { MainChatStewardConflictsBanner, MainChatStewardRosterPanel } from "./steward-roster-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
-import { useMainChatSettingsMultiSteward } from "./use-steward-settings";
 
-const ThemedPower = withUnistyles(Power);
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedRadar = withUnistyles(Radar);
 const ThemedSpinner = withUnistyles(LoadingSpinner);
 
@@ -195,21 +195,8 @@ function pickPreferredServerId(
 const patrolIconIdle = <ThemedRadar size={14} uniProps={mutedIconMapping} />;
 const patrolIconBusy = <ThemedSpinner size="small" uniProps={mutedIconMapping} />;
 
-function resolveMasterStatusBadge(
-  mainChatEnabled: boolean,
-  nightModeStatus: MainChatNightModeStatus | undefined,
-): { variant: StatusBadgeVariant; labelKey: string } {
-  if (!mainChatEnabled) {
-    return { variant: "muted", labelKey: "mainChat.settings.master.stateDisabled" };
-  }
-  if (nightModeStatus?.state === "hibernating") {
-    return { variant: "muted", labelKey: "mainChat.nightMode.stateHibernating" };
-  }
-  if (nightModeStatus?.state === "throttled") {
-    return { variant: "warning", labelKey: "mainChat.nightMode.stateThrottled" };
-  }
-  return { variant: "success", labelKey: "mainChat.settings.master.stateActive" };
-}
+const EXPANDED_STATE = { expanded: true } as const;
+const COLLAPSED_STATE = { expanded: false } as const;
 
 function useMainChatSettingsHostState() {
   const hosts = useHosts();
@@ -283,16 +270,6 @@ function useMainChatSettingsHostState() {
     void loadUsage(selectedServerId, client).catch(() => undefined);
   }, [client, loadSettings, loadUsage, selectedServerId]);
 
-  const hostOptions = useMemo<SelectFieldOption<string>[]>(
-    () =>
-      capableHosts.map((host) => ({
-        id: host.serverId,
-        value: host.serverId,
-        label: host.label,
-      })),
-    [capableHosts],
-  );
-
   const hostLabelsByServerId = useMemo<Record<string, string>>(() => {
     const map: Record<string, string> = {};
     for (const host of capableHosts) {
@@ -323,7 +300,6 @@ function useMainChatSettingsHostState() {
     resetUsage,
     updateSettings,
     triggerPatrol,
-    hostOptions,
     hostLabelsByServerId,
     selectedHostDisplay,
   };
@@ -436,75 +412,6 @@ function useMainChatBackgroundModelSelector(
   };
 }
 
-const MainChatMasterCard = memo(function MainChatMasterCard({
-  hasMultipleHosts,
-  selectedServerId,
-  selectedHostDisplay,
-  hostOptions,
-  onSelectHost,
-  mainChatEnabled,
-  nightModeStatus,
-  saving,
-  onToggleEnabled,
-}: {
-  hasMultipleHosts: boolean;
-  selectedServerId: string | null;
-  selectedHostDisplay: { label: string } | null;
-  hostOptions: SelectFieldOption<string>[];
-  onSelectHost: (value: string) => void;
-  mainChatEnabled: boolean;
-  nightModeStatus: MainChatNightModeStatus | undefined;
-  saving: boolean;
-  onToggleEnabled: (enabled: boolean) => void;
-}): ReactElement {
-  const { t } = useTranslation();
-  const masterBadge = resolveMasterStatusBadge(mainChatEnabled, nightModeStatus);
-  return (
-    <View style={settingsStyles.card}>
-      {hasMultipleHosts ? (
-        <View style={[settingsStyles.row, styles.stackedRow]}>
-          <SelectField
-            label={t("mainChat.settings.hostLabel")}
-            value={selectedServerId}
-            selectedDisplay={selectedHostDisplay}
-            options={hostOptions}
-            onChange={onSelectHost}
-            placeholder={t("mainChat.settings.hostLabel")}
-            emptyText={t("mainChat.settings.noCapableHost")}
-          />
-        </View>
-      ) : null}
-
-      <View
-        style={[
-          settingsStyles.row,
-          hasMultipleHosts ? settingsStyles.rowBorder : null,
-          styles.switchRow,
-        ]}
-      >
-        <View style={styles.rowText}>
-          <View style={styles.masterTitleRow}>
-            <ThemedPower size={15} uniProps={mutedIconMapping} />
-            <Text style={settingsStyles.rowTitle}>{t("mainChat.settings.master.switchLabel")}</Text>
-            <StatusBadge size="xs" variant={masterBadge.variant} label={t(masterBadge.labelKey)} />
-          </View>
-          <Text style={settingsStyles.rowHint}>
-            {mainChatEnabled
-              ? (nightModeStatus?.reason ?? t("mainChat.settings.master.enabledHint"))
-              : t("mainChat.settings.master.disabledHint")}
-          </Text>
-        </View>
-        <Switch
-          value={mainChatEnabled}
-          disabled={saving}
-          onValueChange={onToggleEnabled}
-          testID="settings-main-chat-enabled-toggle"
-        />
-      </View>
-    </View>
-  );
-});
-
 function useMainChatSettingsOverviewMetrics(input: {
   selectedServerId: string | null;
   mainChatEnabled: boolean;
@@ -583,82 +490,284 @@ const SupervisorMetricsRow = memo(function SupervisorMetricsRow({
   );
 });
 
-const MainChatStewardTopSections = memo(function MainChatStewardTopSections({
-  multiSteward,
+interface MainChatAdvancedSettingsProps {
+  selectedServerId: string;
+  mainChatAgentId: string | null;
+  client: ReturnType<typeof useMainChatSettingsHostState>["client"];
+  settings: MainChatSettings;
+  nightModeConfig: MainChatNightModeConfig;
+  nightModeStatus: ReturnType<typeof useMainChatSettingsHostState>["nightModeStatus"];
+  usageSummary: ReturnType<typeof useMainChatSettingsHostState>["usageSummary"];
+  usageLoading: boolean;
+  resettingUsage: boolean;
+  lastPatrol: ReturnType<typeof useMainChatSettingsHostState>["lastPatrol"];
+  supervisorMetrics: MainChatMetrics | null;
+  patrolling: boolean;
+  patrolDisabled: boolean;
+  saving: boolean;
+  showWorkspaceFilter: boolean;
+  filterWorkspacesByActiveSteward: boolean;
+  hostLabelsByServerId: Record<string, string>;
+  modelModeOptions: SegmentedControlOption<MainChatBackgroundModelMode>[];
+  bgModel: ReturnType<typeof useMainChatBackgroundModelSelector>;
+  onToggleFilterWorkspaces: (enabled: boolean) => void;
+  onTriggerPatrol: () => void;
+  onRefreshUsage: () => void;
+  onResetUsage: () => void;
+  onUpdateNightMode: (patch: Partial<MainChatNightModeConfig>) => void;
+  onSelectModelMode: (mode: MainChatBackgroundModelMode) => void;
+  onSelectProvider: (provider: string) => void;
+  onSelectModel: (model: string) => void;
+  onSelectThinking: (value: string) => void;
+  onIntervalDraftChange: (key: IntervalFieldKey, text: string) => void;
+  onSaveIntervals: () => void;
+  onCapabilityToggle: (key: CapabilityKey, value: boolean) => void;
+}
+
+const MainChatAdvancedSettings = memo(function MainChatAdvancedSettings({
   selectedServerId,
-  onSelectHost,
-}: {
-  multiSteward: ReturnType<typeof useMainChatSettingsMultiSteward>;
-  selectedServerId: string | null;
-  onSelectHost: (serverId: string) => void;
-}): ReactElement {
+  mainChatAgentId,
+  client,
+  settings,
+  nightModeConfig,
+  nightModeStatus,
+  usageSummary,
+  usageLoading,
+  resettingUsage,
+  lastPatrol,
+  supervisorMetrics,
+  patrolling,
+  patrolDisabled,
+  saving,
+  showWorkspaceFilter,
+  filterWorkspacesByActiveSteward,
+  hostLabelsByServerId,
+  modelModeOptions,
+  bgModel,
+  onToggleFilterWorkspaces,
+  onTriggerPatrol,
+  onRefreshUsage,
+  onResetUsage,
+  onUpdateNightMode,
+  onSelectModelMode,
+  onSelectProvider,
+  onSelectModel,
+  onSelectThinking,
+  onIntervalDraftChange,
+  onSaveIntervals,
+  onCapabilityToggle,
+}: MainChatAdvancedSettingsProps): ReactElement {
   const { t } = useTranslation();
+  const isCustomBackgroundModel = settings.backgroundModel.mode === "custom";
+
   return (
     <>
-      <MainChatStewardConflictsBanner
-        conflicts={multiSteward.conflicts}
-        busyKey={multiSteward.conflictBusyKey}
-        onDisableLocalSteward={multiSteward.handleDisableLocalSteward}
-        onRemoveFromRemoteSteward={multiSteward.handleRemoveFromRemoteSteward}
-      />
-
-      {multiSteward.rosterEntries.length > 1 ? (
+      {showWorkspaceFilter ? (
         <SettingsSection
-          title={t("mainChat.stewards.roster.sectionTitle")}
-          info={t("mainChat.stewards.roster.sectionDescription")}
-          testID="settings-main-chat-steward-roster"
+          title={t("mainChat.stewards.roster.filterWorkspacesTitle")}
+          info={t("mainChat.stewards.roster.filterWorkspacesHint")}
+          testID="settings-main-chat-workspace-filter"
         >
-          <MainChatStewardRosterPanel
-            entries={multiSteward.rosterEntries}
-            selectedServerId={selectedServerId}
-            activeStewardServerId={multiSteward.activeStewardServerId}
-            filterWorkspacesByActiveSteward={multiSteward.filterWorkspacesByActiveSteward}
-            onSelectHost={onSelectHost}
-            onSetDefault={multiSteward.handleSetDefault}
-            onToggleFilterWorkspaces={multiSteward.setFilterWorkspacesByActiveSteward}
-          />
+          <View style={settingsStyles.card}>
+            <View style={[settingsStyles.row, styles.switchRow]}>
+              <View style={styles.rowText}>
+                <Text style={settingsStyles.rowTitle}>
+                  {t("mainChat.stewards.roster.filterWorkspacesTitle")}
+                </Text>
+                <Text style={settingsStyles.rowHint}>
+                  {t("mainChat.stewards.roster.filterWorkspacesHint")}
+                </Text>
+              </View>
+              <Switch
+                value={filterWorkspacesByActiveSteward}
+                onValueChange={onToggleFilterWorkspaces}
+                testID="settings-main-chat-filter-workspaces-toggle"
+              />
+            </View>
+          </View>
         </SettingsSection>
       ) : null}
-    </>
-  );
-});
 
-const MainChatFleetScopeSection = memo(function MainChatFleetScopeSection({
-  visible,
-  selectedServerId,
-  selectedHostLabel,
-  fleetScope,
-  multiSteward,
-  saving,
-}: {
-  visible: boolean;
-  selectedServerId: string | null;
-  selectedHostLabel: string | undefined;
-  fleetScope: MainChatSettings["fleetScope"];
-  multiSteward: ReturnType<typeof useMainChatSettingsMultiSteward>;
-  saving: boolean;
-}): ReactElement | null {
-  const { t } = useTranslation();
-  if (!visible || !selectedServerId) return null;
-  return (
-    <SettingsSection
-      title={t("mainChat.stewards.scope.sectionTitle")}
-      info={t("mainChat.stewards.scope.sectionDescription")}
-      testID="settings-main-chat-fleet-scope"
-    >
-      <MainChatFleetScopePanel
-        selectedServerId={selectedServerId}
-        selectedHostLabel={selectedHostLabel ?? selectedServerId}
-        fleetScope={fleetScope}
-        availableRemoteHosts={multiSteward.selectedAvailableRemoteHosts}
-        inScopeHosts={multiSteward.selectedInScopeHosts}
-        clientHosts={multiSteward.clientHosts}
-        otherOwnerNamesByTargetServerId={multiSteward.otherOwnerNamesByTargetServerId}
-        saving={saving || multiSteward.scopeBusy}
-        onChangeMode={multiSteward.handleChangeFleetScopeMode}
-        onToggleRemoteHost={multiSteward.handleToggleRemoteHost}
-      />
-    </SettingsSection>
+      <SettingsSection
+        title={t("mainChat.actions.triggerPatrol")}
+        info={t("mainChat.settings.patrolNowHint")}
+        testID="settings-main-chat-patrol"
+      >
+        <View style={settingsStyles.card}>
+          <View style={[settingsStyles.row, styles.actionRow]}>
+            <View style={styles.rowText}>
+              <Text style={settingsStyles.rowTitle}>{t("mainChat.actions.triggerPatrol")}</Text>
+              <Text style={settingsStyles.rowHint}>
+                {lastPatrol?.summary ?? t("mainChat.settings.patrolNowHint")}
+              </Text>
+            </View>
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={patrolling ? patrolIconBusy : patrolIconIdle}
+              onPress={onTriggerPatrol}
+              disabled={patrolDisabled}
+              testID="settings-main-chat-patrol-now"
+            >
+              {t("mainChat.actions.triggerPatrolShort")}
+            </Button>
+          </View>
+          <SupervisorMetricsRow metrics={supervisorMetrics} />
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.usage.sectionTitle")}
+        info={t("mainChat.usage.sectionDescription")}
+        testID="settings-main-chat-token-usage"
+      >
+        <MainChatTokenUsagePanel
+          usage={usageSummary}
+          loading={usageLoading}
+          resetting={resettingUsage}
+          onRefresh={onRefreshUsage}
+          onReset={onResetUsage}
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.nightMode.sectionTitle")}
+        info={t("mainChat.nightMode.sectionDescription")}
+        testID="settings-main-chat-night-mode"
+      >
+        <MainChatNightModePanel
+          serverId={selectedServerId}
+          nightMode={nightModeConfig}
+          status={nightModeStatus}
+          disabled={saving}
+          onUpdateNightMode={onUpdateNightMode}
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.settings.backgroundModel.title")}
+        info={t("mainChat.settings.backgroundModel.description")}
+        testID="settings-main-chat-background-model"
+      >
+        <View style={settingsStyles.card}>
+          <View style={[settingsStyles.row, styles.stackedRow]}>
+            <SegmentedControl
+              options={modelModeOptions}
+              value={settings.backgroundModel.mode}
+              onValueChange={onSelectModelMode}
+              testID="settings-main-chat-model-mode"
+            />
+            <Text style={settingsStyles.rowHint}>
+              {t(getBackgroundModelModeHintKey(settings.backgroundModel.mode))}
+            </Text>
+          </View>
+
+          {isCustomBackgroundModel ? (
+            <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.stackedRow]}>
+              <SelectField
+                label={t("mainChat.settings.backgroundModel.providerLabel")}
+                value={bgModel.selectedProviderEntry?.provider ?? null}
+                selectedDisplay={bgModel.selectedProviderDisplay}
+                options={bgModel.providerOptions}
+                loading={bgModel.providersLoading}
+                onChange={onSelectProvider}
+                placeholder={t("mainChat.settings.backgroundModel.providerPlaceholder")}
+                emptyText={t("mainChat.settings.backgroundModel.noProviders")}
+              />
+
+              <SelectField
+                label={t("mainChat.settings.backgroundModel.modelLabel")}
+                value={bgModel.selectedModelDef?.id ?? null}
+                selectedDisplay={bgModel.selectedModelDisplay}
+                options={bgModel.modelOptions}
+                loading={bgModel.providersLoading}
+                searchable
+                onChange={onSelectModel}
+                placeholder={t("mainChat.settings.backgroundModel.modelPlaceholder")}
+                emptyText={t("mainChat.settings.backgroundModel.noModels")}
+              />
+
+              {bgModel.showThinkingSelect ? (
+                <SelectField
+                  label={t("mainChat.settings.backgroundModel.thinkingLabel")}
+                  value={settings.backgroundModel.thinkingOptionId ?? ""}
+                  selectedDisplay={bgModel.selectedThinkingDisplay}
+                  options={bgModel.thinkingOptions}
+                  onChange={onSelectThinking}
+                  placeholder={t("mainChat.settings.backgroundModel.thinkingDefault")}
+                  emptyText={t("mainChat.settings.backgroundModel.thinkingDefault")}
+                />
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.settings.intervals.title")}
+        info={t("mainChat.settings.intervals.description")}
+        testID="settings-main-chat-intervals"
+      >
+        <View style={settingsStyles.card}>
+          {INTERVAL_FIELDS.map((field, index) => (
+            <IntervalFieldRow
+              key={field.key}
+              field={field}
+              index={index}
+              committedValue={settings.intervals[field.key]}
+              resetScope={selectedServerId}
+              onChange={onIntervalDraftChange}
+            />
+          ))}
+          <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.saveFooter]}>
+            <Button
+              variant="default"
+              size="sm"
+              onPress={onSaveIntervals}
+              disabled={saving}
+              testID="settings-main-chat-intervals-save"
+            >
+              {t("mainChat.settings.intervals.saveButton")}
+            </Button>
+          </View>
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.settings.capabilities.title")}
+        info={t("mainChat.settings.capabilities.description")}
+        testID="settings-main-chat-capabilities"
+      >
+        <View style={settingsStyles.card}>
+          {CAPABILITY_FIELDS.map((field, index) => (
+            <CapabilityToggleRow
+              key={field.key}
+              field={field}
+              index={index}
+              value={settings.capabilities[field.key]}
+              disabled={saving}
+              onToggle={onCapabilityToggle}
+            />
+          ))}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.standingAuth.sectionTitle")}
+        info={t("mainChat.standingAuth.sectionDescription")}
+        testID="settings-main-chat-standing-auth"
+      >
+        <View style={settingsStyles.card}>
+          <StandingAuthPanel
+            serverId={selectedServerId}
+            mainAgentId={mainChatAgentId}
+            client={client}
+            hostLabelsByServerId={hostLabelsByServerId}
+            variant="settings"
+          />
+        </View>
+      </SettingsSection>
+    </>
   );
 });
 
@@ -857,10 +966,45 @@ export function MainChatSettingsSection(): ReactElement {
     resetUsage,
     updateSettings,
     triggerPatrol,
-    hostOptions,
     hostLabelsByServerId,
     selectedHostDisplay,
   } = useMainChatSettingsHostState();
+
+  const filterWorkspacesByActiveSteward = useMainChatStewardStore(
+    (state) => state.filterWorkspacesByActiveSteward,
+  );
+  const setFilterWorkspacesByActiveSteward = useMainChatStewardStore(
+    (state) => state.setFilterWorkspacesByActiveSteward,
+  );
+
+  const handleSelectHost = useCallback(
+    (serverId: string) => {
+      setSelectedServerId(serverId);
+    },
+    [setSelectedServerId],
+  );
+
+  const groupsController = useMainChatHostGroups({
+    activeGroupServerId: selectedServerId,
+    onSelectGroup: handleSelectHost,
+  });
+
+  const activeGroups = groupsController.partition.groups;
+
+  // Keep Settings focused on an enabled group whenever at least one exists.
+  useEffect(() => {
+    if (activeGroups.length === 0) return;
+    if (selectedServerId && activeGroups.some((g) => g.ownerServerId === selectedServerId)) {
+      return;
+    }
+    const preferred =
+      activeGroups.find((g) => g.isDefault) ??
+      activeGroups.find((g) => g.ownerOnline) ??
+      activeGroups[0];
+    if (preferred) {
+      setSelectedServerId(preferred.ownerServerId);
+    }
+  }, [activeGroups, selectedServerId, setSelectedServerId]);
 
   const mainChatEnabled = isMainChatEnabled(settings);
   const nightModeConfig = useMemo(() => resolveMainChatNightMode(settings), [settings]);
@@ -878,25 +1022,15 @@ export function MainChatSettingsSection(): ReactElement {
   const [saving, setSaving] = useState(false);
   const [patrolling, setPatrolling] = useState(false);
   const [resettingUsage, setResettingUsage] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   useEffect(() => {
     setTitleDraft(settings.title);
     setIntervalDrafts(toIntervalDrafts(settings.intervals));
   }, [settings]);
 
-  const {
-    providersLoading,
-    enabledProviders,
-    selectedProviderEntry,
-    selectedModelDef,
-    providerOptions,
-    modelOptions,
-    thinkingOptions,
-    selectedProviderDisplay,
-    selectedModelDisplay,
-    selectedThinkingDisplay,
-    showThinkingSelect,
-  } = useMainChatBackgroundModelSelector(selectedServerId, settings.backgroundModel);
+  const bgModel = useMainChatBackgroundModelSelector(selectedServerId, settings.backgroundModel);
+  const { enabledProviders, selectedProviderEntry, selectedModelDef } = bgModel;
 
   const applyPatch = useCallback(
     async (patch: MainChatSettingsPatch, successMessage?: string) => {
@@ -914,29 +1048,15 @@ export function MainChatSettingsSection(): ReactElement {
     [client, selectedServerId, t, toast, updateSettings],
   );
 
-  const multiSteward = useMainChatSettingsMultiSteward({
-    capableHosts,
-    selectedServerId,
-    selectedClient: client,
-    selectedSettings: settings,
-    onApplyPatch: applyPatch,
-  });
-
   const handleSaveTitle = useCallback(() => {
     const trimmed = titleDraft.trim();
     if (!trimmed) return;
     void applyPatch({ title: trimmed }, t("mainChat.settings.renamedToast", { title: trimmed }));
   }, [applyPatch, t, titleDraft]);
 
-  const handleToggleMasterEnabled = useCallback(
-    (enabled: boolean) => {
-      void applyPatch(
-        { enabled },
-        enabled ? t("mainChat.settings.enabledToast") : t("mainChat.settings.disabledToast"),
-      );
-    },
-    [applyPatch, t],
-  );
+  const handleToggleAdvanced = useCallback(() => {
+    setAdvancedOpen((prev) => !prev);
+  }, []);
 
   const handleUpdateNightMode = useCallback(
     (patch: Partial<MainChatNightModeConfig>, successMessage?: string) => {
@@ -1053,13 +1173,6 @@ export function MainChatSettingsSection(): ReactElement {
     [t],
   );
 
-  const handleSelectHost = useCallback(
-    (value: string) => {
-      setSelectedServerId(value);
-    },
-    [setSelectedServerId],
-  );
-
   const handleSelectProvider = useCallback(
     (provider: string) => {
       const nextEntry = enabledProviders.find((entry) => entry.provider === provider);
@@ -1122,9 +1235,8 @@ export function MainChatSettingsSection(): ReactElement {
     () => saving || titleDraft.trim().length === 0 || titleDraft.trim() === settings.title,
     [saving, settings.title, titleDraft],
   );
-  const hasMultipleHosts = capableHosts.length > 1;
   const patrolDisabled = patrolling || isLoading;
-  const isCustomBackgroundModel = settings.backgroundModel.mode === "custom";
+  const selectedHostLabel = selectedHostDisplay?.label ?? selectedServerId ?? "";
 
   if (capableHosts.length === 0) {
     return (
@@ -1141,72 +1253,25 @@ export function MainChatSettingsSection(): ReactElement {
 
   return (
     <>
-      <MainChatStewardTopSections
-        multiSteward={multiSteward}
-        selectedServerId={selectedServerId}
-        onSelectHost={handleSelectHost}
-      />
-
       <SettingsSection
-        title={t("mainChat.settings.master.title")}
-        info={t("mainChat.settings.master.description")}
-        testID="settings-main-chat-master"
+        title={t("mainChat.groups.sectionTitle")}
+        info={t("mainChat.groups.sectionDescription")}
+        testID="settings-main-chat-groups"
       >
-        <MainChatMasterCard
-          hasMultipleHosts={hasMultipleHosts}
-          selectedServerId={selectedServerId}
-          selectedHostDisplay={selectedHostDisplay}
-          hostOptions={hostOptions}
-          onSelectHost={handleSelectHost}
-          mainChatEnabled={mainChatEnabled}
-          nightModeStatus={nightModeStatus}
-          saving={saving}
-          onToggleEnabled={handleToggleMasterEnabled}
-        />
+        <MainChatHostGroupsPanel controller={groupsController} />
       </SettingsSection>
 
-      <MainChatFleetScopeSection
-        visible={mainChatEnabled}
-        selectedServerId={selectedServerId}
-        selectedHostLabel={selectedHostDisplay?.label}
-        fleetScope={settings.fleetScope}
-        multiSteward={multiSteward}
-        saving={saving}
-      />
+      {activeGroups.length === 0 ? (
+        <View style={[settingsStyles.card, styles.emptyCard]} testID="settings-main-chat-no-groups">
+          <Text style={styles.emptyText}>{t("mainChat.groups.noActiveGroupHint")}</Text>
+        </View>
+      ) : null}
 
-      <SettingsSection
-        title={t("mainChat.usage.sectionTitle")}
-        info={t("mainChat.usage.sectionDescription")}
-        testID="settings-main-chat-token-usage"
-      >
-        <MainChatTokenUsagePanel
-          usage={usageSummary}
-          loading={usageLoading}
-          resetting={resettingUsage}
-          onRefresh={handleRefreshUsage}
-          onReset={handleResetUsage}
-        />
-      </SettingsSection>
-
-      {mainChatEnabled ? (
+      {mainChatEnabled && selectedServerId ? (
         <>
           <SettingsSection
-            title={t("mainChat.nightMode.sectionTitle")}
-            info={t("mainChat.nightMode.sectionDescription")}
-            testID="settings-main-chat-night-mode"
-          >
-            <MainChatNightModePanel
-              serverId={selectedServerId ?? ""}
-              nightMode={nightModeConfig}
-              status={nightModeStatus}
-              disabled={saving}
-              onUpdateNightMode={handleUpdateNightMode}
-            />
-          </SettingsSection>
-
-          <SettingsSection
-            title={t("mainChat.settings.identity.title")}
-            info={t("mainChat.settings.identity.description")}
+            title={t("mainChat.groups.basicSectionTitle", { host: selectedHostLabel })}
+            info={t("mainChat.groups.basicSectionDescription")}
             testID="settings-main-chat-identity"
           >
             <View style={settingsStyles.card}>
@@ -1220,7 +1285,7 @@ export function MainChatSettingsSection(): ReactElement {
                     size="sm"
                     style={styles.nameInput}
                     initialValue={settings.title}
-                    resetKey={`${selectedServerId ?? ""}:${settings.title}`}
+                    resetKey={`${selectedServerId}:${settings.title}`}
                     onChangeText={setTitleDraft}
                     placeholder={t("mainChat.defaultTitle")}
                     maxLength={40}
@@ -1239,27 +1304,6 @@ export function MainChatSettingsSection(): ReactElement {
                   </Button>
                 </View>
               </View>
-
-              <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.actionRow]}>
-                <View style={styles.rowText}>
-                  <Text style={settingsStyles.rowTitle}>{t("mainChat.actions.triggerPatrol")}</Text>
-                  <Text style={settingsStyles.rowHint}>
-                    {lastPatrol?.summary ?? t("mainChat.settings.patrolNowHint")}
-                  </Text>
-                </View>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  leftIcon={patrolling ? patrolIconBusy : patrolIconIdle}
-                  onPress={handleTriggerPatrol}
-                  disabled={patrolDisabled}
-                  testID="settings-main-chat-patrol-now"
-                >
-                  {t("mainChat.actions.triggerPatrolShort")}
-                </Button>
-              </View>
-
-              <SupervisorMetricsRow metrics={supervisorMetrics} />
             </View>
           </SettingsSection>
 
@@ -1283,129 +1327,66 @@ export function MainChatSettingsSection(): ReactElement {
             onRefreshOverview={refreshOverview}
           />
 
-          <SettingsSection
-            title={t("mainChat.settings.backgroundModel.title")}
-            info={t("mainChat.settings.backgroundModel.description")}
-            testID="settings-main-chat-background-model"
-          >
-            <View style={settingsStyles.card}>
-              <View style={[settingsStyles.row, styles.stackedRow]}>
-                <SegmentedControl
-                  options={modelModeOptions}
-                  value={settings.backgroundModel.mode}
-                  onValueChange={handleSelectModelMode}
-                  testID="settings-main-chat-model-mode"
-                />
+          <View style={styles.advancedWrap}>
+            <PressHighlight
+              onPress={handleToggleAdvanced}
+              style={[settingsStyles.card, styles.advancedToggle]}
+              highlightStyle={styles.advancedTogglePressed}
+              accessibilityRole="button"
+              accessibilityState={advancedOpen ? EXPANDED_STATE : COLLAPSED_STATE}
+              testID="settings-main-chat-advanced-toggle"
+            >
+              <View style={styles.rowText}>
+                <Text style={settingsStyles.rowTitle}>
+                  {t("mainChat.groups.advancedToggleTitle")}
+                </Text>
                 <Text style={settingsStyles.rowHint}>
-                  {t(getBackgroundModelModeHintKey(settings.backgroundModel.mode))}
+                  {t("mainChat.groups.advancedToggleHint")}
                 </Text>
               </View>
+              {advancedOpen ? (
+                <ThemedChevronDown size={16} uniProps={mutedIconMapping} />
+              ) : (
+                <ThemedChevronRight size={16} uniProps={mutedIconMapping} />
+              )}
+            </PressHighlight>
+          </View>
 
-              {isCustomBackgroundModel ? (
-                <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.stackedRow]}>
-                  <SelectField
-                    label={t("mainChat.settings.backgroundModel.providerLabel")}
-                    value={selectedProviderEntry?.provider ?? null}
-                    selectedDisplay={selectedProviderDisplay}
-                    options={providerOptions}
-                    loading={providersLoading}
-                    onChange={handleSelectProvider}
-                    placeholder={t("mainChat.settings.backgroundModel.providerPlaceholder")}
-                    emptyText={t("mainChat.settings.backgroundModel.noProviders")}
-                  />
-
-                  <SelectField
-                    label={t("mainChat.settings.backgroundModel.modelLabel")}
-                    value={selectedModelDef?.id ?? null}
-                    selectedDisplay={selectedModelDisplay}
-                    options={modelOptions}
-                    loading={providersLoading}
-                    searchable
-                    onChange={handleSelectModel}
-                    placeholder={t("mainChat.settings.backgroundModel.modelPlaceholder")}
-                    emptyText={t("mainChat.settings.backgroundModel.noModels")}
-                  />
-
-                  {showThinkingSelect ? (
-                    <SelectField
-                      label={t("mainChat.settings.backgroundModel.thinkingLabel")}
-                      value={settings.backgroundModel.thinkingOptionId ?? ""}
-                      selectedDisplay={selectedThinkingDisplay}
-                      options={thinkingOptions}
-                      onChange={handleSelectThinking}
-                      placeholder={t("mainChat.settings.backgroundModel.thinkingDefault")}
-                      emptyText={t("mainChat.settings.backgroundModel.thinkingDefault")}
-                    />
-                  ) : null}
-                </View>
-              ) : null}
-            </View>
-          </SettingsSection>
-
-          <SettingsSection
-            title={t("mainChat.settings.intervals.title")}
-            info={t("mainChat.settings.intervals.description")}
-            testID="settings-main-chat-intervals"
-          >
-            <View style={settingsStyles.card}>
-              {INTERVAL_FIELDS.map((field, index) => (
-                <IntervalFieldRow
-                  key={field.key}
-                  field={field}
-                  index={index}
-                  committedValue={settings.intervals[field.key]}
-                  resetScope={selectedServerId ?? ""}
-                  onChange={handleIntervalDraftChange}
-                />
-              ))}
-              <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.saveFooter]}>
-                <Button
-                  variant="default"
-                  size="sm"
-                  onPress={handleSaveIntervals}
-                  disabled={saving}
-                  testID="settings-main-chat-intervals-save"
-                >
-                  {t("mainChat.settings.intervals.saveButton")}
-                </Button>
-              </View>
-            </View>
-          </SettingsSection>
-
-          <SettingsSection
-            title={t("mainChat.settings.capabilities.title")}
-            info={t("mainChat.settings.capabilities.description")}
-            testID="settings-main-chat-capabilities"
-          >
-            <View style={settingsStyles.card}>
-              {CAPABILITY_FIELDS.map((field, index) => (
-                <CapabilityToggleRow
-                  key={field.key}
-                  field={field}
-                  index={index}
-                  value={settings.capabilities[field.key]}
-                  disabled={saving}
-                  onToggle={handleCapabilityToggle}
-                />
-              ))}
-            </View>
-          </SettingsSection>
-
-          <SettingsSection
-            title={t("mainChat.standingAuth.sectionTitle")}
-            info={t("mainChat.standingAuth.sectionDescription")}
-            testID="settings-main-chat-standing-auth"
-          >
-            <View style={settingsStyles.card}>
-              <StandingAuthPanel
-                serverId={selectedServerId}
-                mainAgentId={mainChatAgentId}
-                client={client}
-                hostLabelsByServerId={hostLabelsByServerId}
-                variant="settings"
-              />
-            </View>
-          </SettingsSection>
+          {advancedOpen ? (
+            <MainChatAdvancedSettings
+              selectedServerId={selectedServerId}
+              mainChatAgentId={mainChatAgentId}
+              client={client}
+              settings={settings}
+              nightModeConfig={nightModeConfig}
+              nightModeStatus={nightModeStatus}
+              usageSummary={usageSummary}
+              usageLoading={usageLoading}
+              resettingUsage={resettingUsage}
+              lastPatrol={lastPatrol}
+              supervisorMetrics={supervisorMetrics}
+              patrolling={patrolling}
+              patrolDisabled={patrolDisabled}
+              saving={saving}
+              showWorkspaceFilter={activeGroups.length > 1}
+              filterWorkspacesByActiveSteward={filterWorkspacesByActiveSteward}
+              hostLabelsByServerId={hostLabelsByServerId}
+              modelModeOptions={modelModeOptions}
+              bgModel={bgModel}
+              onToggleFilterWorkspaces={setFilterWorkspacesByActiveSteward}
+              onTriggerPatrol={handleTriggerPatrol}
+              onRefreshUsage={handleRefreshUsage}
+              onResetUsage={handleResetUsage}
+              onUpdateNightMode={handleUpdateNightMode}
+              onSelectModelMode={handleSelectModelMode}
+              onSelectProvider={handleSelectProvider}
+              onSelectModel={handleSelectModel}
+              onSelectThinking={handleSelectThinking}
+              onIntervalDraftChange={handleIntervalDraftChange}
+              onSaveIntervals={handleSaveIntervals}
+              onCapabilityToggle={handleCapabilityToggle}
+            />
+          ) : null}
         </>
       ) : null}
     </>
@@ -1493,5 +1474,19 @@ const styles = StyleSheet.create((theme) => ({
   },
   toggleRow: {
     gap: theme.spacing[3],
+  },
+  advancedWrap: {
+    marginTop: theme.spacing[1],
+  },
+  advancedToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[3],
+  },
+  advancedTogglePressed: {
+    opacity: 0.85,
   },
 }));

@@ -741,6 +741,12 @@ describe("task-ledger service, MCP tools, and session RPC end-to-end", () => {
       stalledCheckIntervalMs: 60_000,
     });
 
+    const rawStart = service.start.bind(service);
+    service.start = async () => {
+      await rawStart();
+      await service.updateSettings({ enabled: true });
+    };
+
     return {
       service,
       agentManager,

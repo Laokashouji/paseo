@@ -322,7 +322,8 @@ export function createDefaultMainChatNightMode(): MainChatNightModeConfig {
 export function isMainChatEnabled(
   settings: Pick<MainChatSettings, "enabled"> | null | undefined,
 ): boolean {
-  return settings?.enabled !== false;
+  if (!settings) return false;
+  return settings.enabled !== false;
 }
 
 export function resolveMainChatNightMode(
@@ -560,7 +561,7 @@ export function createMainChatCustomPresetId(
 
 export function createDefaultMainChatFleetScope(): MainChatFleetScope {
   return {
-    mode: "all_connected",
+    mode: "local_only",
     hostServerIds: [],
   };
 }
@@ -572,7 +573,7 @@ export function normalizeMainChatFleetScope(
   const mode: MainChatFleetScopeMode =
     scope?.mode === "local_only" || scope?.mode === "allowlist" || scope?.mode === "all_connected"
       ? scope.mode
-      : "all_connected";
+      : "local_only";
   const normalizedLocalId = localServerId?.trim() || null;
   const seen = new Set<string>();
   const hostServerIds: string[] = [];
@@ -625,7 +626,7 @@ export function createDefaultMainChatSettings(
 ): MainChatSettings {
   const preset = getMainChatStylePreset(style);
   return {
-    enabled: true,
+    enabled: false,
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
     activePresetId: preset.style,

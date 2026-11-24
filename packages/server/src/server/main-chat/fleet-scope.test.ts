@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -8,6 +8,8 @@ import type { HostDirectory } from "@getpaseo/protocol/hosts";
 import {
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
+  MAIN_CHAT_WORKSPACE_DIR_NAME,
+  createDefaultMainChatSettings,
   isHostAllowedInFleetScope,
   type MainChatFleetScope,
 } from "@getpaseo/protocol/main-chat";
@@ -68,17 +70,25 @@ function createRemoteSnapshot(agentId: string, title: string, cwd: string): Agen
   };
 }
 
-function createFakeRemoteClient(
-  agents: AgentSnapshotPayload[],
-): FleetRemoteDaemonClient & { subscribeCount: number; unsubscribeCount: number } {
+function createFakeRemoteClient(agents: AgentSnapshotPayload[]): FleetRemoteDaemonClient & {
+  subscribeCount: number;
+  unsubscribeCount: number;
+  emitEvent: (event: unknown) => void;
+} {
   let subscribeCount = 0;
   let unsubscribeCount = 0;
+  const listeners = new Set<(event: unknown) => void>();
   const client = {
     get subscribeCount() {
       return subscribeCount;
     },
     get unsubscribeCount() {
       return unsubscribeCount;
+    },
+    emitEvent(event: unknown) {
+      for (const listener of listeners) {
+        listener(event);
+      }
     },
     isConnected: true,
     fetchAgents: vi.fn(async () => ({
@@ -90,9 +100,11 @@ function createFakeRemoteClient(
     sendMessage: vi.fn(async () => {}),
     respondToPermission: vi.fn(async () => {}),
     cancelAgent: vi.fn(async () => {}),
-    subscribe: vi.fn(() => {
+    subscribe: vi.fn((listener: (event: unknown) => void) => {
       subscribeCount += 1;
+      listeners.add(listener);
       return () => {
+        listeners.delete(listener);
         unsubscribeCount += 1;
       };
     }),
@@ -256,7 +268,7 @@ describe("MainChat steward host-scope isolation (Slice 1)", () => {
         return (
           error instanceof MainChatFleetBridgeError &&
           error.code === "host_out_of_scope" &&
-          error.message.includes("管辖主机范围")
+          error.message.includes("未纳入当前主对话组")
         );
       });
 
@@ -370,6 +382,7 @@ describe("MainChat steward host-scope isolation (Slice 1)", () => {
 
     try {
       const updated = await service.updateSettings({
+        enabled: true,
         title: "工作管家",
         fleetScope: {
           mode: "allowlist",
@@ -465,6 +478,243 @@ describe("MainChat steward host-scope isolation (Slice 1)", () => {
       );
       const regularDir = regularDirResult.structuredContent as HostDirectory;
       expect(regularDir.hosts.map((h) => h.serverId)).toEqual(["srv_macbook", "srv_imac"]);
+    } finally {
+      service.stop();
+    }
+  });
+
+  it("starts fresh hosts in opt-in unmanaged mode and auto-migrates unused legacy state.json while preserving active stewards", async () => {
+    // 1. Fresh host starts disabled + local_only
+    const freshHome = await mkdtemp(path.join(os.tmpdir(), "paseo-optin-fresh-"));
+    tempDirs.push(freshHome);
+    const emptyAgentManager = {
+      listAgents: () => [],
+      getAgent: () => undefined,
+      getPluginTools: () => [],
+      subscribe: () => () => {},
+      updateAgentMetadata: vi.fn(async () => {}),
+      getTimelineStore: () => ({
+        list: async () => ({ rows: [], totalCount: 0, hasMoreBefore: false }),
+      }),
+    } as unknown as AgentManager;
+    const emptyAgentStorage = {
+      listActive: async () => [],
+      get: async () => null,
+    } as unknown as AgentStorage;
+    const emptyProviders = {
+      getSnapshot: () => ({ providers: [] }),
+    } as unknown as ProviderSnapshotManager;
+
+    const freshService = createMainChatService({
+      paseoHome: freshHome,
+      serverId: "srv_fresh",
+      hostLabel: "Fresh Mac",
+      agentManager: emptyAgentManager,
+      agentStorage: emptyAgentStorage,
+      providerSnapshotManager: emptyProviders,
+      workspaceRegistry: { get: () => undefined, listActive: () => [] },
+      createDirectoryWorkspace: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      logger,
+    });
+    await freshService.start();
+    try {
+      const settings = await freshService.getSettings();
+      expect(settings.enabled).toBe(false);
+      expect(settings.fleetScope).toEqual({ mode: "local_only", hostServerIds: [] });
+      expect(freshService.getNightModeStatus().state).toBe("disabled");
+    } finally {
+      freshService.stop();
+    }
+
+    // 2. Unused legacy state.json (enabled: true, all_connected, zero activity) migrates to unmanaged
+    const legacyUnusedHome = await mkdtemp(path.join(os.tmpdir(), "paseo-optin-unused-"));
+    tempDirs.push(legacyUnusedHome);
+    await mkdir(path.join(legacyUnusedHome, MAIN_CHAT_WORKSPACE_DIR_NAME), { recursive: true });
+    await writeFile(
+      path.join(legacyUnusedHome, MAIN_CHAT_WORKSPACE_DIR_NAME, "state.json"),
+      JSON.stringify({
+        version: 1,
+        settings: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          fleetScope: { mode: "all_connected", hostServerIds: [] },
+        },
+      }),
+      "utf8",
+    );
+    const unusedService = createMainChatService({
+      paseoHome: legacyUnusedHome,
+      serverId: "srv_imac",
+      hostLabel: "iMac",
+      agentManager: emptyAgentManager,
+      agentStorage: emptyAgentStorage,
+      providerSnapshotManager: emptyProviders,
+      workspaceRegistry: { get: () => undefined, listActive: () => [] },
+      createDirectoryWorkspace: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      logger,
+    });
+    await unusedService.start();
+    try {
+      const migrated = await unusedService.getSettings();
+      expect(migrated.enabled).toBe(false);
+      expect(migrated.fleetScope).toEqual({ mode: "local_only", hostServerIds: [] });
+    } finally {
+      unusedService.stop();
+    }
+
+    // 3. Active legacy state.json (has explicit allowlist) stays enabled with scope intact
+    const legacyActiveHome = await mkdtemp(path.join(os.tmpdir(), "paseo-optin-active-"));
+    tempDirs.push(legacyActiveHome);
+    await mkdir(path.join(legacyActiveHome, MAIN_CHAT_WORKSPACE_DIR_NAME), { recursive: true });
+    await writeFile(
+      path.join(legacyActiveHome, MAIN_CHAT_WORKSPACE_DIR_NAME, "state.json"),
+      JSON.stringify({
+        version: 1,
+        settings: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          fleetScope: { mode: "allowlist", hostServerIds: ["srv_macbook"] },
+        },
+      }),
+      "utf8",
+    );
+    const activeService = createMainChatService({
+      paseoHome: legacyActiveHome,
+      serverId: "srv_devbox",
+      hostLabel: "DevBox",
+      agentManager: emptyAgentManager,
+      agentStorage: emptyAgentStorage,
+      providerSnapshotManager: emptyProviders,
+      workspaceRegistry: { get: () => undefined, listActive: () => [] },
+      createDirectoryWorkspace: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      logger,
+    });
+    await activeService.start();
+    try {
+      const preserved = await activeService.getSettings();
+      expect(preserved.enabled).toBe(true);
+      expect(preserved.fleetScope).toEqual({ mode: "allowlist", hostServerIds: ["srv_macbook"] });
+    } finally {
+      activeService.stop();
+    }
+  });
+
+  it("supervises remote permission & error events only for in-scope hosts and cleans up on group leave", async () => {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paseo-remote-supervision-"));
+    tempDirs.push(homeDir);
+
+    const macbookSnapshot = createRemoteSnapshot("agent_mb_live", "Build App", "/Users/dev/app");
+    const imacSnapshot = createRemoteSnapshot("agent_imac_live", "Home Task", "/Users/dev/home");
+    const macbookClient = createFakeRemoteClient([macbookSnapshot]);
+    const imacClient = createFakeRemoteClient([imacSnapshot]);
+
+    const connectedHosts = createStubConnectedHosts({
+      selfId: "srv_devbox",
+      selfLabel: "DevBox",
+      remotes: [
+        { serverId: "srv_macbook", label: "MacBook", client: macbookClient },
+        { serverId: "srv_imac", label: "iMac", client: imacClient },
+      ],
+    });
+
+    const agentManager = {
+      listAgents: () => [],
+      getAgent: () => undefined,
+      getPluginTools: () => [],
+      subscribe: () => () => {},
+      updateAgentMetadata: vi.fn(async () => {}),
+      getTimelineStore: () => ({
+        list: async () => ({ rows: [], totalCount: 0, hasMoreBefore: false }),
+      }),
+    } as unknown as AgentManager;
+
+    const service = createMainChatService({
+      paseoHome: homeDir,
+      serverId: "srv_devbox",
+      hostLabel: "DevBox",
+      connectedHosts: () => connectedHosts,
+      agentManager,
+      agentStorage: {
+        listActive: async () => [],
+        get: async () => null,
+      } as unknown as AgentStorage,
+      providerSnapshotManager: {
+        getSnapshot: () => ({ providers: [] }),
+      } as unknown as ProviderSnapshotManager,
+      workspaceRegistry: { get: () => undefined, listActive: () => [] },
+      createDirectoryWorkspace: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      logger,
+    });
+
+    await service.start();
+    try {
+      await service.updateSettings({
+        enabled: true,
+        fleetScope: { mode: "allowlist", hostServerIds: ["srv_macbook"] },
+      });
+      await service.getFleetHosts({ forceRefresh: true });
+
+      // In-scope MacBook emits a red-line permission request -> tracked & queued by supervisor
+      macbookClient.emitEvent({
+        type: "agent_permission_request",
+        agentId: "agent_mb_live",
+        request: {
+          id: "perm_mb_1",
+          name: "Bash",
+          title: "git push --force",
+          description: "git push --force origin main",
+          kind: "tool",
+        },
+      });
+
+      const signalsAfterMacPerm = service.listPendingSignals?.() ?? [];
+      expect(
+        signalsAfterMacPerm.some(
+          (sig) => sig.serverId === "srv_macbook" && sig.agentId === "agent_mb_live",
+        ),
+      ).toBe(true);
+      expect(
+        (service.listTrackedApprovals?.() ?? []).some(
+          (entry) => entry.serverId === "srv_macbook" && entry.requestId === "perm_mb_1",
+        ),
+      ).toBe(true);
+
+      // Out-of-scope iMac is not attached at all -> emitting events does NOT enter supervisor
+      imacClient.emitEvent({
+        type: "agent_permission_request",
+        agentId: "agent_imac_live",
+        request: {
+          id: "perm_imac_1",
+          name: "Bash",
+          title: "git push --force",
+          description: "git push --force origin main",
+          kind: "tool",
+        },
+      });
+      expect(
+        (service.listPendingSignals?.() ?? []).some((sig) => sig.serverId === "srv_imac"),
+      ).toBe(false);
+      expect(
+        (service.listTrackedApprovals?.() ?? []).some((entry) => entry.serverId === "srv_imac"),
+      ).toBe(false);
+
+      // Removing MacBook from the group immediately clears its tracked remote approvals
+      await service.updateSettings({
+        fleetScope: { mode: "local_only", hostServerIds: [] },
+      });
+      expect(
+        (service.listTrackedApprovals?.() ?? []).some((entry) => entry.serverId === "srv_macbook"),
+      ).toBe(false);
+      // Let fire-and-forget triage persistence settle before tempDir cleanup
+      await new Promise((resolve) => setTimeout(resolve, 25));
     } finally {
       service.stop();
     }

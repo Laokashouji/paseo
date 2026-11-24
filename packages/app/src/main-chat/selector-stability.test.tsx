@@ -326,6 +326,7 @@ describe("Main Chat React rendering selector stability regressions (React #185)"
         settingsByServerId: {
           srv_1: {
             ...createDefaultMainChatSettings("conservative"),
+            enabled: true,
             title: "我的管家",
           },
         },
@@ -339,7 +340,10 @@ describe("Main Chat React rendering selector stability regressions (React #185)"
   });
 
   it("renders MainChatSettingsSection without React #185 infinite loops across unrelated store updates", async () => {
-    const defaultSettings = createDefaultMainChatSettings("conservative");
+    const defaultSettings = {
+      ...createDefaultMainChatSettings("conservative"),
+      enabled: true,
+    };
     const fakeClient = makeFakeClient(defaultSettings);
     seedSessionStore(fakeClient);
     useMainChatSettingsStore.setState({
@@ -365,8 +369,9 @@ describe("Main Chat React rendering selector stability regressions (React #185)"
       await Promise.resolve();
     });
 
-    expect(view.container.textContent).toContain("mainChat.settings.identity.title");
-    expect(view.container.textContent).toContain("mainChat.settings.backgroundModel.title");
+    expect(view.container.textContent).toContain("mainChat.groups.sectionTitle");
+    expect(view.container.textContent).toContain("mainChat.groups.basicSectionTitle");
+    expect(view.container.textContent).toContain("mainChat.groups.advancedToggleTitle");
     const rendersAfterMount = renderCount;
     expect(rendersAfterMount).toBeLessThan(10);
 

@@ -760,6 +760,26 @@ export class MainChatFleetAggregator {
     this.reconcileHosts(true);
   }
 
+  getCachedRemoteAgent(serverId: string, agentId: string): AggregatedHostAgent | null {
+    const trimmedServerId = serverId.trim();
+    if (!trimmedServerId || trimmedServerId === this.localServerId) return null;
+    if (this.isHostAllowed && !this.isHostAllowed(trimmedServerId)) return null;
+    const state = this.remoteStates.get(trimmedServerId);
+    if (!state) return null;
+    return state.agents.get(agentId) ?? null;
+  }
+
+  listCachedRemoteAgents(): AggregatedHostAgent[] {
+    const agents: AggregatedHostAgent[] = [];
+    for (const [serverId, state] of this.remoteStates.entries()) {
+      if (this.isHostAllowed && !this.isHostAllowed(serverId)) continue;
+      for (const agent of state.agents.values()) {
+        agents.push(agent);
+      }
+    }
+    return agents;
+  }
+
   listAvailableRemoteHosts(): AggregatedHostSummary[] {
     const normalized = this.normalizeConnectedHosts({ ignoreScope: true });
     const summaries: AggregatedHostSummary[] = [];

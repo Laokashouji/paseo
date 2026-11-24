@@ -9,7 +9,7 @@ import {
   type MainChatOverview,
 } from "@getpaseo/protocol/main-chat";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
@@ -181,7 +181,7 @@ function makeOverview(metricsOverrides?: Partial<MainChatOverview["metrics"]>): 
       usageLimitRetries: 0,
       ...metricsOverrides,
     },
-    settings: createDefaultMainChatSettings(),
+    settings: { ...createDefaultMainChatSettings(), enabled: true },
   };
 }
 
@@ -203,7 +203,7 @@ function makePaneContext(agentId: string): PaneContextValue {
 }
 
 function seedSession(agentsList: Agent[], clientOverrides?: Partial<DaemonClient>): DaemonClient {
-  const settings = createDefaultMainChatSettings();
+  const settings = { ...createDefaultMainChatSettings(), enabled: true };
   const overview = makeOverview();
   const client = {
     getMainChatSettings: vi.fn(async () => ({ settings, nightModeStatus: null, error: null })),
@@ -394,6 +394,8 @@ describe("Single-row Main Chat tray consolidation", () => {
       expect(client.getMainChatSettings).toHaveBeenCalled();
     });
 
+    const advancedToggle = await view.findByTestId("settings-main-chat-advanced-toggle");
+    fireEvent.click(advancedToggle);
     const metricsRow = await view.findByTestId("settings-main-chat-supervisor-metrics");
     expect(metricsRow.textContent).toContain('"held":7');
     expect(metricsRow.textContent).toContain('"autoContinued":4');

@@ -81,6 +81,9 @@ describe("main-chat real daemon E2E", () => {
       mcpEnabled: true,
       agentClients: baseClients,
     });
+    const initialSettings = await ctx.client.getMainChatSettings();
+    expect(initialSettings.settings?.enabled).toBe(false);
+    await ctx.client.updateMainChatSettings({ enabled: true });
   });
 
   afterEach(async () => {

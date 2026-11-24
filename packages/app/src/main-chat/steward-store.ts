@@ -237,7 +237,11 @@ function buildSingleRosterItem(input: {
   hostLabelMap: ReadonlyMap<string, string>;
 }): MainChatStewardRosterItem | null {
   const { serverId, candidate, settings, cached, fleetHosts, hostLabelMap } = input;
-  if (settings !== undefined && !isMainChatEnabled(settings)) {
+  if (settings !== undefined) {
+    if (!isMainChatEnabled(settings)) {
+      return null;
+    }
+  } else if (!cached && !candidate?.hasExistingMainChat) {
     return null;
   }
   const online = Boolean(candidate?.online);
@@ -422,7 +426,7 @@ export function detectStewardHostConflicts(input: {
 
   for (const serverId of input.capableServerIds) {
     const settings = input.settingsByServerId[serverId];
-    if (settings !== undefined && !isMainChatEnabled(settings)) continue;
+    if (!isMainChatEnabled(settings)) continue;
     enabledCount += 1;
     const managedIds = resolveStewardAllowedServerIds({
       stewardServerId: serverId,

@@ -419,6 +419,12 @@ describe("main-chat service, tools, and session", () => {
       semanticTriageRunner: harnessOptions.semanticTriageRunner,
     });
 
+    const rawStart = service.start.bind(service);
+    service.start = async () => {
+      await rawStart();
+      await service.updateSettings({ enabled: true });
+    };
+
     return { service, agentManager, createWorkspaceRecord };
   }
 

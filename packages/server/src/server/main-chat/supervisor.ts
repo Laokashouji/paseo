@@ -13,7 +13,10 @@ import {
   type MainChatSupervisionSignal,
   type MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
-import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type {
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+} from "@getpaseo/protocol/agent-types";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import type { AgentProvider, AgentTimelineItem } from "../agent/agent-sdk-types.js";
@@ -21,6 +24,12 @@ import type { AgentStorage } from "../agent/agent-storage.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type { StructuredGenerationDaemonConfig } from "../agent/structured-generation-providers.js";
 import type { MainChatContextSnapshotBuilder } from "./context-snapshot.js";
+import type { AggregatedHostAgent } from "./fleet-aggregator.js";
+import type {
+  FleetBridgeAgentsChangedEvent,
+  FleetBridgePermissionRequestedEvent,
+  FleetBridgePermissionResolvedEvent,
+} from "./fleet-bridge.js";
 import { evaluateMainChatNightMode, type MainChatNightModeEvaluation } from "./night-mode.js";
 import {
   buildMainChatInitialBriefingPrompt,
@@ -93,6 +102,15 @@ export interface MainChatSupervisorDependencies {
   isLeaderConversationActive?: (conversationId: string) => boolean;
   onPatrolTick?: () => Promise<void> | void;
   onAgentEvent?: (event: AgentManagerEvent) => void;
+  isHostAllowed?: (serverId: string) => boolean;
+  getRemoteAgent?: (serverId: string, agentId: string) => AggregatedHostAgent | null;
+  listRemoteAgents?: () => AggregatedHostAgent[];
+  respondRemotePermission?: (
+    serverId: string,
+    agentId: string,
+    requestId: string,
+    response: AgentPermissionResponse,
+  ) => Promise<void>;
   semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
   transientRetryDelayMs?: number;
   maxTransientAutoRetries?: number;
@@ -143,6 +161,10 @@ export interface MainChatSupervisor {
     conversationId?: string | null;
   }): { pausedDeadlineAt: string };
   getApprovalTracker(): ApprovalInterceptionTracker;
+  handleRemotePermissionRequested(event: FleetBridgePermissionRequestedEvent): void;
+  handleRemotePermissionResolved(event: FleetBridgePermissionResolvedEvent): void;
+  handleRemoteAgentsChanged(event: FleetBridgeAgentsChangedEvent): void;
+  reconcileRemoteHostScope(): void;
 }
 
 interface AgentToolLoopTracker {
@@ -394,6 +416,8 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   const autoApprovedPermissionKeys = new Set<string>();
   const toolLoopByAgent = new Map<string, AgentToolLoopTracker>();
   const initialBriefingSentAgents = new Set<string>();
+  const remoteErrorSigByAgentKey = new Map<string, string>();
+  const remoteStalledNotifiedAtByKey = new Map<string, number>();
 
   let unsubscribeEvents: (() => void) | null = null;
   let patrolTimer: ReturnType<typeof setTimeout> | null = null;
@@ -414,13 +438,20 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   });
 
   function hasActiveFleetWorkNow(): boolean {
-    return deps.agentManager
+    const localBusy = deps.agentManager
       .listAgents()
       .some(
         (agent) =>
           isObservedFleetAgent(agent) &&
           (agent.lifecycle === "running" || agent.pendingPermissions.size > 0),
       );
+    if (localBusy) return true;
+    const remoteAgents = deps.listRemoteAgents?.() ?? [];
+    return remoteAgents.some(
+      (agent) =>
+        (!deps.isHostAllowed || deps.isHostAllowed(agent.serverId)) &&
+        (agent.lifecycle === "running" || agent.pendingPermissions.length > 0),
+    );
   }
 
   function evaluatePowerState(nowMs: number = getNowMs()): MainChatNightModeEvaluation {
@@ -522,9 +553,65 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     );
   }
 
+  function revalidateRemoteSignal(signal: MainChatSupervisionSignal): SignalRevalidationOutcome {
+    const serverId = signal.serverId;
+    if (!serverId) return true;
+    if (deps.isHostAllowed && !deps.isHostAllowed(serverId)) {
+      return { valid: false, reason: "host_out_of_scope" };
+    }
+    const remoteAgent = signal.agentId
+      ? (deps.getRemoteAgent?.(serverId, signal.agentId) ?? null)
+      : null;
+    if (!remoteAgent) return true;
+    if (
+      (signal.kind === "needs_you" || signal.kind === "ask") &&
+      remoteAgent.pendingPermissions.length === 0 &&
+      !hasOpenDecisionForSignal(signal)
+    ) {
+      return { valid: false, reason: "remote_permission_resolved" };
+    }
+    if (
+      signal.kind === "interrupted" &&
+      remoteAgent.lifecycle !== "error" &&
+      !remoteAgent.lastError
+    ) {
+      return { valid: false, reason: "remote_error_recovered" };
+    }
+    if (signal.kind === "stalled" && remoteAgent.lifecycle !== "running") {
+      return { valid: false, reason: "remote_no_longer_running" };
+    }
+    return true;
+  }
+
+  function isAllStoppedSignalStillValid(task: MainChatTaskRecord): boolean {
+    const stillStopped = detectAllStoppedTasks({
+      tasks: [task],
+      getLiveAgentState: (agentId) => {
+        const live = deps.agentManager.getAgent(agentId);
+        return live ? { lifecycle: live.lifecycle, updatedAtMs: live.updatedAt.getTime() } : null;
+      },
+      hasPendingRetry: (agentId) => pendingRetryTimers.has(agentId),
+      nowMs: getNowMs(),
+      thresholdMs: deps.allStoppedThresholdMs ?? ALL_STOPPED_THRESHOLD_MS,
+    });
+    return stillStopped.length > 0;
+  }
+
+  async function isSignalAgentArchived(signal: MainChatSupervisionSignal): Promise<boolean> {
+    if (!signal.agentId || ARCHIVED_ALLOWED_SIGNAL_KINDS.has(signal.kind)) {
+      return false;
+    }
+    const stored = await deps.agentStorage.get(signal.agentId).catch(() => null);
+    return Boolean(stored?.archivedAt);
+  }
+
   async function revalidateSignalLive(
     signal: MainChatSupervisionSignal,
   ): Promise<SignalRevalidationOutcome> {
+    if (signal.serverId && signal.serverId !== deps.serverId) {
+      return revalidateRemoteSignal(signal);
+    }
+
     const task =
       (signal.taskId ? deps.store.getTask(signal.taskId) : null) ??
       (signal.agentId ? deps.store.findTaskByAgentId(signal.agentId) : null);
@@ -535,11 +622,8 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       if (taskVerdict !== null) return taskVerdict;
     }
 
-    if (signal.agentId && !ARCHIVED_ALLOWED_SIGNAL_KINDS.has(signal.kind)) {
-      const stored = await deps.agentStorage.get(signal.agentId).catch(() => null);
-      if (stored?.archivedAt) {
-        return { valid: false, reason: "agent_archived" };
-      }
+    if (await isSignalAgentArchived(signal)) {
+      return { valid: false, reason: "agent_archived" };
     }
 
     const triage = signal.agentId ? deps.store.getTriage(signal.agentId) : null;
@@ -558,20 +642,8 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     );
     if (liveVerdict !== null) return liveVerdict;
 
-    if (signal.kind === "all_stopped" && task) {
-      const stillStopped = detectAllStoppedTasks({
-        tasks: [task],
-        getLiveAgentState: (agentId) => {
-          const live = deps.agentManager.getAgent(agentId);
-          return live ? { lifecycle: live.lifecycle, updatedAtMs: live.updatedAt.getTime() } : null;
-        },
-        hasPendingRetry: (agentId) => pendingRetryTimers.has(agentId),
-        nowMs: getNowMs(),
-        thresholdMs: deps.allStoppedThresholdMs ?? ALL_STOPPED_THRESHOLD_MS,
-      });
-      if (stillStopped.length === 0) {
-        return { valid: false, reason: "task_no_longer_all_stopped" };
-      }
+    if (signal.kind === "all_stopped" && task && !isAllStoppedSignalStillValid(task)) {
+      return { valid: false, reason: "task_no_longer_all_stopped" };
     }
 
     return true;
@@ -2038,6 +2110,573 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     return res.queued ? 1 : 0;
   }
 
+  function remoteAgentCompositeKey(serverId: string, agentId: string): string {
+    return `${serverId}:${agentId}`;
+  }
+
+  function remotePermissionCompositeKey(
+    serverId: string,
+    agentId: string,
+    requestId: string,
+  ): string {
+    return `remote:${serverId}:${agentId}:${requestId}`;
+  }
+
+  function isRemoteHostInScope(serverId: string): boolean {
+    if (!serverId || serverId === deps.serverId) return false;
+    return !deps.isHostAllowed || deps.isHostAllowed(serverId);
+  }
+
+  function formatRemoteAgentDisplayTitle(
+    hostLabel: string,
+    serverId: string,
+    remoteAgent: AggregatedHostAgent | null,
+    agentId: string,
+  ): string {
+    const hostTag = hostLabel.trim() || serverId;
+    const rawTitle =
+      remoteAgent?.title.trim() || (remoteAgent?.cwd ? basenameOf(remoteAgent.cwd) : agentId);
+    return `[${hostTag}] ${rawTitle}`;
+  }
+
+  function resolveRemoteRoute(
+    agentId: string,
+    remoteAgent: AggregatedHostAgent | null,
+  ): {
+    managed: boolean;
+    task: MainChatTaskRecord | null;
+    conversationId: string | null;
+    quiet: boolean;
+  } {
+    const task = deps.store.findTaskByAgentId(agentId);
+    const parentId = remoteAgent ? getParentAgentIdFromLabels(remoteAgent.labels) : null;
+    const taskMeta = remoteAgent ? getMainChatTaskMetaFromLabels(remoteAgent.labels) : null;
+    const managed = Boolean(task || (parentId && taskMeta?.planId) || taskMeta?.taskId);
+    const quiet = task
+      ? task.quiet !== false
+      : managed && remoteAgent?.labels[MAIN_CHAT_TASK_QUIET_LABEL] !== "false";
+    return {
+      managed,
+      task,
+      conversationId: task?.conversationId ?? null,
+      quiet,
+    };
+  }
+
+  function tryAutoApproveRemotePermission(params: {
+    event: FleetBridgePermissionRequestedEvent;
+    remoteAgent: AggregatedHostAgent | null;
+    request: AgentPermissionRequest;
+    route: ReturnType<typeof resolveRemoteRoute>;
+    toolName: string;
+    redLineBlocked: boolean;
+    agentKey: string;
+    permKey: string;
+    nowMs: number;
+  }): boolean {
+    const {
+      event,
+      remoteAgent,
+      request,
+      route,
+      toolName,
+      redLineBlocked,
+      agentKey,
+      permKey,
+      nowMs,
+    } = params;
+    if (!route.managed || redLineBlocked || !deps.respondRemotePermission || !remoteAgent) {
+      return false;
+    }
+    const match = matchStandingAuthorization(
+      {
+        scope: "permission",
+        serverId: event.serverId,
+        localServerId: deps.serverId ?? null,
+        cwd: remoteAgent.cwd,
+        toolName,
+        command: null,
+        kind: request.kind,
+        question: event.permission.description ?? null,
+      },
+      deps.store.listStandingAuthorizations({ includeRevoked: false }),
+      nowMs,
+    );
+    if (!match.matched || !match.authorization) {
+      return false;
+    }
+    const matchedAuth = match.authorization;
+    autoApprovedPermissionKeys.add(permKey);
+    void deps
+      .respondRemotePermission(event.serverId, event.agentId, event.permission.requestId, {
+        behavior: "allow",
+      })
+      .then(async () => {
+        permissionFirstSeenAt.delete(agentKey);
+        await deps.store.recordStandingAuthorizationMatch(
+          matchedAuth.id,
+          new Date(getNowMs()).toISOString(),
+        );
+        await deps.store.incrementMetric("supervisorHeld");
+        if (route.quiet) {
+          await deps.store.incrementSuppressedQuietBadgeCount();
+        }
+        return undefined;
+      })
+      .catch((error) => {
+        autoApprovedPermissionKeys.delete(permKey);
+        deps.logger.warn(
+          { err: error, serverId: event.serverId, agentId: event.agentId },
+          "Remote permission auto-approval failed; leaving request for user",
+        );
+      });
+    return true;
+  }
+
+  function trackAndSignalRemotePermission(params: {
+    event: FleetBridgePermissionRequestedEvent;
+    remoteAgent: AggregatedHostAgent | null;
+    request: AgentPermissionRequest;
+    route: ReturnType<typeof resolveRemoteRoute>;
+    title: string;
+    redLine: ReturnType<typeof checkRedLineGuard>;
+    nowMs: number;
+  }): void {
+    const { event, remoteAgent, request, route, title, redLine, nowMs } = params;
+    const waitLabel =
+      event.permission.title?.trim() || event.permission.name.trim() || "待审批请求";
+    const initialTier = resolveInitialApprovalTier(
+      route.managed,
+      redLine.blocked,
+      route.conversationId,
+    );
+
+    approvalTracker.track({
+      agentId: event.agentId,
+      serverId: event.serverId,
+      requestId: event.permission.requestId,
+      taskId: route.task?.id ?? null,
+      conversationId: route.conversationId,
+      category: resolveApprovalCategory(request.kind),
+      label: waitLabel,
+      initialTier,
+      nowMs,
+    });
+
+    void deps.store
+      .putTriage({
+        agentId: event.agentId,
+        workspaceId: remoteAgent?.workspaceId ?? null,
+        title,
+        managedByMainChat: route.managed,
+        phase: "blocked_user",
+        summary: redLine.blocked ? `等待红线审批：${waitLabel}` : `等待审批：${waitLabel}`,
+        waitReason: redLine.reason ?? waitLabel,
+        suggestedAction: "点击批准或打开远端会话处理",
+        triageSource: "rule",
+        updatedAt: new Date(nowMs).toISOString(),
+      })
+      .catch(() => undefined);
+    void deps.store.incrementMetric("triageRuleCount").catch(() => undefined);
+
+    if (route.quiet && !redLine.blocked && initialTier !== "user") {
+      enqueueStructuredSignal({
+        kind: "ask",
+        urgency: "urgent",
+        taskId: route.task?.id ?? null,
+        agentId: event.agentId,
+        serverId: event.serverId,
+        conversationId: route.conversationId,
+        title,
+        summary: `拦截待处理审批：${waitLabel}（已启动 5m 空闲升级 / 15m 硬截止时钟）`,
+        fingerprintSeed: `remote-ask:${event.serverId}:${event.permission.requestId}`,
+        quiet: true,
+      });
+      return;
+    }
+
+    if (route.managed || redLine.blocked) {
+      void deps.store.incrementMetric("interrupts").catch(() => undefined);
+    }
+    if (redLine.blocked) {
+      enqueueStructuredSignal({
+        kind: "needs_you",
+        urgency: "urgent",
+        taskId: route.task?.id ?? null,
+        agentId: event.agentId,
+        serverId: event.serverId,
+        conversationId: null,
+        title,
+        summary: `高风险红线审批需你确认（${waitLabel}）：${redLine.reason}`,
+        fingerprintSeed: `remote-redline:${event.serverId}:${event.permission.requestId}`,
+        quiet: route.quiet,
+        isRedLine: true,
+        escalatedToUser: true,
+      });
+    }
+  }
+
+  function handleRemotePermissionRequested(event: FleetBridgePermissionRequestedEvent): void {
+    if (event.isLocal || !isRemoteHostInScope(event.serverId)) return;
+    if (!isMainChatEnabled(deps.store.getSettings())) return;
+
+    const nowMs = getNowMs();
+    lastFleetOrUserActivityAtMs = nowMs;
+    const agentKey = remoteAgentCompositeKey(event.serverId, event.agentId);
+    if (!permissionFirstSeenAt.has(agentKey)) {
+      permissionFirstSeenAt.set(agentKey, nowMs);
+    }
+
+    const permKey = remotePermissionCompositeKey(
+      event.serverId,
+      event.agentId,
+      event.permission.requestId,
+    );
+    if (pendingPermissionRequestsByKey.has(permKey)) {
+      return;
+    }
+
+    const remoteAgent = deps.getRemoteAgent?.(event.serverId, event.agentId) ?? null;
+    const request: AgentPermissionRequest = {
+      id: event.permission.requestId,
+      provider: "claude",
+      name: event.permission.name,
+      kind: event.permission.kind ?? "tool",
+      title: event.permission.title ?? undefined,
+      description: event.permission.description ?? undefined,
+    };
+    pendingPermissionRequestsByKey.set(permKey, {
+      agentId: event.agentId,
+      cwd: remoteAgent?.cwd ?? "",
+      serverId: event.serverId,
+      request,
+    });
+
+    const title = formatRemoteAgentDisplayTitle(
+      event.hostLabel,
+      event.serverId,
+      remoteAgent,
+      event.agentId,
+    );
+    const route = resolveRemoteRoute(event.agentId, remoteAgent);
+    const toolName = event.permission.name || event.permission.title || "";
+    const redLine = checkRedLineGuard({
+      kind: request.kind,
+      toolName,
+      command: null,
+      question: event.permission.description ?? null,
+    });
+
+    if (
+      tryAutoApproveRemotePermission({
+        event,
+        remoteAgent,
+        request,
+        route,
+        toolName,
+        redLineBlocked: redLine.blocked,
+        agentKey,
+        permKey,
+        nowMs,
+      })
+    ) {
+      return;
+    }
+
+    trackAndSignalRemotePermission({
+      event,
+      remoteAgent,
+      request,
+      route,
+      title,
+      redLine,
+      nowMs,
+    });
+  }
+
+  function handleRemotePermissionResolved(event: FleetBridgePermissionResolvedEvent): void {
+    const permKey = remotePermissionCompositeKey(event.serverId, event.agentId, event.requestId);
+    approvalTracker.resolve(event.agentId, event.requestId);
+    void deps.store
+      .removeClarificationsForPermission(event.agentId, event.requestId)
+      .catch(() => undefined);
+    pendingPermissionRequestsByKey.delete(permKey);
+    autoApprovedPermissionKeys.delete(permKey);
+
+    const hasRemainingForAgent = Array.from(pendingPermissionRequestsByKey.values()).some(
+      (meta) => meta.serverId === event.serverId && meta.agentId === event.agentId,
+    );
+    if (!hasRemainingForAgent) {
+      permissionFirstSeenAt.delete(remoteAgentCompositeKey(event.serverId, event.agentId));
+    }
+  }
+
+  function inspectRemoteAgentError(remoteAgent: AggregatedHostAgent, now: number): number {
+    const agentKey = remoteAgentCompositeKey(remoteAgent.serverId, remoteAgent.agentId);
+    const rawError = remoteAgent.lastError?.trim() || null;
+    const isErrored = remoteAgent.lifecycle === "error" || Boolean(rawError);
+    if (!isErrored) {
+      remoteErrorSigByAgentKey.delete(agentKey);
+      return 0;
+    }
+
+    const errorMessage = rawError ?? "远端会话异常中断";
+    if (isCancelledTurnError(errorMessage)) {
+      remoteErrorSigByAgentKey.delete(agentKey);
+      return 0;
+    }
+
+    if (remoteErrorSigByAgentKey.get(agentKey) === errorMessage) {
+      return 0;
+    }
+    remoteErrorSigByAgentKey.set(agentKey, errorMessage);
+
+    const route = resolveRemoteRoute(remoteAgent.agentId, remoteAgent);
+    const title = formatRemoteAgentDisplayTitle(
+      remoteAgent.hostLabel,
+      remoteAgent.serverId,
+      remoteAgent,
+      remoteAgent.agentId,
+    );
+    const errorClass = classifyMainChatTurnError(errorMessage);
+    if (route.managed && (!route.quiet || errorClass === "user")) {
+      void deps.store.incrementMetric("interrupts").catch(() => undefined);
+    }
+    void deps.store.incrementMetric("triageRuleCount").catch(() => undefined);
+
+    const triage: MainChatSessionTriage = {
+      agentId: remoteAgent.agentId,
+      workspaceId: remoteAgent.workspaceId ?? null,
+      title,
+      managedByMainChat: route.managed,
+      phase: errorClass === "user" ? "blocked_user" : "interrupted",
+      summary: `远端异常中断：${errorMessage.slice(0, 90)}`,
+      waitReason: errorMessage.slice(0, 140),
+      suggestedAction: "打开远端会话处理错误或重试",
+      triageSource: "rule",
+      updatedAt: new Date(now).toISOString(),
+    };
+    void deps.store.putTriage(triage).catch(() => undefined);
+
+    const res = enqueueStructuredSignal({
+      kind: errorClass === "user" ? "needs_you" : "interrupted",
+      urgency: "urgent",
+      taskId: route.task?.id ?? null,
+      agentId: remoteAgent.agentId,
+      serverId: remoteAgent.serverId,
+      conversationId: errorClass === "user" ? null : route.conversationId,
+      title,
+      summary: triage.summary,
+      fingerprintSeed: `remote-error:${remoteAgent.serverId}:${errorMessage.slice(0, 80)}`,
+      quiet: route.quiet,
+    });
+    return res.queued ? 1 : 0;
+  }
+
+  function handleRemoteAgentsChanged(event: FleetBridgeAgentsChangedEvent): void {
+    if (!isRemoteHostInScope(event.serverId)) return;
+    if (!isMainChatEnabled(deps.store.getSettings())) return;
+
+    const now = getNowMs();
+    lastFleetOrUserActivityAtMs = now;
+    const candidates =
+      event.agentIds && event.agentIds.length > 0
+        ? event.agentIds
+            .map((agentId) => deps.getRemoteAgent?.(event.serverId, agentId) ?? null)
+            .filter((agent): agent is AggregatedHostAgent => agent !== null)
+        : (deps.listRemoteAgents?.() ?? []).filter((agent) => agent.serverId === event.serverId);
+
+    for (const remoteAgent of candidates) {
+      inspectRemoteAgentError(remoteAgent, now);
+      if (remoteAgent.lifecycle !== "running") {
+        remoteStalledNotifiedAtByKey.delete(
+          remoteAgentCompositeKey(remoteAgent.serverId, remoteAgent.agentId),
+        );
+      }
+    }
+  }
+
+  function inspectRemoteAgentPendingPermission(
+    remoteAgent: AggregatedHostAgent,
+    route: ReturnType<typeof resolveRemoteRoute>,
+    title: string,
+    agentKey: string,
+    now: number,
+    needsYouEscalateMs: number,
+  ): number {
+    const firstSeen = permissionFirstSeenAt.get(agentKey) ?? now;
+    permissionFirstSeenAt.set(agentKey, firstSeen);
+    const firstPerm = remoteAgent.pendingPermissions[0];
+    const waitLabel = firstPerm?.title?.trim() || firstPerm?.name.trim() || "待审批请求";
+    if (now - firstSeen < needsYouEscalateMs) {
+      return 0;
+    }
+    const waitedMin = Math.max(1, Math.round((now - firstSeen) / 60_000));
+    const res = enqueueStructuredSignal({
+      kind: "needs_you",
+      urgency: "urgent",
+      taskId: route.task?.id ?? null,
+      agentId: remoteAgent.agentId,
+      serverId: remoteAgent.serverId,
+      conversationId: null,
+      title,
+      summary: `等待审批已超 ${waitedMin} 分钟：${waitLabel}`,
+      fingerprintSeed: `remote-perm:${remoteAgent.serverId}:${firstPerm?.requestId ?? waitLabel}`,
+      quiet: route.quiet,
+      escalatedToUser: true,
+    });
+    return res.queued ? 1 : 0;
+  }
+
+  function inspectRemoteAgentStalled(
+    remoteAgent: AggregatedHostAgent,
+    route: ReturnType<typeof resolveRemoteRoute>,
+    title: string,
+    agentKey: string,
+    now: number,
+    stalledThresholdMs: number,
+  ): number {
+    if (remoteAgent.lifecycle !== "running") {
+      remoteStalledNotifiedAtByKey.delete(agentKey);
+      return 0;
+    }
+    const updatedAtMs = Date.parse(remoteAgent.updatedAtIso);
+    if (
+      !Number.isFinite(updatedAtMs) ||
+      now - updatedAtMs < stalledThresholdMs ||
+      remoteStalledNotifiedAtByKey.has(agentKey)
+    ) {
+      return 0;
+    }
+    remoteStalledNotifiedAtByKey.set(agentKey, now);
+    const idleMin = Math.max(1, Math.round((now - updatedAtMs) / 60_000));
+    const triage: MainChatSessionTriage = {
+      agentId: remoteAgent.agentId,
+      workspaceId: remoteAgent.workspaceId ?? null,
+      title,
+      managedByMainChat: route.managed,
+      phase: "stalled",
+      summary: `远端已静默运行 ${idleMin} 分钟无新动态`,
+      waitReason: "长时间无新输出或状态变化",
+      suggestedAction: "打开远端会话检查进程状态或提醒汇报",
+      triageSource: "rule",
+      updatedAt: new Date(now).toISOString(),
+    };
+    void deps.store.putTriage(triage).catch(() => undefined);
+    const res = enqueueStructuredSignal({
+      kind: "stalled",
+      urgency: "normal",
+      taskId: route.task?.id ?? null,
+      agentId: remoteAgent.agentId,
+      serverId: remoteAgent.serverId,
+      conversationId: route.conversationId,
+      title,
+      summary: triage.summary,
+      fingerprintSeed: `remote-stalled:${remoteAgent.serverId}:${remoteAgent.updatedAtIso}`,
+      quiet: route.quiet,
+    });
+    return res.queued ? 1 : 0;
+  }
+
+  function inspectSingleRemoteFleetAgent(
+    remoteAgent: AggregatedHostAgent,
+    now: number,
+    needsYouEscalateMs: number,
+    stalledThresholdMs: number,
+  ): number {
+    const agentKey = remoteAgentCompositeKey(remoteAgent.serverId, remoteAgent.agentId);
+    const route = resolveRemoteRoute(remoteAgent.agentId, remoteAgent);
+    const title = formatRemoteAgentDisplayTitle(
+      remoteAgent.hostLabel,
+      remoteAgent.serverId,
+      remoteAgent,
+      remoteAgent.agentId,
+    );
+
+    if (remoteAgent.pendingPermissions.length > 0) {
+      return inspectRemoteAgentPendingPermission(
+        remoteAgent,
+        route,
+        title,
+        agentKey,
+        now,
+        needsYouEscalateMs,
+      );
+    }
+
+    const errorSignals = inspectRemoteAgentError(remoteAgent, now);
+    const stalledSignals = inspectRemoteAgentStalled(
+      remoteAgent,
+      route,
+      title,
+      agentKey,
+      now,
+      stalledThresholdMs,
+    );
+    return errorSignals + stalledSignals;
+  }
+
+  function inspectRemoteFleetAgents(
+    now: number,
+    needsYouEscalateMs: number,
+    stalledThresholdMs: number,
+  ): { scannedRemote: number; signalsAdded: number } {
+    const remoteAgents = (deps.listRemoteAgents?.() ?? []).filter((agent) =>
+      isRemoteHostInScope(agent.serverId),
+    );
+    let signalsAdded = 0;
+
+    for (const remoteAgent of remoteAgents) {
+      signalsAdded += inspectSingleRemoteFleetAgent(
+        remoteAgent,
+        now,
+        needsYouEscalateMs,
+        stalledThresholdMs,
+      );
+    }
+
+    return { scannedRemote: remoteAgents.length, signalsAdded };
+  }
+
+  function reconcileRemoteHostScope(): void {
+    for (const entry of approvalTracker.list()) {
+      if (
+        entry.serverId &&
+        entry.serverId !== deps.serverId &&
+        !isRemoteHostInScope(entry.serverId)
+      ) {
+        approvalTracker.resolve(entry.agentId, entry.requestId);
+      }
+    }
+    for (const [key, meta] of Array.from(pendingPermissionRequestsByKey.entries())) {
+      if (meta.serverId && meta.serverId !== deps.serverId && !isRemoteHostInScope(meta.serverId)) {
+        pendingPermissionRequestsByKey.delete(key);
+        autoApprovedPermissionKeys.delete(key);
+      }
+    }
+    for (const key of Array.from(permissionFirstSeenAt.keys())) {
+      const sep = key.indexOf(":");
+      if (sep > 0) {
+        const hostId = key.slice(0, sep);
+        if (!isRemoteHostInScope(hostId)) {
+          permissionFirstSeenAt.delete(key);
+        }
+      }
+    }
+    for (const key of Array.from(remoteErrorSigByAgentKey.keys())) {
+      const sep = key.indexOf(":");
+      if (sep > 0 && !isRemoteHostInScope(key.slice(0, sep))) {
+        remoteErrorSigByAgentKey.delete(key);
+      }
+    }
+    for (const key of Array.from(remoteStalledNotifiedAtByKey.keys())) {
+      const sep = key.indexOf(":");
+      if (sep > 0 && !isRemoteHostInScope(key.slice(0, sep))) {
+        remoteStalledNotifiedAtByKey.delete(key);
+      }
+    }
+  }
+
   async function scanFleetAndBuildSignals(): Promise<{
     scannedSessions: number;
     signalsFound: number;
@@ -2089,8 +2728,11 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       );
     }
 
+    const remoteScan = inspectRemoteFleetAgents(now, needsYouEscalateMs, stalledThresholdMs);
+    newSignals += remoteScan.signalsAdded;
+
     return {
-      scannedSessions: agents.length,
+      scannedSessions: agents.length + remoteScan.scannedRemote,
       signalsFound: signalQueue.getPendingCount() + newSignals,
     };
   }
@@ -2250,6 +2892,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
 
   return {
     start() {
+      signalQueue.start();
       if (unsubscribeEvents) return;
       unsubscribeEvents = deps.agentManager.subscribe(handleManagerEvent);
       armPatrolTimer();
@@ -2266,6 +2909,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         clearAllPendingTimers();
         return;
       }
+      signalQueue.start();
       if (!unsubscribeEvents) return;
       armPatrolTimer();
     },
@@ -2313,6 +2957,11 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     getApprovalTracker() {
       return approvalTracker;
     },
+
+    handleRemotePermissionRequested,
+    handleRemotePermissionResolved,
+    handleRemoteAgentsChanged,
+    reconcileRemoteHostScope,
 
     async dispatchInitialBriefing(mainAgentId) {
       const settings = deps.store.getSettings();

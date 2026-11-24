@@ -71,6 +71,7 @@ import {
   buildSettingsSectionRoute,
   isMainChatPathname,
 } from "@/utils/host-routes";
+import { resolveMainChatCustomTitle } from "./host-groups";
 import {
   MainChatLifecycleConfirmModal,
   MainChatLifecycleMenuItems,
@@ -794,18 +795,20 @@ const StewardSwitcherItem = memo(function StewardSwitcherItem({
   }, [item, onSelectSteward]);
 
   const dotStyle = resolveStewardToneBadgeStyle(item.accentTone);
+  const customTitle = resolveMainChatCustomTitle(item.title, item.hostLabel);
+  const primaryLabel = customTitle ? `${item.hostLabel} · ${customTitle}` : item.hostLabel;
   const titleWithTags = item.isDefault
-    ? `${item.title} · ${t("mainChat.stewards.defaultBadge")}`
-    : item.title;
+    ? `${primaryLabel} · ${t("mainChat.stewards.defaultBadge")}`
+    : primaryLabel;
   const leading = useMemo(
     () => (
       <View
         style={[styles.stewardAvatarDot, dotStyle, !item.online && styles.stewardAvatarDotOffline]}
       >
-        <Text style={styles.stewardAvatarLetter}>{item.title.slice(0, 1) || "管"}</Text>
+        <Text style={styles.stewardAvatarLetter}>{item.hostLabel.slice(0, 1) || "管"}</Text>
       </View>
     ),
-    [dotStyle, item.online, item.title],
+    [dotStyle, item.hostLabel, item.online],
   );
 
   return (
@@ -945,7 +948,14 @@ function useMainChatHeroData() {
     return record.input.text.replace(/\s+/g, " ").trim();
   });
 
-  const displayTitle = settings?.title?.trim() || activeSteward?.title || summaryBase.displayTitle;
+  const rawTitle = settings?.title?.trim() || activeSteward?.title || summaryBase.displayTitle;
+  const customTitle = activeSteward
+    ? resolveMainChatCustomTitle(rawTitle, activeSteward.hostLabel)
+    : null;
+  let displayTitle = rawTitle;
+  if (hasMultipleStewards && activeSteward) {
+    displayTitle = `${customTitle ?? rawTitle} · ${activeSteward.hostLabel}`;
+  }
 
   return {
     summaryBase,
@@ -1076,7 +1086,9 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
   const handleSelectSteward = useCallback(
     (item: MainChatStewardRosterItemWithActivity) => {
       selectSteward(item.serverId);
-      toast.show(t("mainChat.stewards.switchedToast", { title: item.title }), { variant: "info" });
+      toast.show(t("mainChat.groups.switchedToast", { host: item.hostLabel }), {
+        variant: "info",
+      });
       if (isSelected) {
         onBeforeNavigate?.();
         router.push(buildMainChatRoute(item.serverId));

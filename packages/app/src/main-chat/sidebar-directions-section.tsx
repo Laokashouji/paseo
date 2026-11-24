@@ -328,6 +328,17 @@ function useSidebarDirectionsState(
   return { snapshot, targetServerId, client, treeModel };
 }
 
+function resolveDirectionsEnabled(
+  settings: ReturnType<typeof useMainChatSettingsStore.getState>["settingsByServerId"][string],
+  rosterCount: number,
+  mainAgentId: string | null,
+): boolean {
+  if (settings !== undefined) {
+    return isMainChatEnabled(settings);
+  }
+  return rosterCount > 0 || Boolean(mainAgentId);
+}
+
 /**
  * Dedicated "Conversations & directions" section positioned between the sticky Main Chat hero
  * entry and the regular coding Workspaces list. Renders the three-level direction tree
@@ -360,7 +371,7 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
   const mainChatSettings = useMainChatSettingsStore((state) =>
     targetServerId ? state.settingsByServerId[targetServerId] : undefined,
   );
-  const isEnabled = isMainChatEnabled(mainChatSettings);
+  const isEnabled = resolveDirectionsEnabled(mainChatSettings, roster.length, snapshot.mainAgentId);
 
   const collapsed = useMainChatConversationsStore((state) => state.sectionCollapsed);
   const toggleCollapsed = useMainChatConversationsStore((state) => state.toggleSectionCollapsed);
