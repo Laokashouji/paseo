@@ -18,7 +18,11 @@ import React, { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
 import { useSessionStore, type Agent, type SessionState } from "@/stores/session-store";
-import { MainChatActionBar } from "./action-bar";
+import {
+  MainChatActionBar,
+  MainChatActionBarDrawerOverlay,
+  useMainChatActionBarDrawerStore,
+} from "./action-bar";
 import { STALE_IN_PROGRESS_THRESHOLD_MS } from "./action-bar-model";
 import {
   MainChatCompactionBanner,
@@ -1051,6 +1055,60 @@ describe("Main Chat M2 & M3 UI components", () => {
       targetTitle: "超 48h 搁置任务",
     });
     expect(view.queryByTestId("main-chat-action-panel-inProgress")).toBeNull();
+    useMainChatActionBarDrawerStore.getState().reset();
+  });
+
+  it("renders MainChatActionBar in external drawerMode without injecting the drawer into the composer strip and closes overlay on Escape", () => {
+    useMainChatActionBarDrawerStore.getState().reset();
+    const client = makeFakeClient();
+    seedSession(client);
+
+    const overview = makeOverview({
+      tasks: [
+        makeTask({
+          id: "task_ext_run",
+          title: "外部浮层验证任务",
+          status: "running",
+          activeAgentId: "child_ext",
+          agentIds: ["child_ext"],
+        }),
+      ],
+    });
+    useMainChatOverviewStore.setState({
+      overviewsByKey: { [overviewStoreKey("srv_1", "agent_main")]: overview },
+    });
+
+    const view = renderWithProviders(
+      <>
+        <div data-testid="mock-stream-viewport">
+          <MainChatActionBarDrawerOverlay serverId="srv_1" agentId="agent_main" />
+        </div>
+        <div data-testid="mock-composer-strip">
+          <MainChatActionBar serverId="srv_1" agentId="agent_main" drawerMode="external" />
+        </div>
+      </>,
+    );
+
+    expect(view.queryByTestId("main-chat-action-bar-drawer-overlay")).toBeNull();
+
+    // Clicking capsule opens drawer inside stream viewport overlay, leaving composer strip untouched
+    fireEvent.click(view.getByTestId("main-chat-action-capsule-inProgress"));
+    const streamViewport = view.getByTestId("mock-stream-viewport");
+    const composerStrip = view.getByTestId("mock-composer-strip");
+    expect(
+      streamViewport.querySelector('[data-testid="main-chat-action-bar-drawer-overlay"]'),
+    ).toBeTruthy();
+    expect(
+      streamViewport.querySelector('[data-testid="main-chat-action-panel-inProgress"]'),
+    ).toBeTruthy();
+    expect(
+      composerStrip.querySelector('[data-testid="main-chat-action-panel-inProgress"]'),
+    ).toBeNull();
+
+    // Pressing Escape dismisses the floating overlay
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(view.queryByTestId("main-chat-action-bar-drawer-overlay")).toBeNull();
+    useMainChatActionBarDrawerStore.getState().reset();
   });
 
   it("renders TaskPanelDrawer with Brief strip, multi-agent switcher, status controls, and Chat/Diff/Terminal segments", async () => {

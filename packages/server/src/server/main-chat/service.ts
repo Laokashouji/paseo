@@ -286,6 +286,13 @@ export interface MainChatCompactResult {
   compaction: MainChatCompactionState;
 }
 
+export interface MainChatClearOptions {
+  provider?: string;
+  model?: string;
+  modeId?: string;
+  thinkingOptionId?: string;
+}
+
 export interface MainChatClearResult {
   previousAgentId: string | null;
   agentId: string;
@@ -298,6 +305,10 @@ export interface MainChatClearResult {
 export interface MainChatNewSessionOptions {
   carryHandoffSummary?: boolean;
   title?: string;
+  provider?: string;
+  model?: string;
+  modeId?: string;
+  thinkingOptionId?: string;
 }
 
 export interface MainChatNewSessionResult extends MainChatClearResult {
@@ -342,7 +353,10 @@ export interface MainChatService {
     options?: MainChatCompactOptions,
   ): Promise<MainChatCompactResult>;
   checkIdlePrecompaction(mainAgentId?: string): Promise<boolean>;
-  clearMainChatContext(mainAgentId?: string): Promise<MainChatClearResult>;
+  clearMainChatContext(
+    mainAgentId?: string,
+    options?: MainChatClearOptions,
+  ): Promise<MainChatClearResult>;
   startNewMainChatSession(
     mainAgentId?: string,
     options?: MainChatNewSessionOptions,
@@ -2552,26 +2566,127 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
   }
 
+  function resolveReplacementProviderConfig(
+    input: {
+      provider?: string;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
+    },
+    oldSnapshot: {
+      provider: string;
+      model: string | null;
+      modeId: string | null;
+      thinkingOptionId: string | null;
+    },
+  ): {
+    provider: AgentProvider;
+    providerChanged: boolean;
+    model: string | null;
+    modeId: string | null;
+    thinkingOptionId: string | null;
+  } {
+    const parsedRequestedProvider = input.provider?.trim()
+      ? parseProviderSpec(input.provider)
+      : null;
+    const nextProvider = (parsedRequestedProvider?.provider ??
+      oldSnapshot.provider) as AgentProvider;
+    const providerChanged = nextProvider !== oldSnapshot.provider;
+    const requestedModel = input.model?.trim() || parsedRequestedProvider?.model?.trim() || null;
+
+    let nextModel = requestedModel;
+    if (!nextModel) {
+      nextModel = providerChanged ? null : oldSnapshot.model;
+    }
+
+    let nextModeId: string | null;
+    if (input.modeId !== undefined) {
+      nextModeId = input.modeId.trim() || null;
+    } else {
+      nextModeId = providerChanged ? null : oldSnapshot.modeId;
+    }
+
+    let nextThinkingOptionId: string | null;
+    if (input.thinkingOptionId !== undefined) {
+      nextThinkingOptionId = input.thinkingOptionId.trim() || null;
+    } else {
+      nextThinkingOptionId = providerChanged ? null : oldSnapshot.thinkingOptionId;
+    }
+
+    return {
+      provider: nextProvider,
+      providerChanged,
+      model: nextModel,
+      modeId: nextModeId,
+      thinkingOptionId: nextThinkingOptionId,
+    };
+  }
+
+  function formatReplacementActivity(input: {
+    mode: "clear" | "handoff";
+    carryHandoffSummary: boolean;
+    providerChanged: boolean;
+    targetModelLabel: string;
+    migratedPlans: number;
+    migratedTasks: number;
+    migratedDecisions: number;
+    migratedChildAgents: number;
+  }): { trigger: string; summary: string } {
+    if (input.mode === "clear") {
+      return {
+        trigger: "user_clear",
+        summary: input.providerChanged
+          ? `已原位清空上下文并切换模型至 ${input.targetModelLabel}，迁移 ${input.migratedPlans} 个计划、${input.migratedTasks} 个任务、${input.migratedDecisions} 个决策与 ${input.migratedChildAgents} 个子会话`
+          : `已原位清空上下文并归档旧会话，迁移 ${input.migratedPlans} 个计划、${input.migratedTasks} 个任务、${input.migratedDecisions} 个决策与 ${input.migratedChildAgents} 个子会话`,
+      };
+    }
+    if (input.carryHandoffSummary) {
+      return {
+        trigger: input.providerChanged ? "provider_switch_handoff" : "new_session_with_handoff",
+        summary: input.providerChanged
+          ? `已切换主对话模型至 ${input.targetModelLabel} 并带入交接摘要（迁移 ${input.migratedTasks} 个任务与 ${input.migratedChildAgents} 个子会话）`
+          : `已开启新主对话并完成交接摘要与督办权转移（迁移 ${input.migratedTasks} 个任务与 ${input.migratedChildAgents} 个子会话）`,
+      };
+    }
+    return {
+      trigger: "new_session",
+      summary: input.providerChanged
+        ? `已切换主对话模型至 ${input.targetModelLabel} 并完成督办权转移（迁移 ${input.migratedChildAgents} 个子会话）`
+        : `已开启全新主对话并完成督办权转移（迁移 ${input.migratedChildAgents} 个子会话）`,
+    };
+  }
+
+  async function resolveExistingMainChatForReplacement(requestedMainAgentId?: string) {
+    const trimmed = requestedMainAgentId?.trim();
+    if (!trimmed) return findExistingMainChat();
+    const workspaceId =
+      deps.agentManager.getAgent(trimmed)?.workspaceId ??
+      (await deps.agentStorage.get(trimmed))?.workspaceId ??
+      (await resolveMainChatWorkspace()).workspaceId;
+    return { agentId: trimmed, workspaceId };
+  }
+
   async function replaceMainChatSession(input: {
     requestedMainAgentId?: string;
     mode: "clear" | "handoff";
     carryHandoffSummary: boolean;
     title?: string;
+    provider?: string;
+    model?: string;
+    modeId?: string;
+    thinkingOptionId?: string;
   }): Promise<MainChatNewSessionResult> {
     return runWithLifecycleLock(async () => {
       await store.load();
-      const existing = input.requestedMainAgentId?.trim()
-        ? {
-            agentId: input.requestedMainAgentId.trim(),
-            workspaceId:
-              deps.agentManager.getAgent(input.requestedMainAgentId.trim())?.workspaceId ??
-              (await deps.agentStorage.get(input.requestedMainAgentId.trim()))?.workspaceId ??
-              (await resolveMainChatWorkspace()).workspaceId,
-          }
-        : await findExistingMainChat();
+      const existing = await resolveExistingMainChatForReplacement(input.requestedMainAgentId);
 
       if (!existing) {
-        const ensured = await ensureMainChatInternal();
+        const ensured = await ensureMainChatInternal({
+          ...(input.provider ? { provider: input.provider } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.modeId ? { modeId: input.modeId } : {}),
+          ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+        });
         return {
           previousAgentId: null,
           agentId: ensured.agentId,
@@ -2605,15 +2720,17 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         });
       }
 
+      const nextConfig = resolveReplacementProviderConfig(input, oldSnapshot);
+
       // Create replacement main chat first so any creation failure leaves old main chat intact.
       const created = await createCleanMainChatAgent({
         workspaceId: existing.workspaceId || workspace.workspaceId,
         cwd: oldSnapshot.cwd || workspace.cwd,
         title: nextTitle,
-        provider: oldSnapshot.provider as AgentProvider,
-        model: oldSnapshot.model,
-        modeId: oldSnapshot.modeId,
-        thinkingOptionId: oldSnapshot.thinkingOptionId,
+        provider: nextConfig.provider,
+        model: nextConfig.model,
+        modeId: nextConfig.modeId,
+        thinkingOptionId: nextConfig.thinkingOptionId,
       });
 
       const migratedChildAgents = await migrateChildAgents(oldMainAgentId, created.agentId);
@@ -2635,15 +2752,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       await archiveReplacedMainChatAgent(oldMainAgentId, created.agentId);
 
       const nowIso = new Date(getNowMs()).toISOString();
-      let activityTrigger = "new_session";
-      let activitySummary = `已开启全新主对话并完成督办权转移（迁移 ${migratedChildAgents} 个子会话）`;
-      if (input.mode === "clear") {
-        activityTrigger = "user_clear";
-        activitySummary = `已原位清空上下文并归档旧会话，迁移 ${storeMigration.migratedPlans} 个计划、${storeMigration.migratedTasks} 个任务、${storeMigration.migratedDecisions} 个决策与 ${migratedChildAgents} 个子会话`;
-      } else if (input.carryHandoffSummary) {
-        activityTrigger = "new_session_with_handoff";
-        activitySummary = `已开启新主对话并完成交接摘要与督办权转移（迁移 ${storeMigration.migratedTasks} 个任务与 ${migratedChildAgents} 个子会话）`;
-      }
+      const { trigger: activityTrigger, summary: activitySummary } = formatReplacementActivity({
+        mode: input.mode,
+        carryHandoffSummary: input.carryHandoffSummary,
+        providerChanged: nextConfig.providerChanged,
+        targetModelLabel: formatProviderModel(nextConfig.provider, nextConfig.model),
+        migratedPlans: storeMigration.migratedPlans,
+        migratedTasks: storeMigration.migratedTasks,
+        migratedDecisions: storeMigration.migratedDecisions,
+        migratedChildAgents,
+      });
       await store.appendActivity({
         id: makeId("act"),
         mainAgentId: created.agentId,
@@ -3263,11 +3381,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       return checkIdlePrecompactionInternal(mainAgentId);
     },
 
-    async clearMainChatContext(mainAgentId) {
+    async clearMainChatContext(mainAgentId, options) {
       const result = await replaceMainChatSession({
         requestedMainAgentId: mainAgentId,
         mode: "clear",
         carryHandoffSummary: false,
+        provider: options?.provider,
+        model: options?.model,
+        modeId: options?.modeId,
+        thinkingOptionId: options?.thinkingOptionId,
       });
       return {
         previousAgentId: result.previousAgentId,
@@ -3285,6 +3407,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         mode: "handoff",
         carryHandoffSummary: options?.carryHandoffSummary ?? true,
         title: options?.title,
+        provider: options?.provider,
+        model: options?.model,
+        modeId: options?.modeId,
+        thinkingOptionId: options?.thinkingOptionId,
       });
     },
 

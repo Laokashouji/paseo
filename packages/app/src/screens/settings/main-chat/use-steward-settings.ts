@@ -10,6 +10,10 @@ import { useTranslation } from "react-i18next";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useToast } from "@/contexts/toast-context";
 import { EMPTY_FLEET_HOSTS, useMainChatConversationsStore } from "@/main-chat/conversations-store";
+import {
+  buildExpectedTargetDescriptions,
+  syncHostRegistrationIdempotent,
+} from "@/main-chat/host-sync-banner";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import {
   detectStewardHostConflicts,
@@ -21,6 +25,16 @@ import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { FleetScopeCandidateHost } from "./fleet-scope-panel";
 import type { StewardRosterHostEntry } from "./steward-roster-panel";
+
+async function listDaemonExistingHosts(client: DaemonClient) {
+  if (typeof client.listHosts !== "function") return undefined;
+  try {
+    const directory = await client.listHosts();
+    return Array.isArray(directory?.hosts) ? directory.hosts : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function useMainChatSettingsMultiSteward(input: {
   capableHosts: ReadonlyArray<{ serverId: string; label: string }>;
@@ -203,20 +217,30 @@ export function useMainChatSettingsMultiSteward(input: {
               );
               return;
             }
-            const addResult = await selectedClient.addHost({
-              connection: candidate.syncConnection,
-              label: candidate.label,
+            const existingHosts = await listDaemonExistingHosts(selectedClient);
+            const matchedProfile = clientHosts.find((host) => host.serverId === candidate.serverId);
+            const syncResult = await syncHostRegistrationIdempotent({
+              client: selectedClient,
+              candidate: {
+                serverId: candidate.serverId,
+                label: candidate.label,
+                syncConnection: candidate.syncConnection,
+                targetDescriptions: matchedProfile
+                  ? buildExpectedTargetDescriptions(matchedProfile)
+                  : undefined,
+              },
+              existingHosts,
             });
-            if (addResult.error) {
+            if (syncResult.error) {
               toast.error(
                 t("mainChat.stewards.scope.syncFailedToast", {
                   host: candidate.label,
-                  error: addResult.error,
+                  error: syncResult.error,
                 }),
               );
               return;
             }
-            syncedRemote = true;
+            syncedRemote = syncResult.status === "added";
           }
 
           await updateSettings(
@@ -248,6 +272,7 @@ export function useMainChatSettingsMultiSteward(input: {
       })();
     },
     [
+      clientHosts,
       refreshFleetHosts,
       scopeBusy,
       selectedClient,

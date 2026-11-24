@@ -30,7 +30,7 @@ import { useRetainedPanelActive } from "@/components/retained-panel";
 import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
 import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
-import { MainChatActionBar } from "@/main-chat/action-bar";
+import { MainChatActionBar, MainChatActionBarDrawerOverlay } from "@/main-chat/action-bar";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1328,6 +1328,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
             parentAgentId={parentPillAgentId}
             toast={toastApi}
           />
+          <MainChatActionBarDrawerOverlay serverId={serverId} agentId={agentId} />
         </>
       ) : null}
     </View>
@@ -1848,7 +1849,7 @@ function ActiveAgentComposer({
 
   return (
     <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
-      <MainChatActionBar serverId={serverId} agentId={agentId} />
+      <MainChatActionBar serverId={serverId} agentId={agentId} drawerMode="external" />
       <MainChatRouteBanner
         target={mainChatDirectRoute.target}
         onClear={mainChatDirectRoute.clearTarget}

@@ -1,24 +1,29 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import { isMainChatEnabled } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import equal from "fast-deep-equal";
 import { CircleAlert, Power, RefreshCw, Settings, Sparkles } from "lucide-react-native";
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { CombinedModelSelector } from "@/components/combined-model-selector";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useToast } from "@/contexts/toast-context";
 import { useDirectoryDemand } from "@/hooks/use-directory-demand";
+import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { buildSelectableProviderSelectorProviders } from "@/provider-selection/provider-selection";
 import { useHostRuntimeConnectionStatus, useHosts } from "@/runtime/host-runtime";
 import { useLastWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import {
   buildMainChatRoute,
+  buildSettingsHostSectionRoute,
   buildSettingsRoute,
   buildSettingsSectionRoute,
 } from "@/utils/host-routes";
@@ -39,6 +44,7 @@ const ThemedSettings = withUnistyles(Settings);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 const dangerIconMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 
 type EnsureState =
@@ -86,29 +92,178 @@ function resolveEffectiveOverrideRef(
   };
 }
 
+function MainChatFirstSetupView({
+  serverId,
+  title,
+  starting,
+  errorMessage,
+  onStart,
+  onOpenProviderSettings,
+}: {
+  serverId: string;
+  title: string;
+  starting: boolean;
+  errorMessage: string | null;
+  onStart: (selection: { provider: AgentProvider; model?: string }) => void;
+  onOpenProviderSettings: () => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  const snapshot = useProvidersSnapshot(serverId);
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const [selectedModel, setSelectedModel] = useState<string>("");
+
+  useEffect(() => {
+    setSelectedProvider("");
+    setSelectedModel("");
+  }, [serverId]);
+
+  const providers = useMemo(
+    () =>
+      buildSelectableProviderSelectorProviders(snapshot.entries, {
+        selectedProvider: selectedProvider || null,
+      }),
+    [selectedProvider, snapshot.entries],
+  );
+
+  const handleSelectModel = useCallback((provider: AgentProvider, modelId: string) => {
+    setSelectedProvider(provider);
+    setSelectedModel(modelId);
+  }, []);
+
+  const handleOpenSelector = useCallback(() => {
+    snapshot.refetchIfStale?.(selectedProvider || undefined);
+  }, [selectedProvider, snapshot]);
+
+  const handleRetryProvider = useCallback(
+    (provider: AgentProvider) => {
+      void snapshot.refresh?.([provider]);
+    },
+    [snapshot],
+  );
+
+  const handleStartPress = useCallback(() => {
+    if (!selectedProvider || starting) return;
+    onStart({
+      provider: selectedProvider as AgentProvider,
+      ...(selectedModel ? { model: selectedModel } : {}),
+    });
+  }, [onStart, selectedModel, selectedProvider, starting]);
+
+  const isSnapshotLoading = Boolean(snapshot.isLoading || snapshot.isFetching);
+  const hasNoProviders = !isSnapshotLoading && providers.length === 0;
+
+  return (
+    <View style={styles.centerState} testID="main-chat-first-setup">
+      <View style={styles.setupCard}>
+        <View style={styles.setupHeader}>
+          <View style={styles.setupIconBadge}>
+            <ThemedSparkles size={20} uniProps={primaryIconMapping} />
+          </View>
+          <View style={styles.setupHeaderText}>
+            <Text style={styles.setupTitle}>{t("mainChat.firstSetup.title")}</Text>
+            <Text style={styles.setupDescription}>
+              {t("mainChat.firstSetup.description", { title })}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.setupField}>
+          <Text style={styles.setupFieldLabel}>{t("mainChat.firstSetup.modelLabel")}</Text>
+          <CombinedModelSelector
+            providers={providers}
+            selectedProvider={selectedProvider}
+            selectedModel={selectedModel}
+            onSelect={handleSelectModel}
+            isLoading={isSnapshotLoading}
+            onOpen={handleOpenSelector}
+            onRetryProvider={handleRetryProvider}
+            isRetryingProvider={Boolean(snapshot.isRefreshing)}
+            disabled={starting || hasNoProviders}
+            serverId={serverId}
+            desktopPlacement="bottom-start"
+            desktopMinWidth={360}
+          />
+        </View>
+
+        {hasNoProviders ? (
+          <Text style={styles.setupEmptyHint} testID="main-chat-first-setup-no-providers">
+            {t("mainChat.firstSetup.noProvidersHint")}
+          </Text>
+        ) : null}
+
+        {errorMessage ? (
+          <Text style={styles.setupErrorText} testID="main-chat-first-setup-error">
+            {errorMessage}
+          </Text>
+        ) : null}
+
+        <View style={styles.setupActions}>
+          {hasNoProviders ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={ThemedSettings}
+              onPress={onOpenProviderSettings}
+              testID="main-chat-first-setup-open-providers"
+            >
+              {t("mainChat.firstSetup.openProviderSettings")}
+            </Button>
+          ) : (
+            <Button
+              variant="default"
+              size="sm"
+              leftIcon={ThemedSparkles}
+              loading={starting}
+              disabled={!selectedProvider || starting}
+              onPress={handleStartPress}
+              testID="main-chat-first-setup-start"
+            >
+              {starting
+                ? t("mainChat.firstSetup.startingButton")
+                : t("mainChat.firstSetup.startButton")}
+            </Button>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function MainChatScreenBody({
   isDisabled,
   enabling,
+  targetServerId,
+  displayTitle,
+  supportsMainChat,
+  needsFirstSetup,
   resolvedRef,
   ensureState,
   isEnsuring,
   activePane,
   onFocusMainPane,
+  onStartWithModel,
   onRetry,
   onEnableMainChat,
   onOpenSettings,
+  onOpenProviderSettings,
   onOpenMainChatSettings,
 }: {
   isDisabled: boolean;
   enabling: boolean;
+  targetServerId: string | null;
+  displayTitle: string;
+  supportsMainChat: boolean;
+  needsFirstSetup: boolean;
   resolvedRef: MainChatAgentRef | null;
   ensureState: EnsureState;
   isEnsuring: boolean;
   activePane: "main" | "drawer";
   onFocusMainPane: () => void;
+  onStartWithModel: (selection: { provider: AgentProvider; model?: string }) => void;
   onRetry: () => void;
   onEnableMainChat: () => void;
   onOpenSettings: () => void;
+  onOpenProviderSettings: () => void;
   onOpenMainChatSettings: () => void;
 }): ReactElement {
   const { t } = useTranslation();
@@ -158,6 +313,18 @@ function MainChatScreenBody({
       />
     );
   }
+  if (needsFirstSetup && targetServerId && supportsMainChat) {
+    return (
+      <MainChatFirstSetupView
+        serverId={targetServerId}
+        title={displayTitle}
+        starting={ensureState.kind === "ensuring"}
+        errorMessage={ensureState.kind === "error" ? ensureState.message : null}
+        onStart={onStartWithModel}
+        onOpenProviderSettings={onOpenProviderSettings}
+      />
+    );
+  }
   if (ensureState.kind === "error") {
     return (
       <View style={styles.centerState} testID="main-chat-ensure-error">
@@ -203,15 +370,18 @@ function MainChatScreenBody({
   );
 }
 
-function useMainChatEnsureState(params: {
+function useMainChatEnsureController(params: {
   targetServerId: string | null;
   client: DaemonClient | null;
   existing: MainChatAgentRef | null;
   supportsMainChat: boolean;
   isDisabled: boolean;
-  retryCount: number;
-}): EnsureState {
-  const { targetServerId, client, existing, supportsMainChat, isDisabled, retryCount } = params;
+}): {
+  ensureState: EnsureState;
+  startWithSelection: (selection: { provider: AgentProvider; model?: string }) => void;
+  resetError: () => void;
+} {
+  const { targetServerId, client, existing, supportsMainChat, isDisabled } = params;
   const { t } = useTranslation();
   const [ensureState, setEnsureState] = useState<EnsureState>({ kind: "idle" });
 
@@ -228,50 +398,65 @@ function useMainChatEnsureState(params: {
       return;
     }
 
-    if (!targetServerId || !client || !supportsMainChat || isDisabled) {
-      return;
-    }
+    setEnsureState((current) => {
+      if (current.kind === "resolved" && current.ref.serverId === targetServerId) {
+        return current;
+      }
+      if (current.kind === "ensuring" && current.serverId === targetServerId) {
+        return current;
+      }
+      return { kind: "idle" };
+    });
+  }, [existing, targetServerId]);
 
-    let cancelled = false;
-    setEnsureState({ kind: "ensuring", serverId: targetServerId });
+  const startWithSelection = useCallback(
+    (selection: { provider: AgentProvider; model?: string }) => {
+      if (!targetServerId || !client || !supportsMainChat || isDisabled) {
+        return;
+      }
+      const requestedServerId = targetServerId;
+      setEnsureState({ kind: "ensuring", serverId: requestedServerId });
 
-    void client
-      .ensureMainChat()
-      .then((result) => {
-        if (cancelled) return null;
-        if (result.error || !result.agentId || !result.workspaceId) {
+      void client
+        .ensureMainChat({
+          provider: selection.provider,
+          ...(selection.model ? { model: selection.model } : {}),
+        })
+        .then((result) => {
+          if (result.error || !result.agentId || !result.workspaceId) {
+            setEnsureState({
+              kind: "error",
+              serverId: requestedServerId,
+              message: result.error ?? t("mainChat.openFailed"),
+            });
+            return null;
+          }
+          setEnsureState({
+            kind: "resolved",
+            ref: {
+              serverId: requestedServerId,
+              workspaceId: result.workspaceId,
+              agentId: result.agentId,
+            },
+          });
+          return result.agentId;
+        })
+        .catch((error) => {
           setEnsureState({
             kind: "error",
-            serverId: targetServerId,
-            message: result.error ?? t("mainChat.openFailed"),
+            serverId: requestedServerId,
+            message: error instanceof Error ? error.message : t("mainChat.openFailed"),
           });
-          return null;
-        }
-        setEnsureState({
-          kind: "resolved",
-          ref: {
-            serverId: targetServerId,
-            workspaceId: result.workspaceId,
-            agentId: result.agentId,
-          },
         });
-        return result.agentId;
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setEnsureState({
-          kind: "error",
-          serverId: targetServerId,
-          message: error instanceof Error ? error.message : t("mainChat.openFailed"),
-        });
-      });
+    },
+    [client, isDisabled, supportsMainChat, t, targetServerId],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [client, existing, isDisabled, retryCount, supportsMainChat, t, targetServerId]);
+  const resetError = useCallback(() => {
+    setEnsureState({ kind: "idle" });
+  }, []);
 
-  return ensureState;
+  return { ensureState, startWithSelection, resetError };
 }
 
 function useMainChatScreenDataSync(params: {
@@ -344,6 +529,11 @@ function useMainChatTargetSession(routeServerId: string | null) {
   const client = useSessionStore((state) =>
     targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
   );
+  const hasDirectorySnapshot = useSessionStore((state) => {
+    if (!targetServerId) return false;
+    const session = state.sessions[targetServerId];
+    return Boolean(session?.hasHydratedAgents);
+  });
   const connectionStatus = useHostRuntimeConnectionStatus(targetServerId ?? "");
   const settings = useMainChatSettingsStore((state) =>
     targetServerId ? state.settingsByServerId[targetServerId] : undefined,
@@ -378,6 +568,7 @@ function useMainChatTargetSession(routeServerId: string | null) {
     summary,
     targetServerId,
     client,
+    hasDirectorySnapshot,
     connectionStatus,
     configuredTitle: settings?.title,
     isDisabled: settings !== undefined && !isMainChatEnabled(settings),
@@ -397,17 +588,34 @@ function resolveMainChatScreenNavServerId(
     : undefined;
 }
 
+function resolveMainChatNeedsFirstSetup(input: {
+  isDisabled: boolean;
+  resolvedRef: MainChatAgentRef | null;
+  targetServerId: string | null;
+  hasClient: boolean;
+  supportsMainChat: boolean;
+  connectionStatus: string;
+  hasDirectorySnapshot: boolean;
+}): boolean {
+  if (input.isDisabled || input.resolvedRef) return false;
+  if (!input.targetServerId || !input.hasClient || !input.supportsMainChat) return false;
+  return input.connectionStatus !== "connecting" && input.hasDirectorySnapshot;
+}
+
 function resolveMainChatEnsuringState(input: {
   isDisabled: boolean;
   ensureKind: string;
   targetServerId: string | null;
   connectionStatus: string;
   supportsMainChat: boolean;
+  hasDirectorySnapshot: boolean;
 }): boolean {
   if (input.isDisabled) return false;
   if (input.ensureKind === "ensuring") return true;
   return Boolean(
-    input.targetServerId && (input.connectionStatus === "connecting" || input.supportsMainChat),
+    input.targetServerId &&
+    (input.connectionStatus === "connecting" ||
+      (input.supportsMainChat && !input.hasDirectorySnapshot)),
   );
 }
 
@@ -418,6 +626,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
     summary,
     targetServerId,
     client,
+    hasDirectorySnapshot,
     connectionStatus,
     configuredTitle,
     isDisabled,
@@ -426,17 +635,15 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
     hasMultipleStewards,
   } = useMainChatTargetSession(routeServerId);
 
-  const [retryCount, setRetryCount] = useState(0);
   const [enabling, setEnabling] = useState(false);
   const [activePane, setActivePane] = useState<"main" | "drawer">("main");
 
-  const ensureState = useMainChatEnsureState({
+  const { ensureState, startWithSelection, resetError } = useMainChatEnsureController({
     targetServerId,
     client,
     existing: summary.existing,
     supportsMainChat: summary.supportsMainChat,
     isDisabled,
-    retryCount,
   });
 
   const resolvedRef: MainChatAgentRef | null =
@@ -452,16 +659,12 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
     isDisabled,
   });
 
-  const handleRetry = useCallback(() => {
-    setRetryCount((count) => count + 1);
-  }, []);
-
   const handleEnableMainChat = useCallback(() => {
     if (!targetServerId || !client || enabling) return;
     setEnabling(true);
     void updateSettings(targetServerId, { enabled: true }, client)
       .then(() => {
-        setRetryCount((count) => count + 1);
+        resetError();
         toast.show(t("mainChat.settings.enabledToast"), { variant: "success" });
         return true;
       })
@@ -471,11 +674,19 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
       .finally(() => {
         setEnabling(false);
       });
-  }, [client, enabling, t, targetServerId, toast, updateSettings]);
+  }, [client, enabling, resetError, t, targetServerId, toast, updateSettings]);
 
   const handleOpenSettings = useCallback(() => {
     router.push(buildSettingsRoute());
   }, []);
+
+  const handleOpenProviderSettings = useCallback(() => {
+    if (!targetServerId) {
+      router.push(buildSettingsRoute());
+      return;
+    }
+    router.push(buildSettingsHostSectionRoute(targetServerId, "providers"));
+  }, [targetServerId]);
 
   const handleOpenMainChatSettings = useCallback(() => {
     router.push(buildSettingsSectionRoute("main-chat"));
@@ -486,26 +697,42 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
   }, []);
 
   const displayTitle = configuredTitle?.trim() || summary.displayTitle;
+  const needsFirstSetup = resolveMainChatNeedsFirstSetup({
+    isDisabled,
+    resolvedRef,
+    targetServerId,
+    hasClient: client !== null,
+    supportsMainChat: summary.supportsMainChat,
+    connectionStatus,
+    hasDirectorySnapshot,
+  });
   const isEnsuring = resolveMainChatEnsuringState({
     isDisabled,
     ensureKind: ensureState.kind,
     targetServerId,
     connectionStatus,
     supportsMainChat: summary.supportsMainChat,
+    hasDirectorySnapshot,
   });
 
   const body = (
     <MainChatScreenBody
       isDisabled={isDisabled}
       enabling={enabling}
+      targetServerId={targetServerId}
+      displayTitle={displayTitle}
+      supportsMainChat={summary.supportsMainChat}
+      needsFirstSetup={needsFirstSetup}
       resolvedRef={resolvedRef}
       ensureState={ensureState}
       isEnsuring={isEnsuring}
       activePane={activePane}
       onFocusMainPane={handleFocusMainPane}
-      onRetry={handleRetry}
+      onStartWithModel={startWithSelection}
+      onRetry={resetError}
       onEnableMainChat={handleEnableMainChat}
       onOpenSettings={handleOpenSettings}
+      onOpenProviderSettings={handleOpenProviderSettings}
       onOpenMainChatSettings={handleOpenMainChatSettings}
     />
   );
@@ -530,8 +757,8 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
       activePane={activePane}
       onActivePaneChange={setActivePane}
     >
-      {!isDisabled ? (
-        <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef?.agentId ?? null} />
+      {!isDisabled && resolvedRef ? (
+        <HostSyncBanner serverId={effectiveServerId} mainAgentId={resolvedRef.agentId} />
       ) : null}
       {body}
     </MainChatShell>
@@ -549,6 +776,68 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     paddingHorizontal: theme.spacing[6],
     gap: theme.spacing[3],
+  },
+  setupCard: {
+    width: "100%",
+    maxWidth: 460,
+    borderRadius: theme.borderRadius.xl,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+    padding: theme.spacing[4],
+    gap: theme.spacing[4],
+  },
+  setupHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[3],
+  },
+  setupIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: theme.borderRadius.lg,
+    backgroundColor: theme.colors.surface2,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  setupHeaderText: {
+    flex: 1,
+    minWidth: 0,
+    gap: theme.spacing[1],
+  },
+  setupTitle: {
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.semibold,
+    color: theme.colors.foreground,
+  },
+  setupDescription: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    lineHeight: 20,
+  },
+  setupField: {
+    gap: theme.spacing[1.5],
+  },
+  setupFieldLabel: {
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foreground,
+  },
+  setupEmptyHint: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    lineHeight: 18,
+  },
+  setupErrorText: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.statusDanger,
+  },
+  setupActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: theme.spacing[2],
   },
   stateActions: {
     flexDirection: "row",

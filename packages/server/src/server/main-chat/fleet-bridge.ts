@@ -357,6 +357,9 @@ function toFleetHostStatus(host: AggregatedHostSummary): MainChatFleetHostStatus
     needsAttentionCount: host.needsAttentionCount,
     lastSyncedAt: host.lastSyncedAt,
     error: host.error,
+    ...(host.registrationId ? { registrationId: host.registrationId } : {}),
+    ...(host.expectedServerId ? { expectedServerId: host.expectedServerId } : {}),
+    ...(host.targetDescription ? { targetDescription: host.targetDescription } : {}),
   };
 }
 

@@ -3629,11 +3629,11 @@ export const en = {
     fleetSync: {
       capsuleSummary: "{{total}} fleet hosts · {{online}} online",
       capsuleSingleOnline: "{{total}} fleet host",
-      unlinkedPill: "{{count}} unlinked",
+      unlinkedPill: "{{count}} available",
       refreshLabel: "Refresh fleet host status",
       expandLabel: "Expand or collapse fleet hosts",
       localBadge: "Local",
-      readOnlyBadge: "Client read-only",
+      readOnlyBadge: "Not linked",
       agentCount: "{{count}} agents",
       attentionCount: "{{count}} need attention",
       status: {
@@ -3643,18 +3643,40 @@ export const en = {
         error: "Error",
         degraded: "Degraded",
       },
-      unlinkedTitle: "{{count}} client-only host(s) not linked to Main Chat",
+      unlinkedTitle: "{{count}} more host(s) available to manage",
       unlinkedDescription:
-        "Detected {{count}} client-only host(s) ({{names}}). They are currently read-only in the UI and do not support 24/7 background supervision or cross-host dispatch.",
-      syncNowButton: "Link to Main Chat host",
-      openSettingsButton: "Open host connection settings",
-      dismissButton: "Dismiss",
-      syncSuccessToast: "Linked {{count}} host(s) to Main Chat host",
+        'Main Chat runs on {{mainHost}} and manages local tasks by default. You also have {{names}} connected in this app — link them to enable background supervision and cross-host dispatch, or choose "Local only".',
+      syncNowButton: "Link {{count}} host(s)",
+      localOnlyButton: "Local only",
+      localOnlySuccessToast: "Set to manage this host only",
+      openSettingsButton: "Open host settings",
+      dismissButton: "Later",
+      syncSuccessToast: "Linked {{count}} host(s) to {{mainHost}}; connecting in background",
+      syncAlreadyLinkedToast: "These hosts are already linked and connecting in background",
       syncPartialToast:
         "Linked {{synced}} host(s); {{remaining}} still need credentials in host settings",
       syncNeedsManualToast:
         "Some hosts lack direct or relay credentials; opening Main Chat host settings",
       syncFailed: "Failed to link host to Main Chat host",
+    },
+    firstSetup: {
+      title: "Choose a model for Main Chat",
+      description:
+        "Before starting {{title}} for the first time, pick the provider and model you want to use. You can switch providers anytime later in the composer or Settings.",
+      modelLabel: "Provider & model",
+      modelPlaceholder: "Select provider & model",
+      startButton: "Start Main Chat",
+      startingButton: "Starting...",
+      noProvidersHint:
+        "No enabled providers are available on this host yet. Configure at least one provider in Settings first.",
+      openProviderSettings: "Configure providers",
+      needSetupToast: "Open Main Chat to choose a model and start first",
+    },
+    modelSwitch: {
+      busyRunning:
+        "Main Chat is currently responding. Wait for the turn to finish before switching providers.",
+      switchedToast: "Switched Main Chat to {{model}} with handoff summary; all tasks preserved",
+      switchFailed: "Failed to switch Main Chat provider",
     },
     shell: {
       roleMain: "Main chat",
@@ -4051,6 +4073,16 @@ export const en = {
             "This cannot be undone. If this preset is active, your current intervals and toggles remain intact and revert to its built-in baseline.",
           confirmButton: "Delete",
         },
+      },
+      foregroundModel: {
+        title: "Main Chat model",
+        description:
+          "Choose the provider and model used by the foreground Main Chat conversation. Switching providers automatically carries over a handoff summary and preserves active tasks and plans.",
+        label: "Current model",
+        hintInitialized: "Switch freely between any enabled provider and model.",
+        hintUninitialized: "Main Chat has not been started yet; picking a model will start it.",
+        initializedToast: "Started Main Chat with {{model}}",
+        modelUpdatedToast: "Updated Main Chat model to {{model}}",
       },
       backgroundModel: {
         title: "Background triage model",

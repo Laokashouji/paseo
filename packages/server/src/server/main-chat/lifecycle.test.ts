@@ -652,4 +652,96 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
       expect("payload" in res && res.payload.error).toContain("not configured");
     }
   });
+
+  it("switches main chat provider and model cleanly on new_session and clear without leaking incompatible mode/thinking options", async () => {
+    const harness = makeLifecycleHarness({ supportsNativeCompact: true });
+    await harness.service.start();
+    const { agentId: codexMainId } = await harness.service.ensureMainChat({
+      provider: "codex",
+      model: "gpt-5.6-terra",
+      modeId: "full-access",
+      thinkingOptionId: "max",
+    });
+
+    expect(harness.agents.get(codexMainId)?.config).toMatchObject({
+      provider: "codex",
+      model: "gpt-5.6-terra",
+      modeId: "full-access",
+      thinkingOptionId: "max",
+    });
+
+    const plan = await harness.service.createPlan(codexMainId, {
+      summary: "跨 Provider 切换验证",
+      tasks: [
+        {
+          title: "保持任务不断链",
+          goal: "切换 Provider 后子任务仍挂载到新主对话",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["父子关系迁移成功"],
+        },
+      ],
+    });
+    const childId = plan.tasks[0]!.agentId!;
+
+    // Switch provider from codex -> claude via main_chat.new_session.request
+    const switchResponses: SessionOutboundMessage[] = [];
+    await handleMainChatSessionMessage(
+      harness.service,
+      {
+        type: "main_chat.new_session.request",
+        requestId: "req_switch_provider",
+        mainAgentId: codexMainId,
+        carryHandoffSummary: true,
+        provider: "claude",
+        model: "claude-opus-4-6",
+      },
+      (msg) => switchResponses.push(msg),
+    );
+    const switchRes = switchResponses[0];
+    expect(switchRes?.type).toBe("main_chat.new_session.response");
+    if (switchRes?.type !== "main_chat.new_session.response") {
+      throw new Error("unexpected response");
+    }
+    expect(switchRes.payload.error).toBeNull();
+    expect(switchRes.payload.previousAgentId).toBe(codexMainId);
+    expect(switchRes.payload.migratedChildAgents).toBe(1);
+
+    const claudeMainId = switchRes.payload.agentId!;
+    const claudeAgent = harness.agents.get(claudeMainId);
+    expect(claudeAgent?.config.provider).toBe("claude");
+    expect(claudeAgent?.config.model).toBe("claude-opus-4-6");
+    // Incompatible codex modeId ("full-access") and thinkingOptionId ("max") must not carry over to claude.
+    expect(claudeAgent?.config.modeId).not.toBe("full-access");
+    expect(claudeAgent?.config.thinkingOptionId).toBeUndefined();
+    expect(harness.agents.get(childId)?.labels[PARENT_AGENT_ID_LABEL]).toBe(claudeMainId);
+
+    // Switch again via main_chat.clear.request with explicit provider/model
+    const clearResponses: SessionOutboundMessage[] = [];
+    await handleMainChatSessionMessage(
+      harness.service,
+      {
+        type: "main_chat.clear.request",
+        requestId: "req_clear_switch",
+        mainAgentId: claudeMainId,
+        provider: "gemini",
+        model: "gemini-4-neon",
+      },
+      (msg) => clearResponses.push(msg),
+    );
+    const clearRes = clearResponses[0];
+    expect(clearRes?.type).toBe("main_chat.clear.response");
+    if (clearRes?.type !== "main_chat.clear.response") {
+      throw new Error("unexpected response");
+    }
+    expect(clearRes.payload.error).toBeNull();
+    const geminiAgent = harness.agents.get(clearRes.payload.agentId!);
+    expect(geminiAgent?.config.provider).toBe("gemini");
+    expect(geminiAgent?.config.model).toBe("gemini-4-neon");
+    expect(harness.agents.get(childId)?.labels[PARENT_AGENT_ID_LABEL]).toBe(
+      clearRes.payload.agentId,
+    );
+
+    harness.service.stop();
+  });
 });

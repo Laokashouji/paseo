@@ -599,16 +599,15 @@ function useShellHeaderActions(input: {
 
   const runPatrol = useCallback(() => {
     if (!serverId || !client || isPatrolling) return;
+    if (!mainAgentId) {
+      toast.show(t("mainChat.firstSetup.needSetupToast"), { variant: "info" });
+      return;
+    }
     setIsPatrolling(true);
     void (async () => {
       try {
-        let resolvedMainAgentId = mainAgentId ?? undefined;
-        if (!resolvedMainAgentId) {
-          const ensured = await client.ensureMainChat();
-          resolvedMainAgentId = ensured.agentId ?? undefined;
-        }
         const result = await triggerPatrol(serverId, client, {
-          mainAgentId: resolvedMainAgentId,
+          mainAgentId,
           forceWakeup: true,
         });
         toast.show(result.summary, { variant: "success" });

@@ -94,6 +94,9 @@ export interface AggregatedHostSummary {
   needsAttentionCount: number;
   lastSyncedAt: string | null;
   error: string | null;
+  registrationId?: string;
+  expectedServerId?: string;
+  targetDescription?: string;
 }
 
 export interface AggregatedHostAgent {
@@ -363,9 +366,82 @@ interface NormalizedKnownHost {
   key: string;
   serverId: string;
   registrationId: string;
+  expectedServerId: string | null;
+  targetDescription: string | null;
   label: string;
   summary: ConnectedHostSummary | null;
   acceptedHandle: FleetAcceptedHostHandle | null;
+}
+
+const MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX = "main-chat-sync:";
+
+function extractRelayTargetServerId(targetDesc: string | undefined): string | null {
+  const trimmed = targetDesc?.trim();
+  if (!trimmed || !trimmed.startsWith("relay://")) return null;
+  const rest = trimmed.slice("relay://".length);
+  const slashIndex = rest.indexOf("/");
+  if (slashIndex < 0) return null;
+  const rawId = rest.slice(slashIndex + 1).trim();
+  if (!rawId) return null;
+  try {
+    return decodeURIComponent(rawId).trim() || rawId;
+  } catch {
+    return rawId;
+  }
+}
+
+export function extractExpectedServerIdFromHostSummary(
+  summary: ConnectedHostSummary | null,
+): string | null {
+  if (!summary) return null;
+  const pinned = summary.serverId?.trim();
+  if (pinned) return pinned;
+
+  const metaServerId = summary.metadata?.mainChatSyncServerId?.trim();
+  if (metaServerId) return metaServerId;
+
+  const sourceKey = summary.source?.key?.trim();
+  if (sourceKey && sourceKey.startsWith(MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX)) {
+    const extracted = sourceKey.slice(MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX.length).trim();
+    if (extracted) return extracted;
+  }
+
+  return extractRelayTargetServerId(summary.targetDescription);
+}
+
+function buildNormalizedHostDedupKey(entry: NormalizedKnownHost): string {
+  if (entry.expectedServerId) return `srv:${entry.expectedServerId}`;
+  if (entry.targetDescription) return `target:${entry.targetDescription}`;
+  return `reg:${entry.serverId}`;
+}
+
+function deduplicateNormalizedHosts(candidates: NormalizedKnownHost[]): NormalizedKnownHost[] {
+  const dedupedByTarget = new Map<string, NormalizedKnownHost>();
+  for (const entry of candidates) {
+    const dedupKey = buildNormalizedHostDedupKey(entry);
+    const existing = dedupedByTarget.get(dedupKey);
+    if (!existing || normalizedHostPriority(entry) > normalizedHostPriority(existing)) {
+      dedupedByTarget.set(dedupKey, entry);
+    }
+  }
+  return Array.from(dedupedByTarget.values());
+}
+
+function normalizedHostPriority(entry: NormalizedKnownHost): number {
+  if (entry.acceptedHandle) return 5;
+  if (entry.summary?.serverId) return 4;
+  switch (entry.summary?.status) {
+    case "connecting":
+      return 3;
+    case "offline":
+      return 2;
+    case "error":
+      return 1;
+    case "disabled":
+      return 0;
+    default:
+      return 2;
+  }
 }
 
 function basenameOf(cwd: string): string {
@@ -686,12 +762,13 @@ export class MainChatFleetAggregator {
 
   listAvailableRemoteHosts(): AggregatedHostSummary[] {
     const normalized = this.normalizeConnectedHosts({ ignoreScope: true });
-    return normalized.map((entry) => {
+    const summaries: AggregatedHostSummary[] = [];
+    for (const entry of normalized) {
       const state = this.remoteStates.get(entry.serverId);
       const { status, error } = this.resolveRemoteHostStatus(entry, state);
       const cachedAgents =
         state && entry.summary?.status !== "disabled" ? Array.from(state.agents.values()) : [];
-      return {
+      const item: AggregatedHostSummary = {
         serverId: entry.serverId,
         label: entry.label,
         isLocal: false,
@@ -700,8 +777,13 @@ export class MainChatFleetAggregator {
         needsAttentionCount: cachedAgents.filter(agentNeedsAttention).length,
         lastSyncedAt: state?.lastSyncedAt ?? entry.summary?.lastOnlineAt ?? null,
         error,
+        registrationId: entry.registrationId,
       };
-    });
+      if (entry.expectedServerId) item.expectedServerId = entry.expectedServerId;
+      if (entry.targetDescription) item.targetDescription = entry.targetDescription;
+      summaries.push(item);
+    }
+    return summaries;
   }
 
   start(): void {
@@ -812,6 +894,9 @@ export class MainChatFleetAggregator {
         needsAttentionCount: remoteAgents.filter(agentNeedsAttention).length,
         lastSyncedAt: state?.lastSyncedAt ?? entry.summary?.lastOnlineAt ?? null,
         error,
+        registrationId: entry.registrationId,
+        ...(entry.expectedServerId ? { expectedServerId: entry.expectedServerId } : {}),
+        ...(entry.targetDescription ? { targetDescription: entry.targetDescription } : {}),
       });
     }
 
@@ -1292,6 +1377,34 @@ export class MainChatFleetAggregator {
     return ignoreScope || !this.isHostAllowed || this.isHostAllowed(serverId);
   }
 
+  private normalizeKnownHostSummary(
+    summary: ConnectedHostSummary,
+    acceptedByServerId: ReadonlyMap<string, FleetAcceptedHostHandle>,
+    ignoreScope: boolean,
+  ): NormalizedKnownHost | null {
+    const remoteServerId =
+      summary.serverId !== null && summary.serverId !== this.localServerId
+        ? summary.serverId
+        : null;
+    const expectedServerId = extractExpectedServerIdFromHostSummary(summary);
+    if (expectedServerId === this.localServerId) return null;
+    const serverId = remoteServerId ?? summary.registrationId;
+    if (!this.shouldIncludeHost(expectedServerId ?? serverId, ignoreScope)) return null;
+    const acceptedHandle = remoteServerId ? (acceptedByServerId.get(remoteServerId) ?? null) : null;
+    const targetDescription = summary.targetDescription?.trim() || null;
+    const label = acceptedHandle?.label || summary.label?.trim() || targetDescription || serverId;
+    return {
+      key: serverId,
+      serverId,
+      registrationId: summary.registrationId,
+      expectedServerId,
+      targetDescription,
+      label,
+      summary,
+      acceptedHandle,
+    };
+  }
+
   private normalizeConnectedHosts(options?: { ignoreScope?: boolean }): NormalizedKnownHost[] {
     if (!this.connectedHosts) return [];
     const ignoreScope = Boolean(options?.ignoreScope);
@@ -1302,47 +1415,32 @@ export class MainChatFleetAggregator {
       acceptedByServerId.set(handle.serverId, handle);
     }
 
-    const entries: NormalizedKnownHost[] = [];
+    const candidates: NormalizedKnownHost[] = [];
     const seenServerIds = new Set<string>();
 
     for (const summary of this.connectedHosts.listKnownHosts()) {
-      const remoteServerId =
-        summary.serverId !== null && summary.serverId !== this.localServerId
-          ? summary.serverId
-          : null;
-      const serverId = remoteServerId ?? summary.registrationId;
-      if (!this.shouldIncludeHost(serverId, ignoreScope)) continue;
-      const acceptedHandle = remoteServerId
-        ? (acceptedByServerId.get(remoteServerId) ?? null)
-        : null;
-      const label =
-        acceptedHandle?.label || summary.label?.trim() || summary.targetDescription || serverId;
-
-      seenServerIds.add(serverId);
-      entries.push({
-        key: serverId,
-        serverId,
-        registrationId: summary.registrationId,
-        label,
-        summary,
-        acceptedHandle,
-      });
+      const normalized = this.normalizeKnownHostSummary(summary, acceptedByServerId, ignoreScope);
+      if (!normalized) continue;
+      seenServerIds.add(normalized.serverId);
+      candidates.push(normalized);
     }
 
     for (const handle of acceptedHandles) {
       if (handle.serverId === this.localServerId || seenServerIds.has(handle.serverId)) continue;
       if (!this.shouldIncludeHost(handle.serverId, ignoreScope)) continue;
-      entries.push({
+      candidates.push({
         key: handle.serverId,
         serverId: handle.serverId,
         registrationId: handle.registrationId,
+        expectedServerId: handle.serverId,
+        targetDescription: null,
         label: handle.label,
         summary: null,
         acceptedHandle: handle,
       });
     }
 
-    return entries;
+    return deduplicateNormalizedHosts(candidates);
   }
 
   private getOrCreateRemoteState(
@@ -1996,6 +2094,9 @@ export class MainChatFleetAggregator {
         needsAttentionCount: cachedAgents.filter(agentNeedsAttention).length,
         lastSyncedAt: state?.lastSyncedAt ?? entry.summary?.lastOnlineAt ?? null,
         error,
+        registrationId: entry.registrationId,
+        ...(entry.expectedServerId ? { expectedServerId: entry.expectedServerId } : {}),
+        ...(entry.targetDescription ? { targetDescription: entry.targetDescription } : {}),
       });
     }
 

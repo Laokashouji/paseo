@@ -81,8 +81,25 @@ vi.mock("@/hooks/use-directory-demand", () => ({
   useDirectoryDemand: () => undefined,
 }));
 
+const mockProviderSnapshotEntries = vi.hoisted<{
+  value: Array<{
+    provider: string;
+    label: string;
+    enabled: boolean;
+    status: "ready";
+    models: Array<{ id: string; label: string; isDefault?: boolean }>;
+  }>;
+}>(() => ({ value: [] }));
+
 vi.mock("@/hooks/use-providers-snapshot", () => ({
-  useProvidersSnapshot: () => ({ entries: [], isLoading: false }),
+  useProvidersSnapshot: () => ({
+    entries: mockProviderSnapshotEntries.value,
+    isLoading: false,
+    isFetching: false,
+    isRefreshing: false,
+    refresh: vi.fn(async () => undefined),
+    refetchIfStale: vi.fn(),
+  }),
 }));
 
 vi.mock("@/runtime/host-runtime", () => ({
@@ -482,6 +499,9 @@ function seedHost(overrides?: {
         agentDetails: new Map(),
         workspaces,
         pendingPermissions: new Map(),
+        hasHydratedAgents: true,
+        hasHydratedWorkspaces: true,
+        hasWorkspaceDirectorySnapshot: true,
       } as unknown as SessionState,
     },
   });
@@ -647,7 +667,9 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
 
     const view = render(
       <ToastApiProvider api={noopToastApi}>
-        <MainChatSettingsSection />
+        <KeyboardActionDispatcherProvider>
+          <MainChatSettingsSection />
+        </KeyboardActionDispatcherProvider>
       </ToastApiProvider>,
     );
 
@@ -676,5 +698,55 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
     });
     expect(view.getByTestId("settings-main-chat-usage-card")).toBeTruthy();
     expect(view.queryByTestId("settings-main-chat-night-mode")).toBeNull();
+  });
+
+  it("does not auto-create Main Chat with a default model on first entry and waits for manual model selection", async () => {
+    mockProviderSnapshotEntries.value = [
+      {
+        provider: "codex",
+        label: "Codex",
+        enabled: true,
+        status: "ready",
+        models: [{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", isDefault: true }],
+      },
+      {
+        provider: "claude",
+        label: "Claude Code",
+        enabled: true,
+        status: "ready",
+        models: [{ id: "claude-opus-4-6", label: "Claude Opus 4.6", isDefault: true }],
+      },
+    ];
+    try {
+      const enabledSettings = createDefaultMainChatSettings("conservative");
+      enabledSettings.enabled = true;
+      const { ensureMainChat } = seedHost({ settings: enabledSettings });
+
+      // Clear existing Main Chat agent to simulate first-time entry after directory hydration
+      act(() => {
+        clearAgentsForServer("srv_1");
+      });
+
+      const view = render(
+        <ToastApiProvider api={noopToastApi}>
+          <KeyboardActionDispatcherProvider>
+            <MainChatScreen />
+          </KeyboardActionDispatcherProvider>
+        </ToastApiProvider>,
+      );
+
+      // Must show first-time setup UI and NEVER auto-call ensureMainChat()
+      expect(view.getByTestId("main-chat-first-setup")).toBeTruthy();
+      expect(ensureMainChat).not.toHaveBeenCalled();
+      // Host sync banner stays hidden until Main Chat is initialized
+      expect(view.queryByTestId("main-chat-host-sync-banner")).toBeNull();
+      // Start button stays disabled until the user explicitly chooses a model
+      const startButton = view.getByTestId("main-chat-first-setup-start");
+      expect(startButton.getAttribute("aria-disabled")).toBe("true");
+      fireEvent.click(startButton);
+      expect(ensureMainChat).not.toHaveBeenCalled();
+    } finally {
+      mockProviderSnapshotEntries.value = [];
+    }
   });
 });

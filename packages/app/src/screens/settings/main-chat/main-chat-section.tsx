@@ -1,3 +1,4 @@
+import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import {
   createDefaultMainChatSettings,
   isMainChatEnabled,
@@ -10,6 +11,7 @@ import {
   type MainChatSettings,
   type MainChatSettingsPatch,
 } from "@getpaseo/protocol/main-chat";
+import { router } from "expo-router";
 import equal from "fast-deep-equal";
 import { Power, Radar } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
@@ -17,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { CombinedModelSelector } from "@/components/combined-model-selector";
 import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { Button } from "@/components/ui/button";
 import { FormTextInput } from "@/components/ui/form-field";
@@ -39,11 +42,13 @@ import {
   type MainChatIntervalFieldKey,
   type MainChatIntervalFieldSpec,
 } from "@/main-chat/style-presets";
+import { buildSelectableProviderSelectorProviders } from "@/provider-selection/provider-selection";
 import { useHosts } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
+import { buildMainChatRoute } from "@/utils/host-routes";
 import { MainChatFleetScopePanel } from "./fleet-scope-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
 import { MainChatStewardConflictsBanner, MainChatStewardRosterPanel } from "./steward-roster-panel";
@@ -657,6 +662,183 @@ const MainChatFleetScopeSection = memo(function MainChatFleetScopeSection({
   );
 });
 
+const MainChatForegroundModelSection = memo(function MainChatForegroundModelSection({
+  selectedServerId,
+  mainChatAgentId,
+  client,
+  disabled,
+  onRefreshOverview,
+}: {
+  selectedServerId: string | null;
+  mainChatAgentId: string | null;
+  client: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
+  disabled: boolean;
+  onRefreshOverview: (agentId: string | null) => void;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [switching, setSwitching] = useState(false);
+
+  const liveMainAgent = useStoreWithEqualityFn(
+    useSessionStore,
+    useCallback(
+      (state) => {
+        if (!selectedServerId || !mainChatAgentId) return null;
+        const agent = state.sessions[selectedServerId]?.agents.get(mainChatAgentId) ?? null;
+        if (!agent) return null;
+        return {
+          provider: agent.provider,
+          model: agent.runtimeInfo?.model ?? agent.model ?? "",
+          status: agent.status,
+        };
+      },
+      [mainChatAgentId, selectedServerId],
+    ),
+    equal,
+  );
+
+  const snapshot = useProvidersSnapshot(selectedServerId, { enabled: Boolean(selectedServerId) });
+  const providers = useMemo(
+    () =>
+      buildSelectableProviderSelectorProviders(snapshot.entries, {
+        selectedProvider: liveMainAgent?.provider ?? null,
+      }),
+    [liveMainAgent?.provider, snapshot.entries],
+  );
+
+  const handleOpen = useCallback(() => {
+    snapshot.refetchIfStale?.();
+  }, [snapshot]);
+
+  const handleRetryProvider = useCallback(
+    (provider: AgentProvider) => {
+      void snapshot.refresh?.([provider]);
+    },
+    [snapshot],
+  );
+
+  const handleSelectModel = useCallback(
+    (nextProvider: AgentProvider, nextModelId: string) => {
+      if (!selectedServerId || !client || switching) return;
+      if (liveMainAgent?.status === "running" && nextProvider !== liveMainAgent.provider) {
+        toast.show(t("mainChat.modelSwitch.busyRunning"), { variant: "info" });
+        return;
+      }
+
+      const targetEntry = snapshot.entries?.find((entry) => entry.provider === nextProvider);
+      const displayLabel =
+        targetEntry?.models?.find((model) => model.id === nextModelId)?.label ??
+        (nextModelId ? `${nextProvider}/${nextModelId}` : targetEntry?.label || nextProvider);
+
+      setSwitching(true);
+      void (async () => {
+        try {
+          if (!mainChatAgentId || !liveMainAgent) {
+            const ensured = await client.ensureMainChat({
+              provider: nextProvider,
+              ...(nextModelId ? { model: nextModelId } : {}),
+            });
+            if (ensured.error || !ensured.agentId) {
+              throw new Error(ensured.error ?? t("mainChat.modelSwitch.switchFailed"));
+            }
+            onRefreshOverview(ensured.agentId);
+            toast.show(
+              t("mainChat.settings.foregroundModel.initializedToast", { model: displayLabel }),
+              { variant: "success" },
+            );
+            return;
+          }
+
+          if (nextProvider === liveMainAgent.provider) {
+            await client.setAgentModel(mainChatAgentId, nextModelId);
+            toast.show(
+              t("mainChat.settings.foregroundModel.modelUpdatedToast", { model: displayLabel }),
+              { variant: "success" },
+            );
+            return;
+          }
+
+          const response = await client.startNewMainChatSession({
+            mainAgentId: mainChatAgentId,
+            carryHandoffSummary: true,
+            provider: nextProvider,
+            ...(nextModelId ? { model: nextModelId } : {}),
+          });
+          if (response.error || !response.agentId) {
+            throw new Error(response.error ?? t("mainChat.modelSwitch.switchFailed"));
+          }
+          useMainChatOverviewStore.getState().setActiveAgentOverride(selectedServerId, {
+            serverId: selectedServerId,
+            agentId: response.agentId,
+            workspaceId: response.workspaceId ?? "",
+            previousAgentId: response.previousAgentId ?? mainChatAgentId,
+          });
+          onRefreshOverview(response.agentId);
+          toast.show(t("mainChat.modelSwitch.switchedToast", { model: displayLabel }), {
+            variant: "success",
+          });
+        } catch (error) {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.modelSwitch.switchFailed"),
+          );
+        } finally {
+          setSwitching(false);
+        }
+      })();
+    },
+    [
+      client,
+      liveMainAgent,
+      mainChatAgentId,
+      onRefreshOverview,
+      selectedServerId,
+      snapshot.entries,
+      switching,
+      t,
+      toast,
+    ],
+  );
+
+  if (!selectedServerId) return null;
+
+  return (
+    <SettingsSection
+      title={t("mainChat.settings.foregroundModel.title")}
+      info={t("mainChat.settings.foregroundModel.description")}
+      testID="settings-main-chat-foreground-model"
+    >
+      <View style={settingsStyles.card}>
+        <View style={[settingsStyles.row, styles.actionRow]}>
+          <View style={styles.rowText}>
+            <Text style={settingsStyles.rowTitle}>
+              {t("mainChat.settings.foregroundModel.label")}
+            </Text>
+            <Text style={settingsStyles.rowHint}>
+              {liveMainAgent
+                ? t("mainChat.settings.foregroundModel.hintInitialized")
+                : t("mainChat.settings.foregroundModel.hintUninitialized")}
+            </Text>
+          </View>
+          <CombinedModelSelector
+            providers={providers}
+            selectedProvider={liveMainAgent?.provider ?? ""}
+            selectedModel={liveMainAgent?.model ?? ""}
+            onSelect={handleSelectModel}
+            isLoading={Boolean(snapshot.isLoading || snapshot.isFetching)}
+            onOpen={handleOpen}
+            onRetryProvider={handleRetryProvider}
+            isRetryingProvider={Boolean(snapshot.isRefreshing)}
+            disabled={disabled || switching || !client}
+            serverId={selectedServerId}
+            desktopPlacement="bottom-start"
+            desktopMinWidth={360}
+          />
+        </View>
+      </View>
+    </SettingsSection>
+  );
+});
+
 export function MainChatSettingsSection(): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
@@ -831,23 +1013,36 @@ export function MainChatSettingsSection(): ReactElement {
 
   const handleTriggerPatrol = useCallback(() => {
     if (!selectedServerId || !client || patrolling) return;
+    if (!mainChatAgentId) {
+      toast.show(t("mainChat.firstSetup.needSetupToast"), { variant: "info" });
+      router.push(buildMainChatRoute(selectedServerId));
+      return;
+    }
     setPatrolling(true);
     void (async () => {
       try {
-        const ensured = await client.ensureMainChat();
         const result = await triggerPatrol(selectedServerId, client, {
-          mainAgentId: ensured.agentId ?? undefined,
+          mainAgentId: mainChatAgentId,
           forceWakeup: true,
         });
         toast.show(result.summary, { variant: "success" });
-        refreshOverview(ensured.agentId ?? null);
+        refreshOverview(mainChatAgentId);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("mainChat.patrolFailed"));
       } finally {
         setPatrolling(false);
       }
     })();
-  }, [client, patrolling, refreshOverview, selectedServerId, t, toast, triggerPatrol]);
+  }, [
+    client,
+    mainChatAgentId,
+    patrolling,
+    refreshOverview,
+    selectedServerId,
+    t,
+    toast,
+    triggerPatrol,
+  ]);
 
   const modelModeOptions = useMemo<SegmentedControlOption<MainChatBackgroundModelMode>[]>(
     () => [
@@ -1079,6 +1274,14 @@ export function MainChatSettingsSection(): ReactElement {
               onApplyPatch={applyPatch}
             />
           </SettingsSection>
+
+          <MainChatForegroundModelSection
+            selectedServerId={selectedServerId}
+            mainChatAgentId={mainChatAgentId}
+            client={client}
+            disabled={saving}
+            onRefreshOverview={refreshOverview}
+          />
 
           <SettingsSection
             title={t("mainChat.settings.backgroundModel.title")}

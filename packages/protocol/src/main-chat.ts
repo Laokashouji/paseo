@@ -858,6 +858,9 @@ export const MainChatFleetHostStatusSchema = z.object({
   needsAttentionCount: z.number().int().nonnegative(),
   lastSyncedAt: z.string().nullable(),
   error: z.string().nullable(),
+  registrationId: z.string().optional(),
+  expectedServerId: z.string().optional(),
+  targetDescription: z.string().optional(),
 });
 export type MainChatFleetHostStatus = z.infer<typeof MainChatFleetHostStatusSchema>;
 
@@ -1552,6 +1555,10 @@ export const MainChatClearRequestSchema = z.object({
   type: z.literal("main_chat.clear.request"),
   requestId: z.string(),
   mainAgentId: z.string().optional(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
 });
 export type MainChatClearRequest = z.infer<typeof MainChatClearRequestSchema>;
 
@@ -1579,6 +1586,10 @@ export const MainChatNewSessionRequestSchema = z.object({
   mainAgentId: z.string().optional(),
   carryHandoffSummary: z.boolean().optional(),
   title: z.string().min(1).max(40).optional(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
 });
 export type MainChatNewSessionRequest = z.infer<typeof MainChatNewSessionRequestSchema>;
 

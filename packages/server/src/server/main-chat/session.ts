@@ -546,7 +546,12 @@ async function handleLifecycleMessages(
 
   if (msg.type === "main_chat.clear.request") {
     try {
-      const result = await service.clearMainChatContext(msg.mainAgentId);
+      const result = await service.clearMainChatContext(msg.mainAgentId, {
+        provider: msg.provider,
+        model: msg.model,
+        modeId: msg.modeId,
+        thinkingOptionId: msg.thinkingOptionId,
+      });
       send({
         type: "main_chat.clear.response",
         payload: {
@@ -583,6 +588,10 @@ async function handleLifecycleMessages(
       const result = await service.startNewMainChatSession(msg.mainAgentId, {
         carryHandoffSummary: msg.carryHandoffSummary,
         title: msg.title,
+        provider: msg.provider,
+        model: msg.model,
+        modeId: msg.modeId,
+        thinkingOptionId: msg.thinkingOptionId,
       });
       send({
         type: "main_chat.new_session.response",
