@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cdp, userEvent } from "vitest/browser";
 import type { EditingTextInputHandle } from "@/components/ui/text-input";
 import { resolveLinkedClipboardMarkdown } from "@/composer/pasted-text.web";
 import { ComposerMarkdownInput, type ComposerMarkdownInputProps } from "./markdown-editor.web";
@@ -506,5 +507,210 @@ describe("ComposerMarkdownInput (web Live Preview)", () => {
     } finally {
       mounted.content.removeEventListener("paste", onCapturePaste, true);
     }
+  });
+
+  it("formats empty list prefixes immediately after a paragraph and avoids duplicate markers during IME composition", async () => {
+    const client = cdp();
+    const mounted = mountEditor({ initialValue: "帮我做几件事" });
+    const { container, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.setSelection({ start: 6, end: 6 });
+    });
+
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}1. ");
+
+    await vi.waitFor(() => {
+      const lines = container.querySelectorAll(".cm-line");
+      expect(lines.length).toBe(2);
+      expect(lines[1]?.classList.contains("cm-md-ordered-line")).toBe(true);
+      expect(lines[1]?.querySelector(".cm-md-ordered-widget")?.textContent).toBe("1.");
+      expect(lines[1]?.textContent).toBe("1.");
+    });
+    expect(handle.getText()).toBe("帮我做几件事\n1. ");
+
+    // Start Chinese IME composition immediately after `1. ` without committing yet.
+    await client.send("Input.imeSetComposition", {
+      text: "ceshi",
+      selectionStart: 5,
+      selectionEnd: 5,
+    });
+
+    await vi.waitFor(() => {
+      const line2 = container.querySelectorAll(".cm-line")[1];
+      expect(handle.getText()).toBe("帮我做几件事\n1. ceshi");
+      expect(line2?.classList.contains("cm-md-ordered-line")).toBe(true);
+      expect(line2?.querySelectorAll(".cm-md-ordered-widget").length).toBe(1);
+      expect(line2?.textContent).toBe("1.ceshi");
+    });
+
+    // Commit Chinese text via IME.
+    await client.send("Input.insertText", { text: "测试" });
+
+    await vi.waitFor(() => {
+      const line2 = container.querySelectorAll(".cm-line")[1];
+      expect(handle.getText()).toBe("帮我做几件事\n1. 测试");
+      expect(line2?.querySelectorAll(".cm-md-ordered-widget").length).toBe(1);
+      expect(line2?.textContent).toBe("1.测试");
+    });
+
+    // Also verify `- ` after a paragraph with IME composition never flashes H2 or duplicates text.
+    act(() => {
+      handle.replaceText("帮我做几件事", { start: 6, end: 6 });
+    });
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}- ");
+
+    await vi.waitFor(() => {
+      const lines = container.querySelectorAll(".cm-line");
+      expect(lines[0]?.classList.contains("cm-md-h2")).toBe(false);
+      expect(lines[1]?.classList.contains("cm-md-bullet-line")).toBe(true);
+      expect(lines[1]?.querySelector(".cm-md-bullet-widget")?.textContent).toBe("•");
+    });
+
+    await client.send("Input.imeSetComposition", {
+      text: "ceshi",
+      selectionStart: 5,
+      selectionEnd: 5,
+    });
+    await vi.waitFor(() => {
+      const line2 = container.querySelectorAll(".cm-line")[1];
+      expect(handle.getText()).toBe("帮我做几件事\n- ceshi");
+      expect(line2?.querySelectorAll(".cm-md-bullet-widget").length).toBe(1);
+      expect(line2?.textContent).toBe("•ceshi");
+    });
+
+    await client.send("Input.insertText", { text: "测试" });
+    await vi.waitFor(() => {
+      const line2 = container.querySelectorAll(".cm-line")[1];
+      expect(handle.getText()).toBe("帮我做几件事\n- 测试");
+      expect(line2?.querySelectorAll(".cm-md-bullet-widget").length).toBe(1);
+      expect(line2?.textContent).toBe("•测试");
+    });
+  });
+
+  it("formats empty bullet and nested list prefixes after paragraphs without flashing Setext H2", () => {
+    const mounted = mountEditor({ initialValue: "说明如下" });
+    const { container, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+      handle.setSelection({ start: 4, end: 4 });
+      handle.insertText?.("\n-");
+    });
+    // Bare `-` on the active line below a paragraph should not flash the paragraph into H2.
+    expect(container.querySelector(".cm-line.cm-md-h2")).toBeNull();
+
+    // Typing a second `-` turns it into an intentional Setext H2 heading.
+    act(() => {
+      handle.insertText?.("-");
+    });
+    expect(container.querySelector(".cm-line.cm-md-h2")?.textContent).toBe("说明如下");
+
+    // Replacing with `- ` renders a clean bullet list item without turning line 1 into H2.
+    act(() => {
+      handle.replaceText("说明如下\n- ", { start: 7, end: 7 });
+    });
+    expect(container.querySelector(".cm-line.cm-md-h2")).toBeNull();
+    expect(container.querySelector(".cm-line.cm-md-bullet-line")).not.toBeNull();
+    expect(container.querySelector(".cm-md-bullet-widget")?.textContent).toBe("•");
+
+    // `* `, `+ `, `1) `, nested lists, and quoted lists after paragraphs all preview immediately.
+    for (const [sample, expectedGlyph] of [
+      ["说明如下\n* ", "•"],
+      ["说明如下\n+ ", "•"],
+      ["1. first\n  - ", "◦"],
+      ["> 引用说明\n> - ", "•"],
+    ] as const) {
+      act(() => {
+        handle.replaceText(sample, { start: sample.length, end: sample.length });
+      });
+      expect(container.querySelector(".cm-md-bullet-widget")?.textContent).toBe(expectedGlyph);
+    }
+
+    for (const [sample, expectedMarker] of [
+      ["说明如下\n1) ", "1)"],
+      ["- item\n  1. ", "1."],
+      ["> 引用说明\n> 1. ", "1."],
+    ] as const) {
+      act(() => {
+        handle.replaceText(sample, { start: sample.length, end: sample.length });
+      });
+      expect(container.querySelector(".cm-md-ordered-widget")?.textContent).toBe(expectedMarker);
+    }
+
+    // Non-interrupting patterns (non-1 ordered after paragraph, 4-space indent, fenced code) stay plain.
+    for (const nonList of ["说明如下\n2. ", "说明如下\n    1. ", "```\n说明如下\n1. \n```"]) {
+      act(() => {
+        handle.replaceText(nonList, { start: nonList.length, end: nonList.length });
+      });
+      expect(container.querySelector(".cm-md-ordered-widget")).toBeNull();
+    }
+  });
+
+  it("defers brand-new replace widgets during IME composition until compositionend so prefixes never duplicate", async () => {
+    const client = cdp();
+    const mounted = mountEditor();
+    const { container, inputRef } = mounted;
+    const handle = inputRef.current!;
+
+    act(() => {
+      handle.focus();
+    });
+
+    // Type `1.` without space so no replace widget exists before composition begins.
+    await userEvent.keyboard("1.");
+    await vi.waitFor(() => {
+      expect(handle.getText()).toBe("1.");
+      expect(container.querySelector(".cm-md-ordered-widget")).toBeNull();
+    });
+
+    // IME composition introduces the space and pinyin in the same text node.
+    await client.send("Input.imeSetComposition", {
+      text: " ni",
+      selectionStart: 3,
+      selectionEnd: 3,
+    });
+
+    await vi.waitFor(() => {
+      const line = container.querySelector(".cm-line");
+      expect(handle.getText()).toBe("1. ni");
+      expect(line?.querySelector(".cm-md-ordered-widget")).toBeNull();
+      expect(line?.textContent).toBe("1. ni");
+    });
+
+    // Committing text ends composition and immediately applies the ordered list widget.
+    await client.send("Input.insertText", { text: " 你" });
+
+    await vi.waitFor(() => {
+      const line = container.querySelector(".cm-line");
+      expect(handle.getText()).toBe("1. 你");
+      expect(line?.querySelectorAll(".cm-md-ordered-widget").length).toBe(1);
+      expect(line?.textContent).toBe("1.你");
+    });
+
+    // Also verify committing identical text (no final DOM diff on compositionend) still refreshes.
+    act(() => {
+      handle.replaceText("1.", { start: 2, end: 2 });
+    });
+    await client.send("Input.imeSetComposition", {
+      text: " ok",
+      selectionStart: 3,
+      selectionEnd: 3,
+    });
+    await vi.waitFor(() => {
+      expect(handle.getText()).toBe("1. ok");
+      expect(container.querySelector(".cm-md-ordered-widget")).toBeNull();
+    });
+
+    await client.send("Input.insertText", { text: " ok" });
+    await vi.waitFor(() => {
+      const line = container.querySelector(".cm-line");
+      expect(handle.getText()).toBe("1. ok");
+      expect(line?.querySelectorAll(".cm-md-ordered-widget").length).toBe(1);
+      expect(line?.textContent).toBe("1.ok");
+    });
   });
 });
