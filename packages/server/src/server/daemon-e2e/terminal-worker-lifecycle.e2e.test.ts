@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -91,7 +95,12 @@ async function getAvailablePort(): Promise<number> {
 }
 
 async function startSupervisor(
-  options: { home?: string; port?: number; pathPrefix?: string } = {},
+  options: {
+    home?: string;
+    port?: number;
+    pathPrefix?: string;
+    extraEnv?: Record<string, string>;
+  } = {},
 ): Promise<Harness> {
   const home = options.home ?? mkdtempSync(path.join(tmpdir(), "tw-life-"));
   const workDir = path.join(home, "work");
@@ -109,6 +118,7 @@ async function startSupervisor(
     PASEO_DICTATION_ENABLED: "0",
     PASEO_VOICE_MODE_ENABLED: "0",
     CI: "true",
+    ...options.extraEnv,
   };
   if (options.pathPrefix) {
     env.PATH = `${options.pathPrefix}${path.delimiter}${env.PATH ?? ""}`;
@@ -399,50 +409,129 @@ describe("terminals across daemon restarts", { timeout: 240_000 }, () => {
   });
 
   test("daemon.update.request restarts the daemon and keeps the terminal", async () => {
-    // Fake npm only: `ls` reports this checkout as the global install at the daemon's
-    // version, `install -g` does nothing, and anything else fails so real npm never runs.
-    const fakeBin = mkdtempSync(path.join(tmpdir(), "tw-npm-"));
-    extraDirs.push(fakeBin);
-    const listing = JSON.stringify({
-      path: path.join(fakeBin, "global"),
-      dependencies: {
-        "@getpaseo/cli": {
-          version: resolveDaemonVersion(import.meta.url),
-          path: SERVER_ROOT,
-        },
-      },
-    });
-    const fakeNpm = path.join(fakeBin, "fake-npm.cjs");
-    writeFileSync(
-      fakeNpm,
-      `const args = process.argv.slice(2);
-const has = (...tokens) => tokens.every((token) => args.includes(token));
-if (has("-g", "ls", "@getpaseo/cli", "--json", "--depth=0", "--long")) {
-  process.stdout.write(${JSON.stringify(listing)} + "\\n");
-} else if (args[0] === "install" && has("-g", "@getpaseo/cli@latest")) {
-  // The installed version is already the running one: nothing to do.
-} else {
-  process.stderr.write("unexpected npm call: " + args.join(" ") + "\\n");
-  process.exit(1);
-}
-`,
-    );
-    const npmScript = path.join(fakeBin, "npm");
-    writeFileSync(npmScript, `#!/bin/sh\nexec "${process.execPath}" "${fakeNpm}" "$@"\n`);
-    chmodSync(npmScript, 0o755);
-    writeFileSync(path.join(fakeBin, "npm.cmd"), `@"${process.execPath}" "${fakeNpm}" %*\r\n`);
-    const harness = await startSupervisor({ pathPrefix: fakeBin });
-    let client = await connect(harness);
-    const workspaceId = await createWorkspace(client, harness);
-    const terminal = await createMarkedTerminal(client, harness, workspaceId, "MARKER-UPDATE");
-    const daemonPid = await daemonWorkerPid(client);
+    const fixtureRoot = mkdtempSync(path.join(tmpdir(), "tw-fork-update-"));
+    extraDirs.push(fixtureRoot);
+    const currentVersion = resolveDaemonVersion(import.meta.url);
+    const nextVersion = "99.0.501";
 
-    const update = await client.updateDaemon();
-    expect(update).toMatchObject({ success: true });
-    await client.close();
-    client = await waitForReplacement(harness, daemonPid);
-    await expectKept(client, terminal, "MARKER-UPDATE", "update");
-    await client.close();
+    const runtimeBase = path.join(fixtureRoot, "runtime");
+    const currentReleaseDir = path.join(runtimeBase, "releases", currentVersion);
+    mkdirSync(currentReleaseDir, { recursive: true });
+    writeFileSync(
+      path.join(currentReleaseDir, "fork-runtime.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        repo: "Laokashouji/paseo",
+        version: currentVersion,
+        tag: `fork-v${currentVersion}`,
+        platform: process.platform,
+        arch: process.arch,
+      }),
+    );
+    const currentLink = path.join(runtimeBase, "current");
+    symlinkSync(path.join("releases", currentVersion), currentLink, "dir");
+
+    const archiveSrc = path.join(fixtureRoot, "archive-src");
+    const workerStub = path.join(
+      archiveSrc,
+      "node_modules",
+      "@getpaseo",
+      "server",
+      "dist",
+      "server",
+      "server",
+      "daemon-worker.js",
+    );
+    mkdirSync(path.dirname(workerStub), { recursive: true });
+    mkdirSync(path.join(archiveSrc, "bin"), { recursive: true });
+    writeFileSync(
+      path.join(archiveSrc, "fork-runtime.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        repo: "Laokashouji/paseo",
+        version: nextVersion,
+        tag: `fork-v${nextVersion}`,
+        platform: process.platform,
+        arch: process.arch,
+      }),
+    );
+    writeFileSync(
+      path.join(archiveSrc, "node_modules", "@getpaseo", "server", "package.json"),
+      JSON.stringify({ name: "@getpaseo/server", version: nextVersion }),
+    );
+    writeFileSync(workerStub, "// stub worker\n");
+    writeFileSync(path.join(archiveSrc, "bin", "paseo"), "#!/bin/sh\necho ok\n");
+    chmodSync(path.join(archiveSrc, "bin", "paseo"), 0o755);
+
+    const assetName = `paseo-daemon-${nextVersion}-${process.platform}-${process.arch}.tar.gz`;
+    const tarballPath = path.join(fixtureRoot, assetName);
+    execFileSync("tar", ["-czf", tarballPath, "-C", archiveSrc, "."]);
+    const tarballBytes = readFileSync(tarballPath);
+    const sha256 = createHash("sha256").update(tarballBytes).digest("hex");
+    const targetKey = `${process.platform}-${process.arch}`;
+
+    let boundOrigin = "";
+    const server = createHttpServer((req, res) => {
+      const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      if (pathname === "/latest-daemon.json") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            schemaVersion: 1,
+            repo: "Laokashouji/paseo",
+            tag: `fork-v${nextVersion}`,
+            version: nextVersion,
+            targets: {
+              [targetKey]: {
+                asset: assetName,
+                url: `${boundOrigin}/${assetName}`,
+                sha256,
+                size: tarballBytes.byteLength,
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (pathname === `/${assetName}`) {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end(tarballBytes);
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Failed to bind fixture HTTP server");
+    }
+    boundOrigin = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const harness = await startSupervisor({
+        extraEnv: {
+          PASEO_FORK_RUNTIME_ROOT: currentReleaseDir,
+          PASEO_FORK_UPDATE_MANIFEST_URL: `${boundOrigin}/latest-daemon.json`,
+        },
+      });
+      let client = await connect(harness);
+      const workspaceId = await createWorkspace(client, harness);
+      const terminal = await createMarkedTerminal(client, harness, workspaceId, "MARKER-UPDATE");
+      const daemonPid = await daemonWorkerPid(client);
+
+      const update = await client.updateDaemon();
+      expect(update).toMatchObject({ success: true, newVersion: nextVersion });
+      expect(realpathSync(currentLink)).toBe(
+        realpathSync(path.join(runtimeBase, "releases", nextVersion)),
+      );
+      await client.close();
+      client = await waitForReplacement(harness, daemonPid);
+      await expectKept(client, terminal, "MARKER-UPDATE", "update");
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   test.skipIf(!POSIX)(
