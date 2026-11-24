@@ -67,6 +67,7 @@ import {
   type SessionRuntimeMetrics,
 } from "./session.js";
 import type { HubRelationshipManagement } from "./hub/relationship-controller.js";
+import type { InteractiveCardsService } from "./interactive-cards/service.js";
 import { WorkspaceSetupObservation } from "./workspace-setup-observation.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { WorkspaceArchiveOperations } from "./workspace-archive-operations.js";
@@ -637,6 +638,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private unsubscribeTerminalActivity: (() => void) | null = null;
   private readonly browserToolsBroker: BrowserToolsBroker | null;
+  private interactiveCardsService: InteractiveCardsService | null = null;
   private readonly hubRelationships: HubRelationshipManagement | null;
   private connectionLifecycle: "starting" | "accepting" | "stopping" = "accepting";
   private readonly advertiseDaemonStatusRpc: boolean;
@@ -1170,6 +1172,10 @@ export class VoiceAssistantWebSocketServer {
     this.connectionLifecycle = "stopping";
   }
 
+  public setInteractiveCardsService(service: InteractiveCardsService | null): void {
+    this.interactiveCardsService = service;
+  }
+
   public beginAcceptingConnections(): void {
     if (this.connectionLifecycle === "starting") {
       this.connectionLifecycle = "accepting";
@@ -1670,6 +1676,7 @@ export class VoiceAssistantWebSocketServer {
       },
       sourceId: options.sourceId,
       browserToolsBroker: this.browserToolsBroker,
+      interactiveCardsService: this.interactiveCardsService,
       clientId: options.clientId,
       appVersion: options.appVersion,
       clientCapabilities: options.clientCapabilities,
@@ -2242,6 +2249,8 @@ export class VoiceAssistantWebSocketServer {
         fsEntryOps: true,
         // COMPAT(fsEntryDuplicate): added in v0.3.0, remove gate after 2027-02-09.
         fsEntryDuplicate: true,
+        // COMPAT(interactiveCards): added in fork interactive-cards, gate UI against older daemons.
+        ...(this.interactiveCardsService ? { interactiveCards: true } : {}),
         // COMPAT(checkoutDiscardChanges): added in v0.3.0, remove gate after 2027-02-08.
         checkoutDiscardChanges: true,
         checkoutDiffAll: true,

@@ -1,5 +1,6 @@
 import { isTurnTrigger, isTurnBoundary } from "@/agent-stream/turn-membership";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import { isInteractiveCardToolName } from "@getpaseo/protocol/interactive-cards";
 import type { StreamItem, ToolCallItem, ThoughtItem } from "@/types/stream";
 
 export interface ToolCallDescriptor {
@@ -74,7 +75,11 @@ export function isGroupableToolCall(
     return false;
   }
   const descriptor = describeToolCall(item);
-  return descriptor.detail.type !== "plan" && descriptor.name.trim().toLowerCase() !== "speak";
+  return (
+    descriptor.detail.type !== "plan" &&
+    descriptor.name.trim().toLowerCase() !== "speak" &&
+    isInteractiveCardToolName(descriptor.name) !== "view_show"
+  );
 }
 
 function createRun(calls: readonly GroupableItem[], isSealed: boolean): ToolCallRun {

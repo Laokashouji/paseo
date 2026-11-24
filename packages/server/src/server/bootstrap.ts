@@ -147,6 +147,7 @@ import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
+import { InteractiveCardsService } from "./interactive-cards/service.js";
 import {
   createPaseoToolCatalog,
   createPaseoAgentToolManifest,
@@ -1053,6 +1054,59 @@ export async function createPaseoDaemon(
     agentManager,
     agentStorage,
   );
+  const interactiveCardsService = new InteractiveCardsService({
+    paseoHome: config.paseoHome,
+    logger,
+    isAgentArchived: async (agentId) => {
+      const stored = await agentStorage.get(agentId);
+      return stored?.archivedAt != null;
+    },
+    deliverUserReply: async ({ agentId, text, clientMessageId }) => {
+      await sendPromptToAgent({
+        agentId,
+        prompt: text,
+        messageId: clientMessageId,
+        agentManager,
+        agentStorage,
+        activeTurnBehavior: "steer",
+        unarchive: false,
+        logger,
+      });
+    },
+  });
+  const detachInteractiveCardsEvents = agentManager.subscribe(
+    (event) => {
+      if (event.type === "agent_removed") {
+        void interactiveCardsService.deleteAgent(event.agentId).catch((err) => {
+          logger.warn({ err, agentId: event.agentId }, "Failed to delete interactive card state");
+        });
+        return;
+      }
+      if (
+        event.type === "timeline_replacement" ||
+        (event.type === "agent_stream" && event.event.type === "turn_completed")
+      ) {
+        const assistantTexts = agentManager
+          .getTimeline(event.agentId)
+          .filter(
+            (item): item is Extract<typeof item, { type: "assistant_message" }> =>
+              item.type === "assistant_message",
+          )
+          .map((item) => item.text);
+        if (assistantTexts.length > 0) {
+          void interactiveCardsService
+            .scanAssistantMessages(event.agentId, assistantTexts)
+            .catch((err) => {
+              logger.warn(
+                { err, agentId: event.agentId },
+                "Failed to scan assistant interactive cards",
+              );
+            });
+        }
+      }
+    },
+    { replayState: false },
+  );
   await agentStorage.initialize();
   const restartRecovery = createRestartRecovery({
     storage: agentStorage,
@@ -1619,6 +1673,7 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
+    interactiveCardsService,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -1925,6 +1980,7 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
             );
+            wsServer.setInteractiveCardsService(interactiveCardsService);
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             providerSnapshotManager.settlePluginProviders();
@@ -2033,6 +2089,8 @@ export async function createPaseoDaemon(
       label: "drain plugin lifecycle events",
     }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
     await agentManager.flushForShutdown().catch(() => undefined);
+    detachInteractiveCardsEvents();
+    interactiveCardsService.dispose();
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();

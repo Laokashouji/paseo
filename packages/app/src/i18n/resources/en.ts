@@ -1,6 +1,8 @@
 import { pluginGallery } from "./plugin-gallery";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const en = {
+  interactiveCards: interactiveCardsI18n.en,
   pluginCombobox: {
     searching: "Searching…",
     empty: "No results",

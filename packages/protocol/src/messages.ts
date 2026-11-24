@@ -43,6 +43,31 @@ export {
 } from "./plugin-config.js";
 import { TerminalProfileSchema } from "./terminal-profile.js";
 export { TerminalProfileSchema, type TerminalProfile } from "./terminal-profile.js";
+import {
+  AgentCardsListRequestSchema,
+  AgentCardsListResponseSchema,
+  AgentCardsSubmitRequestSchema,
+  AgentCardsSubmitResponseSchema,
+  AgentCardsUpdateEventSchema,
+} from "./interactive-cards.js";
+export {
+  AgentCardsListRequestSchema,
+  AgentCardsListResponsePayloadSchema,
+  AgentCardsListResponseSchema,
+  AgentCardsSubmitRequestSchema,
+  AgentCardsSubmitResponsePayloadSchema,
+  AgentCardsSubmitResponseSchema,
+  AgentCardsUpdateEventPayloadSchema,
+  AgentCardsUpdateEventSchema,
+  type AgentCardsListRequest,
+  type AgentCardsListResponse,
+  type AgentCardsListResponsePayload,
+  type AgentCardsSubmitRequest,
+  type AgentCardsSubmitResponse,
+  type AgentCardsSubmitResponsePayload,
+  type AgentCardsUpdateEvent,
+  type AgentCardsUpdateEventPayload,
+} from "./interactive-cards.js";
 import { z } from "zod";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
@@ -3510,6 +3535,7 @@ export const SessionEventSubscriptionSchema = z.enum([
   "workspace_setup_progress",
   "agent.provider_subagents.update",
   "agent.background_work.update",
+  "agent.cards.update",
   "terminal_attention_required",
   "status.server_info",
   "status.daemon_config_changed",
@@ -3566,6 +3592,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   HostsRouteCloseRequestSchema,
 
   BrowserHostRegisterRequestSchema,
+  AgentCardsListRequestSchema,
+  AgentCardsSubmitRequestSchema,
   SubscriptionReleaseRequestSchema,
   SessionEventsSetSubscriptionRequestSchema,
   HubExecutionAgentCreateRequestSchema,
@@ -4200,6 +4228,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(interactiveCards): added in fork interactive-cards, gate UI against older daemons.
+        interactiveCards: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7639,6 +7669,9 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   HostsRouteClosedSchema,
 
   BrowserHostRegisterResponseSchema,
+  AgentCardsListResponseSchema,
+  AgentCardsSubmitResponseSchema,
+  AgentCardsUpdateEventSchema,
   SubscriptionReleaseResponseSchema,
   SessionEventsSetSubscriptionResponseSchema,
   HubExecutionAgentCreateResponseSchema,

@@ -1,7 +1,9 @@
 import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const fr: TranslationResources = {
+  interactiveCards: interactiveCardsI18n.fr,
   pluginCombobox: {
     searching: "Recherche…",
     empty: "Aucun résultat",

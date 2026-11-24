@@ -109,6 +109,8 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
+import { registerInteractiveCardTools } from "../../interactive-cards/mcp-tools.js";
+import type { InteractiveCardsService } from "../../interactive-cards/service.js";
 import {
   PaseoToolInputError,
   type PaseoToolCatalog,
@@ -162,6 +164,7 @@ export interface PaseoToolHostDependencies {
   ) => Promise<string>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
+  interactiveCardsService?: InteractiveCardsService | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1382,6 +1385,15 @@ function createToolCatalog(
       resolveCallerAgent,
     });
   }
+
+  registerInteractiveCardTools({
+    registerTool,
+    agentManager,
+    interactiveCardsService: options.interactiveCardsService,
+    callerAgentId,
+    scope,
+    policy: options.paseoToolPolicy,
+  });
 
   registerTool(
     "list_hosts",

@@ -154,6 +154,8 @@ import {
 import { parsePluginClientId } from "./plugins/plugin-session-identity.js";
 import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
+import { handleInteractiveCardsSessionMessage } from "./interactive-cards/session.js";
+import type { InteractiveCardsService } from "./interactive-cards/service.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
   getAgentStreamEventTurnId,
@@ -513,6 +515,7 @@ export interface SessionOptions {
   workspaceBaseBranch?: WorkspaceBaseBranchService;
   directorySync?: DirectorySyncService;
   workspaceLabelService?: WorkspaceLabelService;
+  interactiveCardsService?: InteractiveCardsService | null;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
   checkoutDiffManager: CheckoutDiffManager;
@@ -819,6 +822,8 @@ export class Session {
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private unsubscribeAgentEvents: (() => void) | null = null;
+  private unsubscribeInteractiveCards: (() => void) | null = null;
+  private readonly interactiveCardsService: InteractiveCardsService | null | undefined;
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
@@ -910,6 +915,7 @@ export class Session {
       workspaceRegistry,
       directorySync,
       workspaceLabelService,
+      interactiveCardsService,
       filesystem,
       scheduleService,
       checkoutDiffManager,
@@ -995,6 +1001,7 @@ export class Session {
     this.workspaceRegistry = workspaceRegistry;
     this.directorySync = resolveDirectorySync(directorySync);
     this.workspaceLabelService = resolveWorkspaceLabelService(workspaceLabelService);
+    this.interactiveCardsService = interactiveCardsService;
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
@@ -1867,6 +1874,15 @@ export class Session {
     if (!agents) {
       this.unsubscribeAgentEvents?.();
       this.unsubscribeAgentEvents = null;
+    }
+    const wantsCards = this.wantsEvent("agent.cards.update");
+    if (wantsCards && this.interactiveCardsService && !this.unsubscribeInteractiveCards) {
+      this.unsubscribeInteractiveCards = this.interactiveCardsService.subscribe((payload) => {
+        this.emit({ type: "agent.cards.update", payload });
+      });
+    } else if (!wantsCards && this.unsubscribeInteractiveCards) {
+      this.unsubscribeInteractiveCards();
+      this.unsubscribeInteractiveCards = null;
     }
     this.refreshWorkspaceProducers(workspaces);
     this.refreshCatalogProducers(legacy);
@@ -3176,6 +3192,12 @@ export class Session {
         return this.handleAgentBackgroundWorkListRequest(msg);
       case "agent.background_work.stop.request":
         return this.handleAgentBackgroundWorkStopRequest(msg);
+      case "agent.cards.list.request":
+        return this.handleAgentCardsListRequest(msg, source);
+      case "agent.cards.submit.request":
+        return handleInteractiveCardsSessionMessage(this.interactiveCardsService, msg, (response) =>
+          this.emitForSource(response, source),
+        );
       case "agent.provider_subagents.timeline.get.request":
         return this.handleProviderSubagentTimelineRequest(msg, source);
       case "session.events.set_subscription.request": {
@@ -8777,6 +8799,25 @@ export class Session {
     });
   }
 
+  private async handleAgentCardsListRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.cards.list.request" }>,
+    source: object | undefined,
+  ): Promise<void> {
+    if (this.interactiveCardsService) {
+      const assistantTexts = this.agentManager
+        .getTimeline(msg.agentId)
+        .filter(
+          (item): item is Extract<typeof item, { type: "assistant_message" }> =>
+            item.type === "assistant_message",
+        )
+        .map((item) => item.text);
+      await this.interactiveCardsService.scanAssistantMessages(msg.agentId, assistantTexts);
+    }
+    await handleInteractiveCardsSessionMessage(this.interactiveCardsService, msg, (response) =>
+      this.emitForSource(response, source),
+    );
+  }
+
   private async handleAgentBackgroundWorkListRequest(
     msg: Extract<SessionInboundMessage, { type: "agent.background_work.list.request" }>,
   ): Promise<void> {
@@ -9054,11 +9095,23 @@ export class Session {
           await receipt.dispatched;
           return;
         }
+        let effectivePrompt = prompt;
+        if (
+          this.interactiveCardsService &&
+          typeof prompt === "string" &&
+          !prompt.trimStart().startsWith("/")
+        ) {
+          const feedback =
+            await this.interactiveCardsService.consumePendingValidationFeedback(agentId);
+          if (feedback) {
+            effectivePrompt = `${feedback}\n\n${prompt}`;
+          }
+        }
         const result = await sendPromptToAgent({
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
           agentId,
-          prompt,
+          prompt: effectivePrompt,
           messageId: msg.messageId,
           activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
           sessionMode: msg.sessionMode,
@@ -9466,6 +9519,8 @@ export class Session {
       this.unsubscribeAgentEvents();
       this.unsubscribeAgentEvents = null;
     }
+    this.unsubscribeInteractiveCards?.();
+    this.unsubscribeInteractiveCards = null;
     this.unsubscribeProjectMutations?.();
     this.unsubscribeProjectMutations = null;
     this.unsubscribePluginChanges?.();
@@ -9539,36 +9594,40 @@ function isValidGitHubRepoSegment(value: string): boolean {
   return /^[A-Za-z0-9._-]+$/u.test(value);
 }
 
+const DIRECT_SESSION_EVENT_CATEGORIES = new Set<string>([
+  "project.update",
+  "providers_snapshot_update",
+  "agent_attention_required",
+  "agent_permission_request",
+  "agent_permission_resolved",
+  "checkout_status_update",
+  "script_status_update",
+  "workspace_setup_progress",
+  "agent.provider_subagents.update",
+  "agent.background_work.update",
+  "agent.cards.update",
+  "terminal_attention_required",
+  "activity_log",
+  "hub.execution.agent.update",
+  "hub.execution.agent.stream",
+]);
+
 function sessionEventCategory(message: SessionOutboundMessage): SessionEventSubscription | null {
-  switch (message.type) {
-    case "project.update":
-    case "providers_snapshot_update":
-    case "agent_attention_required":
-    case "agent_permission_request":
-    case "agent_permission_resolved":
-    case "checkout_status_update":
-    case "script_status_update":
-    case "workspace_setup_progress":
-    case "agent.provider_subagents.update":
-    case "agent.background_work.update":
-    case "terminal_attention_required":
-    case "activity_log":
-    case "hub.execution.agent.update":
-    case "hub.execution.agent.stream":
-      return message.type;
-    case "status":
-      switch (message.payload.status) {
-        case "server_info":
-          return "status.server_info";
-        case "daemon_config_changed":
-          return "status.daemon_config_changed";
-        case "plugin_catalog_changed":
-          return "status.plugin_catalog_changed";
-        case "plugin_settings_changed":
-          return "status.plugin_settings_changed";
-        default:
-          return null;
-      }
+  if (DIRECT_SESSION_EVENT_CATEGORIES.has(message.type)) {
+    return message.type as SessionEventSubscription;
+  }
+  if (message.type !== "status") {
+    return null;
+  }
+  switch (message.payload.status) {
+    case "server_info":
+      return "status.server_info";
+    case "daemon_config_changed":
+      return "status.daemon_config_changed";
+    case "plugin_catalog_changed":
+      return "status.plugin_catalog_changed";
+    case "plugin_settings_changed":
+      return "status.plugin_settings_changed";
     default:
       return null;
   }
@@ -9591,6 +9650,7 @@ function legacyWantsEvent(
       return capabilities.has(CLIENT_CAPS.providerSubagents);
     // Old apps parse outbound messages strictly and do not know this type.
     case "agent.background_work.update":
+    case "agent.cards.update":
       return false;
     default:
       return true;

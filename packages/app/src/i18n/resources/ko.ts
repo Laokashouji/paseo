@@ -1,7 +1,9 @@
 import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ko: TranslationResources = {
+  interactiveCards: interactiveCardsI18n.ko,
   pluginCombobox: {
     searching: "검색 중…",
     empty: "결과 없음",
