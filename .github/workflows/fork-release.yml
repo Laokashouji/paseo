@@ -455,8 +455,111 @@ jobs:
             ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}-mac.yml
           retention-days: 7
 
+  build-daemon:
+    needs: [prepare]
+    permissions:
+      contents: write
+      packages: read
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      FORK_VERSION: ${{ needs.prepare.outputs.fork_version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.resolved_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ONNXRUNTIME_NODE_INSTALL: skip
+
+      - name: Ephemerally apply fork version across workspaces
+        shell: bash
+        run: node scripts/fork/version-utils.mjs apply --version "$FORK_VERSION"
+
+      - name: Build server, CLI, and daemon web UI
+        shell: bash
+        env:
+          EXPO_PUBLIC_FORK_CHANGELOG_URL: https://raw.githubusercontent.com/${{ github.repository }}/fork/FORK_CHANGELOG.md
+          EXPO_PUBLIC_CHANGELOG_WEB_URL: https://github.com/${{ github.repository }}/releases
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          npm run build:server
+          npm run build:daemon-web-ui
+
+      - name: Package standalone Linux x64 Fork daemon runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/fork/package-daemon-release.mjs \
+            --version "$FORK_VERSION" \
+            --tag "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --output-dir release-daemon \
+            --skip-build
+
+      - name: Smoke-test extracted Fork daemon archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          tar -xzf "release-daemon/assets/paseo-daemon-${FORK_VERSION}-linux-x64.tar.gz" -C "$smoke_dir"
+          actual_version="$("$smoke_dir/bin/paseo" --version | tail -n 1 | tr -d '[:space:]')"
+          if [[ "$actual_version" != "$FORK_VERSION" ]]; then
+            echo "::error::Extracted daemon CLI reported version=$actual_version, expected $FORK_VERSION"
+            exit 1
+          fi
+          test -f "$smoke_dir/fork-runtime.json"
+          test -f "$smoke_dir/node_modules/@getpaseo/server/dist/server/server/daemon-worker.js"
+          test -f "$smoke_dir/node_modules/@getpaseo/server/dist/scripts/supervisor-entrypoint.js"
+          test -f "$smoke_dir/node_modules/@getpaseo/server/dist/server/web-ui/index.html"
+          echo "Verified extracted Linux x64 Fork daemon archive (v${actual_version})"
+
+      - name: Upload Linux daemon tarball to draft GitHub Release
+        if: env.SHOULD_PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG")"
+          node scripts/upload-release-assets.mjs "$release_lookup" "release-daemon/assets" "${{ github.repository }}"
+
+      - name: Upload daemon manifest fragment artifact
+        if: env.SHOULD_PUBLISH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-daemon-manifest-linux-x64
+          path: release-daemon/manifests/daemon-target-linux-x64.json
+          retention-days: 1
+
+      - name: Upload unsigned daemon test artifacts
+        if: env.SHOULD_PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-unsigned-daemon-linux-x64
+          path: |
+            release-daemon/assets/*.tar.gz
+            release-daemon/manifests/*.json
+          retention-days: 7
+
   publish-release:
-    needs: [prepare, build-macos]
+    needs: [prepare, build-macos, build-daemon]
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
     permissions:
       contents: write
@@ -489,7 +592,13 @@ jobs:
           pattern: fork-mac-manifest-*
           path: release-manifests
 
-      - name: Assemble latest-mac.yml and publish GitHub Release
+      - name: Download daemon manifest fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fork-daemon-manifest-*
+          path: release-daemon-manifests
+
+      - name: Assemble latest-mac.yml + latest-daemon.json and publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_PATH: ${{ runner.temp }}/yaml-tools/node_modules
@@ -510,6 +619,16 @@ jobs:
             exit 1
           fi
 
+          daemon_inputs=()
+          while IFS= read -r fragment; do
+            daemon_inputs+=(--input "$fragment")
+          done < <(find release-daemon-manifests -type f -name 'daemon-target-*.json' | sort)
+
+          if (( ${#daemon_inputs[@]} == 0 )); then
+            echo "::error::No daemon manifest fragments found to assemble"
+            exit 1
+          fi
+
           timestamp="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
           out_path="release-manifests/final/${manifest_name}"
           node scripts/fork/prepare-mac-manifest.mjs \
@@ -519,11 +638,22 @@ jobs:
             --rollout-hours "$ROLLOUT_HOURS" \
             --expected-version "$FORK_VERSION"
 
+          daemon_out_path="release-manifests/final/latest-daemon.json"
+          node scripts/fork/prepare-daemon-manifest.mjs \
+            "${daemon_inputs[@]}" \
+            --output "$daemon_out_path" \
+            --release-date "$timestamp" \
+            --expected-version "$FORK_VERSION" \
+            --expected-tag "$RELEASE_TAG" \
+            --expected-repo "${{ github.repository }}"
+
           echo "=== Final ${manifest_name} ==="
           cat "$out_path"
+          echo "=== Final latest-daemon.json ==="
+          cat "$daemon_out_path"
 
           release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" --cleanup-duplicates)"
-          gh release upload "$release_lookup" "$out_path" --clobber --repo "${{ github.repository }}"
+          gh release upload "$release_lookup" "$out_path" "$daemon_out_path" --clobber --repo "${{ github.repository }}"
           gh release edit "$release_lookup" \
             --tag "$RELEASE_TAG" \
             --draft=false \

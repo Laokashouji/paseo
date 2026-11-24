@@ -136,19 +136,37 @@ gh run watch --repo Laokashouji/paseo
 
 ## 5. 更新 Linux DevBox CLI / Daemon
 
-如果本次改动仅涉及前端 UI（`packages/app`、`packages/desktop`），DevBox 无需更新；如果涉及服务端、插件或协议（`packages/server`、`packages/cli`、`packages/protocol`）：
+### 方式 A：托管 Fork Release 运行时（推荐，支持应用内一键「更新 Daemon」）
+
+每次执行 `./scripts/fork/release.sh --push` 发布 `fork-vX.Y.Z` 时，CI 会与 macOS 桌面端并行构建 Linux x64 预编译包 `paseo-daemon-<version>-linux-x64.tar.gz` 及 `latest-daemon.json` 清单。
+
+首次在 DevBox 或任意 Linux 主机初始化托管运行时（安装到 `~/.local/share/paseo-fork/releases/<version>` 并通过 `current` 软链切换，完全脱离本地开发仓库）：
+
+```bash
+# 从最新 Fork GitHub Release 安装并切换默认 ~/.local/bin/paseo
+./scripts/fork/install-release-cli.sh --switch-default
+
+# 首次切换需通过 systemd 完整重启一次，让 Supervisor 切到托管运行时
+systemctl --user restart paseo-daemon.service
+```
+
+完成上述一次性切换后：
+- DevBox 显示与 Mac 桌面端完全一致的 Fork 版本号（如 `v0.17.518`）。
+- 后续每次发布新 `fork-v*` 版本，直接在 Paseo 应用的「Host 设置 → 更新 Daemon」点击 **「更新」** 即可自动从 `Laokashouji/paseo` 下载预编译包、校验 SHA-256、原子切换 `current` 软链并原地重启 Worker（保留运行中终端）。
+- 如需离线或发版前测试本地打包产物，可使用 `./scripts/fork/install-release-cli.sh --from-tarball <tar.gz> --switch-default`。
+- 随时切回官方 npm 安装版：`./scripts/fork/install-release-cli.sh --restore-official && systemctl --user restart paseo-daemon.service`。
+
+### 方式 B：本地源码目录直连构建（适合未发版的服务端快速联调）
+
+如果改动尚未发 `fork-v*` Release、希望直接从当前源码目录编译联调：
 
 ```bash
 # 仅构建并安装并存命令 ~/.local/bin/paseo-fork（不影响线上官方 paseo）
 ./scripts/fork/install-local-cli.sh
 
-# 切换默认 ~/.local/bin/paseo 指向 fork 构建（自动备份原官方路径）
+# 切换默认 ~/.local/bin/paseo 指向本地源码构建（自动备份原官方路径）
 ./scripts/fork/install-local-cli.sh --switch-default
-paseo daemon restart
-
-# 随时一键切回官方 npm 安装版
-./scripts/fork/install-local-cli.sh --restore-official
-paseo daemon restart
+systemctl --user restart paseo-daemon.service
 ```
 
 ## 6. 飞书工程文档与同步维护规范
@@ -170,7 +188,7 @@ paseo daemon restart
 | 能力 A8 | [【能力】原生主对话（Main Chat）](https://bytedance.larkoffice.com/wiki/CKnOwMZ4Ai9cGOkAFH0cOoIXnnh) | `feat/main-chat` | `CKnOwMZ4Ai9cGOkAFH0cOoIXnnh` | `OSZTdPGEDo8bLBx1xS3cUjZNnsf` |
 | 能力 A9 | [【能力】侧边栏导航区高度调节与溢出二级菜单](https://bytedance.larkoffice.com/wiki/VD1Nw6iMoiehUUkC316cZzyDnYc) | `feat/sidebar-nav-overflow` | `VD1Nw6iMoiehUUkC316cZzyDnYc` | `XtTRdcdoXoY4JPxw8xIcYlN0nyb` |
 | 工程 B1 | [【工程】Fork 架构与上游同步机制](https://bytedance.larkoffice.com/wiki/DlKSwCe61iiBtGkI2ygcdpg9nJg) | `fork-infra`、`FORK.md` | `DlKSwCe61iiBtGkI2ygcdpg9nJg` | `O6IIdIOBEoDCwzxE1cvceaXZnuy` |
-| 指南 B2 | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre) | `scripts/fork/*`、`.github/workflows/fork-release.yml` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
+| 指南 B2 | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre) | `scripts/fork/*`、`.github/workflows/fork-release.yml`、`feat/fork-daemon-self-update` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
 | 演进 B3 | [【演进】版本记录、路线图与文档维护规范](https://bytedance.larkoffice.com/wiki/SnOUwoR0miYuYVkt5ENcPU3Ynnd) | `fork-v*` 标签、`FORK_CHANGELOG.md`、路线图 | `SnOUwoR0miYuYVkt5ENcPU3Ynnd` | `VL42dzHpAor2OyxY4rdcd2cInwx` |
 
 ### AI 同步维护规范（新增 / 修改 / 删除）
