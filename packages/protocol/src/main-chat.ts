@@ -51,6 +51,34 @@ export const MAIN_CHAT_LESSONS_INJECT_PER_KIND_MAX = 2;
 export const MAIN_CHAT_LESSONS_INJECT_BUDGET_BYTES = 1800;
 export const MAIN_CHAT_LESSONS_FRESH_DAYS = 90;
 export const MAIN_CHAT_LESSONS_MAX_SOURCES = 5;
+export const MAIN_CHAT_MODEL_PURPOSES = [
+  "main",
+  "directionLead",
+  "subagentDefault",
+  "subagentReadonly",
+  "backgroundTriage",
+] as const;
+export const MAIN_CHAT_BUILTIN_MODEL_PROFILE_IDS = ["performance", "balanced", "economy"] as const;
+export const MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES = 12;
+export const MAIN_CHAT_MAX_MODEL_PROFILE_HISTORY = 20;
+export const MAIN_CHAT_NOTIFICATION_TIERS = ["critical", "actionable", "digest", "silent"] as const;
+export const MAIN_CHAT_NOTIFICATION_CATEGORIES = [
+  "permission_approval",
+  "decision_required",
+  "task_failed",
+  "delivery_gate_blocked",
+  "task_review",
+  "task_progress",
+  "rule_diagnostic",
+  "patrol_summary",
+] as const;
+export const MAIN_CHAT_CRITICAL_PASSTHROUGH_CATEGORIES = [
+  "permission_approval",
+  "decision_required",
+  "task_failed",
+  "delivery_gate_blocked",
+] as const;
+export const MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS = 120;
 
 export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "title",
@@ -78,6 +106,12 @@ export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "intervals.needsYouEscalateMin",
   "intervals.wakeupCooldownMin",
   "limitFallbacks",
+  "modelConfig.activeProfileId",
+  "modelConfig.slots",
+  "notificationPolicy.lowDistractionEnabled",
+  "notificationPolicy.mode",
+  "notificationPolicy.foldLowPriorityToDigest",
+  "notificationPolicy.categoryOverrides",
   "profile.aboutMe",
   "profile.ownerAliases",
 ] as const;
@@ -464,6 +498,188 @@ export const MainChatProjectLessonGroupSchema = z.object({
 });
 export type MainChatProjectLessonGroup = z.infer<typeof MainChatProjectLessonGroupSchema>;
 
+// ============================================================================
+// P1-4 Multi-Purpose Model Slots & Model Profiles Schemas
+// ============================================================================
+
+export const MainChatModelPurposeSchema = z.enum(MAIN_CHAT_MODEL_PURPOSES);
+export type MainChatModelPurpose = z.infer<typeof MainChatModelPurposeSchema>;
+
+export const MainChatBuiltinModelProfileIdSchema = z.enum(MAIN_CHAT_BUILTIN_MODEL_PROFILE_IDS);
+export type MainChatBuiltinModelProfileId = z.infer<typeof MainChatBuiltinModelProfileIdSchema>;
+
+export const MainChatModelSlotBindingSchema = z.object({
+  provider: z.string().trim().min(1).max(64),
+  model: z.string().trim().min(1).max(120).nullable().optional(),
+  thinkingOptionId: z.string().trim().min(1).max(64).nullable().optional(),
+  label: z.string().trim().min(1).max(80).nullable().optional(),
+});
+export type MainChatModelSlotBinding = z.infer<typeof MainChatModelSlotBindingSchema>;
+
+export const MainChatModelSlotsSchema = z.object({
+  main: MainChatModelSlotBindingSchema.nullable().optional(),
+  directionLead: MainChatModelSlotBindingSchema.nullable().optional(),
+  subagentDefault: MainChatModelSlotBindingSchema.nullable().optional(),
+  subagentReadonly: MainChatModelSlotBindingSchema.nullable().optional(),
+  backgroundTriage: MainChatModelSlotBindingSchema.nullable().optional(),
+});
+export type MainChatModelSlots = z.infer<typeof MainChatModelSlotsSchema>;
+
+export const MainChatModelProfileSchema = z.object({
+  id: z.string().trim().min(1).max(48),
+  name: z.string().trim().min(1).max(48),
+  description: z.string().trim().max(240).optional(),
+  builtin: z.boolean().optional(),
+  slots: MainChatModelSlotsSchema,
+  updatedAt: z.string().optional(),
+});
+export type MainChatModelProfile = z.infer<typeof MainChatModelProfileSchema>;
+
+export const MainChatModelProfileSwitchEventSchema = z.object({
+  id: z.string(),
+  action: z.enum(["switch", "rollback"]),
+  fromProfileId: z.string().nullable(),
+  toProfileId: z.string().nullable(),
+  changedSlots: z.array(MainChatModelPurposeSchema),
+  actor: z.enum(["user", "proposal", "tool"]),
+  createdAt: z.string(),
+});
+export type MainChatModelProfileSwitchEvent = z.infer<typeof MainChatModelProfileSwitchEventSchema>;
+
+export const MainChatModelProfileRollbackSchema = z.object({
+  profileId: z.string().nullable(),
+  slots: MainChatModelSlotsSchema,
+  savedAt: z.string(),
+});
+export type MainChatModelProfileRollback = z.infer<typeof MainChatModelProfileRollbackSchema>;
+
+export const MainChatModelConfigSchema = z.object({
+  activeProfileId: z.string().trim().min(1).max(48).nullable().optional(),
+  slots: MainChatModelSlotsSchema.optional(),
+  customProfiles: z
+    .array(MainChatModelProfileSchema)
+    .max(MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES)
+    .optional(),
+  rollbackSnapshot: MainChatModelProfileRollbackSchema.nullable().optional(),
+  switchHistory: z
+    .array(MainChatModelProfileSwitchEventSchema)
+    .max(MAIN_CHAT_MAX_MODEL_PROFILE_HISTORY)
+    .optional(),
+});
+export type MainChatModelConfig = z.infer<typeof MainChatModelConfigSchema>;
+
+export const MainChatModelConfigPatchSchema = z.object({
+  activeProfileId: z.string().trim().min(1).max(48).nullable().optional(),
+  applyProfileId: z.string().trim().min(1).max(48).optional(),
+  rollbackProfile: z.boolean().optional(),
+  slots: MainChatModelSlotsSchema.optional(),
+  upsertCustomProfile: MainChatModelProfileSchema.optional(),
+  deleteCustomProfileId: z.string().trim().min(1).max(48).optional(),
+  customProfiles: z
+    .array(MainChatModelProfileSchema)
+    .max(MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES)
+    .optional(),
+});
+export type MainChatModelConfigPatch = z.infer<typeof MainChatModelConfigPatchSchema>;
+
+// ============================================================================
+// P1-5 Notification Tiering, Low-Distraction Policy & Delivery Receipts
+// ============================================================================
+
+export const MainChatNotificationTierSchema = z.enum(MAIN_CHAT_NOTIFICATION_TIERS);
+export type MainChatNotificationTier = z.infer<typeof MainChatNotificationTierSchema>;
+
+export const MainChatNotificationCategorySchema = z.enum(MAIN_CHAT_NOTIFICATION_CATEGORIES);
+export type MainChatNotificationCategory = z.infer<typeof MainChatNotificationCategorySchema>;
+
+export const MainChatNotificationModePresetSchema = z.enum(["all", "balanced", "low_distraction"]);
+export type MainChatNotificationModePreset = z.infer<typeof MainChatNotificationModePresetSchema>;
+
+export const MainChatNotificationPolicySchema = z.object({
+  lowDistractionEnabled: z.boolean(),
+  mode: MainChatNotificationModePresetSchema.optional(),
+  foldLowPriorityToDigest: z.boolean(),
+  categoryOverrides: z.record(z.string(), MainChatNotificationTierSchema).optional(),
+});
+export type MainChatNotificationPolicy = z.infer<typeof MainChatNotificationPolicySchema>;
+
+export const MainChatNotificationPolicyPatchSchema = z.object({
+  lowDistractionEnabled: z.boolean().optional(),
+  mode: MainChatNotificationModePresetSchema.optional(),
+  foldLowPriorityToDigest: z.boolean().optional(),
+  categoryOverrides: z.record(z.string(), MainChatNotificationTierSchema.nullable()).optional(),
+});
+export type MainChatNotificationPolicyPatch = z.infer<typeof MainChatNotificationPolicyPatchSchema>;
+
+export const MainChatNotificationDeliveryStatusSchema = z.enum([
+  "queued",
+  "delivered",
+  "suppressed_quiet",
+  "suppressed_night",
+  "acknowledged",
+  "read",
+]);
+export type MainChatNotificationDeliveryStatus = z.infer<
+  typeof MainChatNotificationDeliveryStatusSchema
+>;
+
+export const MainChatNotificationChannelSchema = z.enum([
+  "main_chat",
+  "push",
+  "badge",
+  "digest",
+  "drawer",
+]);
+export type MainChatNotificationChannel = z.infer<typeof MainChatNotificationChannelSchema>;
+
+export const MainChatNotificationSummarySchema = z.object({
+  lowDistractionEnabled: z.boolean(),
+  mode: MainChatNotificationModePresetSchema,
+  unreadCount: z.number().int().nonnegative(),
+  deliveredCount: z.number().int().nonnegative(),
+  suppressedQuietCount: z.number().int().nonnegative(),
+  suppressedNightCount: z.number().int().nonnegative(),
+  foldedDigestCount: z.number().int().nonnegative(),
+  criticalPassthroughCount: z.number().int().nonnegative(),
+  latestReceiptAt: z.string().nullable(),
+});
+export type MainChatNotificationSummary = z.infer<typeof MainChatNotificationSummarySchema>;
+
+// ============================================================================
+// P1-6 Zero-Token Deterministic Rule Diagnostics
+// ============================================================================
+
+export const MainChatRuleDiagnosticKindSchema = z.enum([
+  "read_without_reply",
+  "missing_wrap_up",
+  "tool_loop",
+]);
+export type MainChatRuleDiagnosticKind = z.infer<typeof MainChatRuleDiagnosticKindSchema>;
+
+export const MainChatToolLoopPatternSchema = z.enum([
+  "exact_repeat",
+  "alternating_ab",
+  "repeated_error",
+]);
+export type MainChatToolLoopPattern = z.infer<typeof MainChatToolLoopPatternSchema>;
+
+export const MainChatRuleDiagnosticSeveritySchema = z.enum(["warning", "critical"]);
+export type MainChatRuleDiagnosticSeverity = z.infer<typeof MainChatRuleDiagnosticSeveritySchema>;
+
+export const MainChatRuleDiagnosticSchema = z.object({
+  kind: MainChatRuleDiagnosticKindSchema,
+  severity: MainChatRuleDiagnosticSeveritySchema,
+  summary: z.string(),
+  detail: z.string().nullable().optional(),
+  detectedAt: z.string(),
+  toolName: z.string().nullable().optional(),
+  repeatCount: z.number().int().positive().nullable().optional(),
+  pattern: MainChatToolLoopPatternSchema.nullable().optional(),
+  errorExcerpt: z.string().nullable().optional(),
+  missingItems: z.array(z.string()).optional(),
+});
+export type MainChatRuleDiagnostic = z.infer<typeof MainChatRuleDiagnosticSchema>;
+
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   autoCompactEnabled: z.boolean().optional(),
@@ -473,6 +689,8 @@ export const MainChatSettingsSchema = z.object({
     .array(MainChatLimitFallbackEntrySchema)
     .max(MAIN_CHAT_MAX_LIMIT_FALLBACKS)
     .optional(),
+  modelConfig: MainChatModelConfigSchema.optional(),
+  notificationPolicy: MainChatNotificationPolicySchema.optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
   taskLessonsEnabled: z.boolean().optional(),
@@ -511,6 +729,8 @@ export const MainChatSettingsPatchSchema = z.object({
     .array(MainChatLimitFallbackEntrySchema)
     .max(MAIN_CHAT_MAX_LIMIT_FALLBACKS)
     .optional(),
+  modelConfig: MainChatModelConfigPatchSchema.optional(),
+  notificationPolicy: MainChatNotificationPolicyPatchSchema.optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
   taskLessonsEnabled: z.boolean().optional(),
@@ -606,6 +826,8 @@ export const MainChatSessionTriageSchema = z.object({
   suggestedAction: z.string().nullable(),
   triageSource: z.enum(["rule", "model"]),
   updatedAt: z.string(),
+  ruleDiagnostic: MainChatRuleDiagnosticSchema.nullable().optional(),
+  ruleDiagnostics: z.array(MainChatRuleDiagnosticSchema).optional(),
 });
 export type MainChatSessionTriage = z.infer<typeof MainChatSessionTriageSchema>;
 
@@ -1213,6 +1435,326 @@ export function resolveMainChatLimitFallbacks(
   return normalizeMainChatLimitFallbacks(settings?.limitFallbacks);
 }
 
+export function createDefaultMainChatModelConfig(): MainChatModelConfig {
+  return {
+    activeProfileId: "balanced",
+    slots: {},
+    customProfiles: [],
+    rollbackSnapshot: null,
+    switchHistory: [],
+  };
+}
+
+export function isBuiltinMainChatModelProfileId(
+  value: string | null | undefined,
+): value is MainChatBuiltinModelProfileId {
+  return value === "performance" || value === "balanced" || value === "economy";
+}
+
+function normalizeModelSlotBinding(
+  binding: MainChatModelSlotBinding | null | undefined,
+): MainChatModelSlotBinding | null {
+  if (!binding) return null;
+  const provider = binding.provider?.trim();
+  if (!provider) return null;
+  const model = binding.model?.trim() || null;
+  const thinkingOptionId = binding.thinkingOptionId?.trim() || null;
+  const label = binding.label?.trim() || null;
+  return {
+    provider,
+    model,
+    thinkingOptionId,
+    ...(label ? { label } : {}),
+  };
+}
+
+export function normalizeMainChatModelSlots(
+  slots: MainChatModelSlots | null | undefined,
+): MainChatModelSlots {
+  if (!slots) return {};
+  const result: MainChatModelSlots = {};
+  for (const purpose of MAIN_CHAT_MODEL_PURPOSES) {
+    if (Object.prototype.hasOwnProperty.call(slots, purpose)) {
+      const normalized = normalizeModelSlotBinding(slots[purpose]);
+      if (normalized) {
+        result[purpose] = normalized;
+      }
+    }
+  }
+  return result;
+}
+
+function resolveBuiltinModelTierNames(
+  provider: string,
+  fallbackModel: string | null,
+): { strongModel: string | null; midModel: string | null; fastModel: string | null } {
+  if (provider === "claude") {
+    return {
+      strongModel: "claude-opus-4-6",
+      midModel: "claude-sonnet-4-6",
+      fastModel: "claude-haiku-4-5",
+    };
+  }
+  if (provider === "codex") {
+    return {
+      strongModel: "gpt-5.3-codex",
+      midModel: "gpt-5.3-codex",
+      fastModel: "gpt-5.1-codex-mini",
+    };
+  }
+  return { strongModel: fallbackModel, midModel: fallbackModel, fastModel: fallbackModel };
+}
+
+export function resolveBuiltinMainChatModelProfiles(
+  baseBinding?: Pick<MainChatModelSlotBinding, "provider" | "model" | "thinkingOptionId"> | null,
+): MainChatModelProfile[] {
+  const provider = baseBinding?.provider?.trim() || "claude";
+  const fallbackModel = baseBinding?.model?.trim() || null;
+  const { strongModel, midModel, fastModel } = resolveBuiltinModelTierNames(
+    provider,
+    fallbackModel,
+  );
+
+  return [
+    {
+      id: "performance",
+      name: "性能优先",
+      description: "主对话、方向主管与默认子任务全部优先高推理模型，后台分诊使用轻量模型。",
+      builtin: true,
+      slots: {
+        main: { provider, model: strongModel, thinkingOptionId: "high" },
+        directionLead: { provider, model: strongModel, thinkingOptionId: "high" },
+        subagentDefault: { provider, model: strongModel, thinkingOptionId: "medium" },
+        subagentReadonly: { provider, model: midModel, thinkingOptionId: "low" },
+        backgroundTriage: { provider, model: fastModel, thinkingOptionId: "off" },
+      },
+    },
+    {
+      id: "balanced",
+      name: "均衡推荐",
+      description: "主对话与方向主管用强模型把关，默认子任务用均衡模型，只读与分诊走轻量模型。",
+      builtin: true,
+      slots: {
+        main: { provider, model: strongModel, thinkingOptionId: "medium" },
+        directionLead: { provider, model: midModel, thinkingOptionId: "medium" },
+        subagentDefault: { provider, model: midModel, thinkingOptionId: "low" },
+        subagentReadonly: { provider, model: fastModel, thinkingOptionId: "off" },
+        backgroundTriage: { provider, model: fastModel, thinkingOptionId: "off" },
+      },
+    },
+    {
+      id: "economy",
+      name: "经济省额",
+      description: "全槽位优先经济快速模型并降低思考强度，适合额度紧张或大批量常规任务。",
+      builtin: true,
+      slots: {
+        main: { provider, model: midModel, thinkingOptionId: "low" },
+        directionLead: { provider, model: midModel, thinkingOptionId: "off" },
+        subagentDefault: { provider, model: fastModel, thinkingOptionId: "off" },
+        subagentReadonly: { provider, model: fastModel, thinkingOptionId: "off" },
+        backgroundTriage: { provider, model: fastModel, thinkingOptionId: "off" },
+      },
+    },
+  ];
+}
+
+function normalizeCustomModelProfile(
+  profile: MainChatModelProfile,
+  fallbackUpdatedAt?: string,
+): MainChatModelProfile {
+  return {
+    id: profile.id.trim(),
+    name: profile.name.trim(),
+    description: profile.description,
+    builtin: false,
+    slots: normalizeMainChatModelSlots(profile.slots),
+    updatedAt: profile.updatedAt ?? fallbackUpdatedAt,
+  };
+}
+
+export function resolveMainChatModelConfig(
+  settings: Pick<MainChatSettings, "modelConfig"> | null | undefined,
+): MainChatModelConfig {
+  const raw = settings?.modelConfig;
+  if (!raw) return createDefaultMainChatModelConfig();
+  return {
+    activeProfileId: raw.activeProfileId?.trim() || null,
+    slots: normalizeMainChatModelSlots(raw.slots),
+    customProfiles: (raw.customProfiles ?? [])
+      .slice(0, MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES)
+      .map((profile) => normalizeCustomModelProfile(profile)),
+    rollbackSnapshot: raw.rollbackSnapshot
+      ? {
+          profileId: raw.rollbackSnapshot.profileId ?? null,
+          slots: normalizeMainChatModelSlots(raw.rollbackSnapshot.slots),
+          savedAt: raw.rollbackSnapshot.savedAt,
+        }
+      : null,
+    switchHistory: (raw.switchHistory ?? []).slice(0, MAIN_CHAT_MAX_MODEL_PROFILE_HISTORY),
+  };
+}
+
+export interface ResolvedMainChatModelSlot {
+  purpose: MainChatModelPurpose;
+  binding: MainChatModelSlotBinding | null;
+  source: "explicit" | "inherited" | "background_model" | "live_main" | "auto";
+  inheritedFrom: MainChatModelPurpose | "background_model" | "live_main" | null;
+}
+
+const SLOT_INHERITANCE_CHAIN: Record<MainChatModelPurpose, readonly MainChatModelPurpose[]> = {
+  main: [],
+  directionLead: ["main"],
+  subagentDefault: ["main"],
+  subagentReadonly: ["subagentDefault", "main"],
+  backgroundTriage: ["subagentReadonly", "main"],
+};
+
+function resolveBackgroundTriageFallbackSlot(
+  settings: Pick<MainChatSettings, "backgroundModel"> | null | undefined,
+): ResolvedMainChatModelSlot | null {
+  const bg = settings?.backgroundModel;
+  if (bg?.mode === "custom" && bg.provider?.trim()) {
+    return {
+      purpose: "backgroundTriage",
+      binding: {
+        provider: bg.provider.trim(),
+        model: bg.model?.trim() || null,
+        thinkingOptionId: bg.thinkingOptionId?.trim() || null,
+      },
+      source: "background_model",
+      inheritedFrom: "background_model",
+    };
+  }
+  if (bg?.mode === "auto") {
+    return {
+      purpose: "backgroundTriage",
+      binding: null,
+      source: "auto",
+      inheritedFrom: null,
+    };
+  }
+  return null;
+}
+
+function normalizeLiveMainBinding(
+  liveMainBinding:
+    | Pick<MainChatModelSlotBinding, "provider" | "model" | "thinkingOptionId">
+    | null
+    | undefined,
+): MainChatModelSlotBinding | null {
+  if (!liveMainBinding?.provider?.trim()) return null;
+  return normalizeModelSlotBinding({
+    provider: liveMainBinding.provider,
+    model: liveMainBinding.model ?? null,
+    thinkingOptionId: liveMainBinding.thinkingOptionId ?? null,
+  });
+}
+
+export function resolveMainChatModelSlot(input: {
+  purpose: MainChatModelPurpose;
+  settings: Pick<MainChatSettings, "modelConfig" | "backgroundModel"> | null | undefined;
+  liveMainBinding?: Pick<
+    MainChatModelSlotBinding,
+    "provider" | "model" | "thinkingOptionId"
+  > | null;
+}): ResolvedMainChatModelSlot {
+  const config = resolveMainChatModelConfig(input.settings);
+  const slots = config.slots ?? {};
+  const explicit = normalizeModelSlotBinding(slots[input.purpose]);
+  if (explicit) {
+    return { purpose: input.purpose, binding: explicit, source: "explicit", inheritedFrom: null };
+  }
+
+  if (input.purpose === "backgroundTriage") {
+    const bgOverride = resolveBackgroundTriageFallbackSlot(input.settings);
+    if (bgOverride) return bgOverride;
+  }
+
+  for (const parent of SLOT_INHERITANCE_CHAIN[input.purpose]) {
+    const inherited = normalizeModelSlotBinding(slots[parent]);
+    if (inherited) {
+      return {
+        purpose: input.purpose,
+        binding: inherited,
+        source: "inherited",
+        inheritedFrom: parent,
+      };
+    }
+  }
+
+  const liveMain = normalizeLiveMainBinding(input.liveMainBinding);
+  if (liveMain) {
+    return {
+      purpose: input.purpose,
+      binding: liveMain,
+      source: "live_main",
+      inheritedFrom: "live_main",
+    };
+  }
+
+  return { purpose: input.purpose, binding: null, source: "auto", inheritedFrom: null };
+}
+
+export function isCriticalPassthroughNotificationCategory(
+  category: MainChatNotificationCategory,
+): boolean {
+  return (MAIN_CHAT_CRITICAL_PASSTHROUGH_CATEGORIES as readonly string[]).includes(category);
+}
+
+export function createDefaultMainChatNotificationPolicy(): MainChatNotificationPolicy {
+  return {
+    lowDistractionEnabled: false,
+    mode: "balanced",
+    foldLowPriorityToDigest: false,
+    categoryOverrides: {},
+  };
+}
+
+export function normalizeMainChatNotificationPolicy(
+  policy: Partial<MainChatNotificationPolicy> | null | undefined,
+): MainChatNotificationPolicy {
+  const defaults = createDefaultMainChatNotificationPolicy();
+  const mode = policy?.mode ?? (policy?.lowDistractionEnabled ? "low_distraction" : defaults.mode);
+  const lowDistractionEnabled =
+    policy?.lowDistractionEnabled !== undefined
+      ? Boolean(policy.lowDistractionEnabled)
+      : mode === "low_distraction";
+  const foldLowPriorityToDigest =
+    policy?.foldLowPriorityToDigest !== undefined
+      ? Boolean(policy.foldLowPriorityToDigest)
+      : lowDistractionEnabled;
+
+  const overrides: Record<string, MainChatNotificationTier> = {};
+  if (policy?.categoryOverrides) {
+    for (const [key, value] of Object.entries(policy.categoryOverrides)) {
+      if (
+        (MAIN_CHAT_NOTIFICATION_CATEGORIES as readonly string[]).includes(key) &&
+        (MAIN_CHAT_NOTIFICATION_TIERS as readonly string[]).includes(value)
+      ) {
+        // Critical passthrough categories can never be downgraded below critical.
+        if (isCriticalPassthroughNotificationCategory(key as MainChatNotificationCategory)) {
+          overrides[key] = "critical";
+        } else {
+          overrides[key] = value;
+        }
+      }
+    }
+  }
+
+  return {
+    lowDistractionEnabled,
+    mode,
+    foldLowPriorityToDigest,
+    categoryOverrides: overrides,
+  };
+}
+
+export function resolveMainChatNotificationPolicy(
+  settings: Pick<MainChatSettings, "notificationPolicy"> | null | undefined,
+): MainChatNotificationPolicy {
+  return normalizeMainChatNotificationPolicy(settings?.notificationPolicy);
+}
+
 export function createDefaultMainChatSettings(
   style: MainChatStyle = "conservative",
 ): MainChatSettings {
@@ -1223,6 +1765,8 @@ export function createDefaultMainChatSettings(
     compaction: createDefaultMainChatCompactionConfig(),
     cacheKeepalive: createDefaultMainChatCacheKeepaliveConfig(),
     limitFallbacks: [],
+    modelConfig: createDefaultMainChatModelConfig(),
+    notificationPolicy: createDefaultMainChatNotificationPolicy(),
     mainBackgroundFolded: true,
     mainTasksQuiet: true,
     taskLessonsEnabled: true,
@@ -1291,12 +1835,16 @@ function resolveMergeBaseSettings(
   const currentCompaction = resolveMainChatCompactionConfig(current);
   const currentCacheKeepalive = resolveMainChatCacheKeepaliveConfig(current);
   const currentLimitFallbacks = resolveMainChatLimitFallbacks(current);
+  const currentModelConfig = resolveMainChatModelConfig(current);
+  const currentNotificationPolicy = resolveMainChatNotificationPolicy(current);
   const shared = {
     enabled: isMainChatEnabled(current),
     autoCompactEnabled: isMainChatAutoCompactEnabled(current),
     compaction: currentCompaction,
     cacheKeepalive: currentCacheKeepalive,
     limitFallbacks: currentLimitFallbacks,
+    modelConfig: currentModelConfig,
+    notificationPolicy: currentNotificationPolicy,
     mainBackgroundFolded: isMainChatBackgroundFolded(current),
     mainTasksQuiet: isMainChatTasksQuiet(current),
     taskLessonsEnabled: isMainChatTaskLessonsEnabled(current),
@@ -1410,6 +1958,284 @@ function mergeMainChatToggleAndGovernanceFields(
   };
 }
 
+function makeProtocolSwitchEventId(): string {
+  return `mps_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function areModelSlotBindingsEqual(
+  left: MainChatModelSlotBinding | null | undefined,
+  right: MainChatModelSlotBinding | null | undefined,
+): boolean {
+  const a = normalizeModelSlotBinding(left);
+  const b = normalizeModelSlotBinding(right);
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    a.provider === b.provider &&
+    (a.model ?? null) === (b.model ?? null) &&
+    (a.thinkingOptionId ?? null) === (b.thinkingOptionId ?? null)
+  );
+}
+
+function diffModelSlots(
+  before: MainChatModelSlots,
+  after: MainChatModelSlots,
+): MainChatModelPurpose[] {
+  const changed: MainChatModelPurpose[] = [];
+  for (const purpose of MAIN_CHAT_MODEL_PURPOSES) {
+    if (!areModelSlotBindingsEqual(before[purpose], after[purpose])) {
+      changed.push(purpose);
+    }
+  }
+  return changed;
+}
+
+function mergeCustomModelProfilesList(
+  currentProfiles: readonly MainChatModelProfile[],
+  patch: NonNullable<MainChatSettingsPatch["modelConfig"]>,
+  nowIso: string,
+): MainChatModelProfile[] {
+  let next =
+    patch.customProfiles !== undefined
+      ? patch.customProfiles
+          .slice(0, MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES)
+          .map((p) => normalizeCustomModelProfile(MainChatModelProfileSchema.parse(p), nowIso))
+      : [...currentProfiles];
+
+  if (patch.upsertCustomProfile) {
+    const parsed = MainChatModelProfileSchema.parse(patch.upsertCustomProfile);
+    if (isBuiltinMainChatModelProfileId(parsed.id)) {
+      throw new Error(`Cannot overwrite built-in model profile "${parsed.id}"`);
+    }
+    const normalized = normalizeCustomModelProfile(parsed, nowIso);
+    const idx = next.findIndex((entry) => entry.id === normalized.id);
+    if (idx >= 0) {
+      next = next.map((entry, i) => (i === idx ? normalized : entry));
+    } else {
+      if (next.length >= MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES) {
+        throw new Error(
+          `Custom model profile limit reached (${MAIN_CHAT_MAX_CUSTOM_MODEL_PROFILES})`,
+        );
+      }
+      next = [...next, normalized];
+    }
+  }
+
+  if (patch.deleteCustomProfileId) {
+    const targetId = patch.deleteCustomProfileId.trim();
+    if (targetId && !isBuiltinMainChatModelProfileId(targetId)) {
+      next = next.filter((entry) => entry.id !== targetId);
+    }
+  }
+  return next;
+}
+
+function applyModelProfileRollbackTransition(
+  current: MainChatModelConfig,
+  currentSlots: MainChatModelSlots,
+  baseHistory: NonNullable<MainChatModelConfig["switchHistory"]>,
+  nowIso: string,
+) {
+  if (!current.rollbackSnapshot) {
+    throw new Error("No previous model profile snapshot available to roll back");
+  }
+  const targetSlots = normalizeMainChatModelSlots(current.rollbackSnapshot.slots);
+  const targetProfileId = current.rollbackSnapshot.profileId ?? null;
+  const changedSlots = diffModelSlots(currentSlots, targetSlots);
+  return {
+    slots: targetSlots,
+    activeProfileId: targetProfileId,
+    rollbackSnapshot: {
+      profileId: current.activeProfileId ?? null,
+      slots: currentSlots,
+      savedAt: nowIso,
+    },
+    switchHistory: [
+      {
+        id: makeProtocolSwitchEventId(),
+        action: "rollback" as const,
+        fromProfileId: current.activeProfileId ?? null,
+        toProfileId: targetProfileId,
+        changedSlots,
+        actor: "user" as const,
+        createdAt: nowIso,
+      },
+      ...baseHistory,
+    ].slice(0, MAIN_CHAT_MAX_MODEL_PROFILE_HISTORY),
+  };
+}
+
+function applyModelProfileTransitionPatch(input: {
+  current: MainChatModelConfig;
+  currentSlots: MainChatModelSlots;
+  customProfiles: readonly MainChatModelProfile[];
+  patch: NonNullable<MainChatSettingsPatch["modelConfig"]>;
+  nowIso: string;
+}): {
+  slots: MainChatModelSlots;
+  activeProfileId: string | null;
+  rollbackSnapshot: MainChatModelConfig["rollbackSnapshot"];
+  switchHistory: NonNullable<MainChatModelConfig["switchHistory"]>;
+} {
+  const { current, currentSlots, customProfiles, patch, nowIso } = input;
+  const baseHistory = [...(current.switchHistory ?? [])];
+
+  if (patch.rollbackProfile) {
+    return applyModelProfileRollbackTransition(current, currentSlots, baseHistory, nowIso);
+  }
+
+  if (patch.applyProfileId) {
+    const targetId = patch.applyProfileId.trim();
+    const builtins = resolveBuiltinMainChatModelProfiles(currentSlots.main ?? null);
+    const matched =
+      builtins.find((p) => p.id === targetId) ??
+      customProfiles.find((p) => p.id === targetId) ??
+      null;
+    if (!matched) {
+      throw new Error(`Model profile "${targetId}" not found`);
+    }
+    const targetSlots = normalizeMainChatModelSlots(matched.slots);
+    const changedSlots = diffModelSlots(currentSlots, targetSlots);
+    const changed = changedSlots.length > 0 || (current.activeProfileId ?? null) !== matched.id;
+    return {
+      slots: targetSlots,
+      activeProfileId: matched.id,
+      rollbackSnapshot: changed
+        ? { profileId: current.activeProfileId ?? null, slots: currentSlots, savedAt: nowIso }
+        : (current.rollbackSnapshot ?? null),
+      switchHistory: changed
+        ? [
+            {
+              id: makeProtocolSwitchEventId(),
+              action: "switch" as const,
+              fromProfileId: current.activeProfileId ?? null,
+              toProfileId: matched.id,
+              changedSlots,
+              actor: "user" as const,
+              createdAt: nowIso,
+            },
+            ...baseHistory,
+          ].slice(0, MAIN_CHAT_MAX_MODEL_PROFILE_HISTORY)
+        : baseHistory,
+    };
+  }
+
+  return {
+    slots: { ...currentSlots },
+    activeProfileId: current.activeProfileId ?? null,
+    rollbackSnapshot: current.rollbackSnapshot ?? null,
+    switchHistory: baseHistory,
+  };
+}
+
+function mergeModelSlotsOverride(
+  baseSlots: MainChatModelSlots,
+  slotPatch: NonNullable<MainChatSettingsPatch["modelConfig"]>["slots"],
+): MainChatModelSlots {
+  if (!slotPatch) return baseSlots;
+  const merged: MainChatModelSlots = { ...baseSlots };
+  for (const purpose of MAIN_CHAT_MODEL_PURPOSES) {
+    if (!Object.prototype.hasOwnProperty.call(slotPatch, purpose)) continue;
+    const incoming = slotPatch[purpose];
+    if (incoming === null) {
+      delete merged[purpose];
+    } else if (incoming !== undefined) {
+      const normalized = normalizeModelSlotBinding(incoming);
+      if (normalized) merged[purpose] = normalized;
+      else delete merged[purpose];
+    }
+  }
+  return merged;
+}
+
+function mergeModelConfig(
+  base: MainChatSettings,
+  patch: MainChatSettingsPatch["modelConfig"],
+): MainChatModelConfig {
+  const current = resolveMainChatModelConfig(base);
+  if (!patch) return current;
+
+  const nowIso = new Date().toISOString();
+  const nextCustomProfiles = mergeCustomModelProfilesList(
+    current.customProfiles ?? [],
+    patch,
+    nowIso,
+  );
+  const currentSlots = normalizeMainChatModelSlots(current.slots);
+  const transitioned = applyModelProfileTransitionPatch({
+    current,
+    currentSlots,
+    customProfiles: nextCustomProfiles,
+    patch,
+    nowIso,
+  });
+  const nextSlots = mergeModelSlotsOverride(transitioned.slots, patch.slots);
+  let nextActiveProfileId = transitioned.activeProfileId;
+
+  if (patch.activeProfileId !== undefined && !patch.applyProfileId && !patch.rollbackProfile) {
+    nextActiveProfileId = patch.activeProfileId?.trim() || null;
+  }
+  if (
+    nextActiveProfileId &&
+    !isBuiltinMainChatModelProfileId(nextActiveProfileId) &&
+    !nextCustomProfiles.some((entry) => entry.id === nextActiveProfileId)
+  ) {
+    nextActiveProfileId = null;
+  }
+
+  return {
+    activeProfileId: nextActiveProfileId,
+    slots: nextSlots,
+    customProfiles: nextCustomProfiles,
+    rollbackSnapshot: transitioned.rollbackSnapshot,
+    switchHistory: transitioned.switchHistory,
+  };
+}
+
+function mergeNotificationPolicy(
+  base: MainChatSettings,
+  patch: MainChatSettingsPatch["notificationPolicy"],
+): MainChatNotificationPolicy {
+  const current = resolveMainChatNotificationPolicy(base);
+  if (!patch) return current;
+
+  const nextOverrides: Record<string, MainChatNotificationTier> = {
+    ...current.categoryOverrides,
+  };
+  if (patch.categoryOverrides) {
+    for (const [key, value] of Object.entries(patch.categoryOverrides)) {
+      if (value === null) {
+        delete nextOverrides[key];
+      } else if (value !== undefined) {
+        nextOverrides[key] = value;
+      }
+    }
+  }
+
+  const nextMode = patch.mode ?? current.mode ?? "balanced";
+  let nextLowDistraction = current.lowDistractionEnabled;
+  let nextFold = current.foldLowPriorityToDigest;
+  if (patch.mode !== undefined && patch.lowDistractionEnabled === undefined) {
+    nextLowDistraction = patch.mode === "low_distraction";
+  }
+  if (patch.mode !== undefined && patch.foldLowPriorityToDigest === undefined) {
+    nextFold = patch.mode === "low_distraction";
+  }
+  if (patch.lowDistractionEnabled !== undefined) {
+    nextLowDistraction = patch.lowDistractionEnabled;
+  }
+  if (patch.foldLowPriorityToDigest !== undefined) {
+    nextFold = patch.foldLowPriorityToDigest;
+  }
+
+  return normalizeMainChatNotificationPolicy({
+    lowDistractionEnabled: nextLowDistraction,
+    mode: nextMode,
+    foldLowPriorityToDigest: nextFold,
+    categoryOverrides: nextOverrides,
+  });
+}
+
 export function mergeMainChatSettings(
   current: MainChatSettings,
   patch: MainChatSettingsPatch,
@@ -1431,6 +2257,8 @@ export function mergeMainChatSettings(
     compaction: mergeCompactionConfig(base, patch.compaction),
     cacheKeepalive: mergeCacheKeepaliveConfig(base, patch.cacheKeepalive),
     limitFallbacks: nextLimitFallbacks,
+    modelConfig: mergeModelConfig(base, patch.modelConfig),
+    notificationPolicy: mergeNotificationPolicy(base, patch.notificationPolicy),
     profile: mergeProfileConfig(current, base, patch.profile),
     title: patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE,
     style: patch.style ?? base.style,
@@ -1584,6 +2412,28 @@ export const MainChatSupervisionSignalSchema = z.object({
   createdAt: z.string(),
 });
 export type MainChatSupervisionSignal = z.infer<typeof MainChatSupervisionSignalSchema>;
+
+export const MainChatNotificationReceiptSchema = z.object({
+  id: z.string(),
+  category: MainChatNotificationCategorySchema,
+  signalKind: MainChatSupervisionSignalKindSchema.nullable().optional(),
+  tier: MainChatNotificationTierSchema,
+  status: MainChatNotificationDeliveryStatusSchema,
+  channel: MainChatNotificationChannelSchema,
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string().nullable(),
+  taskId: z.string().nullable().optional(),
+  agentId: z.string().nullable().optional(),
+  conversationId: z.string().nullable().optional(),
+  passthrough: z.boolean().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  deliveredAt: z.string().nullable().optional(),
+  acknowledgedAt: z.string().nullable().optional(),
+  readAt: z.string().nullable().optional(),
+});
+export type MainChatNotificationReceipt = z.infer<typeof MainChatNotificationReceiptSchema>;
 
 export const MainChatApprovalClarificationSchema = z.object({
   id: z.string(),
@@ -1814,6 +2664,10 @@ export const MainChatTaskRecordSchema = z.object({
   dependencyState: MainChatTaskDependencyStateSchema.optional(),
   autoStartOnReady: z.boolean().optional(),
   deliveryGate: MainChatTaskDeliveryGateSchema.nullable().optional(),
+  lastProvider: z.string().nullable().optional(),
+  lastModel: z.string().nullable().optional(),
+  lastThinkingOptionId: z.string().nullable().optional(),
+  lastRuleDiagnostic: MainChatRuleDiagnosticSchema.nullable().optional(),
 });
 export type MainChatTaskRecord = z.infer<typeof MainChatTaskRecordSchema>;
 
@@ -1958,6 +2812,8 @@ export const MainChatOverviewSchema = z.object({
   settingsProposals: z.array(MainChatSettingsProposalRecordSchema).optional(),
   recentLimitFallbacks: z.array(MainChatLimitFallbackEventSchema).optional(),
   projectLessons: z.array(MainChatProjectLessonSchema).optional(),
+  notificationSummary: MainChatNotificationSummarySchema.optional(),
+  recentNotificationReceipts: z.array(MainChatNotificationReceiptSchema).optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -3235,6 +4091,140 @@ export const MainChatUpdateTaskDependenciesResponseSchema = z.object({
 });
 export type MainChatUpdateTaskDependenciesResponse = z.infer<
   typeof MainChatUpdateTaskDependenciesResponseSchema
+>;
+
+// ============================================================================
+// P1-4 Model Profile Atomic Switch & Failed Task Retry-With-Fallback RPC Schemas
+// ============================================================================
+
+export const MainChatSwitchModelProfileRequestSchema = z.object({
+  type: z.literal("main_chat.switch_model_profile.request"),
+  requestId: z.string(),
+  profileId: z.string().trim().min(1).max(48).optional(),
+  rollback: z.boolean().optional(),
+});
+export type MainChatSwitchModelProfileRequest = z.infer<
+  typeof MainChatSwitchModelProfileRequestSchema
+>;
+
+export const MainChatSwitchModelProfileResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  settings: MainChatSettingsSchema.nullable(),
+  activeProfileId: z.string().nullable(),
+  changedSlots: z.array(MainChatModelPurposeSchema),
+  event: MainChatModelProfileSwitchEventSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatSwitchModelProfileResponsePayload = z.infer<
+  typeof MainChatSwitchModelProfileResponsePayloadSchema
+>;
+
+export const MainChatSwitchModelProfileResponseSchema = z.object({
+  type: z.literal("main_chat.switch_model_profile.response"),
+  payload: MainChatSwitchModelProfileResponsePayloadSchema,
+});
+export type MainChatSwitchModelProfileResponse = z.infer<
+  typeof MainChatSwitchModelProfileResponseSchema
+>;
+
+export const MainChatRetryTaskWithFallbackRequestSchema = z.object({
+  type: z.literal("main_chat.retry_task_with_fallback.request"),
+  requestId: z.string(),
+  taskId: z.string().min(1),
+  provider: z.string().trim().min(1).max(64).optional(),
+  model: z.string().trim().min(1).max(120).nullable().optional(),
+  thinkingOptionId: z.string().trim().min(1).max(64).nullable().optional(),
+  reason: z.string().trim().max(300).optional(),
+});
+export type MainChatRetryTaskWithFallbackRequest = z.infer<
+  typeof MainChatRetryTaskWithFallbackRequestSchema
+>;
+
+export const MainChatRetryTaskWithFallbackResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  previousAgentId: z.string().nullable(),
+  newAgentId: z.string().nullable(),
+  fromModelSpec: z.string().nullable(),
+  toModelSpec: z.string().nullable(),
+  fallbackEvent: MainChatLimitFallbackEventSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatRetryTaskWithFallbackResponsePayload = z.infer<
+  typeof MainChatRetryTaskWithFallbackResponsePayloadSchema
+>;
+
+export const MainChatRetryTaskWithFallbackResponseSchema = z.object({
+  type: z.literal("main_chat.retry_task_with_fallback.response"),
+  payload: MainChatRetryTaskWithFallbackResponsePayloadSchema,
+});
+export type MainChatRetryTaskWithFallbackResponse = z.infer<
+  typeof MainChatRetryTaskWithFallbackResponseSchema
+>;
+
+// ============================================================================
+// P1-5 Notification Delivery Receipts RPC Schemas
+// ============================================================================
+
+export const MainChatListNotificationReceiptsRequestSchema = z.object({
+  type: z.literal("main_chat.list_notification_receipts.request"),
+  requestId: z.string(),
+  status: MainChatNotificationDeliveryStatusSchema.optional(),
+  category: MainChatNotificationCategorySchema.optional(),
+  unreadOnly: z.boolean().optional(),
+  limit: z.number().int().positive().max(MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS).optional(),
+});
+export type MainChatListNotificationReceiptsRequest = z.infer<
+  typeof MainChatListNotificationReceiptsRequestSchema
+>;
+
+export const MainChatListNotificationReceiptsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  receipts: z.array(MainChatNotificationReceiptSchema),
+  summary: MainChatNotificationSummarySchema,
+  error: z.string().nullable(),
+});
+export type MainChatListNotificationReceiptsResponsePayload = z.infer<
+  typeof MainChatListNotificationReceiptsResponsePayloadSchema
+>;
+
+export const MainChatListNotificationReceiptsResponseSchema = z.object({
+  type: z.literal("main_chat.list_notification_receipts.response"),
+  payload: MainChatListNotificationReceiptsResponsePayloadSchema,
+});
+export type MainChatListNotificationReceiptsResponse = z.infer<
+  typeof MainChatListNotificationReceiptsResponseSchema
+>;
+
+export const MainChatAckNotificationReceiptRequestSchema = z.object({
+  type: z.literal("main_chat.ack_notification_receipt.request"),
+  requestId: z.string(),
+  receiptId: z.string().min(1).optional(),
+  receiptIds: z.array(z.string().min(1)).max(MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS).optional(),
+  markAll: z.boolean().optional(),
+  status: z.enum(["acknowledged", "read"]).optional(),
+});
+export type MainChatAckNotificationReceiptRequest = z.infer<
+  typeof MainChatAckNotificationReceiptRequestSchema
+>;
+
+export const MainChatAckNotificationReceiptResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  updatedCount: z.number().int().nonnegative(),
+  receipts: z.array(MainChatNotificationReceiptSchema),
+  summary: MainChatNotificationSummarySchema,
+  error: z.string().nullable(),
+});
+export type MainChatAckNotificationReceiptResponsePayload = z.infer<
+  typeof MainChatAckNotificationReceiptResponsePayloadSchema
+>;
+
+export const MainChatAckNotificationReceiptResponseSchema = z.object({
+  type: z.literal("main_chat.ack_notification_receipt.response"),
+  payload: MainChatAckNotificationReceiptResponsePayloadSchema,
+});
+export type MainChatAckNotificationReceiptResponse = z.infer<
+  typeof MainChatAckNotificationReceiptResponseSchema
 >;
 
 export interface MainChatTaskLabelsMeta {

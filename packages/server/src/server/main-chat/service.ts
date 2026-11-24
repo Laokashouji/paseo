@@ -19,7 +19,9 @@ import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   computeEffectiveCompactionWindowTokens,
   extractMainChatPermissionRuleCandidate,
+  formatMainChatModelSpec,
   getMainChatTaskMetaFromLabels,
+  isFormerMainChatLabels,
   isHostAllowedInFleetScope,
   isMainChatAutoCompactEnabled,
   isMainChatEnabled,
@@ -30,6 +32,7 @@ import {
   resolveMainChatCompactionConfig,
   resolveMainChatDeliveryGatePolicy,
   resolveMainChatFleetScope,
+  resolveMainChatModelConfig,
   resolveMainChatProfile,
   type MainChatActivityEntry,
   type MainChatActivityKind,
@@ -47,7 +50,13 @@ import {
   type MainChatLimitFallbackEvent,
   type MainChatMemoryFileContent,
   type MainChatMemoryFileMeta,
+  type MainChatModelProfileSwitchEvent,
+  type MainChatModelPurpose,
   type MainChatNightModeStatus,
+  type MainChatNotificationCategory,
+  type MainChatNotificationDeliveryStatus,
+  type MainChatNotificationReceipt,
+  type MainChatNotificationSummary,
   type MainChatOverview,
   type MainChatPatrolResult,
   type MainChatPermissionRule,
@@ -127,8 +136,16 @@ import {
 } from "./leader-tools.js";
 import {
   createMainChatLimitFallbackController,
+  hasHandoffBlockLabel,
   type LimitFallbackSwitchOutcome,
 } from "./limit-fallback.js";
+import {
+  computeAtomicModelProfileSwitch,
+  pickNextFallbackForFailedTask,
+  resolveSlotModelForDispatch,
+  validateModelSlotsAtomic,
+  type AvailableProviderInfo,
+} from "./model-profiles.js";
 import { assembleMainChatMemoryContext, createMainChatMemoryStore } from "./memory.js";
 import {
   buildMainChatCompactionCheckpointPrompt,
@@ -642,6 +659,50 @@ export interface MainChatService {
     agentId: string,
     errorMessage: string,
   ): Promise<LimitFallbackSwitchOutcome>;
+  // Wave 4: Multi-Purpose Model Profiles, Failed-Task Retry with Fallback, Notification Receipts
+  switchModelProfile(input: {
+    profileId?: string;
+    rollback?: boolean;
+    actor?: "user" | "proposal" | "tool";
+  }): Promise<{
+    settings: MainChatSettings;
+    activeProfileId: string | null;
+    changedSlots: MainChatModelPurpose[];
+    event: MainChatModelProfileSwitchEvent | null;
+  }>;
+  retryTaskWithFallback(input: {
+    taskId: string;
+    provider?: string;
+    model?: string | null;
+    thinkingOptionId?: string | null;
+    reason?: string;
+  }): Promise<{
+    task: MainChatTaskRecord;
+    previousAgentId: string | null;
+    newAgentId: string;
+    fromModelSpec: string | null;
+    toModelSpec: string;
+    fallbackEvent: MainChatLimitFallbackEvent;
+  }>;
+  listNotificationReceipts(options?: {
+    status?: MainChatNotificationDeliveryStatus;
+    category?: MainChatNotificationCategory;
+    unreadOnly?: boolean;
+    limit?: number;
+  }): Promise<{
+    receipts: MainChatNotificationReceipt[];
+    summary: MainChatNotificationSummary;
+  }>;
+  ackNotificationReceipt(input: {
+    receiptId?: string;
+    receiptIds?: string[];
+    markAll?: boolean;
+    status?: "acknowledged" | "read";
+  }): Promise<{
+    updatedCount: number;
+    receipts: MainChatNotificationReceipt[];
+    summary: MainChatNotificationSummary;
+  }>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -1903,6 +1964,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     agentId: string;
     cwd: string;
     workspaceId: string | null;
+    provider?: string | null;
+    model?: string | null;
+    thinkingOptionId?: string | null;
     nowIso: string;
   }): Promise<void> {
     const targetToAttach = input.continuedTask ?? input.existingRecord;
@@ -1918,7 +1982,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         continuesWhy: input.continuedTask ? (input.task.continuesWhy ?? null) : null,
         nowIso: input.nowIso,
       });
-      await store.putTask(updatedRecord);
+      await store.putTask({
+        ...updatedRecord,
+        lastProvider: input.provider ?? updatedRecord.lastProvider ?? null,
+        lastModel: input.model !== undefined ? input.model : (updatedRecord.lastModel ?? null),
+        lastThinkingOptionId:
+          input.thinkingOptionId !== undefined
+            ? input.thinkingOptionId
+            : (updatedRecord.lastThinkingOptionId ?? null),
+        lastRuleDiagnostic: null,
+      });
       return;
     }
 
@@ -1938,7 +2011,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     if (input.preExistingDecisions.length > 0) {
       createdRecord.decisions = input.preExistingDecisions;
     }
-    await store.putTask(createdRecord);
+    await store.putTask({
+      ...createdRecord,
+      lastProvider: input.provider ?? null,
+      lastModel: input.model ?? null,
+      lastThinkingOptionId: input.thinkingOptionId ?? null,
+      lastRuleDiagnostic: null,
+    });
   }
 
   function resolveDirectionNotesForPlan(
@@ -2069,19 +2148,54 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       modeId: string | null;
       thinkingOptionId: string | null;
     };
-  }): Promise<{ agentId: string; workspaceId: string | null; cwd: string }> {
+  }): Promise<{
+    agentId: string;
+    workspaceId: string | null;
+    cwd: string;
+    provider: string;
+    model: string | null;
+    thinkingOptionId: string | null;
+  }> {
     const { plan, task, continuedTask, prepared, mainAgent } = input;
-    const providerSpec = task.provider ?? formatProviderModel(mainAgent.provider, mainAgent.model);
+    const slotResolution = resolveSlotModelForDispatch({
+      purpose: task.mode === "readonly" ? "subagentReadonly" : "subagentDefault",
+      settings: store.getSettings(),
+      liveMainBinding: {
+        provider: mainAgent.provider,
+        model: mainAgent.model,
+        thinkingOptionId: mainAgent.thinkingOptionId,
+      },
+    });
+    const providerSpec =
+      task.provider ??
+      slotResolution.providerSpec ??
+      formatProviderModel(mainAgent.provider, mainAgent.model);
+    const parsedEffective = parseProviderSpec(providerSpec);
+    const effectiveThinking =
+      task.thinkingOptionId ??
+      slotResolution.thinkingOptionId ??
+      mainAgent.thinkingOptionId ??
+      null;
+
     if (task.serverId && task.serverId !== deps.serverId) {
-      return dispatchRemotePlannedTask({
+      const remoteDispatched = await dispatchRemotePlannedTask({
         serverId: task.serverId,
         providerSpec,
         plan,
         task,
         continuedTask,
         prepared,
-        mainAgent,
+        mainAgent: {
+          modeId: mainAgent.modeId,
+          thinkingOptionId: effectiveThinking,
+        },
       });
+      return {
+        ...remoteDispatched,
+        provider: parsedEffective.provider,
+        model: parsedEffective.model ?? null,
+        thinkingOptionId: effectiveThinking,
+      };
     }
 
     const target = await resolveTaskWorkspaceTarget(task);
@@ -2105,7 +2219,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         initialPrompt: prepared.initialPrompt,
         cwd: target.cwd,
         workspaceId: target.workspaceId,
-        thinking: task.thinkingOptionId ?? mainAgent.thinkingOptionId ?? undefined,
+        thinking: effectiveThinking ?? undefined,
         mode: task.modeId ?? mainAgent.modeId ?? undefined,
         labels: prepared.labels,
         promptFailure: "throw",
@@ -2119,6 +2233,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       agentId: snapshot.id,
       workspaceId: snapshot.workspaceId ?? target.workspaceId,
       cwd: target.cwd,
+      provider: parsedEffective.provider,
+      model: parsedEffective.model ?? null,
+      thinkingOptionId: effectiveThinking,
     };
   }
 
@@ -2440,6 +2557,22 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  function readAvailableProvidersForModelValidation(cwd?: string): AvailableProviderInfo[] {
+    try {
+      const targetCwd = cwd ?? path.join(deps.paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME);
+      const snapshot = deps.providerSnapshotManager.getSnapshot(targetCwd);
+      if (!snapshot?.records || snapshot.records.length === 0) {
+        return [];
+      }
+      return snapshot.records.map((record) => ({
+        provider: record.entry.provider,
+        enabled: record.entry.enabled !== false,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   async function startReadyTaskInternal(
     taskId: string,
   ): Promise<{ task: MainChatTaskRecord; plan: MainChatPlanRecord | null }> {
@@ -2632,6 +2765,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         agentId: dispatched.agentId,
         cwd: dispatched.cwd,
         workspaceId: dispatched.workspaceId,
+        provider: dispatched.provider,
+        model: dispatched.model,
+        thinkingOptionId: dispatched.thinkingOptionId,
         nowIso,
       });
 
@@ -4533,6 +4669,233 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     await store.completeOptInMigration({ disableDefault: false });
   }
 
+  function extractLiveMainModelBinding(
+    liveMain: ManagedAgent | null | undefined,
+  ): { provider: string; model: string | null; thinkingOptionId: string | null } | null {
+    if (!liveMain) return null;
+    return {
+      provider: liveMain.provider,
+      model: liveMain.runtimeInfo?.model ?? liveMain.config.model ?? null,
+      thinkingOptionId: liveMain.config.thinkingOptionId ?? null,
+    };
+  }
+
+  async function validateModelConfigPatchAtomic(
+    previous: MainChatSettings,
+    patch: MainChatSettingsPatch,
+  ): Promise<void> {
+    if (!patch.modelConfig) return;
+    const availableProviders = readAvailableProvidersForModelValidation();
+    if (patch.modelConfig.slots) {
+      validateModelSlotsAtomic(patch.modelConfig.slots, availableProviders);
+    }
+    if (!patch.modelConfig.applyProfileId && !patch.modelConfig.rollbackProfile) return;
+    const existingMain = await findExistingMainChat();
+    const liveMain = existingMain ? deps.agentManager.getAgent(existingMain.agentId) : null;
+    computeAtomicModelProfileSwitch({
+      currentSettings: previous,
+      profileId: patch.modelConfig.applyProfileId,
+      rollback: patch.modelConfig.rollbackProfile,
+      actor: "user",
+      liveMainBinding: extractLiveMainModelBinding(liveMain),
+      availableProviders,
+      nowIso: new Date(getNowMs()).toISOString(),
+    });
+  }
+
+  async function syncLiveMainModelAfterProfileSwitch(
+    liveMain: ManagedAgent | null | undefined,
+    saved: MainChatSettings,
+  ): Promise<void> {
+    const nextMainSlot = resolveMainChatModelConfig(saved).slots?.main ?? null;
+    if (
+      !liveMain ||
+      !nextMainSlot ||
+      liveMain.provider !== nextMainSlot.provider ||
+      liveMain.lifecycle === "running" ||
+      typeof deps.agentManager.setAgentModel !== "function"
+    ) {
+      return;
+    }
+    try {
+      await deps.agentManager.setAgentModel(liveMain.id, nextMainSlot.model ?? null);
+    } catch (error) {
+      logger.warn(
+        { err: error, agentId: liveMain.id },
+        "Failed to sync live Main Chat model after atomic profile switch",
+      );
+    }
+  }
+
+  function assertManagedTaskRecordRetryable(
+    existing: MainChatTaskRecord | null,
+    taskId: string,
+  ): MainChatTaskRecord {
+    if (!existing) {
+      throw new Error(
+        `找不到受管任务「${taskId}」：一键换模型重试仅支持主对话受管任务，严禁操作用户手动会话`,
+      );
+    }
+    if (!existing.mainAgentId?.trim()) {
+      throw new Error("该任务未归属主对话受管上下文，禁止执行换模型重试");
+    }
+    if (
+      existing.status === "completed" ||
+      existing.status === "cancelled" ||
+      Boolean(existing.supersededByTaskId)
+    ) {
+      throw new Error(`任务「${existing.title}」已处于终态（${existing.status}），无法换模型重试`);
+    }
+    return existing;
+  }
+
+  function pickFirstNonEmptyString(
+    candidates: readonly (string | null | undefined)[],
+  ): string | null {
+    for (const item of candidates) {
+      if (item) return item;
+    }
+    return null;
+  }
+
+  function extractPreviousAgentModelSpec(
+    livePrev: ManagedAgent | null | undefined,
+    storedPrev: Awaited<ReturnType<AgentStorage["get"]>>,
+    existing: MainChatTaskRecord,
+  ): {
+    currentProvider: string | null;
+    currentModel: string | null;
+    fromModelSpec: string | null;
+  } {
+    const currentProvider = pickFirstNonEmptyString([
+      livePrev?.provider,
+      storedPrev?.provider,
+      existing.lastProvider,
+    ]);
+    const currentModel = pickFirstNonEmptyString([
+      livePrev?.runtimeInfo?.model,
+      livePrev?.config.model,
+      storedPrev?.runtimeInfo?.model,
+      storedPrev?.config?.model,
+      existing.lastModel,
+    ]);
+    const fromModelSpec = currentProvider
+      ? formatMainChatModelSpec(currentProvider, currentModel)
+      : null;
+    return { currentProvider, currentModel, fromModelSpec };
+  }
+
+  async function resolveManagedFailedTaskForRetry(taskId: string): Promise<{
+    existing: MainChatTaskRecord;
+    previousAgentId: string | null;
+    currentProvider: string | null;
+    currentModel: string | null;
+    fromModelSpec: string | null;
+  }> {
+    const existing = assertManagedTaskRecordRetryable(resolveTaskRecordByRef({ taskId }), taskId);
+    const previousAgentId = existing.activeAgentId ?? existing.agentIds.at(-1) ?? null;
+    const livePrev = previousAgentId ? deps.agentManager.getAgent(previousAgentId) : null;
+    const storedPrev =
+      !livePrev && previousAgentId ? await deps.agentStorage.get(previousAgentId) : null;
+    const prevLabels = livePrev?.labels ?? storedPrev?.labels;
+
+    // Hard redline: NEVER touch Main Chat itself, former main chat, or handoff-interrupted sessions!
+    if (
+      isMainChatLabels(prevLabels) ||
+      isFormerMainChatLabels(prevLabels) ||
+      hasHandoffBlockLabel(prevLabels)
+    ) {
+      throw new Error(
+        `任务「${existing.title}」关联会话属于 handoff 中断/替换或主对话自身，严禁一键换模型重试`,
+      );
+    }
+
+    const isFailedOrError =
+      existing.status === "failed" ||
+      livePrev?.lifecycle === "error" ||
+      storedPrev?.lastStatus === "error";
+    if (!isFailedOrError) {
+      throw new Error(
+        `仅支持对失败/错误状态的主对话受管任务执行换模型重试（当前状态：${existing.status}）`,
+      );
+    }
+
+    const modelInfo = extractPreviousAgentModelSpec(livePrev, storedPrev, existing);
+    return { existing, previousAgentId, ...modelInfo };
+  }
+
+  function collectTaskAttemptedFallbackSpecs(existing: MainChatTaskRecord): Set<string> {
+    const lineageAgentIds = new Set<string>(existing.agentIds);
+    if (existing.activeAgentId) lineageAgentIds.add(existing.activeAgentId);
+    const attemptedSpecs = new Set<string>();
+    for (const evt of store.listLimitFallbackEvents(50)) {
+      if (!lineageAgentIds.has(evt.agentId)) continue;
+      attemptedSpecs.add(
+        `${evt.fromProvider.trim().toLowerCase()}::${(evt.fromModel?.trim() ?? "").toLowerCase()}`,
+      );
+      attemptedSpecs.add(
+        `${evt.toProvider.trim().toLowerCase()}::${(evt.toModel?.trim() ?? "").toLowerCase()}`,
+      );
+    }
+    return attemptedSpecs;
+  }
+
+  async function persistRetryTaskFallbackArtifacts(input: {
+    existing: MainChatTaskRecord;
+    linkedPlan: MainChatPlanRecord | null;
+    matchedPlannedTask: MainChatPlannedTask | undefined;
+    spawnedTask: MainChatPlannedTask;
+    previousAgentId: string | null;
+    currentProvider: string | null;
+    currentModel: string | null;
+    fromModelSpec: string | null;
+    toModelSpec: string;
+    toProvider: string;
+    toModel: string | null;
+    retryReason: string;
+    nowIso: string;
+  }): Promise<MainChatLimitFallbackEvent> {
+    if (input.linkedPlan && input.matchedPlannedTask) {
+      await store.putPlan({
+        ...input.linkedPlan,
+        status: "started",
+        startedAt: input.linkedPlan.startedAt ?? input.nowIso,
+        tasks: input.linkedPlan.tasks.map((item) =>
+          item.id === input.matchedPlannedTask?.id ? input.spawnedTask : item,
+        ),
+      });
+    }
+    if (input.previousAgentId) {
+      await store.removeTriage(input.previousAgentId);
+    }
+    const fallbackEvent: MainChatLimitFallbackEvent = {
+      id: makeId("lfb"),
+      agentId: input.spawnedTask.agentId!,
+      agentRole: "managed_task",
+      fromProvider: input.currentProvider ?? "unknown",
+      fromModel: input.currentModel,
+      toProvider: input.toProvider,
+      toModel: input.toModel,
+      reason: input.retryReason.slice(0, 180),
+      createdAt: input.nowIso,
+    };
+    await store.appendLimitFallbackEvent(fallbackEvent);
+    await store.appendActivity({
+      id: makeId("act"),
+      mainAgentId: input.existing.mainAgentId,
+      kind: "background_turn",
+      trigger: "retry_task_with_fallback",
+      summary: `受管任务「${input.existing.title}」已切换备用模型重试（${input.fromModelSpec ?? "原模型"} → ${input.toModelSpec}）`,
+      silent: false,
+      status: "completed",
+      createdAt: input.nowIso,
+      completedAt: input.nowIso,
+      relatedAgentId: input.spawnedTask.agentId!,
+      detail: input.retryReason,
+    });
+    return fallbackEvent;
+  }
+
   return {
     async start() {
       serviceStarted = true;
@@ -4587,6 +4950,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         idlePrecompactMinIdlePatched = true;
       }
       const previous = store.getSettings();
+      await validateModelConfigPatchAtomic(previous, patch);
       const previousScope = resolveMainChatFleetScope(previous, deps.serverId);
       const normalizedPatch: MainChatSettingsPatch = patch.fleetScope
         ? {
@@ -5189,6 +5553,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         }),
         recentLimitFallbacks: store.listLimitFallbackEvents(12),
         projectLessonGroups: lessonsStore.listGroups(),
+        notificationSummary: store.getNotificationSummary(),
+        recentNotificationReceipts: store.listNotificationReceipts({ limit: 30 }),
       };
     },
 
@@ -5569,7 +5935,33 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async createConversation(input) {
       await store.load();
       await conversationManager.load();
-      const created = await conversationManager.createConversation(input);
+      let enrichedInput = input;
+      if (input.kind === "leader" && !input.provider) {
+        const existingMain = await findExistingMainChat();
+        const liveMain = existingMain ? deps.agentManager.getAgent(existingMain.agentId) : null;
+        const slot = resolveSlotModelForDispatch({
+          purpose: "directionLead",
+          settings: store.getSettings(),
+          liveMainBinding: liveMain
+            ? {
+                provider: liveMain.provider,
+                model: liveMain.runtimeInfo?.model ?? liveMain.config.model ?? null,
+                thinkingOptionId: liveMain.config.thinkingOptionId ?? null,
+              }
+            : null,
+        });
+        if (slot.provider) {
+          enrichedInput = {
+            ...input,
+            provider: slot.provider,
+            ...(input.model === undefined && slot.model ? { model: slot.model } : {}),
+            ...(input.thinkingOptionId === undefined && slot.thinkingOptionId
+              ? { thinkingOptionId: slot.thinkingOptionId }
+              : {}),
+          };
+        }
+      }
+      const created = await conversationManager.createConversation(enrichedInput);
       contextSnapshots.invalidateCache();
       return created;
     },
@@ -6100,6 +6492,164 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     async handleWorkspaceGitSnapshot(snapshot) {
       return handleWorkspaceGitSnapshotInternal(snapshot);
+    },
+
+    async switchModelProfile(input) {
+      await store.load();
+      const currentSettings = store.getSettings();
+      const existingMain = await findExistingMainChat();
+      const liveMain = existingMain ? deps.agentManager.getAgent(existingMain.agentId) : null;
+      const availableProviders = readAvailableProvidersForModelValidation(liveMain?.cwd);
+      const nowIso = new Date(getNowMs()).toISOString();
+
+      const switched = computeAtomicModelProfileSwitch({
+        currentSettings,
+        profileId: input.profileId,
+        rollback: input.rollback,
+        actor: input.actor ?? "user",
+        liveMainBinding: extractLiveMainModelBinding(liveMain),
+        availableProviders,
+        nowIso,
+      });
+
+      const saved = await store.replaceSettings(switched.nextSettings);
+      supervisor.refreshSchedule();
+      contextSnapshots.invalidateCache();
+      await syncLiveMainModelAfterProfileSwitch(liveMain, saved);
+
+      if (switched.event && existingMain) {
+        const isRollback = switched.event.action === "rollback";
+        const targetLabel = switched.activeProfileId ?? "自定义";
+        await store.appendActivity({
+          id: makeId("act"),
+          mainAgentId: existingMain.agentId,
+          kind: "background_turn",
+          trigger: isRollback ? "model_profile_rollback" : "model_profile_switch",
+          summary: isRollback
+            ? `已回滚模型档位至「${targetLabel}」（影响 ${switched.changedSlots.length} 个槽位）`
+            : `已原子切换模型档位至「${targetLabel}」（变更 ${switched.changedSlots.length} 个槽位）`,
+          silent: false,
+          status: "completed",
+          createdAt: nowIso,
+          completedAt: nowIso,
+          detail: switched.changedSlots.join(", ") || null,
+        });
+      }
+
+      return {
+        settings: saved,
+        activeProfileId: switched.activeProfileId,
+        changedSlots: switched.changedSlots,
+        event: switched.event,
+      };
+    },
+
+    async retryTaskWithFallback(input) {
+      await store.load();
+      await lessonsStore.load();
+      const { existing, previousAgentId, currentProvider, currentModel, fromModelSpec } =
+        await resolveManagedFailedTaskForRetry(input.taskId);
+
+      const picked = pickNextFallbackForFailedTask({
+        currentProvider,
+        currentModel,
+        attemptedSpecs: collectTaskAttemptedFallbackSpecs(existing),
+        settings: store.getSettings(),
+        explicitOverride: input.provider
+          ? {
+              provider: input.provider,
+              model: input.model ?? null,
+              thinkingOptionId: input.thinkingOptionId ?? null,
+            }
+          : null,
+        availableProviders: readAvailableProvidersForModelValidation(existing.cwd ?? undefined),
+      });
+      if (!picked) {
+        throw new Error(
+          "暂无可用的下一个备用模型：请在设置页「限额自动切备用模型」中添加备用模型，或手动指定目标模型",
+        );
+      }
+
+      const toModelSpec = formatMainChatModelSpec(picked.provider, picked.model);
+      const nowIso = new Date(getNowMs()).toISOString();
+      const mainAgent = await resolveMainAgentSnapshot(existing.mainAgentId);
+      const linkedPlan = existing.planId ? store.getPlan(existing.planId) : null;
+      const matchedPlannedTask = linkedPlan?.tasks.find(
+        (item) => item.taskRecordId === existing.id || item.id === existing.id,
+      );
+      const retryReason =
+        input.reason?.trim() ||
+        `失败任务一键切换模型续跑（${fromModelSpec ?? "原模型"} → ${toModelSpec}）`;
+      const basePlannedTask = matchedPlannedTask ?? buildSyntheticPlannedTaskForReadyTask(existing);
+
+      const spawnedTask = await spawnSinglePlannedTask({
+        plan: linkedPlan ?? buildSyntheticPlanForReadyTask(existing, nowIso),
+        task: {
+          ...basePlannedTask,
+          provider: toModelSpec,
+          thinkingOptionId:
+            picked.thinkingOptionId ?? input.thinkingOptionId ?? basePlannedTask.thinkingOptionId,
+          continuesTaskId: existing.id,
+          continuesWhy: retryReason,
+          taskRecordId: existing.id,
+        },
+        mainAgent,
+        nowIso,
+      });
+      if (!spawnedTask.agentId) {
+        throw new Error(spawnedTask.startError ?? "切换备用模型重启子任务失败");
+      }
+
+      const fallbackEvent = await persistRetryTaskFallbackArtifacts({
+        existing,
+        linkedPlan,
+        matchedPlannedTask,
+        spawnedTask,
+        previousAgentId,
+        currentProvider,
+        currentModel,
+        fromModelSpec,
+        toModelSpec,
+        toProvider: picked.provider,
+        toModel: picked.model,
+        retryReason,
+        nowIso,
+      });
+
+      const refreshedTask = store.getTask(existing.id) ?? existing;
+      contextSnapshots.invalidateCache();
+      return {
+        task: refreshedTask,
+        previousAgentId,
+        newAgentId: spawnedTask.agentId,
+        fromModelSpec,
+        toModelSpec,
+        fallbackEvent,
+      };
+    },
+
+    async listNotificationReceipts(options) {
+      await store.load();
+      return {
+        receipts: store.listNotificationReceipts(options),
+        summary: store.getNotificationSummary(),
+      };
+    },
+
+    async ackNotificationReceipt(input) {
+      await store.load();
+      const result = await store.ackNotificationReceipts({
+        receiptId: input.receiptId,
+        receiptIds: input.receiptIds,
+        markAll: input.markAll,
+        status: input.status ?? "read",
+        nowIso: new Date(getNowMs()).toISOString(),
+      });
+      return {
+        updatedCount: result.updatedCount,
+        receipts: result.receipts,
+        summary: store.getNotificationSummary(),
+      };
     },
   };
 }

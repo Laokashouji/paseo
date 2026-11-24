@@ -1,5 +1,18 @@
+import type { MainChatNotificationSummary } from "@getpaseo/protocol/main-chat";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../messages.js";
 import type { MainChatService } from "./service.js";
+
+const EMPTY_NOTIFICATION_SUMMARY: MainChatNotificationSummary = {
+  lowDistractionEnabled: false,
+  mode: "balanced",
+  unreadCount: 0,
+  deliveredCount: 0,
+  suppressedQuietCount: 0,
+  suppressedNightCount: 0,
+  foldedDigestCount: 0,
+  criticalPassthroughCount: 0,
+  latestReceiptAt: null,
+};
 
 export type MainChatSessionMessage = Extract<
   SessionInboundMessage,
@@ -52,6 +65,10 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.lessons_delete.request" }
   | { type: "main_chat.start_ready_task.request" }
   | { type: "main_chat.update_task_dependencies.request" }
+  | { type: "main_chat.switch_model_profile.request" }
+  | { type: "main_chat.retry_task_with_fallback.request" }
+  | { type: "main_chat.list_notification_receipts.request" }
+  | { type: "main_chat.ack_notification_receipt.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -106,6 +123,10 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.lessons_delete.request",
   "main_chat.start_ready_task.request",
   "main_chat.update_task_dependencies.request",
+  "main_chat.switch_model_profile.request",
+  "main_chat.retry_task_with_fallback.request",
+  "main_chat.list_notification_receipts.request",
+  "main_chat.ack_notification_receipt.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -358,6 +379,49 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
   "main_chat.update_task_dependencies.request": (msg, error) => ({
     type: "main_chat.update_task_dependencies.response",
     payload: { requestId: msg.requestId, task: null, error },
+  }),
+  "main_chat.switch_model_profile.request": (msg, error) => ({
+    type: "main_chat.switch_model_profile.response",
+    payload: {
+      requestId: msg.requestId,
+      settings: null,
+      activeProfileId: null,
+      changedSlots: [],
+      event: null,
+      error,
+    },
+  }),
+  "main_chat.retry_task_with_fallback.request": (msg, error) => ({
+    type: "main_chat.retry_task_with_fallback.response",
+    payload: {
+      requestId: msg.requestId,
+      task: null,
+      previousAgentId: null,
+      newAgentId: null,
+      fromModelSpec: null,
+      toModelSpec: null,
+      fallbackEvent: null,
+      error,
+    },
+  }),
+  "main_chat.list_notification_receipts.request": (msg, error) => ({
+    type: "main_chat.list_notification_receipts.response",
+    payload: {
+      requestId: msg.requestId,
+      receipts: [],
+      summary: EMPTY_NOTIFICATION_SUMMARY,
+      error,
+    },
+  }),
+  "main_chat.ack_notification_receipt.request": (msg, error) => ({
+    type: "main_chat.ack_notification_receipt.response",
+    payload: {
+      requestId: msg.requestId,
+      updatedCount: 0,
+      receipts: [],
+      summary: EMPTY_NOTIFICATION_SUMMARY,
+      error,
+    },
   }),
 };
 
@@ -1765,6 +1829,156 @@ async function handleUpdateTaskDependencies(
   }
 }
 
+async function handleSwitchModelProfile(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.switch_model_profile.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.switchModelProfile({
+      profileId: msg.profileId,
+      rollback: msg.rollback,
+      actor: "user",
+    });
+    send({
+      type: "main_chat.switch_model_profile.response",
+      payload: {
+        requestId: msg.requestId,
+        settings: result.settings,
+        activeProfileId: result.activeProfileId,
+        changedSlots: result.changedSlots,
+        event: result.event,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.switch_model_profile.response",
+      payload: {
+        requestId: msg.requestId,
+        settings: null,
+        activeProfileId: null,
+        changedSlots: [],
+        event: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleRetryTaskWithFallback(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.retry_task_with_fallback.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.retryTaskWithFallback({
+      taskId: msg.taskId,
+      provider: msg.provider,
+      model: msg.model,
+      thinkingOptionId: msg.thinkingOptionId,
+      reason: msg.reason,
+    });
+    send({
+      type: "main_chat.retry_task_with_fallback.response",
+      payload: {
+        requestId: msg.requestId,
+        task: result.task,
+        previousAgentId: result.previousAgentId,
+        newAgentId: result.newAgentId,
+        fromModelSpec: result.fromModelSpec,
+        toModelSpec: result.toModelSpec,
+        fallbackEvent: result.fallbackEvent,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.retry_task_with_fallback.response",
+      payload: {
+        requestId: msg.requestId,
+        task: null,
+        previousAgentId: null,
+        newAgentId: null,
+        fromModelSpec: null,
+        toModelSpec: null,
+        fallbackEvent: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleListNotificationReceipts(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.list_notification_receipts.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.listNotificationReceipts({
+      status: msg.status,
+      category: msg.category,
+      unreadOnly: msg.unreadOnly,
+      limit: msg.limit,
+    });
+    send({
+      type: "main_chat.list_notification_receipts.response",
+      payload: {
+        requestId: msg.requestId,
+        receipts: result.receipts,
+        summary: result.summary,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_notification_receipts.response",
+      payload: {
+        requestId: msg.requestId,
+        receipts: [],
+        summary: EMPTY_NOTIFICATION_SUMMARY,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleAckNotificationReceipt(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.ack_notification_receipt.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.ackNotificationReceipt({
+      receiptId: msg.receiptId,
+      receiptIds: msg.receiptIds,
+      markAll: msg.markAll,
+      status: msg.status,
+    });
+    send({
+      type: "main_chat.ack_notification_receipt.response",
+      payload: {
+        requestId: msg.requestId,
+        updatedCount: result.updatedCount,
+        receipts: result.receipts,
+        summary: result.summary,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.ack_notification_receipt.response",
+      payload: {
+        requestId: msg.requestId,
+        updatedCount: 0,
+        receipts: [],
+        summary: EMPTY_NOTIFICATION_SUMMARY,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -1815,6 +2029,10 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.lessons_delete.request": handleLessonsDelete,
   "main_chat.start_ready_task.request": handleStartReadyTask,
   "main_chat.update_task_dependencies.request": handleUpdateTaskDependencies,
+  "main_chat.switch_model_profile.request": handleSwitchModelProfile,
+  "main_chat.retry_task_with_fallback.request": handleRetryTaskWithFallback,
+  "main_chat.list_notification_receipts.request": handleListNotificationReceipts,
+  "main_chat.ack_notification_receipt.request": handleAckNotificationReceipt,
 };
 
 export async function handleMainChatSessionMessage(

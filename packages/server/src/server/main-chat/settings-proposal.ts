@@ -9,25 +9,38 @@ import {
   MAIN_CHAT_MIN_CACHE_KEEPALIVE_MAX_REQUESTS,
   MAIN_CHAT_MIN_COMPACT_WINDOW_CAP_TOKENS,
   MAIN_CHAT_MIN_IDLE_PRECOMPACT_MINUTES,
+  MAIN_CHAT_MODEL_PURPOSES,
+  MAIN_CHAT_NOTIFICATION_CATEGORIES,
+  MAIN_CHAT_NOTIFICATION_TIERS,
   MAIN_CHAT_OWNER_ALIAS_MAX_CHARS,
   MAIN_CHAT_OWNER_ALIASES_MAX_COUNT,
   MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS,
   MainChatLimitFallbackEntrySchema,
+  MainChatModelSlotBindingSchema,
   MainChatSettingsPatchSchema,
   formatMainChatModelSpec,
+  isBuiltinMainChatModelProfileId,
+  isCriticalPassthroughNotificationCategory,
   isMainChatAutoCompactEnabled,
   isMainChatBackgroundFolded,
   isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   normalizeMainChatLimitFallbacks,
+  normalizeMainChatModelSlots,
   resolveMainChatCacheKeepaliveConfig,
   resolveMainChatCompactionConfig,
   resolveMainChatDeliveryGatePolicy,
   resolveMainChatLimitFallbacks,
+  resolveMainChatModelConfig,
   resolveMainChatNightMode,
+  resolveMainChatNotificationPolicy,
   resolveMainChatProfile,
   type MainChatDeliveryGatePolicy,
   type MainChatLimitFallbackEntry,
+  type MainChatModelSlots,
+  type MainChatNotificationCategory,
+  type MainChatNotificationModePreset,
+  type MainChatNotificationTier,
   type MainChatProposableSettingKey,
   type MainChatSettings,
   type MainChatSettingsPatch,
@@ -569,6 +582,187 @@ const SETTING_KEY_HANDLERS: Record<MainChatProposableSettingKey, SettingKeyHandl
     },
   }),
   limitFallbacks: validateLimitFallbacksSetting,
+  "modelConfig.activeProfileId": (rawValue, current) => {
+    if (typeof rawValue !== "string" || !rawValue.trim()) {
+      throw new Error('配置项 "modelConfig.activeProfileId" 必须是非空档位 ID');
+    }
+    const targetId = rawValue.trim();
+    const modelConfig = resolveMainChatModelConfig(current);
+    const knownCustom = (modelConfig.customProfiles ?? []).find((entry) => entry.id === targetId);
+    if (!isBuiltinMainChatModelProfileId(targetId) && !knownCustom) {
+      throw new Error(
+        `未找到模型档位 "${targetId}"（仅支持 performance / balanced / economy 或已保存自定义档位）`,
+      );
+    }
+    const beforeId = modelConfig.activeProfileId ?? null;
+    if (beforeId === targetId) return NOOP_ENTRY;
+    const formatProfile = (id: string | null) => {
+      if (!id) return "自定义槽位";
+      if (id === "performance") return "性能优先 (performance)";
+      if (id === "economy") return "经济省额 (economy)";
+      if (id === "balanced") return "均衡推荐 (balanced)";
+      const match = (modelConfig.customProfiles ?? []).find((entry) => entry.id === id);
+      return match ? `${match.name} (${match.id})` : id;
+    };
+    return {
+      change: {
+        key: "modelConfig.activeProfileId",
+        label: "模型性能档位",
+        beforeDisplay: formatProfile(beforeId),
+        afterDisplay: formatProfile(targetId),
+      },
+      assign: (patch) => {
+        patch.modelConfig = { ...patch.modelConfig, applyProfileId: targetId };
+      },
+    };
+  },
+  "modelConfig.slots": (rawValue, current) => {
+    if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+      throw new Error('配置项 "modelConfig.slots" 必须是按用途映射的对象');
+    }
+    const currentSlots = normalizeMainChatModelSlots(resolveMainChatModelConfig(current).slots);
+    const nextPatchSlots: MainChatModelSlots = {};
+    const changedLabels: string[] = [];
+    const beforeParts: string[] = [];
+    const afterParts: string[] = [];
+
+    for (const [key, value] of Object.entries(rawValue as Record<string, unknown>)) {
+      if (!(MAIN_CHAT_MODEL_PURPOSES as readonly string[]).includes(key)) {
+        throw new Error(`未知模型用途槽位 "${key}"`);
+      }
+      const purpose = key as (typeof MAIN_CHAT_MODEL_PURPOSES)[number];
+      const before = currentSlots[purpose] ?? null;
+      const after = value === null ? null : MainChatModelSlotBindingSchema.parse(value);
+      const beforeSpec = before
+        ? formatMainChatModelSpec(before.provider, before.model)
+        : "继承默认";
+      const afterSpec = after ? formatMainChatModelSpec(after.provider, after.model) : "继承默认";
+      if (
+        beforeSpec === afterSpec &&
+        (before?.thinkingOptionId ?? null) === (after?.thinkingOptionId ?? null)
+      ) {
+        continue;
+      }
+      nextPatchSlots[purpose] = after;
+      changedLabels.push(purpose);
+      beforeParts.push(`${purpose}=${beforeSpec}`);
+      afterParts.push(`${purpose}=${afterSpec}`);
+    }
+    if (changedLabels.length === 0) return NOOP_ENTRY;
+    return {
+      change: {
+        key: "modelConfig.slots",
+        label: "多用途模型槽位",
+        beforeDisplay: beforeParts.join("；"),
+        afterDisplay: afterParts.join("；"),
+      },
+      assign: (patch) => {
+        patch.modelConfig = {
+          ...patch.modelConfig,
+          slots: { ...patch.modelConfig?.slots, ...nextPatchSlots },
+        };
+      },
+    };
+  },
+  "notificationPolicy.lowDistractionEnabled": buildBoolHandler({
+    key: "notificationPolicy.lowDistractionEnabled",
+    label: "通知低打扰模式",
+    readCurrent: (current) => resolveMainChatNotificationPolicy(current).lowDistractionEnabled,
+    assign: (patch, next) => {
+      patch.notificationPolicy = { ...patch.notificationPolicy, lowDistractionEnabled: next };
+    },
+  }),
+  "notificationPolicy.mode": (rawValue, current) => {
+    if (rawValue !== "all" && rawValue !== "balanced" && rawValue !== "low_distraction") {
+      throw new Error(
+        '配置项 "notificationPolicy.mode" 仅支持 "all"、"balanced" 或 "low_distraction"',
+      );
+    }
+    const nextMode: MainChatNotificationModePreset = rawValue;
+    const policy = resolveMainChatNotificationPolicy(current);
+    const beforeMode = policy.mode ?? "balanced";
+    if (nextMode === beforeMode) return NOOP_ENTRY;
+    const modeLabels: Record<MainChatNotificationModePreset, string> = {
+      low_distraction: "低打扰专注",
+      all: "全部提醒",
+      balanced: "均衡分级",
+    };
+    return {
+      change: {
+        key: "notificationPolicy.mode",
+        label: "通知分级档位",
+        beforeDisplay: modeLabels[beforeMode],
+        afterDisplay: modeLabels[nextMode],
+      },
+      assign: (patch) => {
+        patch.notificationPolicy = { ...patch.notificationPolicy, mode: nextMode };
+      },
+    };
+  },
+  "notificationPolicy.foldLowPriorityToDigest": buildBoolHandler({
+    key: "notificationPolicy.foldLowPriorityToDigest",
+    label: "低优先级通知折叠汇总",
+    readCurrent: (current) => resolveMainChatNotificationPolicy(current).foldLowPriorityToDigest,
+    assign: (patch, next) => {
+      patch.notificationPolicy = { ...patch.notificationPolicy, foldLowPriorityToDigest: next };
+    },
+  }),
+  "notificationPolicy.categoryOverrides": (rawValue, current) => {
+    if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+      throw new Error('配置项 "notificationPolicy.categoryOverrides" 必须是类别到级别的映射对象');
+    }
+    const policy = resolveMainChatNotificationPolicy(current);
+    const currentOverrides = policy.categoryOverrides ?? {};
+    const patchOverrides: Record<string, MainChatNotificationTier | null> = {};
+    const beforeParts: string[] = [];
+    const afterParts: string[] = [];
+
+    for (const [key, val] of Object.entries(rawValue as Record<string, unknown>)) {
+      if (!(MAIN_CHAT_NOTIFICATION_CATEGORIES as readonly string[]).includes(key)) {
+        throw new Error(`未知通知类别 "${key}"`);
+      }
+      const category = key as MainChatNotificationCategory;
+      if (
+        val !== null &&
+        !(MAIN_CHAT_NOTIFICATION_TIERS as readonly string[]).includes(String(val))
+      ) {
+        throw new Error(
+          `通知级别 "${String(val)}" 非法，仅支持 critical / actionable / digest / silent`,
+        );
+      }
+      if (
+        isCriticalPassthroughNotificationCategory(category) &&
+        val !== null &&
+        val !== "critical"
+      ) {
+        throw new Error(`关键通知类别 "${category}" 始终允许穿透，禁止降级为 "${String(val)}"`);
+      }
+      const nextTier = val === null ? null : (val as MainChatNotificationTier);
+      const prevTier = currentOverrides[category] ?? null;
+      if (prevTier === nextTier) continue;
+      patchOverrides[category] = nextTier;
+      beforeParts.push(`${category}=${prevTier ?? "默认"}`);
+      afterParts.push(`${category}=${nextTier ?? "默认"}`);
+    }
+    if (beforeParts.length === 0) return NOOP_ENTRY;
+    return {
+      change: {
+        key: "notificationPolicy.categoryOverrides",
+        label: "按类别通知分级覆写",
+        beforeDisplay: beforeParts.join("；"),
+        afterDisplay: afterParts.join("；"),
+      },
+      assign: (patch) => {
+        patch.notificationPolicy = {
+          ...patch.notificationPolicy,
+          categoryOverrides: {
+            ...patch.notificationPolicy?.categoryOverrides,
+            ...patchOverrides,
+          },
+        };
+      },
+    };
+  },
   "profile.aboutMe": (rawValue, current) => {
     if (typeof rawValue !== "string" || rawValue.length > MAIN_CHAT_ABOUT_ME_MAX_CHARS) {
       throw new Error(

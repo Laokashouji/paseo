@@ -6,6 +6,7 @@ import type {
   MainChatOverview,
   MainChatPlanRecord,
   MainChatReceiptCheck,
+  MainChatRetryTaskWithFallbackResponsePayload,
   MainChatReviewTaskResponsePayload,
   MainChatRuleKind,
   MainChatSettingsProposalRecord,
@@ -118,6 +119,18 @@ interface MainChatOverviewStoreState {
     },
     client: DaemonClient,
   ) => Promise<MainChatTaskRecord>;
+  retryTaskWithFallback: (
+    serverId: string,
+    mainAgentId: string,
+    input: {
+      taskId: string;
+      targetProvider?: string;
+      targetModel?: string | null;
+      thinkingOptionId?: string | null;
+      reason?: string;
+    },
+    client: DaemonClient,
+  ) => Promise<MainChatRetryTaskWithFallbackResponsePayload>;
 }
 
 export function overviewStoreKey(serverId: string, mainAgentId: string): string {
@@ -230,11 +243,17 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
           overview.cacheKeepaliveStatus,
         );
     }
-    if (overview.nightModeStatus || overview.cacheKeepaliveStatus || overview.tokenUsage) {
+    if (
+      overview.nightModeStatus ||
+      overview.cacheKeepaliveStatus ||
+      overview.tokenUsage ||
+      overview.notificationSummary
+    ) {
       useMainChatSettingsStore.getState().hydrateTelemetry(serverId, {
         nightModeStatus: overview.nightModeStatus,
         cacheKeepaliveStatus: overview.cacheKeepaliveStatus,
         tokenUsage: overview.tokenUsage,
+        notificationSummary: overview.notificationSummary,
       });
     }
     if (overview.plans.length > 0) {
@@ -579,5 +598,28 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
       };
     });
     return updated;
+  },
+
+  async retryTaskWithFallback(serverId, mainAgentId, input, client) {
+    const response = await client.retryMainChatTaskWithFallback(input);
+    if (response.error || !response.task) {
+      throw new Error(response.error ?? "Failed to retry task with fallback model");
+    }
+    const updatedTask = response.task;
+    const key = overviewStoreKey(serverId, mainAgentId);
+    set((state) => {
+      const existingOverview = state.overviewsByKey[key];
+      if (!existingOverview) return state;
+      return {
+        overviewsByKey: {
+          ...state.overviewsByKey,
+          [key]: {
+            ...existingOverview,
+            tasks: replaceTaskInList(existingOverview.tasks, updatedTask),
+          },
+        },
+      };
+    });
+    return response;
   },
 }));

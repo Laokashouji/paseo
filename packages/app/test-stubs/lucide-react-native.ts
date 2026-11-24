@@ -172,3 +172,6 @@ export const Palette = StubIcon;
 export const Rocket = StubIcon;
 export const TestTube = StubIcon;
 export const Lock = StubIcon;
+export const Bell = StubIcon;
+export const BellOff = StubIcon;
+export const Repeat = StubIcon;

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
+  MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   MainChatActivityEntrySchema,
   MainChatApprovalClarificationSchema,
@@ -12,6 +13,7 @@ import {
   MainChatDurationSampleSchema,
   MainChatLimitFallbackEventSchema,
   MainChatMetricsSchema,
+  MainChatNotificationReceiptSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
   MainChatRuleSuggestionSchema,
@@ -42,7 +44,9 @@ import {
   resolveMainChatCustomPresets,
   resolveMainChatDeliveryGatePolicy,
   resolveMainChatLimitFallbacks,
+  resolveMainChatModelConfig,
   resolveMainChatNightMode,
+  resolveMainChatNotificationPolicy,
   resolveMainChatProfile,
   type MainChatActivityEntry,
   type MainChatActivityKind,
@@ -54,6 +58,10 @@ import {
   type MainChatDurationSample,
   type MainChatLimitFallbackEvent,
   type MainChatMetrics,
+  type MainChatNotificationCategory,
+  type MainChatNotificationDeliveryStatus,
+  type MainChatNotificationReceipt,
+  type MainChatNotificationSummary,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
   type MainChatRuleSuggestion,
@@ -71,6 +79,7 @@ import {
   type MainChatTokenUsageSource,
   type MainChatTokenUsageSummary,
 } from "@getpaseo/protocol/main-chat";
+import { computeMainChatNotificationSummary } from "./notification-policy.js";
 import {
   buildStandingAuthorizationLabel,
   matchStandingAuthorization,
@@ -83,6 +92,10 @@ import {
   pruneDurationSamples,
   pruneTaskRecordList,
 } from "./task-ledger.js";
+import {
+  PersistedZeroTokenAgentWindowSchema,
+  type PersistedZeroTokenAgentWindow,
+} from "./zero-token-rules.js";
 
 export type MainChatTrustRule = MainChatAutoStartRule;
 export type MainChatFullMetrics = Required<MainChatMetrics>;
@@ -167,6 +180,8 @@ const PersistedMainChatStateSchema = z.object({
   settingsProposals: z.record(z.string(), MainChatSettingsProposalRecordSchema).optional(),
   limitFallbackEvents: z.array(MainChatLimitFallbackEventSchema).optional(),
   dagWakeMarkers: z.record(z.string(), z.string()).optional(),
+  notificationReceipts: z.array(MainChatNotificationReceiptSchema).optional(),
+  zeroTokenRuleState: z.record(z.string(), PersistedZeroTokenAgentWindowSchema).optional(),
 });
 
 interface MainChatStateFile {
@@ -198,6 +213,8 @@ interface MainChatStateFile {
   settingsProposals: Record<string, MainChatSettingsProposalRecord>;
   limitFallbackEvents: MainChatLimitFallbackEvent[];
   dagWakeMarkers: Record<string, string>;
+  notificationReceipts: MainChatNotificationReceipt[];
+  zeroTokenRuleState: Record<string, PersistedZeroTokenAgentWindow>;
 }
 
 export const MAX_RETAINED_ACTIVITIES = 200;
@@ -413,6 +430,8 @@ function emptyState(): MainChatStateFile {
     settingsProposals: {},
     limitFallbackEvents: [],
     dagWakeMarkers: {},
+    notificationReceipts: [],
+    zeroTokenRuleState: {},
   };
 }
 
@@ -519,6 +538,7 @@ export interface MainChatStore {
   completeOptInMigration(options?: { disableDefault?: boolean }): Promise<MainChatSettings>;
   getSettings(): MainChatSettings;
   updateSettings(patch: MainChatSettingsPatch): Promise<MainChatSettings>;
+  replaceSettings(next: MainChatSettings): Promise<MainChatSettings>;
   getPlan(planId: string): MainChatPlanRecord | null;
   listPlans(mainAgentId?: string): MainChatPlanRecord[];
   putPlan(plan: MainChatPlanRecord): Promise<void>;
@@ -640,6 +660,36 @@ export interface MainChatStore {
   hasDagWakeMarker(key: string): boolean;
   recordDagWakeMarker(key: string, atIso?: string): Promise<boolean>;
   clearDagWakeMarkersByPrefix(prefix: string): Promise<number>;
+  recordNotificationReceipt(
+    receipt: MainChatNotificationReceipt,
+  ): Promise<MainChatNotificationReceipt>;
+  updateNotificationReceiptStatus(
+    id: string,
+    patch: {
+      status: MainChatNotificationDeliveryStatus;
+      deliveredAt?: string | null;
+      acknowledgedAt?: string | null;
+      readAt?: string | null;
+      reason?: string | null;
+      updatedAt?: string;
+    },
+  ): Promise<MainChatNotificationReceipt | null>;
+  listNotificationReceipts(options?: {
+    status?: MainChatNotificationDeliveryStatus;
+    category?: MainChatNotificationCategory;
+    unreadOnly?: boolean;
+    limit?: number;
+  }): MainChatNotificationReceipt[];
+  ackNotificationReceipts(input: {
+    receiptId?: string;
+    receiptIds?: readonly string[];
+    markAll?: boolean;
+    status?: "acknowledged" | "read";
+    nowIso?: string;
+  }): Promise<{ updatedCount: number; receipts: MainChatNotificationReceipt[] }>;
+  getNotificationSummary(): MainChatNotificationSummary;
+  getZeroTokenRuleState(): Record<string, PersistedZeroTokenAgentWindow>;
+  setZeroTokenRuleState(next: Record<string, PersistedZeroTokenAgentWindow>): Promise<void>;
 }
 
 function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
@@ -828,6 +878,8 @@ function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
     compaction: resolveMainChatCompactionConfig(raw),
     cacheKeepalive: resolveMainChatCacheKeepaliveConfig(raw),
     limitFallbacks: resolveMainChatLimitFallbacks(raw),
+    modelConfig: resolveMainChatModelConfig(raw),
+    notificationPolicy: resolveMainChatNotificationPolicy(raw),
     mainBackgroundFolded: isMainChatBackgroundFolded(raw),
     mainTasksQuiet: isMainChatTasksQuiet(raw),
     taskLessonsEnabled: isMainChatTaskLessonsEnabled(raw),
@@ -889,6 +941,10 @@ function hydratePersistedState(
       -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
     ),
     dagWakeMarkers: { ...data.dagWakeMarkers },
+    notificationReceipts: (data.notificationReceipts ?? []).slice(
+      -MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
+    ),
+    zeroTokenRuleState: { ...data.zeroTokenRuleState },
   };
 }
 
@@ -925,6 +981,11 @@ export function createMainChatStore(
     if (state.limitFallbackEvents.length > MAX_RETAINED_LIMIT_FALLBACK_EVENTS) {
       state.limitFallbackEvents = state.limitFallbackEvents.slice(
         -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
+      );
+    }
+    if (state.notificationReceipts.length > MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS) {
+      state.notificationReceipts = state.notificationReceipts.slice(
+        -MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
       );
     }
     state.tasks = pruneTaskRecordList(state.tasks, MAX_RETAINED_TASKS);
@@ -1010,6 +1071,8 @@ export function createMainChatStore(
         enabled: isMainChatEnabled(state.settings),
         activePresetId,
         customPresets,
+        modelConfig: resolveMainChatModelConfig(state.settings),
+        notificationPolicy: resolveMainChatNotificationPolicy(state.settings),
         backgroundModel: { ...state.settings.backgroundModel },
         intervals: { ...state.settings.intervals },
         capabilities: { ...state.settings.capabilities },
@@ -1020,6 +1083,13 @@ export function createMainChatStore(
     async updateSettings(patch) {
       state.optInMigrated = true;
       state.settings = mergeMainChatSettings(state.settings, patch);
+      await persist();
+      return this.getSettings();
+    },
+
+    async replaceSettings(next) {
+      state.optInMigrated = true;
+      state.settings = MainChatSettingsSchema.parse(next);
       await persist();
       return this.getSettings();
     },
@@ -1831,6 +1901,124 @@ export function createMainChatStore(
         await persist();
       }
       return removed;
+    },
+
+    async recordNotificationReceipt(receipt) {
+      const copy: MainChatNotificationReceipt = { ...receipt };
+      const existingIdx = state.notificationReceipts.findIndex((item) => item.id === copy.id);
+      if (existingIdx >= 0) {
+        state.notificationReceipts[existingIdx] = copy;
+      } else {
+        state.notificationReceipts.push(copy);
+        if (state.notificationReceipts.length > MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS) {
+          state.notificationReceipts = state.notificationReceipts.slice(
+            -MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
+          );
+        }
+      }
+      await persist();
+      return { ...copy };
+    },
+
+    async updateNotificationReceiptStatus(id, patch) {
+      const idx = state.notificationReceipts.findIndex((item) => item.id === id);
+      if (idx < 0) return null;
+      const existing = state.notificationReceipts[idx]!;
+      const nowIso = patch.updatedAt ?? new Date(getNowMs()).toISOString();
+      const updated: MainChatNotificationReceipt = {
+        ...existing,
+        status: patch.status,
+        updatedAt: nowIso,
+        ...(patch.deliveredAt !== undefined ? { deliveredAt: patch.deliveredAt } : {}),
+        ...(patch.acknowledgedAt !== undefined ? { acknowledgedAt: patch.acknowledgedAt } : {}),
+        ...(patch.readAt !== undefined ? { readAt: patch.readAt } : {}),
+        ...(patch.reason !== undefined ? { reason: patch.reason } : {}),
+      };
+      state.notificationReceipts[idx] = updated;
+      await persist();
+      return { ...updated };
+    },
+
+    listNotificationReceipts(options) {
+      let list = state.notificationReceipts.slice();
+      if (options?.status) {
+        list = list.filter((item) => item.status === options.status);
+      }
+      if (options?.category) {
+        list = list.filter((item) => item.category === options.category);
+      }
+      if (options?.unreadOnly) {
+        list = list.filter((item) => item.status !== "read" && item.status !== "acknowledged");
+      }
+      list.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const limit = options?.limit
+        ? Math.max(1, Math.min(MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS, Math.trunc(options.limit)))
+        : MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS;
+      return cloneShallowArray(list.slice(0, limit));
+    },
+
+    async ackNotificationReceipts(input) {
+      const targetStatus = input.status ?? "read";
+      const nowIso = input.nowIso ?? new Date(getNowMs()).toISOString();
+      const targetIds = new Set<string>();
+      if (input.receiptId?.trim()) targetIds.add(input.receiptId.trim());
+      for (const id of input.receiptIds ?? []) {
+        if (id.trim()) targetIds.add(id.trim());
+      }
+
+      let updatedCount = 0;
+      const updatedList: MainChatNotificationReceipt[] = [];
+      for (let i = 0; i < state.notificationReceipts.length; i += 1) {
+        const entry = state.notificationReceipts[i]!;
+        const matches =
+          input.markAll === true
+            ? entry.status !== "read" &&
+              (targetStatus === "read" || entry.status !== "acknowledged")
+            : targetIds.has(entry.id);
+        if (!matches) continue;
+        const next: MainChatNotificationReceipt = {
+          ...entry,
+          status: targetStatus,
+          updatedAt: nowIso,
+          acknowledgedAt: entry.acknowledgedAt ?? nowIso,
+          readAt: targetStatus === "read" ? (entry.readAt ?? nowIso) : (entry.readAt ?? null),
+        };
+        state.notificationReceipts[i] = next;
+        updatedList.push({ ...next });
+        updatedCount += 1;
+      }
+
+      if (updatedCount > 0) {
+        await persist();
+      }
+      return { updatedCount, receipts: updatedList };
+    },
+
+    getNotificationSummary() {
+      return computeMainChatNotificationSummary(state.notificationReceipts, state.settings);
+    },
+
+    getZeroTokenRuleState() {
+      const cloned: Record<string, PersistedZeroTokenAgentWindow> = {};
+      for (const [agentId, win] of Object.entries(state.zeroTokenRuleState)) {
+        cloned[agentId] = {
+          ...win,
+          calls: [...win.calls],
+        };
+      }
+      return cloned;
+    },
+
+    async setZeroTokenRuleState(next) {
+      const cloned: Record<string, PersistedZeroTokenAgentWindow> = {};
+      for (const [agentId, win] of Object.entries(next)) {
+        cloned[agentId] = {
+          ...win,
+          calls: [...win.calls],
+        };
+      }
+      state.zeroTokenRuleState = cloned;
+      await persist();
     },
   };
 }

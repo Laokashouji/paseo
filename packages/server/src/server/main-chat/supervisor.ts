@@ -4,12 +4,16 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import {
   MAIN_CHAT_TASK_QUIET_LABEL,
   getMainChatTaskMetaFromLabels,
+  isFormerMainChatLabels,
   isMainChatEnabled,
   isMainChatLabels,
+  resolveMainChatModelSlot,
   resolveMainChatNightMode,
   type MainChatConversationRecord,
   type MainChatNightModeStatus,
+  type MainChatNotificationReceipt,
   type MainChatPatrolResult,
+  type MainChatRuleDiagnostic,
   type MainChatSessionTriage,
   type MainChatSupervisionSignal,
   type MainChatTaskRecord,
@@ -31,11 +35,21 @@ import type {
   FleetBridgePermissionRequestedEvent,
   FleetBridgePermissionResolvedEvent,
 } from "./fleet-bridge.js";
+import { hasHandoffBlockLabel } from "./limit-fallback.js";
 import { evaluateMainChatNightMode, type MainChatNightModeEvaluation } from "./night-mode.js";
+import {
+  createNotificationReceiptId,
+  evaluateNotificationDispatch,
+} from "./notification-policy.js";
 import {
   buildMainChatInitialBriefingPrompt,
   buildMainChatSupervisionWakeupPrompt,
 } from "./prompts.js";
+import {
+  createZeroTokenRuleWindowManager,
+  detectReadWithoutReply,
+  type ZeroTokenRuleWindowManager,
+} from "./zero-token-rules.js";
 import {
   checkDuplicateQuestionGuard,
   checkRedLineGuard,
@@ -535,6 +549,51 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   const initialBriefingSentAgents = new Set<string>();
   const remoteErrorSigByAgentKey = new Map<string, string>();
   const remoteStalledNotifiedAtByKey = new Map<string, number>();
+  const receiptIdBySignalId = new Map<string, string>();
+  const passthroughSignalIds = new Set<string>();
+  const suppressedReceiptFingerprints = new Map<string, number>();
+  let zeroTokenRules: ZeroTokenRuleWindowManager | null = null;
+
+  function getZeroTokenRules(): ZeroTokenRuleWindowManager {
+    if (!zeroTokenRules) {
+      zeroTokenRules = createZeroTokenRuleWindowManager(deps.store.getZeroTokenRuleState());
+    }
+    return zeroTokenRules;
+  }
+
+  function persistZeroTokenRules(): void {
+    if (!zeroTokenRules) return;
+    void deps.store.setZeroTokenRuleState(zeroTokenRules.exportState()).catch((error) => {
+      deps.logger.warn({ err: error }, "Failed to persist zero-token rule window state");
+    });
+  }
+
+  function isHandoffBlockedAgent(agent: ManagedAgent | null | undefined): boolean {
+    if (!agent) return false;
+    return isFormerMainChatLabels(agent.labels) || hasHandoffBlockLabel(agent.labels);
+  }
+
+  async function syncTaskRuleDiagnostic(
+    agent: ManagedAgent,
+    diagnostic: MainChatRuleDiagnostic | null,
+  ): Promise<void> {
+    const task = deps.store.findTaskByAgentId(agent.id);
+    if (!task) return;
+    const prev = task.lastRuleDiagnostic ?? null;
+    if (
+      prev?.kind === diagnostic?.kind &&
+      prev?.summary === diagnostic?.summary &&
+      prev?.repeatCount === diagnostic?.repeatCount &&
+      prev?.errorExcerpt === diagnostic?.errorExcerpt
+    ) {
+      return;
+    }
+    await deps.store.putTask({
+      ...task,
+      lastRuleDiagnostic: diagnostic,
+      updatedAt: new Date(getNowMs()).toISOString(),
+    });
+  }
 
   let unsubscribeEvents: (() => void) | null = null;
   let patrolTimer: ReturnType<typeof setTimeout> | null = null;
@@ -766,21 +825,34 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     return true;
   }
 
+  function canWakeForSupervisionBatch(
+    batch: DeliverSupervisionBatchPayload,
+    hasPassthroughSignal: boolean,
+    settings: ReturnType<MainChatStore["getSettings"]>,
+  ): boolean {
+    const power = evaluatePowerState();
+    if (hasPassthroughSignal) {
+      return (
+        power.allowUrgentWakeup ||
+        !power.status.inNightWindow ||
+        settings.capabilities.proactiveWakeupEnabled
+      );
+    }
+    if (batch.hasUrgent || batch.hasImmediate) {
+      return power.allowUrgentWakeup;
+    }
+    return power.allowProactiveWakeup;
+  }
+
   async function deliverSupervisionBatch(batch: DeliverSupervisionBatchPayload): Promise<boolean> {
     const settings = deps.store.getSettings();
     const forced = manualFlushActive;
     if (!isMainChatEnabled(settings)) {
       return false;
     }
-    if (!forced) {
-      const power = evaluatePowerState();
-      const canWake =
-        batch.hasUrgent || batch.hasImmediate
-          ? power.allowUrgentWakeup
-          : power.allowProactiveWakeup;
-      if (!canWake) {
-        return false;
-      }
+    const hasPassthroughSignal = batch.signals.some((sig) => passthroughSignalIds.has(sig.id));
+    if (!forced && !canWakeForSupervisionBatch(batch, hasPassthroughSignal, settings)) {
+      return false;
     }
 
     const target = await resolveTargetForConversation(batch.conversationId);
@@ -791,6 +863,8 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const summary = forced
       ? `手动巡检并汇报（${batch.signals.length} 条动态）`
       : `后台督办唤醒（${batch.signals.length} 条动态）`;
+
+    let dispatchedSignalIds: string[] = batch.signals.map((sig) => sig.id);
 
     try {
       const queued = await deps.turnQueue.enqueueBackground({
@@ -811,6 +885,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
           if (!forced && finalValid.length === 0) {
             return null;
           }
+          dispatchedSignalIds = finalValid.map((sig) => sig.id);
           const contextSnapshot = await deps.contextSnapshots.buildTurnContext(target.agentId, {
             forceFull: forced,
           });
@@ -828,8 +903,23 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
           });
         },
         onDispatched: async () => {
-          await deps.store.setLastWakeupAt(new Date(getNowMs()).toISOString());
+          const deliveredAt = new Date(getNowMs()).toISOString();
+          await deps.store.setLastWakeupAt(deliveredAt);
           await deps.store.incrementMetric("proactiveWakeups");
+          for (const signalId of dispatchedSignalIds) {
+            const receiptId = receiptIdBySignalId.get(signalId);
+            receiptIdBySignalId.delete(signalId);
+            passthroughSignalIds.delete(signalId);
+            if (receiptId) {
+              await deps.store
+                .updateNotificationReceiptStatus(receiptId, {
+                  status: "delivered",
+                  deliveredAt,
+                  updatedAt: deliveredAt,
+                })
+                .catch(() => undefined);
+            }
+          }
         },
       });
       return queued.status === "dispatched" || queued.status === "queued";
@@ -851,6 +941,81 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     now: getNowMs,
   });
 
+  function recordSuppressedNotificationReceipt(
+    input: EnqueueSupervisionSignalInput,
+    dispatch: ReturnType<typeof evaluateNotificationDispatch>,
+    nowMs: number,
+    nowIso: string,
+  ): void {
+    const dedupeKey = `${dispatch.status}:${input.kind}:${input.taskId ?? ""}:${input.agentId ?? ""}:${input.fingerprintSeed ?? input.title}`;
+    const lastRecordedAt = suppressedReceiptFingerprints.get(dedupeKey) ?? 0;
+    if (nowMs - lastRecordedAt >= 5 * 60_000) {
+      suppressedReceiptFingerprints.set(dedupeKey, nowMs);
+      if (suppressedReceiptFingerprints.size > 200) {
+        const oldestKey = suppressedReceiptFingerprints.keys().next().value;
+        if (oldestKey) suppressedReceiptFingerprints.delete(oldestKey);
+      }
+      const suppressedReceipt: MainChatNotificationReceipt = {
+        id: createNotificationReceiptId(),
+        category: dispatch.category,
+        signalKind: input.kind,
+        tier: dispatch.tier,
+        status: dispatch.status,
+        channel: dispatch.channel,
+        title: input.title,
+        summary: input.summary,
+        reason: dispatch.reason,
+        taskId: input.taskId ?? null,
+        agentId: input.agentId ?? null,
+        conversationId: input.conversationId ?? null,
+        passthrough: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        deliveredAt: null,
+        acknowledgedAt: null,
+        readAt: null,
+      };
+      void deps.store.recordNotificationReceipt(suppressedReceipt).catch(() => undefined);
+    }
+    if (dispatch.status === "suppressed_quiet") {
+      void deps.store.incrementSuppressedQuietBadgeCount().catch(() => undefined);
+    }
+  }
+
+  function recordQueuedNotificationReceipt(
+    signalId: string,
+    input: EnqueueSupervisionSignalInput,
+    dispatch: ReturnType<typeof evaluateNotificationDispatch>,
+    nowIso: string,
+  ): void {
+    const receiptId = createNotificationReceiptId();
+    receiptIdBySignalId.set(signalId, receiptId);
+    if (dispatch.passthrough) {
+      passthroughSignalIds.add(signalId);
+    }
+    const queuedReceipt: MainChatNotificationReceipt = {
+      id: receiptId,
+      category: dispatch.category,
+      signalKind: input.kind,
+      tier: dispatch.tier,
+      status: "queued",
+      channel: dispatch.channel,
+      title: input.title,
+      summary: input.summary,
+      reason: dispatch.reason,
+      taskId: input.taskId ?? null,
+      agentId: input.agentId ?? null,
+      conversationId: input.conversationId ?? null,
+      passthrough: dispatch.passthrough,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      deliveredAt: null,
+      acknowledgedAt: null,
+      readAt: null,
+    };
+    void deps.store.recordNotificationReceipt(queuedReceipt).catch(() => undefined);
+  }
+
   function enqueueStructuredSignal(
     input: EnqueueSupervisionSignalInput & {
       quiet?: boolean;
@@ -858,7 +1023,29 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       escalatedToUser?: boolean;
     },
   ): EnqueueSupervisionSignalResult {
+    const nowMs = getNowMs();
+    const nowIso = new Date(nowMs).toISOString();
+    const settings = deps.store.getSettings();
+    const dispatch = evaluateNotificationDispatch({
+      signalKind: input.kind,
+      fingerprintSeed: input.fingerprintSeed,
+      isRedLine: input.isRedLine,
+      escalatedToUser: input.escalatedToUser,
+      isDeliveryGateBlocked: input.kind === "pr_conflict" || input.kind === "draft_pr",
+      settings,
+      nightModeEval: evaluatePowerState(),
+      quietTask: input.quiet,
+    });
+
+    if (!dispatch.deliverNow) {
+      recordSuppressedNotificationReceipt(input, dispatch, nowMs, nowIso);
+      return { queued: false, signal: null };
+    }
+
     const result = signalQueue.enqueue(input);
+    if (result.queued && result.signal) {
+      recordQueuedNotificationReceipt(result.signal.id, input, dispatch, nowIso);
+    }
     if (
       result.queued &&
       input.quiet === true &&
@@ -936,6 +1123,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     stalledNudgedAtByAgent.delete(agentId);
     permissionFirstSeenAt.delete(agentId);
     toolLoopByAgent.delete(agentId);
+    if (getZeroTokenRules().clearAgent(agentId)) {
+      persistZeroTokenRules();
+    }
     approvalTracker.resolveAllForAgent(agentId);
     signalQueue.removeByAgentId(agentId);
     for (const [key, entry] of pendingPermissionRequestsByKey) {
@@ -1640,6 +1830,47 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     toolLoopByAgent.set(agentId, tracker);
   }
 
+  async function resolveSemanticTriageProviders(
+    live: ManagedAgent,
+    settings: ReturnType<MainChatStore["getSettings"]>,
+  ): Promise<Array<{ provider: AgentProvider; model?: string; thinkingOptionId?: string }>> {
+    const mainAgentId = await resolveMainAgentId();
+    const mainSelection = resolveMainSelection(mainAgentId);
+    const triageSlot = resolveMainChatModelSlot({
+      purpose: "backgroundTriage",
+      settings,
+      liveMainBinding: mainSelection?.provider
+        ? {
+            provider: mainSelection.provider,
+            model: mainSelection.model ?? null,
+            thinkingOptionId: mainSelection.thinkingOptionId ?? null,
+          }
+        : null,
+    });
+    if (triageSlot.source === "explicit" && triageSlot.binding) {
+      return [
+        {
+          provider: triageSlot.binding.provider as AgentProvider,
+          ...(triageSlot.binding.model ? { model: triageSlot.binding.model } : {}),
+          ...(triageSlot.binding.thinkingOptionId
+            ? { thinkingOptionId: triageSlot.binding.thinkingOptionId }
+            : {}),
+        },
+      ];
+    }
+    if (deps.semanticTriageRunner) {
+      return [{ provider: live.provider }];
+    }
+    if (!deps.providerSnapshotManager) return [];
+    return resolveMainChatBackgroundProviders({
+      backgroundModel: settings.backgroundModel,
+      cwd: live.cwd,
+      providerSnapshotManager: deps.providerSnapshotManager,
+      daemonConfig: deps.readDaemonConfig?.() ?? null,
+      mainSelection,
+    });
+  }
+
   async function runOptionalSemanticTriage(input: {
     live: ManagedAgent;
     title: string;
@@ -1652,20 +1883,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       return null;
     }
     try {
-      const mainAgentId = await resolveMainAgentId();
-      let providers: Array<{ provider: AgentProvider; model?: string; thinkingOptionId?: string }> =
-        [];
-      if (deps.semanticTriageRunner) {
-        providers = [{ provider: input.live.provider }];
-      } else if (deps.providerSnapshotManager) {
-        providers = await resolveMainChatBackgroundProviders({
-          backgroundModel: input.settings.backgroundModel,
-          cwd: input.live.cwd,
-          providerSnapshotManager: deps.providerSnapshotManager,
-          daemonConfig: deps.readDaemonConfig?.() ?? null,
-          mainSelection: resolveMainSelection(mainAgentId),
-        });
-      }
+      const providers = await resolveSemanticTriageProviders(input.live, input.settings);
       if (providers.length === 0) return null;
       return await (deps.semanticTriageRunner ?? runMainChatSemanticTriage)({
         agentManager: deps.agentManager,
@@ -1854,10 +2072,14 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     fingerprintSeed: string;
   } | null {
     if (triage.phase === "done") {
+      const summary =
+        triage.ruleDiagnostic?.kind === "missing_wrap_up"
+          ? `${triage.summary}（${triage.ruleDiagnostic.summary}）`
+          : triage.summary;
       return {
         kind: "review",
-        summary: triage.summary,
-        fingerprintSeed: `done:${triage.summary}`.slice(0, 80),
+        summary,
+        fingerprintSeed: `done:${summary}`.slice(0, 80),
       };
     }
     if (triage.phase === "unsure") {
@@ -1930,6 +2152,89 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     });
   }
 
+  async function applyZeroTokenTurnEvaluation(input: {
+    live: ManagedAgent;
+    lastReply: string;
+    outcome: Awaited<ReturnType<typeof buildTurnTriageOutcome>>;
+  }): Promise<void> {
+    const rules = getZeroTokenRules();
+    const route = resolveTaskRouteForAgent(input.live);
+    const zeroTokenEval = rules.evaluateCompletedTurn(input.live.id, {
+      replyText: input.lastReply,
+      phase: input.outcome.triage.phase,
+      task: route.task,
+      nowMs: getNowMs(),
+    });
+    if (zeroTokenEval.changed) {
+      persistZeroTokenRules();
+    }
+    if (!zeroTokenEval.diagnostic) {
+      await syncTaskRuleDiagnostic(input.live, null);
+      return;
+    }
+    const diag = zeroTokenEval.diagnostic;
+    input.outcome.triage = {
+      ...input.outcome.triage,
+      ruleDiagnostic: diag,
+      ruleDiagnostics: [diag],
+      ...(diag.kind === "read_without_reply"
+        ? {
+            phase: "unsure",
+            summary: diag.summary,
+            waitReason: diag.detail ?? diag.summary,
+            suggestedAction: "查看会话确认是否漏答，或补充明确指示",
+            triageSource: "rule" as const,
+          }
+        : {
+            suggestedAction:
+              input.outcome.triage.suggestedAction ?? "补齐验证证据与收尾总结后再验收",
+          }),
+    };
+    await syncTaskRuleDiagnostic(input.live, diag);
+  }
+
+  async function maybeAutoDelegateAfterTriage(input: {
+    live: ManagedAgent;
+    title: string;
+    managed: boolean;
+    outcome: Awaited<ReturnType<typeof buildTurnTriageOutcome>>;
+    settings: ReturnType<MainChatStore["getSettings"]>;
+  }): Promise<boolean> {
+    const { outcome, settings } = input;
+    const canAutoDelegate =
+      outcome.triage.phase === "blocked_user" &&
+      !outcome.riskyAction &&
+      outcome.isLowRiskTechQuestion &&
+      Boolean(outcome.suggestedReply) &&
+      settings.capabilities.autoDelegateManualQuestions;
+    if (!canAutoDelegate || !outcome.suggestedReply) return false;
+    return tryAutoDelegateLowRiskQuestion({
+      agent: input.live,
+      title: input.title,
+      managed: input.managed,
+      triage: outcome.triage,
+      suggestedReply: outcome.suggestedReply,
+      settings,
+    });
+  }
+
+  function hasZeroTokenReadWithoutReply(
+    agentId: string,
+    lastReply: string,
+    handoffBlocked: boolean,
+  ): boolean {
+    if (handoffBlocked) return false;
+    const currentWin = getZeroTokenRules().getWindow(agentId);
+    return (
+      detectReadWithoutReply({
+        replyText: lastReply,
+        hadReadOrInspectTool: currentWin?.hadReadInTurn ?? false,
+        hadWriteTool: currentWin?.hadWriteInTurn ?? false,
+        nowIso: new Date(getNowMs()).toISOString(),
+      }) !== null
+    );
+  }
+
   async function settleAndTriageCompletedTurn(agentId: string): Promise<void> {
     const live = deps.agentManager.getAgent(agentId);
     if (!isObservedFleetAgent(live)) return;
@@ -1942,6 +2247,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const title = live.config.title?.trim() || basenameOf(live.cwd);
     const projectName = basenameOf(live.cwd);
     const managed = isManagedChildAgent(live);
+    const handoffBlocked = isHandoffBlockedAgent(live);
     const lastReply =
       getAccumulatedAssistantReply(agentId) ||
       extractLastAssistantTextFromTimeline(deps.agentManager.getTimeline(agentId));
@@ -1952,13 +2258,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       });
     }
 
-    const semanticResult = await runOptionalSemanticTriage({
-      live,
-      title,
-      projectName,
-      lastReply,
-      settings,
-    });
+    const skipSemantic = hasZeroTokenReadWithoutReply(agentId, lastReply, handoffBlocked);
+    const semanticResult = skipSemantic
+      ? null
+      : await runOptionalSemanticTriage({ live, title, projectName, lastReply, settings });
     const outcome = await buildTurnTriageOutcome({
       live,
       title,
@@ -1967,22 +2270,11 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       semanticResult,
     });
 
-    const canAutoDelegate =
-      outcome.triage.phase === "blocked_user" &&
-      !outcome.riskyAction &&
-      outcome.isLowRiskTechQuestion &&
-      Boolean(outcome.suggestedReply) &&
-      settings.capabilities.autoDelegateManualQuestions;
-    if (canAutoDelegate && outcome.suggestedReply) {
-      const delegated = await tryAutoDelegateLowRiskQuestion({
-        agent: live,
-        title,
-        managed,
-        triage: outcome.triage,
-        suggestedReply: outcome.suggestedReply,
-        settings,
-      });
-      if (delegated) return;
+    if (!handoffBlocked) {
+      await applyZeroTokenTurnEvaluation({ live, lastReply, outcome });
+    }
+    if (await maybeAutoDelegateAfterTriage({ live, title, managed, outcome, settings })) {
+      return;
     }
 
     await deps.store.putTriage(outcome.triage);
@@ -2072,6 +2364,75 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
   }
 
+  function handleObservedAgentToolCall(
+    agent: ManagedAgent,
+    item: Extract<AgentTimelineItem, { type: "tool_call" }>,
+    now: number,
+  ): void {
+    sealCurrentAssistantSegment(agent.id);
+    recordToolCallForLoopDetection(agent.id, item.name, extractToolDetailText(item.detail), now);
+    if (isHandoffBlockedAgent(agent)) return;
+    const loopResult = getZeroTokenRules().recordToolEvent(agent.id, {
+      callId: item.callId,
+      toolName: item.name,
+      detail: item.detail,
+      status: item.status,
+      error: item.error,
+      nowMs: now,
+    });
+    if (loopResult.changed) {
+      persistZeroTokenRules();
+    }
+    if (!loopResult.diagnostic || !loopResult.isNewTrigger) return;
+    const diag = loopResult.diagnostic;
+    const title = agent.config.title?.trim() || basenameOf(agent.cwd);
+    const managed = isManagedChildAgent(agent);
+    const route = resolveTaskRouteForAgent(agent);
+    const triage: MainChatSessionTriage = {
+      agentId: agent.id,
+      workspaceId: agent.workspaceId ?? null,
+      title,
+      managedByMainChat: managed,
+      phase: "no_progress",
+      summary: diag.summary,
+      waitReason: diag.detail ?? diag.summary,
+      suggestedAction: managed
+        ? "检查工具循环原因，必要时介入修正或切换模型续跑"
+        : "保守模式已仅上报诊断，请查看会话并决定是否介入",
+      triageSource: "rule",
+      updatedAt: diag.detectedAt,
+      ruleDiagnostic: diag,
+      ruleDiagnostics: [diag],
+    };
+    void deps.store.putTriage(triage).catch(() => undefined);
+    void syncTaskRuleDiagnostic(agent, diag).catch(() => undefined);
+    // Strictly obey Conservative Mode A: NEVER send unsolicited business commands to
+    // manual user sessions. Emit structured `no_progress` supervision signal instead.
+    enqueueStructuredSignal({
+      kind: "no_progress",
+      urgency: "urgent",
+      taskId: route.task?.id ?? null,
+      agentId: agent.id,
+      serverId: deps.serverId ?? null,
+      conversationId: route.conversationId,
+      title,
+      summary: diag.detail ? `${diag.summary}（${diag.detail}）` : diag.summary,
+      fingerprintSeed: `tool_loop:${agent.id}:${diag.pattern ?? "repeat"}:${diag.toolName ?? ""}`,
+      quiet: route.quiet,
+    });
+  }
+
+  function handleObservedAgentTurnStarted(agent: ManagedAgent, now: number): void {
+    clearTimerMapEntry(pendingTriageTimers, agent.id);
+    permissionFirstSeenAt.delete(agent.id);
+    assistantTurnBufferByAgent.delete(agent.id);
+    if (!isHandoffBlockedAgent(agent)) {
+      getZeroTokenRules().recordTurnStarted(agent.id, now);
+      persistZeroTokenRules();
+    }
+    void clearStaleNeedsYouForAgent(agent.id, "turn_started").catch(() => undefined);
+  }
+
   function handleManagerEvent(event: AgentManagerEvent): void {
     deps.turnQueue.handleEvent(event);
     deps.onAgentEvent?.(event);
@@ -2102,10 +2463,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     lastFleetOrUserActivityAtMs = Math.max(lastFleetOrUserActivityAtMs, now);
 
     if (event.event.type === "turn_started") {
-      clearTimerMapEntry(pendingTriageTimers, event.agentId);
-      permissionFirstSeenAt.delete(event.agentId);
-      assistantTurnBufferByAgent.delete(event.agentId);
-      void clearStaleNeedsYouForAgent(event.agentId, "turn_started").catch(() => undefined);
+      handleObservedAgentTurnStarted(agent, now);
       return;
     }
 
@@ -2114,13 +2472,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       if (item.type === "assistant_message") {
         appendAssistantTextChunk(event.agentId, item.text, item.messageId);
       } else if (item.type === "tool_call") {
-        sealCurrentAssistantSegment(event.agentId);
-        recordToolCallForLoopDetection(
-          event.agentId,
-          item.name,
-          extractToolDetailText(item.detail),
-          now,
-        );
+        handleObservedAgentToolCall(agent, item, now);
       }
       return;
     }

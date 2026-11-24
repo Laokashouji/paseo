@@ -142,6 +142,14 @@ import {
   MainChatStartReadyTaskResponseSchema,
   MainChatUpdateTaskDependenciesRequestSchema,
   MainChatUpdateTaskDependenciesResponseSchema,
+  MainChatSwitchModelProfileRequestSchema,
+  MainChatSwitchModelProfileResponseSchema,
+  MainChatRetryTaskWithFallbackRequestSchema,
+  MainChatRetryTaskWithFallbackResponseSchema,
+  MainChatListNotificationReceiptsRequestSchema,
+  MainChatListNotificationReceiptsResponseSchema,
+  MainChatAckNotificationReceiptRequestSchema,
+  MainChatAckNotificationReceiptResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -4261,6 +4269,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatLessonsDeleteRequestSchema,
   MainChatStartReadyTaskRequestSchema,
   MainChatUpdateTaskDependenciesRequestSchema,
+  MainChatSwitchModelProfileRequestSchema,
+  MainChatRetryTaskWithFallbackRequestSchema,
+  MainChatListNotificationReceiptsRequestSchema,
+  MainChatAckNotificationReceiptRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8407,6 +8419,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatLessonsDeleteResponseSchema,
   MainChatStartReadyTaskResponseSchema,
   MainChatUpdateTaskDependenciesResponseSchema,
+  MainChatSwitchModelProfileResponseSchema,
+  MainChatRetryTaskWithFallbackResponseSchema,
+  MainChatListNotificationReceiptsResponseSchema,
+  MainChatAckNotificationReceiptResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

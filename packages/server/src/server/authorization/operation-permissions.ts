@@ -293,6 +293,10 @@ const INBOUND_PERMISSION = {
   "main_chat.lessons_delete.request": ["workspace.write", "hub.execute"],
   "main_chat.start_ready_task.request": ["workspace.write", "hub.execute"],
   "main_chat.update_task_dependencies.request": ["workspace.write", "hub.execute"],
+  "main_chat.switch_model_profile.request": ["workspace.write", "hub.execute"],
+  "main_chat.retry_task_with_fallback.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_notification_receipts.request": "workspace.read",
+  "main_chat.ack_notification_receipt.request": ["workspace.write", "hub.execute"],
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -604,6 +608,10 @@ const OUTBOUND_PERMISSION = {
   "main_chat.lessons_delete.response": ["workspace.write", "hub.execute"],
   "main_chat.start_ready_task.response": ["workspace.write", "hub.execute"],
   "main_chat.update_task_dependencies.response": ["workspace.write", "hub.execute"],
+  "main_chat.switch_model_profile.response": ["workspace.write", "hub.execute"],
+  "main_chat.retry_task_with_fallback.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_notification_receipts.response": "workspace.read",
+  "main_chat.ack_notification_receipt.response": ["workspace.write", "hub.execute"],
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

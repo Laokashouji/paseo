@@ -82,7 +82,7 @@ function normalizeModelSpecKey(provider: string, model?: string | null): string 
   return `${provider.trim().toLowerCase()}::${(model?.trim() ?? "").toLowerCase()}`;
 }
 
-function hasHandoffBlockLabel(labels: Record<string, string> | undefined): boolean {
+export function hasHandoffBlockLabel(labels: Record<string, string> | undefined): boolean {
   if (!labels) return false;
   for (const key of HANDOFF_BLOCK_LABEL_KEYS) {
     const val = labels[key];
@@ -93,7 +93,7 @@ function hasHandoffBlockLabel(labels: Record<string, string> | undefined): boole
   return false;
 }
 
-function isManagedSubtaskAgent(agent: ManagedAgent): boolean {
+export function isManagedSubtaskAgent(agent: ManagedAgent): boolean {
   if (agent.internal || agent.background || isMainChatLabels(agent.labels)) return false;
   const parentId = getParentAgentIdFromLabels(agent.labels);
   const taskMeta = getMainChatTaskMetaFromLabels(agent.labels);

@@ -4,6 +4,8 @@ import { router } from "expo-router";
 import {
   Activity,
   ArrowLeft,
+  Bell,
+  BellOff,
   ChevronDown,
   Compass,
   Ellipsis,
@@ -84,6 +86,8 @@ import { formatCompactTokenCount } from "./usage-format";
 
 const ThemedActivity = withUnistyles(Activity);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
+const ThemedBell = withUnistyles(Bell);
+const ThemedBellOff = withUnistyles(BellOff);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedCompass = withUnistyles(Compass);
 const ThemedEllipsis = withUnistyles(Ellipsis);
@@ -441,6 +445,8 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   settings,
   nightPowerState,
   todayTokens,
+  lowDistractionActive,
+  unreadNotificationCount,
   canPatrol,
   canRunLifecycle,
   showRightDrawer,
@@ -463,6 +469,8 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
   settings: MainChatSettings | undefined;
   nightPowerState: MainChatNightModeStatus["state"] | undefined;
   todayTokens: number;
+  lowDistractionActive: boolean;
+  unreadNotificationCount: number;
   canPatrol: boolean;
   canRunLifecycle: boolean;
   showRightDrawer: boolean;
@@ -479,6 +487,18 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
 }) {
   const { t } = useTranslation();
   const isNightQuiet = nightPowerState === "throttled" || nightPowerState === "hibernating";
+  let notifyCapsuleLabel: string | null = null;
+  if (lowDistractionActive && unreadNotificationCount > 0) {
+    notifyCapsuleLabel = t("mainChat.notificationPolicy.summaryPillLowDistractionUnread", {
+      count: unreadNotificationCount,
+    });
+  } else if (lowDistractionActive) {
+    notifyCapsuleLabel = t("mainChat.notificationPolicy.summaryPillLowDistraction");
+  } else if (unreadNotificationCount > 0) {
+    notifyCapsuleLabel = t("mainChat.notificationPolicy.summaryPillUnread", {
+      count: unreadNotificationCount,
+    });
+  }
 
   return (
     <View style={styles.headerRight}>
@@ -496,6 +516,26 @@ const ShellHeaderRight = memo(function ShellHeaderRight({
             {nightPowerState === "hibernating"
               ? t("mainChat.nightMode.badgeHibernating")
               : t("mainChat.nightMode.badgeThrottled")}
+          </Text>
+        </PressHighlight>
+      ) : null}
+
+      {!isCompact && notifyCapsuleLabel ? (
+        <PressHighlight
+          onPress={onOpenSettings}
+          style={styles.telemetryCapsule}
+          highlightStyle={styles.controlPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.notificationPolicy.sectionTitle")}
+          testID="main-chat-notify-capsule"
+        >
+          {lowDistractionActive ? (
+            <ThemedBellOff size={12} uniProps={mutedIconMapping} />
+          ) : (
+            <ThemedBell size={12} uniProps={mutedIconMapping} />
+          )}
+          <Text style={styles.telemetryCapsuleText} numberOfLines={1}>
+            {notifyCapsuleLabel}
           </Text>
         </PressHighlight>
       ) : null}
@@ -689,6 +729,9 @@ function useMainChatShellTelemetry(serverId: string | null) {
   const usageSummary = useMainChatSettingsStore((state) =>
     serverId ? state.usageByServerId[serverId] : undefined,
   );
+  const notificationSummary = useMainChatSettingsStore((state) =>
+    serverId ? state.notificationSummaryByServerId[serverId] : undefined,
+  );
   const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
   const loadUsage = useMainChatSettingsStore((state) => state.loadUsage);
 
@@ -707,6 +750,11 @@ function useMainChatShellTelemetry(serverId: string | null) {
     settings,
     nightPowerState: nightModeStatus?.state,
     todayTokens: usageSummary?.today.totalTokens ?? 0,
+    lowDistractionActive: Boolean(
+      settings?.notificationPolicy?.lowDistractionEnabled ||
+      notificationSummary?.lowDistractionEnabled,
+    ),
+    unreadNotificationCount: notificationSummary?.unreadCount ?? 0,
   };
 }
 
@@ -734,7 +782,14 @@ export const MainChatShell = memo(function MainChatShell({
   const isCompact = useIsCompactFormFactor();
   const isDesktopSidebarOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const clearCameFrom = useMainChatCameFromStore((state) => state.clearCameFrom);
-  const { client, settings, nightPowerState, todayTokens } = useMainChatShellTelemetry(serverId);
+  const {
+    client,
+    settings,
+    nightPowerState,
+    todayTokens,
+    lowDistractionActive,
+    unreadNotificationCount,
+  } = useMainChatShellTelemetry(serverId);
 
   useEffect(() => {
     clearCameFrom();
@@ -827,6 +882,8 @@ export const MainChatShell = memo(function MainChatShell({
                   settings={settings}
                   nightPowerState={nightPowerState}
                   todayTokens={todayTokens}
+                  lowDistractionActive={lowDistractionActive}
+                  unreadNotificationCount={unreadNotificationCount}
                   canPatrol={Boolean(serverId && client && !actions.isPatrolling)}
                   canRunLifecycle={lifecycle.canRunLifecycle}
                   showRightDrawer={showRightDrawer}

@@ -59,7 +59,9 @@ import { buildMainChatRoute } from "@/utils/host-routes";
 import { MainChatCostControlPanel } from "./cost-control-panel";
 import { MainChatLimitFallbacksPanel } from "./limit-fallbacks-panel";
 import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
+import { MainChatModelProfilesPanel } from "./model-profiles-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
+import { MainChatNotificationPolicyPanel } from "./notification-policy-panel";
 import { MainChatProjectLessonsPanel } from "./project-lessons-panel";
 import { MainChatRoutinesPanel } from "./routines-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
@@ -1415,6 +1417,20 @@ export function MainChatSettingsSection(): ReactElement {
           />
 
           <SettingsSection
+            title={t("mainChat.modelProfiles.sectionTitle")}
+            info={t("mainChat.modelProfiles.sectionDescription")}
+            testID="settings-main-chat-model-profiles"
+          >
+            <MainChatModelProfilesPanel
+              serverId={selectedServerId}
+              client={client}
+              settings={settings}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
             title={t("mainChat.quietFold.sectionTitle")}
             info={t("mainChat.quietFold.sectionDescription")}
             testID="settings-main-chat-quiet-fold"
@@ -1455,6 +1471,20 @@ export function MainChatSettingsSection(): ReactElement {
                 />
               </View>
             </View>
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.notificationPolicy.sectionTitle")}
+            info={t("mainChat.notificationPolicy.sectionDescription")}
+            testID="settings-main-chat-notification-policy"
+          >
+            <MainChatNotificationPolicyPanel
+              serverId={selectedServerId}
+              client={client}
+              settings={settings}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
           </SettingsSection>
 
           <SettingsSection

@@ -2,9 +2,11 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
   MainChatCacheKeepaliveStatus,
   MainChatNightModeStatus,
+  MainChatNotificationSummary,
   MainChatPatrolResult,
   MainChatSettings,
   MainChatSettingsPatch,
+  MainChatSwitchModelProfileResponsePayload,
   MainChatTokenUsageSummary,
 } from "@getpaseo/protocol/main-chat";
 import { create } from "zustand";
@@ -13,6 +15,7 @@ interface MainChatSettingsStoreState {
   settingsByServerId: Record<string, MainChatSettings | undefined>;
   nightModeStatusByServerId: Record<string, MainChatNightModeStatus | undefined>;
   cacheKeepaliveStatusByServerId: Record<string, MainChatCacheKeepaliveStatus | undefined>;
+  notificationSummaryByServerId: Record<string, MainChatNotificationSummary | undefined>;
   usageByServerId: Record<string, MainChatTokenUsageSummary | undefined>;
   usageLoadingByServerId: Record<string, boolean | undefined>;
   loadingByServerId: Record<string, boolean | undefined>;
@@ -23,6 +26,11 @@ interface MainChatSettingsStoreState {
     patch: MainChatSettingsPatch,
     client: DaemonClient,
   ) => Promise<MainChatSettings>;
+  switchModelProfile: (
+    serverId: string,
+    input: { profileId?: string; rollback?: boolean },
+    client: DaemonClient,
+  ) => Promise<MainChatSwitchModelProfileResponsePayload>;
   loadUsage: (serverId: string, client: DaemonClient) => Promise<MainChatTokenUsageSummary | null>;
   resetUsage: (serverId: string, client: DaemonClient) => Promise<MainChatTokenUsageSummary>;
   triggerPatrol: (
@@ -42,6 +50,7 @@ interface MainChatSettingsStoreState {
       nightModeStatus?: MainChatNightModeStatus;
       cacheKeepaliveStatus?: MainChatCacheKeepaliveStatus;
       tokenUsage?: MainChatTokenUsageSummary;
+      notificationSummary?: MainChatNotificationSummary;
     },
   ) => void;
 }
@@ -50,6 +59,7 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
   settingsByServerId: {},
   nightModeStatusByServerId: {},
   cacheKeepaliveStatusByServerId: {},
+  notificationSummaryByServerId: {},
   usageByServerId: {},
   usageLoadingByServerId: {},
   loadingByServerId: {},
@@ -103,6 +113,14 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
             usageByServerId: {
               ...state.usageByServerId,
               [serverId]: input.tokenUsage,
+            },
+          }
+        : {}),
+      ...(input.notificationSummary
+        ? {
+            notificationSummaryByServerId: {
+              ...state.notificationSummaryByServerId,
+              [serverId]: input.notificationSummary,
             },
           }
         : {}),
@@ -182,6 +200,21 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
         : {}),
     }));
     return settings;
+  },
+
+  async switchModelProfile(serverId, input, client) {
+    const response = await client.switchMainChatModelProfile(input);
+    if (response.error || !response.settings) {
+      throw new Error(response.error ?? "Failed to switch model profile");
+    }
+    const settings = response.settings;
+    set((state) => ({
+      settingsByServerId: {
+        ...state.settingsByServerId,
+        [serverId]: settings,
+      },
+    }));
+    return response;
   },
 
   async loadUsage(serverId, client) {
