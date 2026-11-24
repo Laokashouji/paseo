@@ -1281,6 +1281,11 @@ export const zhCN: TranslationResources = {
     footer: {
       usage: "使用情况",
     },
+    nav: {
+      more: "更多",
+      moreAccessibility: "更多导航项（{{count}} 项）",
+      resizeHandle: "调整导航区高度",
+    },
     help: {
       trigger: "帮助与支持",
       sectionHelp: "帮助",

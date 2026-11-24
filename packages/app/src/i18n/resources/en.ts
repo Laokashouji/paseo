@@ -1299,6 +1299,11 @@ export const en = {
     footer: {
       usage: "Usage",
     },
+    nav: {
+      more: "More",
+      moreAccessibility: "More navigation items ({{count}})",
+      resizeHandle: "Resize navigation section",
+    },
     help: {
       trigger: "Help and support",
       sectionHelp: "Help",

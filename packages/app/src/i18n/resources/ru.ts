@@ -1308,6 +1308,11 @@ export const ru: TranslationResources = {
     footer: {
       usage: "Использование",
     },
+    nav: {
+      more: "Ещё",
+      moreAccessibility: "Ещё пункты навигации ({{count}})",
+      resizeHandle: "Изменить высоту раздела навигации",
+    },
     help: {
       trigger: "Помощь и поддержка",
       sectionHelp: "Помощь",

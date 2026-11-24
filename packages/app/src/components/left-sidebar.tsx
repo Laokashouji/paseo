@@ -9,38 +9,21 @@ import {
   type LucideIcon,
 } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   Pressable,
-  ScrollView,
   StyleSheet as RNStyleSheet,
   Text,
   useWindowDimensions,
   View,
   type LayoutChangeEvent,
 } from "react-native";
-import {
-  Gesture,
-  type GestureType,
-  ScrollView as GHScrollView,
-} from "react-native-gesture-handler";
+import { Gesture } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import {
-  TitlebarDragRegion,
-  WINDOW_CONTENT_DATASET,
-} from "@/components/desktop/titlebar-drag-region";
+import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { SidebarCloseButton } from "@/components/headers/sidebar-close-button";
 import {
   resolveDesktopSidebarInsetLeft,
@@ -56,6 +39,7 @@ import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-pref
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarToastRegion } from "@/components/sidebar/sidebar-toast-region";
 import { SidebarNavRows, useVisibleSidebarNavItems } from "@/components/sidebar/sidebar-nav-rows";
+import { SidebarNavScroll } from "@/components/sidebar/sidebar-nav-scroll";
 import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-icon-highlight";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarFooterOverflowMenu } from "@/components/sidebar/sidebar-footer-overflow-menu";
@@ -75,7 +59,6 @@ import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-heade
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
-import { isNative as platformIsNative } from "@/constants/platform";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useImportSession } from "@/hooks/use-import-session";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
@@ -683,47 +666,6 @@ function MobileSidebar({
   );
 }
 
-interface SidebarNavScrollProps {
-  closeGestureRef: RefObject<GestureType | undefined>;
-  /** Web only: the viewport emits no window regions (see WINDOW_CONTENT_DATASET). */
-  windowContent?: boolean;
-  children: ReactNode;
-}
-
-// The capped, scrolling nav block shared by the mobile and desktop sidebars, with the
-// divider below it. The divider is a sibling because Unistyles does not patch the
-// gesture-handler ScrollView.
-function SidebarNavScroll({ closeGestureRef, windowContent, children }: SidebarNavScrollProps) {
-  return (
-    <>
-      {platformIsNative ? (
-        <GHScrollView
-          // Same contract as the workspace list: vertical drags scroll the nav
-          // block, a clear horizontal intent still activates the close pan.
-          simultaneousHandlers={closeGestureRef}
-          style={styles.navScroll}
-          showsVerticalScrollIndicator={false}
-          alwaysBounceVertical={false}
-          testID="sidebar-nav-scroll"
-        >
-          {children}
-        </GHScrollView>
-      ) : (
-        <ScrollView
-          dataSet={windowContent ? WINDOW_CONTENT_DATASET : undefined}
-          style={styles.navScroll}
-          showsVerticalScrollIndicator={false}
-          alwaysBounceVertical={false}
-          testID="sidebar-nav-scroll"
-        >
-          {children}
-        </ScrollView>
-      )}
-      <SidebarSeparator testID="sidebar-nav-separator" />
-    </>
-  );
-}
-
 function DesktopSidebar({
   theme,
   workspaceGroups,
@@ -990,13 +932,6 @@ const styles = StyleSheet.create((theme) => ({
   desktopDragStrip: {
     position: "relative",
     height: theme.spacing[2],
-  },
-  // The nav block caps at half the sidebar; a long item list scrolls inside the
-  // cap instead of crowding the workspace list off a short screen.
-  navScroll: {
-    flexGrow: 0,
-    flexShrink: 1,
-    maxHeight: "50%",
   },
   mobileNavRowsGroup: {
     paddingTop: theme.spacing[2],

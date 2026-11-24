@@ -1325,6 +1325,11 @@ export const es: TranslationResources = {
     footer: {
       usage: "Uso",
     },
+    nav: {
+      more: "Más",
+      moreAccessibility: "Más elementos de navegación ({{count}})",
+      resizeHandle: "Cambiar el tamaño de la sección de navegación",
+    },
     help: {
       trigger: "Ayuda y soporte",
       sectionHelp: "Ayuda",
