@@ -106,15 +106,16 @@ export function buildFleetScopeCandidateHosts(input: {
         );
 
   for (const remote of daemonRemotes) {
-    if (!remote.serverId || remote.serverId === input.selectedServerId) continue;
-    const clientMatch = clientById.get(remote.serverId);
-    byId.set(remote.serverId, {
-      serverId: remote.serverId,
-      label: clientMatch?.label.trim() || remote.label.trim() || remote.serverId,
+    const canonicalServerId = remote.expectedServerId || remote.serverId;
+    if (!canonicalServerId || canonicalServerId === input.selectedServerId) continue;
+    const clientMatch = clientById.get(canonicalServerId);
+    byId.set(canonicalServerId, {
+      serverId: canonicalServerId,
+      label: clientMatch?.label.trim() || remote.label.trim() || canonicalServerId,
       linkedOnDaemon: true,
       status: remote.status,
       syncConnection: clientMatch ? buildSyncConnectionString(clientMatch) : null,
-      otherStewardNames: [...(input.otherOwnerNamesByTargetServerId[remote.serverId] ?? [])],
+      otherStewardNames: [...(input.otherOwnerNamesByTargetServerId[canonicalServerId] ?? [])],
     });
   }
 

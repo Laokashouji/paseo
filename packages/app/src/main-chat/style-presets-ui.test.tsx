@@ -98,7 +98,11 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
       null,
       children,
       pages?.map((page) =>
-        React.createElement("div", { key: page.id, "data-testid": `menu-page-${page.id}` }, page.content),
+        React.createElement(
+          "div",
+          { key: page.id, "data-testid": `menu-page-${page.id}` },
+          page.content,
+        ),
       ),
     ),
   DropdownMenuLabel: ({ children }: { children: React.ReactNode }) =>
@@ -111,8 +115,7 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     children: React.ReactNode;
     value?: string;
     testID?: string;
-  }) =>
-    React.createElement("button", { type: "button", "data-testid": testID }, children, value),
+  }) => React.createElement("button", { type: "button", "data-testid": testID }, children, value),
   DropdownMenuItem: ({
     children,
     onSelect,
@@ -355,7 +358,9 @@ describe("Main Chat custom style presets UI", () => {
 
     const view = render(
       <ToastApiProvider api={noopToastApi}>
-        <MainChatSettingsSection />
+        <KeyboardActionDispatcherProvider>
+          <MainChatSettingsSection />
+        </KeyboardActionDispatcherProvider>
       </ToastApiProvider>,
     );
 
@@ -433,8 +438,8 @@ describe("Main Chat custom style presets UI", () => {
     });
 
     // Switch back to custom preset then delete with confirmation
-    const createdId = useMainChatSettingsStore.getState().settingsByServerId.srv_1
-      ?.customPresets?.[0]?.id;
+    const createdId =
+      useMainChatSettingsStore.getState().settingsByServerId.srv_1?.customPresets?.[0]?.id;
     expect(createdId).toBeTruthy();
     await act(async () => {
       fireEvent.click(view.getByTestId(`settings-main-chat-preset-option-${createdId}`));
@@ -469,7 +474,9 @@ describe("Main Chat custom style presets UI", () => {
 
     const view = render(
       <ToastApiProvider api={noopToastApi}>
-        <MainChatSettingsSection />
+        <KeyboardActionDispatcherProvider>
+          <MainChatSettingsSection />
+        </KeyboardActionDispatcherProvider>
       </ToastApiProvider>,
     );
 

@@ -58,41 +58,27 @@ vi.mock("@/constants/layout", async (importOriginal) => {
 vi.mock("lucide-react-native", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const StubIcon = () => null;
-  const fallbackIcons: Record<string, unknown> = { ...actual };
-  const requiredNames = [
-    "Activity",
-    "CalendarClock",
-    "ChevronDown",
-    "ChevronUp",
-    "CircleDashed",
-    "Copy",
-    "Ellipsis",
-    "Folder",
-    "FolderPlus",
-    "History",
-    "Home",
-    "Import",
-    "Keyboard",
-    "Moon",
-    "PanelLeft",
-    "Pencil",
-    "Plus",
-    "Power",
-    "Radar",
-    "RefreshCw",
-    "RotateCcw",
-    "Save",
-    "Settings",
-    "Shield",
-    "SlidersHorizontal",
-    "Sparkles",
-    "Trash2",
-    "Zap",
-  ];
-  for (const name of requiredNames) {
-    fallbackIcons[name] = actual[name] ?? StubIcon;
-  }
-  return fallbackIcons;
+  const target: Record<string, unknown> = { ...actual };
+  return new Proxy(target, {
+    has(obj, prop) {
+      if (prop in obj) return true;
+      return typeof prop === "string" && prop !== "then" && prop !== "__esModule";
+    },
+    get(obj, prop) {
+      if (prop in obj) return obj[prop as string];
+      if (typeof prop === "string" && prop !== "__esModule" && prop !== "then") {
+        return StubIcon;
+      }
+      return undefined;
+    },
+    getOwnPropertyDescriptor(obj, prop) {
+      if (prop in obj) return Object.getOwnPropertyDescriptor(obj, prop);
+      if (typeof prop === "string" && prop !== "__esModule" && prop !== "then") {
+        return { configurable: true, enumerable: true, value: StubIcon };
+      }
+      return undefined;
+    },
+  });
 });
 
 vi.mock("@/hooks/use-keyboard-shortcut-overrides", () => ({
@@ -369,7 +355,9 @@ describe("Main Chat React rendering selector stability regressions (React #185)"
 
     const view = render(
       <ToastApiProvider api={noopToastApi}>
-        <TrackedSettingsSection />
+        <KeyboardActionDispatcherProvider>
+          <TrackedSettingsSection />
+        </KeyboardActionDispatcherProvider>
       </ToastApiProvider>,
     );
 

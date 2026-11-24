@@ -65,14 +65,11 @@ export function useMainChatLifecycleActions(
   const [busyAction, setBusyAction] = useState<"compact" | "clear" | "new_session" | null>(null);
   const [confirmKind, setConfirmKind] = useState<MainChatLifecycleConfirmKind | null>(null);
 
-  const canRunLifecycle = Boolean(serverId && client && busyAction === null);
+  const canRunLifecycle = Boolean(serverId && client && mainAgentId && busyAction === null);
 
   const resolveMainAgentId = useCallback(async (): Promise<string | undefined> => {
-    if (mainAgentId) return mainAgentId;
-    if (!client) return undefined;
-    const ensured = await client.ensureMainChat();
-    return ensured.agentId ?? undefined;
-  }, [client, mainAgentId]);
+    return mainAgentId ?? undefined;
+  }, [mainAgentId]);
 
   const triggerCompact = useCallback(() => {
     if (!serverId || !client || busyAction !== null) return;

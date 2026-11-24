@@ -16,10 +16,12 @@ import { formatThinkingOptionLabel } from "@/agent-controls/labels";
 import { CombinedModelSelector } from "@/components/combined-model-selector";
 import {
   buildProviderSelectorProviders,
+  buildSelectableProviderSelectorProviders,
   buildSelectorProvider,
   type ProviderSelectorProvider,
 } from "@/provider-selection/provider-selection";
 import { filterSelectableModels } from "@/provider-selection/model-catalog";
+import { useMainChatOverviewStore } from "@/main-chat/overview-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { resolveProviderDefinition } from "@/utils/provider-definitions";
@@ -38,6 +40,7 @@ import type {
   AgentModelDefinition,
   AgentProvider,
 } from "@getpaseo/protocol/agent-types";
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import {
   getAgentControlHintKey,
@@ -357,6 +360,8 @@ function pickDesktopModel({
 
 type AgentControlsSlice = {
   provider: string;
+  status: string;
+  isMainChatRoot: boolean;
   cwd: string | null;
   runtimeModelId: string | null;
   model: string | null | undefined;
@@ -379,6 +384,8 @@ function selectAgentControlsSlice(
   }
   return {
     provider: currentAgent.provider,
+    status: currentAgent.status,
+    isMainChatRoot: isMainChatAgent(currentAgent),
     cwd: currentAgent.cwd,
     runtimeModelId: currentAgent.runtimeInfo?.model ?? null,
     model: currentAgent.model,
@@ -1005,6 +1012,139 @@ function useAgentOptionControls(
   );
 }
 
+function resolveSwitchedModelDisplayLabel(
+  snapshotEntries: ReturnType<typeof useProvidersSnapshot>["entries"],
+  nextProvider: string,
+  modelId: string,
+): string {
+  const targetEntry = snapshotEntries?.find((entry) => entry.provider === nextProvider);
+  const matchedModel = targetEntry?.models?.find((model) => model.id === modelId);
+  if (matchedModel?.label) return matchedModel.label;
+  if (modelId) return `${nextProvider}/${modelId}`;
+  return targetEntry?.label || nextProvider;
+}
+
+function useMainChatProviderSwitcher(input: {
+  serverId: string;
+  agentId: string;
+  agent: AgentControlsSlice;
+  client: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
+  snapshotEntries: ReturnType<typeof useProvidersSnapshot>["entries"];
+  onSelectSameProviderModel: (modelId: string) => Promise<void>;
+}) {
+  const { serverId, agentId, agent, client, snapshotEntries, onSelectSameProviderModel } = input;
+  const agentProvider = agent?.provider;
+  const agentStatus = agent?.status;
+  const isMainChatRoot = Boolean(agent?.isMainChatRoot);
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [switching, setSwitching] = useState(false);
+  const switchingRef = useRef(false);
+
+  const canSwitch = Boolean(
+    isMainChatRoot && client && typeof client.startNewMainChatSession === "function",
+  );
+
+  const onSelectProviderAndModel = useCallback(
+    async (nextProvider: string, modelId: string) => {
+      if (!client || !agentProvider) return;
+      if (nextProvider === agentProvider) {
+        await onSelectSameProviderModel(modelId);
+        return;
+      }
+      if (switchingRef.current) return;
+      if (agentStatus === "running") {
+        toast.show(t("mainChat.modelSwitch.busyRunning"), { variant: "info" });
+        return;
+      }
+
+      switchingRef.current = true;
+      setSwitching(true);
+      try {
+        const response = await client.startNewMainChatSession({
+          mainAgentId: agentId,
+          carryHandoffSummary: true,
+          provider: nextProvider,
+          ...(modelId ? { model: modelId } : {}),
+        });
+        if (response.error || !response.agentId) {
+          throw new Error(response.error ?? t("mainChat.modelSwitch.switchFailed"));
+        }
+        const overviewStore = useMainChatOverviewStore.getState();
+        overviewStore.setActiveAgentOverride(serverId, {
+          serverId,
+          agentId: response.agentId,
+          workspaceId: response.workspaceId ?? "",
+          previousAgentId: response.previousAgentId ?? agentId,
+        });
+        void overviewStore.loadOverview(serverId, response.agentId, client).catch(() => null);
+        const targetModelLabel = resolveSwitchedModelDisplayLabel(
+          snapshotEntries,
+          nextProvider,
+          modelId,
+        );
+        toast.show(t("mainChat.modelSwitch.switchedToast", { model: targetModelLabel }), {
+          variant: "success",
+        });
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : t("mainChat.modelSwitch.switchFailed"),
+        );
+      } finally {
+        switchingRef.current = false;
+        setSwitching(false);
+      }
+    },
+    [
+      agentId,
+      agentProvider,
+      agentStatus,
+      client,
+      onSelectSameProviderModel,
+      serverId,
+      snapshotEntries,
+      t,
+      toast,
+    ],
+  );
+
+  const commandCenterSelect = useCallback(
+    (provider: AgentProvider, modelId: string) =>
+      canSwitch ? onSelectProviderAndModel(provider, modelId) : onSelectSameProviderModel(modelId),
+    [canSwitch, onSelectProviderAndModel, onSelectSameProviderModel],
+  );
+
+  return {
+    canSwitch,
+    controlsDisabled: !client || switching,
+    refetchProviderTarget: canSwitch ? undefined : agentProvider,
+    onSelectProviderAndModel: canSwitch ? onSelectProviderAndModel : undefined,
+    commandCenterSelect,
+  };
+}
+
+function resolveAgentModelSelectorProviders(input: {
+  canSwitchProvider: boolean;
+  agentProvider: string | undefined;
+  snapshotEntries: ReturnType<typeof useProvidersSnapshot>["entries"];
+  snapshotSelectedEntry: ReturnType<typeof resolveProviderSnapshotEntry>;
+  agentProviderDefinitions: AgentProviderDefinition[];
+  agentProviderModels: Map<string, AgentModelDefinition[]>;
+}): ProviderSelectorProvider[] {
+  if (input.canSwitchProvider && input.snapshotEntries && input.snapshotEntries.length > 0) {
+    return buildSelectableProviderSelectorProviders(input.snapshotEntries, {
+      selectedProvider: input.agentProvider ?? null,
+    });
+  }
+  if (input.snapshotSelectedEntry) {
+    return [buildSelectorProvider(input.snapshotSelectedEntry)];
+  }
+  return buildProviderSelectorProviders({
+    providerDefinitions: input.agentProviderDefinitions,
+    modelsByProvider: input.agentProviderModels,
+  });
+}
+
 export const AgentControls = memo(function AgentControls({
   showToolbar,
   agentId,
@@ -1047,16 +1187,6 @@ export const AgentControls = memo(function AgentControls({
     () => buildAgentProviderModels(agent?.provider, models),
     [agent?.provider, models],
   );
-  const agentModelSelectorProviders = useMemo(() => {
-    if (snapshotSelectedEntry) {
-      return [buildSelectorProvider(snapshotSelectedEntry)];
-    }
-    return buildProviderSelectorProviders({
-      providerDefinitions: agentProviderDefinitions,
-      modelsByProvider: agentProviderModels,
-    });
-  }, [agentProviderDefinitions, agentProviderModels, snapshotSelectedEntry]);
-
   const modelSelection = resolveAgentModelSelection({
     models,
     runtimeModelId: agent?.runtimeModelId,
@@ -1100,10 +1230,37 @@ export const AgentControls = memo(function AgentControls({
     },
     [agentId, agentProvider, client, toast, updatePreferences],
   );
-  const handleSelectCommandCenterModel = useCallback(
-    (_provider: AgentProvider, modelId: string) => handleSelectModel(modelId),
-    [handleSelectModel],
+
+  const mainChatSwitcher = useMainChatProviderSwitcher({
+    serverId,
+    agentId,
+    agent,
+    client,
+    snapshotEntries,
+    onSelectSameProviderModel: handleSelectModel,
+  });
+
+  const agentModelSelectorProviders = useMemo(
+    () =>
+      resolveAgentModelSelectorProviders({
+        canSwitchProvider: mainChatSwitcher.canSwitch,
+        agentProvider,
+        snapshotEntries,
+        snapshotSelectedEntry,
+        agentProviderDefinitions,
+        agentProviderModels,
+      }),
+    [
+      agentProvider,
+      agentProviderDefinitions,
+      agentProviderModels,
+      mainChatSwitcher.canSwitch,
+      snapshotEntries,
+      snapshotSelectedEntry,
+    ],
   );
+
+  const handleSelectCommandCenterModel = mainChatSwitcher.commandCenterSelect;
 
   // A running agent is one provider's process, so only that provider's profiles
   // can apply to it.
@@ -1249,8 +1406,8 @@ export const AgentControls = memo(function AgentControls({
   );
 
   const handleModelSelectorOpen = useCallback(() => {
-    refetchSnapshotIfStale(agentProvider);
-  }, [agentProvider, refetchSnapshotIfStale]);
+    refetchSnapshotIfStale(mainChatSwitcher.refetchProviderTarget);
+  }, [mainChatSwitcher.refetchProviderTarget, refetchSnapshotIfStale]);
 
   const handleRetryModelProvider = useCallback(
     (provider: AgentProvider) => {
@@ -1275,6 +1432,7 @@ export const AgentControls = memo(function AgentControls({
             modelOptions={modelOptions}
             selectedModelId={modelSelection.activeModelId ?? undefined}
             onSelectModel={handleSelectModel}
+            onSelectProviderAndModel={mainChatSwitcher.onSelectProviderAndModel}
             agentProfiles={agentProfiles}
             onApplyAgentProfile={agentProfiles?.applyProfile}
             onEditAgentProfiles={handleEditAgentProfiles}
@@ -1289,7 +1447,7 @@ export const AgentControls = memo(function AgentControls({
             onRetryModelProvider={handleRetryModelProvider}
             isRetryingModelProvider={snapshotIsRefreshing}
             onDropdownClose={onDropdownClose}
-            disabled={!client}
+            disabled={mainChatSwitcher.controlsDisabled}
             modeControl={modeControl}
             modelSelectorServerId={serverId}
             isCompactLayout={isCompactLayout}

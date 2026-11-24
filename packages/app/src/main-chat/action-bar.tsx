@@ -24,6 +24,7 @@ import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } fr
 import { useTranslation } from "react-i18next";
 import { ScrollView, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { create } from "zustand";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { PermissionRequestCard } from "@/agent-stream/view";
 import { StatusRing } from "@/components/status-ring";
@@ -31,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { EditingTextInput } from "@/components/ui/text-input";
+import { isWeb } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -183,7 +185,56 @@ function selectActionBarSessionSnapshot(
 export interface MainChatActionBarProps {
   serverId: string;
   agentId: string;
+  /**
+   * `"external"` renders only the fixed-height capsule strip while the pane mounts
+   * `<MainChatActionBarDrawerOverlay />` over the transcript stream (zero layout shift).
+   * `"floating"` (default) renders the drawer in an absolute floating layer above the strip.
+   */
+  drawerMode?: "floating" | "external";
 }
+
+interface MainChatActionBarDrawerStoreState {
+  openBucketByKey: Record<string, ActionBarBucketKey | null>;
+  expandedByKey: Record<string, boolean>;
+  toggleBucket: (key: string, bucket: ActionBarBucketKey) => void;
+  closeDrawer: (key: string) => void;
+  toggleExpanded: (key: string) => void;
+  reset: () => void;
+}
+
+export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerStoreState>((set) => ({
+  openBucketByKey: {},
+  expandedByKey: {},
+  toggleBucket(key, bucket) {
+    set((state) => {
+      const current = state.openBucketByKey[key] ?? null;
+      const next = current === bucket ? null : bucket;
+      return {
+        openBucketByKey: { ...state.openBucketByKey, [key]: next },
+        ...(next === null ? { expandedByKey: { ...state.expandedByKey, [key]: false } } : {}),
+      };
+    });
+  },
+  closeDrawer(key) {
+    set((state) => {
+      if ((state.openBucketByKey[key] ?? null) === null && !state.expandedByKey[key]) {
+        return state;
+      }
+      return {
+        openBucketByKey: { ...state.openBucketByKey, [key]: null },
+        expandedByKey: { ...state.expandedByKey, [key]: false },
+      };
+    });
+  },
+  toggleExpanded(key) {
+    set((state) => ({
+      expandedByKey: { ...state.expandedByKey, [key]: !state.expandedByKey[key] },
+    }));
+  },
+  reset() {
+    set({ openBucketByKey: {}, expandedByKey: {} });
+  },
+}));
 
 const CapsuleButton = memo(function CapsuleButton({
   bucket,
@@ -1014,20 +1065,8 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   );
 });
 
-/**
- * Five-state deduplicated action bar anchored directly above the Main Chat composer.
- * Stays as a compact single-row summary bar by default, expands `Needs you` items inline so users
- * can approve permissions / answer decisions / edit & start plans without leaving Main Chat, and
- * separates `awaiting_review` cleanly into its own neutral bucket.
- */
-export const MainChatActionBar = memo(function MainChatActionBar({
-  serverId,
-  agentId,
-}: MainChatActionBarProps): ReactElement | null {
-  const { t } = useTranslation();
-  const toast = useToast();
+function useMainChatActionBarData(serverId: string, agentId: string) {
   const hosts = useHosts();
-  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
   const allowedServerIds = useStewardAllowedServerIds(serverId);
 
   const sessionSnapshot = useStoreWithEqualityFn(
@@ -1045,20 +1084,6 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
-  const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
-
-  const [openBucket, setOpenBucket] = useState<ActionBarBucketKey | null>(null);
-  const [drawerExpanded, setDrawerExpanded] = useState(false);
-  const [expandedNeedsIds, setExpandedNeedsIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [staleExpanded, setStaleExpanded] = useState(false);
-  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!openBucket || overview || !client || typeof client.getMainChatOverview !== "function") {
-      return;
-    }
-    void loadOverview(serverId, agentId, client).catch(() => undefined);
-  }, [agentId, client, loadOverview, openBucket, overview, serverId]);
 
   const hostLabelsByServerId = useMemo(
     () => Object.fromEntries(hosts.map((host) => [host.serverId, host.label])),
@@ -1088,34 +1113,83 @@ export const MainChatActionBar = memo(function MainChatActionBar({
     ],
   );
 
+  return {
+    client,
+    overviewKey,
+    overview,
+    loadOverview,
+    parkTask,
+    reviewTask,
+    model,
+  };
+}
+
+const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerContent({
+  serverId,
+  agentId,
+  openBucket,
+}: {
+  serverId: string;
+  agentId: string;
+  openBucket: ActionBarBucketKey;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
+  const { client, overviewKey, overview, loadOverview, parkTask, reviewTask, model } =
+    useMainChatActionBarData(serverId, agentId);
+  const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
+  const drawerExpanded = useMainChatActionBarDrawerStore((state) =>
+    Boolean(state.expandedByKey[overviewKey]),
+  );
+  const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
+  const toggleExpanded = useMainChatActionBarDrawerStore((state) => state.toggleExpanded);
+
+  const [expandedNeedsIds, setExpandedNeedsIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [staleExpanded, setStaleExpanded] = useState(false);
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!model || !openBucket) return;
-    if (model.counts[openBucket] === 0) {
-      setOpenBucket(null);
+    if (openBucket === "needsYou" && model && model.needsYou.length === 1) {
+      const onlyId = model.needsYou[0]!.id;
+      setExpandedNeedsIds((prev) => (prev.has(onlyId) ? prev : new Set([onlyId])));
     }
   }, [model, openBucket]);
 
-  const handleSelectBucket = useCallback(
-    (bucket: ActionBarBucketKey) => {
-      setOpenBucket((current) => {
-        if (current === bucket) return null;
-        if (bucket === "needsYou" && model && model.needsYou.length === 1) {
-          setExpandedNeedsIds(new Set([model.needsYou[0]!.id]));
-        }
-        return bucket;
-      });
-    },
-    [model],
-  );
+  useEffect(() => {
+    if (overview || !client || typeof client.getMainChatOverview !== "function") {
+      return;
+    }
+    void loadOverview(serverId, agentId, client).catch(() => undefined);
+  }, [agentId, client, loadOverview, overview, serverId]);
+
+  useEffect(() => {
+    if (!model) return;
+    if (model.counts[openBucket] === 0) {
+      closeDrawer(overviewKey);
+    }
+  }, [closeDrawer, model, openBucket, overviewKey]);
+
+  useEffect(() => {
+    if (!isWeb || typeof window === "undefined") return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeDrawer(overviewKey);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeDrawer, overviewKey]);
 
   const handleCloseDrawer = useCallback(() => {
-    setOpenBucket(null);
-    setDrawerExpanded(false);
-  }, []);
+    closeDrawer(overviewKey);
+  }, [closeDrawer, overviewKey]);
 
   const handleToggleDrawerExpand = useCallback(() => {
-    setDrawerExpanded((prev) => !prev);
-  }, []);
+    toggleExpanded(overviewKey);
+  }, [overviewKey, toggleExpanded]);
 
   const handleDirectRoute = useCallback(
     (target: ActionBarDirectTarget) => {
@@ -1124,10 +1198,9 @@ export const MainChatActionBar = memo(function MainChatActionBar({
         targetAgentId: target.agentId,
         targetTitle: target.title,
       });
-      setOpenBucket(null);
-      setDrawerExpanded(false);
+      closeDrawer(overviewKey);
     },
-    [agentId, serverId, setRouteTarget],
+    [agentId, closeDrawer, overviewKey, serverId, setRouteTarget],
   );
 
   const handleToggleNeedsRow = useCallback((id: string) => {
@@ -1247,6 +1320,103 @@ export const MainChatActionBar = memo(function MainChatActionBar({
     setStaleExpanded((prev) => !prev);
   }, []);
 
+  if (!model || model.counts[openBucket] === 0) {
+    return null;
+  }
+
+  return (
+    <ActionBarDrawerPanel
+      openBucket={openBucket}
+      model={model}
+      serverId={serverId}
+      agentId={agentId}
+      drawerExpanded={drawerExpanded}
+      expandedNeedsIds={expandedNeedsIds}
+      staleExpanded={staleExpanded}
+      busyTaskId={busyTaskId}
+      onToggleDrawerExpand={handleToggleDrawerExpand}
+      onClose={handleCloseDrawer}
+      onToggleNeedsRow={handleToggleNeedsRow}
+      onToggleStale={handleToggleStale}
+      onOpenTarget={handleOpenTarget}
+      onOpenTaskItem={handleOpenTaskItem}
+      onDirectRoute={handleDirectRoute}
+      onParkTask={handleParkTask}
+      onAcceptReview={handleAcceptReview}
+      onSubmitRework={handleSubmitRework}
+    />
+  );
+});
+
+/**
+ * Floating drawer overlay for `MainChatActionBar`. Mount inside the transcript viewport container
+ * (alongside `SideQuestionCard` / `AgentTracks`) so opening a bucket floats over the bottom of
+ * the timeline without changing composer height or causing messages to jump.
+ */
+export const MainChatActionBarDrawerOverlay = memo(function MainChatActionBarDrawerOverlay({
+  serverId,
+  agentId,
+}: {
+  serverId: string;
+  agentId: string;
+}): ReactElement | null {
+  const overviewKey = overviewStoreKey(serverId, agentId);
+  const openBucket = useMainChatActionBarDrawerStore(
+    (state) => state.openBucketByKey[overviewKey] ?? null,
+  );
+
+  if (!openBucket) {
+    return null;
+  }
+
+  return (
+    <View
+      style={styles.streamDrawerOverlay}
+      pointerEvents="box-none"
+      testID="main-chat-action-bar-drawer-overlay"
+    >
+      <View style={styles.drawerWidthConstraint} pointerEvents="box-none">
+        <MainChatActionBarDrawerContent
+          serverId={serverId}
+          agentId={agentId}
+          openBucket={openBucket}
+        />
+      </View>
+    </View>
+  );
+});
+
+/**
+ * Five-state deduplicated action bar anchored directly above the Main Chat composer.
+ * Stays as a compact fixed-height single-row summary bar; opening any bucket renders its panel
+ * in a floating overlay without shifting the transcript or composer layout.
+ */
+export const MainChatActionBar = memo(function MainChatActionBar({
+  serverId,
+  agentId,
+  drawerMode = "floating",
+}: MainChatActionBarProps): ReactElement | null {
+  const { overviewKey, model } = useMainChatActionBarData(serverId, agentId);
+  const openBucket = useMainChatActionBarDrawerStore(
+    (state) => state.openBucketByKey[overviewKey] ?? null,
+  );
+  const toggleBucket = useMainChatActionBarDrawerStore((state) => state.toggleBucket);
+  const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
+
+  useEffect(() => {
+    if (!model || !openBucket) return;
+    if (model.counts[openBucket] === 0) {
+      closeDrawer(overviewKey);
+    }
+  }, [closeDrawer, model, openBucket, overviewKey]);
+
+  const handleSelectBucket = useCallback(
+    (bucket: ActionBarBucketKey) => {
+      toggleBucket(overviewKey, bucket);
+    },
+    [overviewKey, toggleBucket],
+  );
+
   if (!model || model.counts.total === 0) {
     return null;
   }
@@ -1257,30 +1427,23 @@ export const MainChatActionBar = memo(function MainChatActionBar({
 
   return (
     <View style={styles.outer} testID="main-chat-action-bar">
-      <View style={styles.inner}>
-        {openBucket ? (
-          <ActionBarDrawerPanel
-            openBucket={openBucket}
-            model={model}
-            serverId={serverId}
-            agentId={agentId}
-            drawerExpanded={drawerExpanded}
-            expandedNeedsIds={expandedNeedsIds}
-            staleExpanded={staleExpanded}
-            busyTaskId={busyTaskId}
-            onToggleDrawerExpand={handleToggleDrawerExpand}
-            onClose={handleCloseDrawer}
-            onToggleNeedsRow={handleToggleNeedsRow}
-            onToggleStale={handleToggleStale}
-            onOpenTarget={handleOpenTarget}
-            onOpenTaskItem={handleOpenTaskItem}
-            onDirectRoute={handleDirectRoute}
-            onParkTask={handleParkTask}
-            onAcceptReview={handleAcceptReview}
-            onSubmitRework={handleSubmitRework}
-          />
-        ) : null}
+      {drawerMode === "floating" && openBucket ? (
+        <View
+          style={styles.floatingDrawerAnchor}
+          pointerEvents="box-none"
+          testID="main-chat-action-bar-drawer-overlay"
+        >
+          <View style={styles.drawerWidthConstraint} pointerEvents="box-none">
+            <MainChatActionBarDrawerContent
+              serverId={serverId}
+              agentId={agentId}
+              openBucket={openBucket}
+            />
+          </View>
+        </View>
+      ) : null}
 
+      <View style={styles.inner}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -1306,11 +1469,36 @@ export const MainChatActionBar = memo(function MainChatActionBar({
 
 const styles = StyleSheet.create((theme) => ({
   outer: {
+    position: "relative",
     width: "100%",
     alignItems: "center",
     paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[1],
+    zIndex: 25,
+  },
+  floatingDrawerAnchor: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: "100%",
+    alignItems: "center",
+    paddingHorizontal: theme.spacing[3],
+    paddingBottom: theme.spacing[1.5],
+    zIndex: 30,
+  },
+  streamDrawerOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: theme.spacing[2],
+    alignItems: "center",
+    paddingHorizontal: theme.spacing[3],
+    zIndex: 25,
+  },
+  drawerWidthConstraint: {
+    width: "100%",
+    maxWidth: theme.contentMaxWidth,
   },
   inner: {
     width: "100%",
@@ -1355,19 +1543,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   drawer: {
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
+    borderColor: theme.colors.borderAccent,
     borderRadius: theme.borderRadius.xl,
     backgroundColor: theme.colors.surface1,
     overflow: "hidden",
     maxHeight: 360,
+    ...theme.shadow.lg,
   },
   drawerExpanded: {
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
+    borderColor: theme.colors.borderAccent,
     borderRadius: theme.borderRadius.xl,
     backgroundColor: theme.colors.surface1,
     overflow: "hidden",
     maxHeight: 540,
+    ...theme.shadow.lg,
   },
   drawerHeader: {
     flexDirection: "row",

@@ -232,6 +232,9 @@ function createKnownHostSummary(overrides: {
   registrationId: string;
   serverId: string | null;
   label?: string | null;
+  source?: { id: string; key: string };
+  metadata?: Record<string, string>;
+  targetDescription?: string;
   enabled?: boolean;
   status: ConnectedHostSummary["status"];
   lastOnlineAt?: string | null;
@@ -241,11 +244,12 @@ function createKnownHostSummary(overrides: {
     registrationId: overrides.registrationId,
     serverId: overrides.serverId,
     label: overrides.label ?? null,
-    source: { id: "user", key: overrides.registrationId },
-    metadata: {},
+    source: overrides.source ?? { id: "user", key: overrides.registrationId },
+    metadata: overrides.metadata ?? {},
     enabled: overrides.enabled ?? overrides.status !== "disabled",
     status: overrides.status,
-    targetDescription: `${overrides.serverId ?? overrides.registrationId}.local`,
+    targetDescription:
+      overrides.targetDescription ?? `${overrides.serverId ?? overrides.registrationId}.local`,
     lastOnlineAt: overrides.lastOnlineAt ?? null,
     nextRetryAt: null,
     error: overrides.error ?? null,
@@ -1705,6 +1709,99 @@ describe("MainChatFleetAggregator", () => {
         seq: 2,
       },
     ]);
+
+    aggregator.stop();
+  });
+
+  it("extracts expectedServerId for connecting hosts, deduplicates duplicate target registrations, and honors allowlist by expectedServerId", async () => {
+    const local = createFakeLocalEnv();
+    const devboxClient = createFakeRemoteClient({ initialAgents: [] });
+    const hosts = new FakeConnectedHosts();
+    hosts.setState(
+      [
+        // Connecting host registered via relay URI (serverId still null before handshake)
+        createKnownHostSummary({
+          registrationId: "hst_imac_connecting",
+          serverId: null,
+          label: "iMac",
+          status: "connecting",
+          targetDescription: "relay://relay.paseo.sh:443/srv_imac",
+          metadata: { mainChatSyncServerId: "srv_imac" },
+          source: { id: "client", key: "main-chat-sync:srv_imac" },
+        }),
+        // Duplicate stale connecting registration pointing at the same target host
+        createKnownHostSummary({
+          registrationId: "hst_imac_dup_error",
+          serverId: null,
+          label: "iMac",
+          status: "error",
+          targetDescription: "relay://relay.paseo.sh:443/srv_imac",
+          error: { code: "duplicate_host", message: "Duplicate host" },
+        }),
+        // Online pinned host + stale duplicate error registration for DevBox
+        createKnownHostSummary({
+          registrationId: "hst_devbox_online",
+          serverId: "srv_devbox",
+          label: "DevBox",
+          status: "online",
+          targetDescription: "relay://relay.paseo.sh:443/srv_devbox",
+        }),
+        createKnownHostSummary({
+          registrationId: "hst_devbox_dup",
+          serverId: null,
+          label: "DevBox",
+          status: "connecting",
+          targetDescription: "relay://relay.paseo.sh:443/srv_devbox",
+        }),
+        // Out-of-scope connecting host
+        createKnownHostSummary({
+          registrationId: "hst_other_connecting",
+          serverId: null,
+          label: "OtherMac",
+          status: "connecting",
+          targetDescription: "relay://relay.paseo.sh:443/srv_other",
+        }),
+      ],
+      [
+        {
+          registrationId: "hst_devbox_online",
+          serverId: "srv_devbox",
+          label: "DevBox",
+          client: devboxClient.client,
+          lastOnlineAt: "2026-11-24T10:00:00.000Z",
+        },
+      ],
+    );
+
+    const allowed = new Set(["srv_devbox", "srv_imac"]);
+    const aggregator = createMainChatFleetAggregator({
+      localServerId: "srv_local",
+      localLabel: "ML9YK34K66",
+      agentManager: local.agentManager,
+      agentStorage: local.agentStorage,
+      connectedHosts: hosts,
+      isHostAllowed: (serverId) => allowed.has(serverId),
+    });
+
+    const snap = await aggregator.collectFleet();
+    // 1 local + 1 deduped DevBox (online wins over duplicate connecting) + 1 deduped iMac (connecting wins over error)
+    expect(snap.hosts).toHaveLength(3);
+    const devboxHost = snap.hosts.find((h) => h.expectedServerId === "srv_devbox");
+    const imacHost = snap.hosts.find((h) => h.expectedServerId === "srv_imac");
+    expect(devboxHost).toMatchObject({
+      serverId: "srv_devbox",
+      status: "online",
+      registrationId: "hst_devbox_online",
+      expectedServerId: "srv_devbox",
+    });
+    expect(imacHost).toMatchObject({
+      serverId: "hst_imac_connecting",
+      status: "connecting",
+      registrationId: "hst_imac_connecting",
+      expectedServerId: "srv_imac",
+      targetDescription: "relay://relay.paseo.sh:443/srv_imac",
+    });
+    expect(snap.hosts.some((h) => h.expectedServerId === "srv_other")).toBe(false);
 
     aggregator.stop();
   });

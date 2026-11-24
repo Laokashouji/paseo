@@ -194,13 +194,8 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     ),
   DropdownMenuLabel: ({ children }: { children: React.ReactNode }) =>
     React.createElement("div", null, children),
-  DropdownMenuSubTrigger: ({
-    children,
-    testID,
-  }: {
-    children: React.ReactNode;
-    testID?: string;
-  }) => React.createElement("button", { type: "button", "data-testid": testID }, children),
+  DropdownMenuSubTrigger: ({ children, testID }: { children: React.ReactNode; testID?: string }) =>
+    React.createElement("button", { type: "button", "data-testid": testID }, children),
   DropdownMenuSeparator: () => null,
 }));
 
@@ -1093,12 +1088,14 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
     expect(view.getByTestId("main-chat-fleet-host-srv_linked")).toBeTruthy();
     expect(view.getByTestId("main-chat-fleet-unlinked-row-srv_mac_relay")).toBeTruthy();
 
-    // Click one-click sync -> calls client.addHost for relay host and refreshes fleet hosts
+    // Click one-click sync -> calls client.addHost with deterministic sourceKey/metadata and refreshes fleet hosts
     fireEvent.click(view.getByTestId("main-chat-fleet-sync-now"));
     await waitFor(() => {
       expect(client.addHost).toHaveBeenCalledWith({
         connection: expect.stringContaining("relay://relay.paseo.sh:443/srv_mac_relay"),
         label: "MacBook Pro",
+        sourceKey: "main-chat-sync:srv_mac_relay",
+        metadata: { mainChatSyncServerId: "srv_mac_relay" },
       });
       expect(client.getMainChatFleetHosts).toHaveBeenCalledWith({ forceRefresh: true });
       expect(toastShowSpy).toHaveBeenCalled();
@@ -1118,6 +1115,156 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
     );
     fireEvent.click(manualOnlyView.getByTestId("main-chat-fleet-sync-now"));
     expect(mockRouterPush).toHaveBeenCalledWith("/settings/hosts/srv_main");
+  });
+
+  it("deduplicates connecting hosts via expectedServerId, skips already-registered hosts on re-sync, auto-refreshes via observeHosts, and supports one-click local_only", async () => {
+    const macRelay = makeHostProfile({
+      serverId: "srv_mac_relay",
+      label: "MacBook Pro",
+      connections: [
+        {
+          id: "r1",
+          type: "relay",
+          relayEndpoint: "relay.paseo.sh:443",
+          daemonPublicKeyB64: "pk_mac_123",
+          useTls: true,
+        },
+      ],
+    });
+    const devboxHost = makeHostProfile({ serverId: "srv_main", label: "ML9YK34K66" });
+    const clientHosts = [devboxHost, macRelay];
+
+    // While MacBook Pro is still connecting (temporary hst_* serverId + expectedServerId),
+    // computeUnlinkedClientHosts must NOT treat it as unlinked (no duplicate row).
+    const connectingFleetHosts: MainChatFleetHostStatus[] = [
+      {
+        serverId: "srv_main",
+        label: "ML9YK34K66",
+        isLocal: true,
+        status: "online",
+        agentCount: 1,
+        needsAttentionCount: 0,
+        lastSyncedAt: "2026-11-24T10:00:00.000Z",
+        error: null,
+      },
+      {
+        serverId: "hst_temp_123",
+        label: "MacBook Pro",
+        isLocal: false,
+        status: "connecting",
+        agentCount: 0,
+        needsAttentionCount: 0,
+        lastSyncedAt: null,
+        error: null,
+        registrationId: "hst_temp_123",
+        expectedServerId: "srv_mac_relay",
+        targetDescription: "relay://relay.paseo.sh:443/srv_mac_relay",
+      },
+    ];
+    expect(computeUnlinkedClientHosts(clientHosts, connectingFleetHosts, "srv_main")).toEqual([]);
+
+    // Live observeHosts push refreshes fleet hosts automatically when hosts.changed arrives,
+    // and clicking "Local only" updates fleetScope to local_only.
+    let hostsUpdateHandler:
+      | ((msg: {
+          type: "hosts.changed";
+          payload: { directory: { self: { serverId: string; label: string }; hosts: unknown[] } };
+        }) => void)
+      | null = null;
+    const observeRelease = vi.fn(async () => undefined);
+    const updateMainChatSettings = vi.fn(async (patch: Record<string, unknown>) => ({
+      requestId: "req_local_only",
+      settings: {
+        ...createDefaultMainChatSettings("conservative"),
+        ...patch,
+      },
+      error: null,
+    }));
+    const listHosts = vi.fn(async () => ({
+      self: { serverId: "srv_main", label: "ML9YK34K66" },
+      hosts: [
+        {
+          registrationId: "hst_existing",
+          serverId: null,
+          label: "MacBook Pro",
+          source: { id: "client", key: "main-chat-sync:srv_mac_relay" },
+          metadata: { mainChatSyncServerId: "srv_mac_relay" },
+          enabled: true,
+          status: "connecting" as const,
+          targetDescription: "relay://relay.paseo.sh:443/srv_mac_relay",
+          lastOnlineAt: null,
+          nextRetryAt: null,
+          error: null,
+        },
+      ],
+    }));
+
+    const localOnlyFleet: MainChatFleetHostStatus[] = [connectingFleetHosts[0]!];
+    const client = makeFakeClient({
+      listHosts,
+      observeHosts: vi.fn(() => ({
+        ready: Promise.resolve({ self: { serverId: "srv_main", label: "ML9YK34K66" }, hosts: [] }),
+        subscribe: (handlers: { update?: typeof hostsUpdateHandler }) => {
+          hostsUpdateHandler = handlers.update ?? null;
+          return () => {
+            hostsUpdateHandler = null;
+          };
+        },
+        release: observeRelease,
+      })),
+      updateMainChatSettings,
+      getMainChatFleetHosts: vi.fn(async () => ({
+        requestId: "r_obs",
+        localServerId: "srv_main",
+        hosts: localOnlyFleet,
+        error: null,
+      })),
+    });
+
+    mockHostsState.value = clientHosts;
+    seedSessions({ mainClient: client });
+    useMainChatConversationsStore.setState({
+      fleetHostsByServerId: { srv_main: localOnlyFleet },
+      localServerIdByServerId: { srv_main: "srv_main" },
+    });
+
+    const view = renderWithProviders(
+      <HostSyncBanner serverId="srv_main" mainAgentId="agent_main" />,
+    );
+
+    // Sync button skips calling addHost when listHosts already reports a matching registration
+    fireEvent.click(view.getByTestId("main-chat-fleet-sync-now"));
+    await waitFor(() => {
+      expect(listHosts).toHaveBeenCalledTimes(1);
+    });
+    expect(client.addHost).not.toHaveBeenCalled();
+
+    // Emitting hosts.changed via observeHosts triggers automatic fleet refresh
+    act(() => {
+      hostsUpdateHandler?.({
+        type: "hosts.changed",
+        payload: {
+          directory: {
+            self: { serverId: "srv_main", label: "ML9YK34K66" },
+            hosts: [],
+          },
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(client.getMainChatFleetHosts).toHaveBeenCalledWith({ forceRefresh: true });
+    });
+
+    // Clicking "仅管本机" persists local_only fleetScope
+    fireEvent.click(view.getByTestId("main-chat-fleet-local-only"));
+    await waitFor(() => {
+      expect(updateMainChatSettings).toHaveBeenCalledWith({
+        fleetScope: { mode: "local_only", hostServerIds: [] },
+      });
+    });
+
+    view.unmount();
+    expect(observeRelease).toHaveBeenCalled();
   });
 
   it("displays directions & side threads with quick create and archive controls in MainChatHistoryScreen", async () => {

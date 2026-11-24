@@ -1,25 +1,19 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
+  normalizeHostPort,
   parseHostPort,
   serializeConnectionUriForStorage,
   serializeRelayConnectionUri,
 } from "@getpaseo/protocol/daemon-endpoints";
+import type { HostDirectory, HostSummary } from "@getpaseo/protocol/hosts";
 import {
   resolveMainChatFleetScope,
   type MainChatFleetHostStatus,
   type MainChatFleetScope,
 } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
-import {
-  ChevronDown,
-  ChevronRight,
-  Link2,
-  RefreshCw,
-  Server,
-  Settings,
-  Unlink,
-} from "lucide-react-native";
-import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
+import { ChevronDown, ChevronRight, Link2, RefreshCw, Server, Settings } from "lucide-react-native";
+import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -42,12 +36,148 @@ const ThemedLink2 = withUnistyles(Link2);
 const ThemedRefreshCw = withUnistyles(RefreshCw);
 const ThemedServer = withUnistyles(Server);
 const ThemedSettings = withUnistyles(Settings);
-const ThemedUnlink = withUnistyles(Unlink);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
-const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
+const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "::"]);
+export const MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX = "main-chat-sync:";
+
+export function buildMainChatSyncSourceKey(serverId: string): string {
+  return `${MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX}${serverId.trim()}`;
+}
+
+export function buildMainChatSyncMetadata(serverId: string): Record<string, string> {
+  return { mainChatSyncServerId: serverId.trim() };
+}
+
+function extractRelayTargetServerId(targetDesc: string | undefined): string | null {
+  const trimmed = targetDesc?.trim();
+  if (!trimmed || !trimmed.startsWith("relay://")) return null;
+  const rest = trimmed.slice("relay://".length);
+  const slashIndex = rest.indexOf("/");
+  if (slashIndex < 0) return null;
+  const rawId = rest.slice(slashIndex + 1).trim();
+  if (!rawId) return null;
+  try {
+    return decodeURIComponent(rawId).trim() || rawId;
+  } catch {
+    return rawId;
+  }
+}
+
+export function extractExpectedServerIdFromHostSummary(
+  summary: Pick<HostSummary, "serverId" | "metadata" | "source" | "targetDescription">,
+): string | null {
+  const pinned = summary.serverId?.trim();
+  if (pinned) return pinned;
+
+  const metaId = summary.metadata?.mainChatSyncServerId?.trim();
+  if (metaId) return metaId;
+
+  const sourceKey = summary.source?.key?.trim();
+  if (sourceKey && sourceKey.startsWith(MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX)) {
+    const extracted = sourceKey.slice(MAIN_CHAT_SYNC_SOURCE_KEY_PREFIX.length).trim();
+    if (extracted) return extracted;
+  }
+
+  return extractRelayTargetServerId(summary.targetDescription);
+}
+
+export function buildExpectedTargetDescriptions(host: HostProfile): string[] {
+  if (!Array.isArray(host.connections)) return [];
+  const descriptions: string[] = [];
+  for (const conn of host.connections) {
+    if (conn.type === "relay") {
+      const endpoint = conn.relayEndpoint.trim();
+      if (!endpoint || !host.serverId) continue;
+      try {
+        const normalized = normalizeHostPort(endpoint);
+        descriptions.push(`relay://${normalized}/${encodeURIComponent(host.serverId)}`);
+      } catch {
+        descriptions.push(`relay://${endpoint}/${encodeURIComponent(host.serverId)}`);
+      }
+    } else if (conn.type === "directTcp") {
+      const endpoint = conn.endpoint.trim();
+      if (!endpoint) continue;
+      try {
+        const parts = parseHostPort(endpoint);
+        if (isLoopbackAddress(parts.host)) continue;
+        const normalized = normalizeHostPort(
+          `${parts.isIpv6 ? `[${parts.host}]` : parts.host}:${parts.port}`,
+        );
+        descriptions.push(`tcp://${normalized}`);
+      } catch {
+        continue;
+      }
+    }
+  }
+  return descriptions;
+}
+
+function isSourceConflictError(error: unknown): boolean {
+  if (!error) return false;
+  if (typeof error === "object" && "code" in error && error.code === "source_conflict") {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /source_conflict|source key already exists/i.test(message);
+}
+
+export function isHostAlreadyRegisteredOnDaemon(
+  candidate: { serverId: string; targetDescriptions?: readonly string[] },
+  existingHosts: readonly HostSummary[],
+): boolean {
+  const sourceKey = buildMainChatSyncSourceKey(candidate.serverId);
+  const targetSet = new Set(candidate.targetDescriptions ?? []);
+  for (const row of existingHosts) {
+    if (row.serverId === candidate.serverId) return true;
+    if (extractExpectedServerIdFromHostSummary(row) === candidate.serverId) return true;
+    if (row.source?.key === sourceKey) return true;
+    if (targetSet.size > 0 && row.targetDescription && targetSet.has(row.targetDescription)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function syncHostRegistrationIdempotent(input: {
+  client: DaemonClient;
+  candidate: {
+    serverId: string;
+    label: string;
+    syncConnection: string;
+    targetDescriptions?: readonly string[];
+  };
+  existingHosts?: readonly HostSummary[];
+}): Promise<{ status: "added" | "already_linked"; error?: string }> {
+  if (
+    input.existingHosts &&
+    isHostAlreadyRegisteredOnDaemon(input.candidate, input.existingHosts)
+  ) {
+    return { status: "already_linked" };
+  }
+  try {
+    const result = (await input.client.addHost({
+      connection: input.candidate.syncConnection,
+      label: input.candidate.label,
+      sourceKey: buildMainChatSyncSourceKey(input.candidate.serverId),
+      metadata: buildMainChatSyncMetadata(input.candidate.serverId),
+    })) as HostSummary & { error?: string };
+    if (result && typeof result.error === "string" && result.error.length > 0) {
+      if (isSourceConflictError(result.error)) {
+        return { status: "already_linked" };
+      }
+      return { status: "added", error: result.error };
+    }
+    return { status: "added" };
+  } catch (error) {
+    if (isSourceConflictError(error)) {
+      return { status: "already_linked" };
+    }
+    throw error;
+  }
+}
 
 export interface UnlinkedClientHostCandidate {
   host: HostProfile;
@@ -132,44 +262,158 @@ function isRoutedViaMainHost(host: HostProfile, mainServerId: string): boolean {
   );
 }
 
+function fleetHostPriority(host: MainChatFleetHostStatus): number {
+  if (host.isLocal) return 6;
+  if (host.status === "online") return 5;
+  if (!host.serverId.startsWith("hst_")) return 4;
+  switch (host.status) {
+    case "connecting":
+      return 3;
+    case "degraded":
+    case "offline":
+      return 2;
+    case "error":
+      return 1;
+  }
+}
+
+function buildFleetHostDedupKey(
+  host: MainChatFleetHostStatus,
+  observed: HostSummary | undefined,
+): string {
+  if (host.isLocal) return `local:${host.serverId}`;
+  const resolvedExpectedId =
+    host.expectedServerId ??
+    (observed ? extractExpectedServerIdFromHostSummary(observed) : null) ??
+    (!host.serverId.startsWith("hst_") ? host.serverId : null);
+  if (resolvedExpectedId) return `srv:${resolvedExpectedId}`;
+  const resolvedTarget = host.targetDescription ?? observed?.targetDescription ?? null;
+  if (resolvedTarget) return `target:${resolvedTarget}`;
+  return `reg:${host.serverId}`;
+}
+
+export function deduplicateFleetHostStatuses(
+  fleetHosts: readonly MainChatFleetHostStatus[],
+  observedConnectedHosts?: readonly HostSummary[] | null,
+): MainChatFleetHostStatus[] {
+  if (fleetHosts.length <= 1) return [...fleetHosts];
+  const observedByRegistrationId = new Map<string, HostSummary>();
+  if (observedConnectedHosts) {
+    for (const row of observedConnectedHosts) {
+      observedByRegistrationId.set(row.registrationId, row);
+    }
+  }
+
+  const deduped = new Map<string, MainChatFleetHostStatus>();
+  for (const host of fleetHosts) {
+    const observed = observedByRegistrationId.get(host.registrationId ?? host.serverId);
+    const dedupKey = buildFleetHostDedupKey(host, observed);
+    const existing = deduped.get(dedupKey);
+    if (!existing || fleetHostPriority(host) > fleetHostPriority(existing)) {
+      deduped.set(dedupKey, host);
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
+function recordObservedHostMatcher(
+  row: HostSummary,
+  linkedIds: Set<string>,
+  linkedTargets: Set<string>,
+): void {
+  if (row.serverId) linkedIds.add(row.serverId);
+  const expected = extractExpectedServerIdFromHostSummary(row);
+  if (expected) linkedIds.add(expected);
+  const desc = row.targetDescription?.trim();
+  if (desc) linkedTargets.add(desc);
+}
+
+function isLegacyUnpinnedConnectingHost(host: MainChatFleetHostStatus): boolean {
+  return (
+    host.serverId.startsWith("hst_") &&
+    !host.expectedServerId &&
+    !host.targetDescription &&
+    host.status === "connecting"
+  );
+}
+
+function collectLinkedHostMatchers(
+  mainServerId: string,
+  mainDaemonFleetHosts: readonly MainChatFleetHostStatus[],
+  observedConnectedHosts?: readonly HostSummary[] | null,
+): {
+  linkedIds: Set<string>;
+  linkedTargets: Set<string>;
+  legacyPendingLabels: Set<string>;
+} {
+  const linkedIds = new Set<string>([mainServerId]);
+  const linkedTargets = new Set<string>();
+  const legacyPendingLabels = new Set<string>();
+  const observedByRegistrationId = new Map<string, HostSummary>();
+
+  for (const row of observedConnectedHosts ?? []) {
+    observedByRegistrationId.set(row.registrationId, row);
+    recordObservedHostMatcher(row, linkedIds, linkedTargets);
+  }
+
+  for (const host of mainDaemonFleetHosts) {
+    linkedIds.add(host.serverId);
+    if (host.expectedServerId) linkedIds.add(host.expectedServerId);
+    const hostDesc = host.targetDescription?.trim();
+    if (hostDesc) linkedTargets.add(hostDesc);
+    const observed = observedByRegistrationId.get(host.registrationId ?? host.serverId);
+    if (observed) {
+      recordObservedHostMatcher(observed, linkedIds, linkedTargets);
+      continue;
+    }
+    if (isLegacyUnpinnedConnectingHost(host) && host.label.trim()) {
+      // COMPAT(fleetHostExpectedServerId): added in v0.17.520, remove after 2027-05-24 once
+      // daemon floor >= v0.17.520 includes expectedServerId on MainChatFleetHostStatus.
+      legacyPendingLabels.add(host.label.trim().toLowerCase());
+    }
+  }
+
+  return { linkedIds, linkedTargets, legacyPendingLabels };
+}
+
 /**
  * Computes frontend-only hosts present in `HostRuntimeStore` that are not yet linked to the Main
  * Chat daemon's `ConnectedHosts` fleet. Always excludes the main daemon itself and `via:<main>`
- * routed hosts. When `fleetScope` is configured:
- * - `local_only`: returns no unlinked hosts (steward intentionally manages only its local host).
- * - `allowlist`: only surfaces hosts explicitly listed in `fleetScope.hostServerIds` that are not
- *   yet linked in the daemon's `ConnectedHosts`.
- * - `all_connected` (or omitted): surfaces all unlinked client hosts.
+ * routed hosts. Matches pinned `serverId`, pre-handshake `expectedServerId`, `targetDescription`,
+ * and live `observedConnectedHosts` so newly added `connecting` hosts never render twice.
  */
 export function computeUnlinkedClientHosts(
   clientHosts: readonly HostProfile[],
   mainDaemonFleetHosts: readonly MainChatFleetHostStatus[],
   mainServerId: string | null,
   fleetScope?: MainChatFleetScope | null,
+  observedConnectedHosts?: readonly HostSummary[] | null,
 ): UnlinkedClientHostCandidate[] {
-  if (!mainServerId) return [];
-
-  if (fleetScope?.mode === "local_only") {
+  if (!mainServerId || fleetScope?.mode === "local_only") {
     return [];
   }
 
   const allowlistSet = fleetScope?.mode === "allowlist" ? new Set(fleetScope.hostServerIds) : null;
-
-  const linkedIds = new Set<string>([mainServerId]);
-  for (const host of mainDaemonFleetHosts) {
-    linkedIds.add(host.serverId);
-  }
+  const { linkedIds, linkedTargets, legacyPendingLabels } = collectLinkedHostMatchers(
+    mainServerId,
+    mainDaemonFleetHosts,
+    observedConnectedHosts,
+  );
 
   const unlinked: UnlinkedClientHostCandidate[] = [];
   for (const host of clientHosts) {
     if (!host.serverId || linkedIds.has(host.serverId)) continue;
     if (allowlistSet && !allowlistSet.has(host.serverId)) continue;
     if (isRoutedViaMainHost(host, mainServerId)) continue;
+    if (buildExpectedTargetDescriptions(host).some((target) => linkedTargets.has(target))) continue;
+    const label = host.label.trim() || host.serverId;
+    if (legacyPendingLabels.has(label.toLowerCase())) continue;
     const syncConnection = buildSyncConnectionString(host);
     unlinked.push({
       host,
       serverId: host.serverId,
-      label: host.label.trim() || host.serverId,
+      label,
       syncConnection,
       canAutoSync: syncConnection !== null,
     });
@@ -253,31 +497,38 @@ const FleetHostStatusRow = memo(function FleetHostStatusRow({
 });
 
 const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
+  mainHostLabel,
   unlinkedHosts,
   syncing,
+  savingScope,
   syncError,
   hasAutoSyncable,
   hasManualOnly,
   onSyncNow,
+  onSetLocalOnly,
   onOpenSettings,
   onDismiss,
 }: {
+  mainHostLabel: string;
   unlinkedHosts: readonly UnlinkedClientHostCandidate[];
   syncing: boolean;
+  savingScope: boolean;
   syncError: string | null;
   hasAutoSyncable: boolean;
   hasManualOnly: boolean;
   onSyncNow: () => void;
+  onSetLocalOnly: () => void;
   onOpenSettings: () => void;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
   const names = unlinkedHosts.map((item) => item.label).join("、");
+  const busy = syncing || savingScope;
 
   return (
     <View style={styles.unlinkedBanner} testID="main-chat-unlinked-hosts-banner">
       <View style={styles.unlinkedHeader}>
-        <ThemedUnlink size={14} uniProps={warningIconMapping} />
+        <ThemedServer size={14} uniProps={primaryIconMapping} />
         <Text style={styles.unlinkedTitle} numberOfLines={1}>
           {t("mainChat.fleetSync.unlinkedTitle", { count: unlinkedHosts.length })}
         </Text>
@@ -286,6 +537,7 @@ const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
       <Text style={styles.unlinkedDescription}>
         {t("mainChat.fleetSync.unlinkedDescription", {
           count: unlinkedHosts.length,
+          mainHost: mainHostLabel,
           names,
         })}
       </Text>
@@ -302,11 +554,22 @@ const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
           size="sm"
           leftIcon={ThemedLink2}
           loading={syncing}
-          disabled={syncing}
+          disabled={busy}
           onPress={onSyncNow}
           testID="main-chat-fleet-sync-now"
         >
-          {t("mainChat.fleetSync.syncNowButton")}
+          {t("mainChat.fleetSync.syncNowButton", { count: unlinkedHosts.length })}
+        </Button>
+
+        <Button
+          variant="outline"
+          size="sm"
+          loading={savingScope}
+          disabled={busy}
+          onPress={onSetLocalOnly}
+          testID="main-chat-fleet-local-only"
+        >
+          {t("mainChat.fleetSync.localOnlyButton")}
         </Button>
 
         {hasManualOnly && hasAutoSyncable ? (
@@ -314,7 +577,7 @@ const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
             variant="outline"
             size="sm"
             leftIcon={ThemedSettings}
-            disabled={syncing}
+            disabled={busy}
             onPress={onOpenSettings}
             testID="main-chat-fleet-open-settings"
           >
@@ -322,7 +585,13 @@ const UnlinkedClientHostNotice = memo(function UnlinkedClientHostNotice({
           </Button>
         ) : null}
 
-        <Button variant="ghost" size="sm" onPress={onDismiss} testID="main-chat-fleet-dismiss">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onPress={onDismiss}
+          testID="main-chat-fleet-dismiss"
+        >
           {t("mainChat.fleetSync.dismissButton")}
         </Button>
       </View>
@@ -335,29 +604,58 @@ async function syncAutoCandidatesToMainDaemon(input: {
   client: DaemonClient;
   candidates: readonly UnlinkedClientHostCandidate[];
   fallbackError: string;
+  observedConnectedHosts?: readonly HostSummary[];
   refreshFleetHosts: (
     serverId: string,
     client: DaemonClient,
     options?: { forceRefresh?: boolean },
   ) => Promise<unknown>;
-}): Promise<{ syncedCount: number; lastError: string | null }> {
+}): Promise<{ syncedCount: number; alreadyLinkedCount: number; lastError: string | null }> {
   let syncedCount = 0;
+  let alreadyLinkedCount = 0;
   let lastError: string | null = null;
+
+  let existingHosts: readonly HostSummary[] = input.observedConnectedHosts ?? [];
+  if (typeof input.client.listHosts === "function") {
+    try {
+      const directory = await input.client.listHosts();
+      if (Array.isArray(directory?.hosts)) {
+        existingHosts = directory.hosts;
+      }
+    } catch {
+      // Fall back to observed hosts or deterministic sourceKey deduplication.
+    }
+  }
 
   for (const candidate of input.candidates) {
     if (!candidate.syncConnection) continue;
     try {
-      await input.client.addHost({
-        connection: candidate.syncConnection,
-        label: candidate.label,
+      const result = await syncHostRegistrationIdempotent({
+        client: input.client,
+        candidate: {
+          serverId: candidate.serverId,
+          label: candidate.label,
+          syncConnection: candidate.syncConnection,
+          targetDescriptions: buildExpectedTargetDescriptions(candidate.host),
+        },
+        existingHosts,
       });
-      syncedCount += 1;
+      if (result.error) {
+        lastError = result.error;
+      } else if (result.status === "already_linked") {
+        alreadyLinkedCount += 1;
+      } else {
+        syncedCount += 1;
+      }
     } catch (error) {
       lastError = error instanceof Error ? error.message : input.fallbackError;
     }
   }
 
-  if (syncedCount > 0 && typeof input.client.getMainChatFleetHosts === "function") {
+  if (
+    (syncedCount > 0 || alreadyLinkedCount > 0) &&
+    typeof input.client.getMainChatFleetHosts === "function"
+  ) {
     try {
       await input.refreshFleetHosts(input.serverId, input.client, { forceRefresh: true });
     } catch {
@@ -365,7 +663,7 @@ async function syncAutoCandidatesToMainDaemon(input: {
     }
   }
 
-  return { syncedCount, lastError };
+  return { syncedCount, alreadyLinkedCount, lastError };
 }
 
 export interface HostSyncBannerProps {
@@ -422,13 +720,70 @@ export const HostSyncBanner = memo(function HostSyncBanner({
     (state) => state.setDismissedFleetSyncNotice,
   );
   const refreshFleetHosts = useMainChatConversationsStore((state) => state.refreshFleetHosts);
+  const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
 
   const [expanded, setExpanded] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [savingScope, setSavingScope] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [observedConnectedHosts, setObservedConnectedHosts] = useState<readonly HostSummary[]>([]);
 
-  const fleetHosts = storeFleetHosts ?? overviewFleetHosts ?? EMPTY_FLEET_HOSTS;
+  useEffect(() => {
+    setObservedConnectedHosts([]);
+    if (
+      !serverId ||
+      !client ||
+      connectedHostsFeature === false ||
+      typeof client.observeHosts !== "function"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const observation = client.observeHosts();
+    const applyDirectory = (directory: HostDirectory, shouldRefreshFleet: boolean) => {
+      if (cancelled) return;
+      if (Array.isArray(directory?.hosts)) {
+        setObservedConnectedHosts(directory.hosts);
+      }
+      if (shouldRefreshFleet && typeof client.getMainChatFleetHosts === "function") {
+        void refreshFleetHosts(serverId, client, { forceRefresh: true }).catch(() => undefined);
+      }
+    };
+
+    const unsubscribe = observation.subscribe({
+      snapshot: (directory) => applyDirectory(directory, false),
+      update: (message) => {
+        if (message.type === "hosts.changed") {
+          applyDirectory(message.payload.directory, true);
+        }
+      },
+    });
+    void observation.ready
+      .then((directory) => applyDirectory(directory, false))
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      void observation.release().catch(() => undefined);
+    };
+  }, [client, connectedHostsFeature, refreshFleetHosts, serverId]);
+
+  const rawFleetHosts = storeFleetHosts ?? overviewFleetHosts ?? EMPTY_FLEET_HOSTS;
+  const fleetHosts = useMemo(
+    () => deduplicateFleetHostStatuses(rawFleetHosts, observedConnectedHosts),
+    [observedConnectedHosts, rawFleetHosts],
+  );
   const effectiveMainServerId = localServerId ?? serverId;
+  const mainHostLabel = useMemo(() => {
+    const localFleet = fleetHosts.find((host) => host.isLocal);
+    if (localFleet?.label.trim()) return localFleet.label.trim();
+    const matchedClient = clientHosts.find((host) => host.serverId === effectiveMainServerId);
+    if (matchedClient?.label.trim()) return matchedClient.label.trim();
+    return effectiveMainServerId ?? "";
+  }, [clientHosts, effectiveMainServerId, fleetHosts]);
+
   const effectiveFleetScope = useMemo(
     () =>
       storeFleetScope ??
@@ -443,8 +798,9 @@ export const HostSyncBanner = memo(function HostSyncBanner({
         fleetHosts,
         effectiveMainServerId,
         effectiveFleetScope,
+        observedConnectedHosts,
       ),
-    [clientHosts, effectiveFleetScope, effectiveMainServerId, fleetHosts],
+    [clientHosts, effectiveFleetScope, effectiveMainServerId, fleetHosts, observedConnectedHosts],
   );
 
   const onlineCount = useMemo(
@@ -486,6 +842,50 @@ export const HostSyncBanner = memo(function HostSyncBanner({
     setDismissedNotice(false, serverId);
   }, [serverId, setDismissedNotice]);
 
+  const handleSetLocalOnly = useCallback(() => {
+    if (!serverId || !client || savingScope) return;
+    setSavingScope(true);
+    setSyncError(null);
+    const applyLocalOnly = async () => {
+      try {
+        await updateSettings(
+          serverId,
+          {
+            fleetScope: {
+              mode: "local_only",
+              hostServerIds: effectiveFleetScope?.hostServerIds ?? [],
+            },
+          },
+          client,
+        );
+        if (typeof client.getMainChatFleetHosts === "function") {
+          try {
+            await refreshFleetHosts(serverId, client, { forceRefresh: true });
+          } catch {
+            // Fleet refresh failure does not undo the saved local_only scope.
+          }
+        }
+        toast.show(t("mainChat.fleetSync.localOnlySuccessToast"), { variant: "success" });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : t("mainChat.fleetSync.syncFailed");
+        setSyncError(message);
+        toast.error(message);
+      } finally {
+        setSavingScope(false);
+      }
+    };
+    void applyLocalOnly();
+  }, [
+    client,
+    effectiveFleetScope?.hostServerIds,
+    refreshFleetHosts,
+    savingScope,
+    serverId,
+    t,
+    toast,
+    updateSettings,
+  ]);
+
   const handleSyncNow = useCallback(() => {
     if (!serverId || syncing) return;
     const canCallAddHost =
@@ -508,18 +908,26 @@ export const HostSyncBanner = memo(function HostSyncBanner({
       client,
       candidates: autoSyncableHosts,
       fallbackError: t("mainChat.fleetSync.syncFailed"),
+      observedConnectedHosts,
       refreshFleetHosts,
     })
-      .then(({ syncedCount, lastError }) => {
-        const remainingCount = unlinkedHosts.length - syncedCount;
+      .then(({ syncedCount, alreadyLinkedCount, lastError }) => {
+        const handledCount = syncedCount + alreadyLinkedCount;
+        const remainingCount = unlinkedHosts.length - handledCount;
         if (syncedCount > 0 && remainingCount === 0) {
-          toast.show(t("mainChat.fleetSync.syncSuccessToast", { count: syncedCount }), {
-            variant: "success",
-          });
-        } else if (syncedCount > 0 && remainingCount > 0) {
+          toast.show(
+            t("mainChat.fleetSync.syncSuccessToast", {
+              count: syncedCount,
+              mainHost: mainHostLabel,
+            }),
+            { variant: "success" },
+          );
+        } else if (syncedCount === 0 && alreadyLinkedCount > 0 && remainingCount === 0) {
+          toast.show(t("mainChat.fleetSync.syncAlreadyLinkedToast"), { variant: "info" });
+        } else if (handledCount > 0 && remainingCount > 0) {
           toast.show(
             t("mainChat.fleetSync.syncPartialToast", {
-              synced: syncedCount,
+              synced: handledCount,
               remaining: remainingCount,
             }),
             { variant: "info" },
@@ -529,7 +937,7 @@ export const HostSyncBanner = memo(function HostSyncBanner({
           setSyncError(lastError);
           toast.error(lastError);
         }
-        return syncedCount;
+        return handledCount;
       })
       .finally(() => {
         setSyncing(false);
@@ -538,6 +946,8 @@ export const HostSyncBanner = memo(function HostSyncBanner({
     autoSyncableHosts,
     client,
     connectedHostsFeature,
+    mainHostLabel,
+    observedConnectedHosts,
     refreshFleetHosts,
     serverId,
     syncing,
@@ -627,7 +1037,7 @@ export const HostSyncBanner = memo(function HostSyncBanner({
                 </Text>
                 <StatusBadge
                   size="sm"
-                  variant="warning"
+                  variant="muted"
                   label={t("mainChat.fleetSync.readOnlyBadge")}
                 />
               </View>
@@ -638,12 +1048,15 @@ export const HostSyncBanner = memo(function HostSyncBanner({
 
       {unlinkedHosts.length > 0 && !dismissedNotice ? (
         <UnlinkedClientHostNotice
+          mainHostLabel={mainHostLabel}
           unlinkedHosts={unlinkedHosts}
           syncing={syncing}
+          savingScope={savingScope}
           syncError={syncError}
           hasAutoSyncable={autoSyncableHosts.length > 0}
           hasManualOnly={manualOnlyHosts.length > 0}
           onSyncNow={handleSyncNow}
+          onSetLocalOnly={handleSetLocalOnly}
           onOpenSettings={handleOpenSettings}
           onDismiss={handleDismiss}
         />
@@ -695,11 +1108,13 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[2],
     paddingVertical: 3,
     borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.statusWarningTint,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
   },
   unlinkedChipText: {
     fontSize: theme.fontSize.sm,
-    color: theme.colors.statusWarning,
+    color: theme.colors.foregroundMuted,
     fontWeight: theme.fontWeight.medium,
   },
   refreshButton: {
@@ -772,8 +1187,8 @@ const styles = StyleSheet.create((theme) => ({
   unlinkedBanner: {
     borderRadius: theme.borderRadius.md,
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.statusWarning,
-    backgroundColor: theme.colors.statusWarningTint,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
     padding: theme.spacing[3],
     gap: theme.spacing[1.5],
   },
@@ -785,12 +1200,12 @@ const styles = StyleSheet.create((theme) => ({
   unlinkedTitle: {
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.semibold,
-    color: theme.colors.statusWarning,
+    color: theme.colors.foreground,
     flex: 1,
   },
   unlinkedDescription: {
     fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
+    color: theme.colors.foregroundMuted,
     lineHeight: 18,
   },
   syncErrorText: {

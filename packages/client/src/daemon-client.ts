@@ -5484,6 +5484,10 @@ export class DaemonClient {
   async clearMainChat(
     options?: {
       mainAgentId?: string;
+      provider?: string;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
     },
     requestId?: string,
   ): Promise<MainChatClearResponsePayload> {
@@ -5492,6 +5496,10 @@ export class DaemonClient {
       message: {
         type: "main_chat.clear.request",
         ...(options?.mainAgentId ? { mainAgentId: options.mainAgentId } : {}),
+        ...(options?.provider ? { provider: options.provider } : {}),
+        ...(options?.model ? { model: options.model } : {}),
+        ...(options?.modeId ? { modeId: options.modeId } : {}),
+        ...(options?.thinkingOptionId ? { thinkingOptionId: options.thinkingOptionId } : {}),
       },
       timeout: 60000,
     });
@@ -5502,6 +5510,10 @@ export class DaemonClient {
       mainAgentId?: string;
       carryHandoffSummary?: boolean;
       title?: string;
+      provider?: string;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
     },
     requestId?: string,
   ): Promise<MainChatNewSessionResponsePayload> {
@@ -5514,6 +5526,10 @@ export class DaemonClient {
           ? { carryHandoffSummary: options.carryHandoffSummary }
           : {}),
         ...(options?.title ? { title: options.title } : {}),
+        ...(options?.provider ? { provider: options.provider } : {}),
+        ...(options?.model ? { model: options.model } : {}),
+        ...(options?.modeId ? { modeId: options.modeId } : {}),
+        ...(options?.thinkingOptionId ? { thinkingOptionId: options.thinkingOptionId } : {}),
       },
       timeout: 60000,
     });

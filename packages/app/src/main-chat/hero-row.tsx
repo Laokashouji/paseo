@@ -704,16 +704,16 @@ function useMainChatHeroActions(input: {
 
   const runPatrol = useCallback(() => {
     if (!targetServerId || !client || isPatrolling) return;
+    if (!existingAgentId) {
+      toast.show(t("mainChat.firstSetup.needSetupToast"), { variant: "info" });
+      router.push(buildMainChatRoute(targetServerId));
+      return;
+    }
     setIsPatrolling(true);
     void (async () => {
       try {
-        let mainAgentId = existingAgentId;
-        if (!mainAgentId) {
-          const ensured = await client.ensureMainChat();
-          mainAgentId = ensured.agentId ?? undefined;
-        }
         const result = await triggerPatrol(targetServerId, client, {
-          mainAgentId,
+          mainAgentId: existingAgentId,
           forceWakeup: true,
         });
         toast.show(result.summary, { variant: "success" });
