@@ -173,9 +173,29 @@ describe("interactive-cards protocol", () => {
 
     expect(isAllowedCardUrl("https://example.com/path")).toBe(true);
     expect(isAllowedCardUrl("paseo://agent/srv1/ag1")).toBe(true);
+    expect(isAllowedCardUrl("paseo://task/task_abcdef12")).toBe(true);
     expect(isAllowedCardUrl("paseo://file/src/index.ts")).toBe(true);
+    expect(isAllowedCardUrl("paseo://workspace/ws_1")).toBe(true);
     expect(isAllowedCardUrl("http://example.com")).toBe(false);
     expect(isAllowedCardUrl("paseo://exec/rm")).toBe(false);
+
+    expect(
+      validateInteractiveCardView({
+        fallback: "Open session or task",
+        sections: [
+          {
+            items: [
+              { type: "link", label: "Task", url: "paseo://task/task_abcdef12" },
+              {
+                type: "button",
+                label: "Inspect",
+                action: { kind: "open", id: "open-task", url: "paseo://task/task_abcdef12" },
+              },
+            ],
+          },
+        ],
+      }).ok,
+    ).toBe(true);
   });
 
   it("recognizes bare and MCP-prefixed interactive card tool names", () => {

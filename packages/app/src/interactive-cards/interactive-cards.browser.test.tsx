@@ -2,24 +2,37 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { fireEvent, within } from "@testing-library/dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
   computeInlineCardKey,
   type InteractiveCardView,
 } from "@getpaseo/protocol/interactive-cards";
+import type { MainChatOverview } from "@getpaseo/protocol/main-chat";
 import { i18n as testI18n } from "@/i18n/i18next";
+import { useMainChatDrawerStore } from "@/main-chat/drawer-store";
+import { overviewStoreKey, useMainChatOverviewStore } from "@/main-chat/overview-store";
+import { MainChatShellProvider } from "@/main-chat/shell-context";
+import { useSessionStore } from "@/stores/session-store";
 import { InteractiveCardContext, type InteractiveCardHostContextValue } from "./context";
 import { InteractiveInlineCardFence } from "./inline-fence";
 import { renderInteractiveToolCard } from "./live-card";
 import { applyAgentCardsSnapshot, resetInteractiveCardsStore } from "./store";
 
 void testI18n;
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const READ_ONLY_HOST: InteractiveCardHostContextValue = {
   serverId: "srv-1",
   agentId: "ag-3",
   client: null,
   interactive: false,
+};
+
+const MAIN_CHAT_SHELL_VALUE = {
+  inMainChatShell: true,
+  originRoute: "/main",
+  originTitle: "管家",
 };
 
 function TestHostProvider({
@@ -511,5 +524,133 @@ describe("Interactive cards (browser)", () => {
     expect(receipt).not.toBeNull();
     const receiptMount = mount(receipt!);
     expect(receiptMount.queries.getByTestId("interactive-live-card-view_update")).toBeTruthy();
+  });
+
+  it("routes paseo://agent/... and paseo://task/... links to the MainChat drawer while keeping paseo://file/... intact", async () => {
+    await page.viewport(1280, 820);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    useMainChatDrawerStore.getState().closeDrawer();
+    useSessionStore.setState({
+      sessions: {
+        "srv-1": {
+          hasHydratedAgents: true,
+          serverInfo: { hostname: "DevBox" },
+          agents: new Map([
+            [
+              "ag_12345678_worker",
+              {
+                id: "ag_12345678_worker",
+                workspaceId: "ws-1",
+                title: "Session Link Target",
+                status: "running",
+                cwd: "/repo/paseo-fork",
+              },
+            ],
+          ]),
+          agentDetails: new Map(),
+          workspaces: new Map(),
+        },
+      } as unknown as ReturnType<typeof useSessionStore.getState>["sessions"],
+    });
+    useMainChatOverviewStore.setState({
+      overviewsByKey: {
+        [overviewStoreKey("srv-1", "ag-main")]: {
+          plans: [],
+          tasks: [
+            {
+              id: "task_abcdef12_demo",
+              serverId: "srv-1",
+              activeAgentId: "ag_12345678_worker",
+              agentIds: ["ag_12345678_worker"],
+              workspaceId: "ws-1",
+              title: "Demo Task",
+              status: "in_progress",
+              cwd: "/repo/paseo-fork",
+            },
+          ],
+          decisions: [],
+          triages: [],
+          receipts: [],
+          reworks: [],
+          nextStepSuggestions: [],
+          settings: {
+            title: "管家",
+            style: "conservative",
+            capabilities: {
+              autoContinueManualErrors: true,
+              autoDelegateManualQuestions: false,
+              autoNudgeManualStalled: false,
+            },
+            stylePresets: [],
+            activeStylePresetId: "builtin_conservative",
+          },
+          patrol: { enabled: true, intervalMs: 60_000, lastRunAt: null, lastSignalCount: 0 },
+          compaction: null,
+        } as unknown as MainChatOverview,
+      },
+    });
+
+    const onOpenFilePath = vi.fn();
+    const view: InteractiveCardView = {
+      title: "Session Navigation",
+      fallback: "Open linked sessions",
+      sections: [
+        {
+          items: [
+            { type: "link", label: "Jump Agent Prefix", url: "paseo://agent/srv-1/ag_12345" },
+            {
+              type: "button",
+              label: "Jump Task Prefix",
+              action: { kind: "open", id: "open-task", url: "paseo://task/task_abc" },
+            },
+            { type: "link", label: "Jump File", url: "paseo://file/src/index.ts" },
+          ],
+        },
+      ],
+    };
+
+    const rawJson = JSON.stringify(view);
+    const hostValue = createTestHost({
+      serverId: "srv-1",
+      agentId: "ag-main",
+      interactive: false,
+      onOpenFilePath,
+    });
+
+    const { queries } = mount(
+      <MainChatShellProvider value={MAIN_CHAT_SHELL_VALUE}>
+        <TestHostProvider host={hostValue}>
+          <InteractiveInlineCardFence code={rawJson} />
+        </TestHostProvider>
+      </MainChatShellProvider>,
+    );
+
+    await act(async () => {
+      fireEvent.click(queries.getByText("Jump Agent Prefix"));
+    });
+    expect(useMainChatDrawerStore.getState().activeTarget).toMatchObject({
+      serverId: "srv-1",
+      agentId: "ag_12345678_worker",
+      workspaceId: "ws-1",
+    });
+
+    useMainChatDrawerStore.getState().closeDrawer();
+
+    await act(async () => {
+      fireEvent.click(queries.getByTestId("interactive-card-button-open-task"));
+    });
+    expect(useMainChatDrawerStore.getState().activeTarget).toMatchObject({
+      serverId: "srv-1",
+      agentId: "ag_12345678_worker",
+      taskId: "task_abcdef12_demo",
+    });
+
+    await act(async () => {
+      fireEvent.click(queries.getByText("Jump File"));
+    });
+    expect(onOpenFilePath).toHaveBeenCalledWith("src/index.ts");
+
+    useMainChatDrawerStore.getState().closeDrawer();
   });
 });

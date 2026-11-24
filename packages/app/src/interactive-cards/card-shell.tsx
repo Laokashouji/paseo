@@ -20,8 +20,9 @@ import type { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import { PressHighlight } from "@/components/ui/press-highlight";
+import { isMainChatSessionLink, useMainChatSessionLinkOpener } from "@/main-chat/session-link";
 import { openExternalUrl } from "@/utils/open-external-url";
-import { buildHostAgentDetailRoute, buildHostWorkspaceRoute } from "@/utils/host-routes";
+import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 import type { Theme } from "@/styles/theme";
 import { InteractiveCardContext, useCardMarkdownRenderer, useInteractiveCardHost } from "./context";
 import {
@@ -507,15 +508,21 @@ const CardSectionBlock = memo(function CardSectionBlock({
 function openInteractiveCardUrl(
   rawUrl: string,
   serverId: string,
+  openSessionLink: (url: string) => unknown,
   onOpenFilePath?: (path: string) => void,
 ): void {
-  if (!isAllowedCardUrl(rawUrl)) return;
-  if (/^https:\/\//i.test(rawUrl)) {
-    void openExternalUrl(rawUrl);
+  const trimmed = rawUrl.trim();
+  if (!isAllowedCardUrl(trimmed)) return;
+  if (/^https:\/\//i.test(trimmed)) {
+    void openExternalUrl(trimmed);
+    return;
+  }
+  if (isMainChatSessionLink(trimmed)) {
+    openSessionLink(trimmed);
     return;
   }
   try {
-    const parsed = new URL(rawUrl);
+    const parsed = new URL(trimmed);
     if (parsed.protocol.toLowerCase() !== "paseo:") return;
     const targetKind = parsed.hostname.toLowerCase();
     const parts = parsed.pathname
@@ -524,14 +531,6 @@ function openInteractiveCardUrl(
       .map((seg) => decodeURIComponent(seg));
     if (targetKind === "file" && parts.length >= 1) {
       onOpenFilePath?.(parts.join("/"));
-      return;
-    }
-    if (targetKind === "agent" && parts.length >= 2) {
-      router.push(buildHostAgentDetailRoute(parts[0]!, parts[1]!));
-      return;
-    }
-    if (targetKind === "agent" && parts.length === 1 && serverId) {
-      router.push(buildHostAgentDetailRoute(serverId, parts[0]!));
       return;
     }
     if (targetKind === "workspace" && parts.length >= 1 && serverId) {
@@ -804,9 +803,12 @@ function useCardShellHandlers(params: {
     pendingConfirm,
   } = params;
 
+  const openSessionLink = useMainChatSessionLinkOpener(serverId || null);
+
   const handleOpenUrl = useCallback(
-    (rawUrl: string) => openInteractiveCardUrl(rawUrl, serverId, host?.onOpenFilePath),
-    [host?.onOpenFilePath, serverId],
+    (rawUrl: string) =>
+      openInteractiveCardUrl(rawUrl, serverId, openSessionLink, host?.onOpenFilePath),
+    [host?.onOpenFilePath, openSessionLink, serverId],
   );
 
   const executeReplySubmission = useCallback(

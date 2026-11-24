@@ -842,7 +842,7 @@ export function extractFallbackFromRawCardJson(raw: string): string | null {
 // URL Policy, Normalization, and Semantic Validation
 // ============================================================================
 
-const ALLOWED_PASEO_HOSTS = new Set(["agent", "file", "workspace"]);
+const ALLOWED_PASEO_HOSTS = new Set(["agent", "task", "file", "workspace"]);
 
 export function isAllowedCardUrl(rawUrl: string): boolean {
   const trimmed = rawUrl.trim();
@@ -1069,7 +1069,7 @@ function collectAction(
     actionIds.add(action.id);
   }
   if (action.kind === "open" && !isAllowedCardUrl(action.url)) {
-    errors.push(`${path}.url: only https:// or paseo://agent|file|workspace URLs are allowed`);
+    errors.push(`${path}.url: only https:// or paseo://agent|task|file|workspace URLs are allowed`);
   }
   if (action.kind === "push_page" && !pageNames.has(action.page)) {
     errors.push(`${path}.page: target page "${action.page}" is not defined in pages`);
@@ -1173,7 +1173,7 @@ function validateSingleCardItem(
     case "link":
       if (!isAllowedCardUrl(item.url)) {
         errors.push(
-          `${itemPath}.url: only https:// or paseo://agent|file|workspace URLs are allowed`,
+          `${itemPath}.url: only https:// or paseo://agent|task|file|workspace URLs are allowed`,
         );
       }
       return;
