@@ -139,6 +139,10 @@ function inferBackgroundTurnKindFromTrigger(trigger: string): MainChatBackground
   }
   if (normalized.includes("briefing")) return "briefing";
   if (normalized.includes("compact")) return "compaction";
+  if (normalized.includes("routine")) return "routine";
+  if (normalized.includes("cache_keepalive") || normalized.includes("keepalive")) {
+    return "cache_keepalive";
+  }
   if (normalized.includes("recovery") || normalized.includes("missing_reply")) {
     return "recovery";
   }

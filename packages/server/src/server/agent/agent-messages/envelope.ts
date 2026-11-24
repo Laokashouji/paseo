@@ -2,6 +2,7 @@ import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
+  MAIN_CHAT_BACKGROUND_COMPACTION_MSG_PREFIX,
   MainChatBackgroundTurnKindSchema,
   type MainChatBackgroundTurnKind,
   type MainChatBackgroundTurnMetadata,
@@ -253,7 +254,35 @@ function inferMainChatBackgroundMetaFromBody(body: string): MainChatBackgroundTu
   if (trimmed.startsWith("📣 方向进展汇报") || trimmed.startsWith("【方向进度汇报】")) {
     return { foldable: true, kind: "relay" };
   }
+  if (trimmed.startsWith("⏰ 例行任务") || trimmed.startsWith("Schedule ")) {
+    return { foldable: true, kind: "routine" };
+  }
   return null;
+}
+
+function buildBackgroundCompactionMetaFromMessageId(
+  messageId: string | undefined,
+  text: string,
+): MainChatBackgroundTurnMetadata | null {
+  if (!messageId || !messageId.startsWith(MAIN_CHAT_BACKGROUND_COMPACTION_MSG_PREFIX)) {
+    return null;
+  }
+  const rest = messageId.slice(MAIN_CHAT_BACKGROUND_COMPACTION_MSG_PREFIX.length);
+  const trigger = rest.startsWith("idle_precompact") ? "idle_precompact" : "manual";
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  let label = "上下文压缩 · 原生 /compact";
+  if (trigger === "idle_precompact") {
+    label = "空闲自动压缩 · 原生 /compact";
+  } else if (trimmed.length > "/compact".length) {
+    label = `上下文压缩 · ${trimmed.slice(0, 48)}`;
+  }
+  return {
+    foldable: true,
+    kind: "compaction",
+    trigger,
+    label,
+    quiet: true,
+  };
 }
 
 function parseBooleanAttribute(raw: string | undefined): boolean | undefined {
@@ -312,6 +341,17 @@ function projectSystemNotificationToolCall(
 function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null {
   if (item.type !== "user_message") return item;
   const cleanedText = stripMainChatContextBlock(item.text);
+  const bgCompactionMeta = buildBackgroundCompactionMetaFromMessageId(
+    item.clientMessageId,
+    cleanedText,
+  );
+  if (bgCompactionMeta) {
+    return projectSystemNotificationToolCall(
+      `${item.clientMessageId}:${cleanedText}`,
+      cleanedText,
+      bgCompactionMeta,
+    );
+  }
   const message = parseAgentMessage(cleanedText);
   if (!message) {
     const attributed = parseAttributedBackgroundEnvelope(cleanedText);
@@ -331,6 +371,17 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
   }
   const { source } = message;
   if (!source) {
+    const wrappedBgCompactionMeta = buildBackgroundCompactionMetaFromMessageId(
+      message.id,
+      message.text,
+    );
+    if (wrappedBgCompactionMeta) {
+      return projectSystemNotificationToolCall(
+        `${message.id}:${message.text}`,
+        message.text,
+        wrappedBgCompactionMeta,
+      );
+    }
     const attributedLegacy = parseAttributedBackgroundEnvelope(message.text);
     if (attributedLegacy) {
       return projectSystemNotificationToolCall(

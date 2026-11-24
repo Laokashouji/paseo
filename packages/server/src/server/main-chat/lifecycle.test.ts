@@ -346,7 +346,7 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
     }
   });
 
-  it("triggers silent idle pre-compaction at >=80% real context window (uncapped beyond 400k), respects autoCompactEnabled, and yields to active user", async () => {
+  it("triggers silent idle pre-compaction honoring default 400k window cap and uncapped (null) mode, respects autoCompactEnabled, and yields to active user", async () => {
     let nowMs = 1_700_000_000_000;
     const harness = makeLifecycleHarness({
       supportsNativeCompact: true,
@@ -358,13 +358,28 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
     const { agentId: mainId } = await harness.service.ensureMainChat();
 
     const mainAgent = harness.agents.get(mainId)!;
-    // With a 1M model context window, 80% threshold is 800k — NOT capped at 400k.
+    // With default 400k window cap on a 1M model, effective window is 400k and 80% threshold is 320k.
+    mainAgent.lastUsage = {
+      contextWindowUsedTokens: 300_000,
+      contextWindowMaxTokens: 1_000_000,
+    };
+    const stateCapped = await harness.service.getCompactionState(mainId);
+    expect(stateCapped.contextWindowMaxTokens).toBe(1_000_000);
+    expect(stateCapped.windowCapTokens).toBe(400_000);
+    expect(stateCapped.effectiveWindowTokens).toBe(400_000);
+    expect(stateCapped.thresholdTokens).toBe(320_000);
+    expect(stateCapped.autoCompactEnabled).toBe(true);
+
+    // Disabling the cap (windowCapTokens: null) restores the full 1M model window (80% -> 800k).
+    await harness.service.updateSettings({ compaction: { windowCapTokens: null } });
     mainAgent.lastUsage = {
       contextWindowUsedTokens: 600_000,
       contextWindowMaxTokens: 1_000_000,
     };
     const state600k = await harness.service.getCompactionState(mainId);
     expect(state600k.contextWindowMaxTokens).toBe(1_000_000);
+    expect(state600k.windowCapTokens).toBeNull();
+    expect(state600k.effectiveWindowTokens).toBe(1_000_000);
     expect(state600k.thresholdTokens).toBe(800_000);
     expect(state600k.autoCompactEnabled).toBe(true);
 

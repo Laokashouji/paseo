@@ -116,6 +116,22 @@ import {
   MainChatMemoryWriteResponseSchema,
   MainChatMemoryDeleteRequestSchema,
   MainChatMemoryDeleteResponseSchema,
+  MainChatRoutinesListRequestSchema,
+  MainChatRoutinesListResponseSchema,
+  MainChatRoutinesCreateRequestSchema,
+  MainChatRoutinesCreateResponseSchema,
+  MainChatRoutinesPauseRequestSchema,
+  MainChatRoutinesPauseResponseSchema,
+  MainChatRoutinesResumeRequestSchema,
+  MainChatRoutinesResumeResponseSchema,
+  MainChatRoutinesRunOnceRequestSchema,
+  MainChatRoutinesRunOnceResponseSchema,
+  MainChatRoutinesDeleteRequestSchema,
+  MainChatRoutinesDeleteResponseSchema,
+  MainChatListSettingsProposalsRequestSchema,
+  MainChatListSettingsProposalsResponseSchema,
+  MainChatResolveSettingsProposalRequestSchema,
+  MainChatResolveSettingsProposalResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -4279,6 +4295,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatMemoryReadRequestSchema,
   MainChatMemoryWriteRequestSchema,
   MainChatMemoryDeleteRequestSchema,
+  MainChatRoutinesListRequestSchema,
+  MainChatRoutinesCreateRequestSchema,
+  MainChatRoutinesPauseRequestSchema,
+  MainChatRoutinesResumeRequestSchema,
+  MainChatRoutinesRunOnceRequestSchema,
+  MainChatRoutinesDeleteRequestSchema,
+  MainChatListSettingsProposalsRequestSchema,
+  MainChatResolveSettingsProposalRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8444,6 +8468,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatMemoryReadResponseSchema,
   MainChatMemoryWriteResponseSchema,
   MainChatMemoryDeleteResponseSchema,
+  MainChatRoutinesListResponseSchema,
+  MainChatRoutinesCreateResponseSchema,
+  MainChatRoutinesPauseResponseSchema,
+  MainChatRoutinesResumeResponseSchema,
+  MainChatRoutinesRunOnceResponseSchema,
+  MainChatRoutinesDeleteResponseSchema,
+  MainChatListSettingsProposalsResponseSchema,
+  MainChatResolveSettingsProposalResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

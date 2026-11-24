@@ -3,6 +3,7 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
 import {
+  MAIN_CHAT_BACKGROUND_COMPACTION_MSG_PREFIX,
   MAIN_CHAT_COMPACT_WINDOW_RATIO,
   MAIN_CHAT_CONVERSATION_ID_LABEL,
   MAIN_CHAT_FORMER_ROLE_VALUE,
@@ -16,6 +17,7 @@ import {
   MAIN_CHAT_TASK_QUIET_LABEL,
   MAIN_CHAT_TASK_RECORD_ID_LABEL,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
+  computeEffectiveCompactionWindowTokens,
   extractMainChatPermissionRuleCandidate,
   getMainChatTaskMetaFromLabels,
   isHostAllowedInFleetScope,
@@ -24,11 +26,13 @@ import {
   isMainChatLabels,
   isMainChatTasksQuiet,
   normalizeMainChatFleetScope,
+  resolveMainChatCompactionConfig,
   resolveMainChatFleetScope,
   resolveMainChatProfile,
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatApprovalClarification,
+  type MainChatCacheKeepaliveStatus,
   type MainChatCompactionReason,
   type MainChatCompactionState,
   type MainChatCompactionStatus,
@@ -38,6 +42,7 @@ import {
   type MainChatDecisionRecord,
   type MainChatFleetHostStatus,
   type MainChatFleetScope,
+  type MainChatLimitFallbackEvent,
   type MainChatMemoryFileContent,
   type MainChatMemoryFileMeta,
   type MainChatNightModeStatus,
@@ -49,10 +54,12 @@ import {
   type MainChatPlannedTask,
   type MainChatReceiptCheck,
   type MainChatReworkRecord,
+  type MainChatRoutineRecord,
   type MainChatRuleKind,
   type MainChatRuleSuggestion,
   type MainChatSettings,
   type MainChatSettingsPatch,
+  type MainChatSettingsProposalRecord,
   type MainChatStandingAuthorization,
   type MainChatStandingAuthorizationScope,
   type MainChatSupervisionSignal,
@@ -87,10 +94,16 @@ import type { StructuredGenerationDaemonConfig } from "../agent/structured-gener
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "../workspace-registry.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../worktree-session.js";
+import type { ScheduleService } from "../schedule/service.js";
+import type { ScheduleExecutionResult, StoredSchedule } from "@getpaseo/protocol/schedule/types";
 import { createAgentCommand, type EnsureWorkspaceForCreate } from "../agent/create-agent/create.js";
 import { sendPreparedPromptToAgent, sendPromptToAgent } from "../agent/agent-prompt.js";
 import { createPaseoWorktreeCommand } from "../worktree/commands.js";
 import { expandUserPath } from "../path-utils.js";
+import {
+  createMainChatCacheKeepaliveScheduler,
+  type CacheKeepaliveRunner,
+} from "./cache-keepalive.js";
 import {
   createMainChatContextSnapshotBuilder,
   type FleetSnapshotSummary,
@@ -107,12 +120,26 @@ import {
   type LeaderProgressReportInput,
   type LeaderProgressReportResult,
 } from "./leader-tools.js";
+import {
+  createMainChatLimitFallbackController,
+  type LimitFallbackSwitchOutcome,
+} from "./limit-fallback.js";
 import { assembleMainChatMemoryContext, createMainChatMemoryStore } from "./memory.js";
 import {
   buildMainChatCompactionCheckpointPrompt,
   buildMainChatHandoffSummary,
   buildWorkerInitialPrompt,
 } from "./prompts.js";
+import {
+  createMainChatRoutinesManager,
+  type CreateMainChatRoutineInput,
+  type ListMainChatRoutinesOptions,
+} from "./routines.js";
+import {
+  buildSettingsProposal,
+  type BuiltSettingsProposalResult,
+  type ProposeSettingsPatchInput,
+} from "./settings-proposal.js";
 import {
   buildDeterministicClarificationAnswer,
   buildNextStepSuggestions,
@@ -144,7 +171,6 @@ import type { RunSemanticTriageInput, SemanticTriageOutput } from "./triage.js";
 
 const MAX_REWORK_ROUNDS = 2;
 export const DEFAULT_MAIN_CHAT_COMPACT_THRESHOLD_TOKENS = 400_000;
-const DEFAULT_IDLE_PRECOMPACT_MIN_IDLE_MS = 10 * 60 * 1_000;
 const DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS = 60 * 1_000;
 
 export interface CreateMainChatPlanTaskInput {
@@ -254,6 +280,12 @@ export interface MainChatServiceDependencies {
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   finishSubscriptions?: () => FinishSubscriptions;
   terminalManager?: TerminalManager | null;
+  scheduleService?: Pick<
+    ScheduleService,
+    "list" | "inspect" | "create" | "pause" | "resume" | "runOnce" | "delete" | "rebindAgentTarget"
+  > | null;
+  cacheKeepaliveCheckIntervalMs?: number;
+  cacheKeepaliveRunner?: CacheKeepaliveRunner;
   logger: Logger;
   transientRetryDelayMs?: number;
   usageLimitRetryDelayMs?: number;
@@ -508,6 +540,41 @@ export interface MainChatService {
     purpose?: string;
     labels?: Record<string, string>;
   }): Promise<string | null>;
+  // Wave 2: Cache Keepalive, Routines, Settings Proposals, and Limit Fallbacks
+  getCacheKeepaliveStatus(): MainChatCacheKeepaliveStatus;
+  checkCacheKeepalive(): Promise<number>;
+  listRoutines(options?: ListMainChatRoutinesOptions): Promise<MainChatRoutineRecord[]>;
+  createRoutine(input: CreateMainChatRoutineInput): Promise<MainChatRoutineRecord>;
+  pauseRoutine(routineId: string): Promise<MainChatRoutineRecord>;
+  resumeRoutine(routineId: string): Promise<MainChatRoutineRecord>;
+  runRoutineOnce(routineId: string): Promise<MainChatRoutineRecord>;
+  deleteRoutine(routineId: string): Promise<{ deleted: boolean }>;
+  executeScheduledAgentRoutine(
+    schedule: StoredSchedule,
+    runId: string,
+  ): Promise<ScheduleExecutionResult | null>;
+  proposeSettingsPatch(
+    input: Omit<ProposeSettingsPatchInput, "mainAgentId"> & { mainAgentId?: string },
+  ): Promise<BuiltSettingsProposalResult>;
+  listSettingsProposals(options?: {
+    mainAgentId?: string;
+    includeResolved?: boolean;
+  }): Promise<MainChatSettingsProposalRecord[]>;
+  resolveSettingsProposal(input: {
+    proposalId: string;
+    decision: "approve" | "reject";
+    note?: string;
+  }): Promise<{
+    proposal: MainChatSettingsProposalRecord;
+    settings: MainChatSettings;
+    nightModeStatus: MainChatNightModeStatus;
+    cacheKeepaliveStatus: MainChatCacheKeepaliveStatus;
+  }>;
+  listRecentLimitFallbacks(limit?: number): Promise<MainChatLimitFallbackEvent[]>;
+  tryLimitFallbackForAgent(
+    agentId: string,
+    errorMessage: string,
+  ): Promise<LimitFallbackSwitchOutcome>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -563,10 +630,11 @@ function trimList(values: readonly string[] | undefined): string[] {
 export function createMainChatService(deps: MainChatServiceDependencies): MainChatService {
   const logger = deps.logger.child({ module: "main-chat" });
   const getNowMs = deps.now ?? (() => Date.now());
+  const explicitCompactThresholdTokens = deps.compactThresholdTokens;
   const configuredCompactThresholdTokens =
     deps.compactThresholdTokens ?? DEFAULT_MAIN_CHAT_COMPACT_THRESHOLD_TOKENS;
-  const idlePrecompactMinIdleMs =
-    deps.idlePrecompactMinIdleMs ?? DEFAULT_IDLE_PRECOMPACT_MIN_IDLE_MS;
+  const explicitIdlePrecompactMinIdleMs = deps.idlePrecompactMinIdleMs;
+  let idlePrecompactMinIdlePatched = false;
   const idlePrecompactCheckIntervalMs =
     deps.idlePrecompactCheckIntervalMs ?? DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS;
 
@@ -885,6 +953,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     },
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
+      await cacheKeepalive.tick();
+    },
+    onTryLimitFallback: async (agent, errorMessage) => {
+      const outcome = await limitFallbackController.handleTurnLimitError(agent, errorMessage);
+      return outcome.switched;
+    },
+    onAgentTurnCompleted: (agent) => {
+      limitFallbackController.handleTurnCompleted(agent);
+      cacheKeepalive.notifyTurnCompleted(agent.id);
     },
     isHostAllowed: isHostAllowedForSteward,
     getRemoteAgent: (serverId, agentId) => fleetBridge.getCachedRemoteAgent(serverId, agentId),
@@ -894,11 +971,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     onAgentEvent: (event) => {
       if (event.type === "agent_removed") {
         lastCumulativeCostByAgent.delete(event.agentId);
+        cacheKeepalive.clearAgent(event.agentId);
         return;
       }
       if (event.type !== "agent_stream" || event.event.type !== "turn_completed") return;
-      const usage = event.event.usage;
-      if (!usage) return;
       const live = deps.agentManager.getAgent(event.agentId);
       if (!live || live.internal || isMainChatLabels(live.labels)) return;
       const hasConversationLabel = Boolean(live.labels[MAIN_CHAT_CONVERSATION_ID_LABEL]);
@@ -906,6 +982,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       if (!hasConversationLabel && (!trackedConversation || trackedConversation.kind === "main")) {
         return;
       }
+      cacheKeepalive.notifyTurnCompleted(event.agentId);
+      const usage = event.event.usage;
+      if (!usage) return;
       recordAgentTurnTokenUsage({
         agentId: event.agentId,
         source: "direction",
@@ -933,6 +1012,97 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     permissionHardDeadlineMs: deps.permissionHardDeadlineMs,
     ruleSuggestionThreshold: deps.ruleSuggestionThreshold,
   });
+
+  const cacheKeepalive = createMainChatCacheKeepaliveScheduler({
+    agentManager: deps.agentManager,
+    agentStorage: deps.agentStorage,
+    store,
+    turnQueue,
+    getNightModeStatus: () => supervisor.getNightModeStatus(),
+    listActiveConversations: async () => {
+      await conversationManager.load();
+      return conversationManager.listConversations({ includeArchived: false });
+    },
+    findMainChatAgentId: async () => (await findExistingMainChat())?.agentId ?? null,
+    logger,
+    now: getNowMs,
+    checkIntervalMs: deps.cacheKeepaliveCheckIntervalMs,
+    runner: deps.cacheKeepaliveRunner,
+  });
+
+  const routinesManager = deps.scheduleService
+    ? createMainChatRoutinesManager({
+        scheduleService: deps.scheduleService,
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        store,
+        turnQueue,
+        ensureMainChatAgentId: async () => (await ensureMainChatInternal()).agentId,
+        findMainChatAgentId: async () => (await findExistingMainChat())?.agentId ?? null,
+        listConversations: async () => {
+          await conversationManager.load();
+          return conversationManager.listConversations({ includeArchived: false });
+        },
+        logger,
+        now: getNowMs,
+      })
+    : null;
+
+  const limitFallbackController = createMainChatLimitFallbackController({
+    agentManager: deps.agentManager,
+    providerSnapshotManager: deps.providerSnapshotManager,
+    store,
+    logger,
+    now: getNowMs,
+    switchMainCrossProvider: async (input) => {
+      const replaced = await replaceMainChatSession({
+        mode: "handoff",
+        requestedMainAgentId: input.mainAgentId,
+        carryHandoffSummary: true,
+        provider: input.targetProvider,
+        model: input.targetModel ?? undefined,
+      });
+      return { agentId: replaced.agentId };
+    },
+    resumeAfterFallback: async (input) => {
+      if (input.role === "main") {
+        await turnQueue.enqueueBackground({
+          mainAgentId: input.agentId,
+          dedupeKey: `limit_fallback:resume:${input.agentId}:${input.toSpec}`,
+          trigger: "limit_fallback",
+          priority: 12,
+          summary: `限额自动切换备用模型 ${input.fromSpec} → ${input.toSpec}`,
+          requeueOnPreempt: false,
+          buildPrompt: () =>
+            `【限额自动切换备用模型】上一个模型（${input.fromSpec}）触发限额（${input.reason}），系统已自动切换到备用模型 ${input.toSpec}。请简要向用户同步已无缝切换并继续推进未完成事项；若无待续动作请回复简短确认。`,
+        });
+        return;
+      }
+      await sendPromptToAgent({
+        agentId: input.agentId,
+        prompt: `上一个模型（${input.fromSpec}）触发限额，系统已自动切换到备用模型 ${input.toSpec}，请从之前中断的位置继续完成当前任务。`,
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        logger,
+        unarchive: false,
+      });
+    },
+    notifyLimitFallback: (event) => {
+      const fromSpec = formatProviderModel(event.fromProvider, event.fromModel);
+      const toSpec = formatProviderModel(event.toProvider, event.toModel);
+      supervisor.enqueueSignal({
+        kind: "usage_limit_wake",
+        urgency: "normal",
+        agentId: event.agentId,
+        serverId: deps.serverId,
+        title: event.agentRole === "main" ? store.getSettings().title : event.agentId,
+        summary: `触发限额，已自动切换备用模型 ${fromSpec} → ${toSpec}`,
+        fingerprintSeed: `limit_fallback:${event.id}`,
+        quiet: false,
+      });
+    },
+  });
+
   let ensureInFlight: Promise<EnsureMainChatResult> | null = null;
   let lifecycleLock: Promise<unknown> = Promise.resolve();
   let idlePrecompactTimer: ReturnType<typeof setInterval> | null = null;
@@ -2200,6 +2370,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
   }
 
+  function resolveEffectiveIdlePrecompactMinIdleMs(): number {
+    if (explicitIdlePrecompactMinIdleMs !== undefined && !idlePrecompactMinIdlePatched) {
+      return explicitIdlePrecompactMinIdleMs;
+    }
+    const cfg = resolveMainChatCompactionConfig(store.getSettings());
+    return Math.max(60_000, cfg.idlePrecompactMinIdleMin * 60_000);
+  }
+
   function resolveCompactThresholdTokens(
     mainAgentId: string,
     contextWindowMaxTokens?: number | null,
@@ -2208,20 +2386,47 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       contextWindowMaxTokens !== undefined
         ? contextWindowMaxTokens
         : resolveContextWindowMaxTokens(mainAgentId);
+    const compactionConfig = resolveMainChatCompactionConfig(store.getSettings());
     if (typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0) {
-      return Math.max(1_000, Math.floor(maxTokens * MAIN_CHAT_COMPACT_WINDOW_RATIO));
+      const effectiveWindow =
+        computeEffectiveCompactionWindowTokens(maxTokens, compactionConfig.windowCapTokens) ??
+        maxTokens;
+      return Math.max(1_000, Math.floor(effectiveWindow * MAIN_CHAT_COMPACT_WINDOW_RATIO));
+    }
+    if (explicitCompactThresholdTokens !== undefined) {
+      return Math.max(1_000, explicitCompactThresholdTokens);
+    }
+    if (compactionConfig.windowCapTokens !== null) {
+      return Math.max(
+        1_000,
+        Math.floor(compactionConfig.windowCapTokens * MAIN_CHAT_COMPACT_WINDOW_RATIO),
+      );
     }
     return Math.max(1_000, configuredCompactThresholdTokens);
   }
 
   function buildCompactionState(mainAgentId: string | null): MainChatCompactionState {
-    const autoCompactEnabled = isMainChatAutoCompactEnabled(store.getSettings());
+    const currentSettings = store.getSettings();
+    const autoCompactEnabled = isMainChatAutoCompactEnabled(currentSettings);
+    const compactionConfig = resolveMainChatCompactionConfig(currentSettings);
     if (!mainAgentId) {
+      let thresholdTokens = Math.max(1_000, configuredCompactThresholdTokens);
+      if (explicitCompactThresholdTokens !== undefined) {
+        thresholdTokens = Math.max(1_000, explicitCompactThresholdTokens);
+      } else if (compactionConfig.windowCapTokens !== null) {
+        thresholdTokens = Math.max(
+          1_000,
+          Math.floor(compactionConfig.windowCapTokens * MAIN_CHAT_COMPACT_WINDOW_RATIO),
+        );
+      }
       return {
         status: "idle",
         estimatedTokens: 0,
-        thresholdTokens: Math.max(1_000, configuredCompactThresholdTokens),
+        thresholdTokens,
         contextWindowMaxTokens: null,
+        windowCapTokens: compactionConfig.windowCapTokens,
+        effectiveWindowTokens: compactionConfig.windowCapTokens,
+        idlePrecompactMinIdleMin: compactionConfig.idlePrecompactMinIdleMin,
         autoCompactEnabled,
         lastCompactedAt: null,
         lastError: null,
@@ -2241,11 +2446,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       derivedStatus = "succeeded";
     }
     const contextWindowMaxTokens = resolveContextWindowMaxTokens(mainAgentId);
+    const effectiveWindowTokens = computeEffectiveCompactionWindowTokens(
+      contextWindowMaxTokens,
+      compactionConfig.windowCapTokens,
+    );
     return {
       status: derivedStatus,
       estimatedTokens: estimateContextTokens(mainAgentId),
       thresholdTokens: resolveCompactThresholdTokens(mainAgentId, contextWindowMaxTokens),
       contextWindowMaxTokens,
+      windowCapTokens: compactionConfig.windowCapTokens,
+      effectiveWindowTokens,
+      idlePrecompactMinIdleMin: compactionConfig.idlePrecompactMinIdleMin,
       autoCompactEnabled,
       lastCompactedAt: persisted.lastCompactedAt,
       lastError: persisted.lastError,
@@ -2330,6 +2542,80 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       return existingInFlight;
     }
 
+    async function executeNativeCompaction(
+      compactionReason: "manual" | "idle_precompact",
+      compactionInstructions: string | undefined,
+      activityId: string | null,
+    ): Promise<string> {
+      const trimmedInstructions = compactionInstructions?.trim() ?? "";
+      const command = trimmedInstructions ? `/compact ${trimmedInstructions}` : "/compact";
+      const bgCompactionMessageId = `${MAIN_CHAT_BACKGROUND_COMPACTION_MSG_PREFIX}${compactionReason}:${makeId("cmp")}`;
+      const dispatch = await sendPromptToAgent({
+        agentId: mainAgentId,
+        prompt: command,
+        messageId: bgCompactionMessageId,
+        runOptions: { clientMessageId: bgCompactionMessageId },
+        agentManager: deps.agentManager,
+        agentStorage: deps.agentStorage,
+        logger,
+        unarchive: false,
+      });
+      if (dispatch.disposition === "turn_started") {
+        await dispatch.started;
+        // Wait for the native /compact turn to settle while turnQueue still holds the background
+        // compaction slot so asynchronous events are never misclassified as a foreground turn.
+        if (
+          typeof deps.agentManager.waitForAgentEvent === "function" &&
+          deps.agentManager.hasInFlightRun(mainAgentId)
+        ) {
+          await deps.agentManager
+            .waitForAgentEvent(mainAgentId, { waitForActive: true })
+            .catch(() => undefined);
+        }
+      }
+      let summary = "已通过底层引擎原生 /compact 完成上下文压缩";
+      if (trimmedInstructions) {
+        summary = `已通过底层引擎原生 /compact 完成上下文压缩（${trimmedInstructions.slice(0, 80)}）`;
+      } else if (compactionReason === "idle_precompact") {
+        summary = "已完成后台空闲原生 /compact 上下文压缩";
+      }
+      if (
+        dispatch.disposition === "out_of_band" &&
+        typeof deps.agentManager.appendTimelineItem === "function"
+      ) {
+        const existingTimeline = deps.agentManager.getTimeline(mainAgentId);
+        const hasStructuredCompactionRow = existingTimeline.some(
+          (item) => item.type === "tool_call" && item.callId.includes(bgCompactionMessageId),
+        );
+        if (!hasStructuredCompactionRow) {
+          await deps.agentManager
+            .appendTimelineItem(mainAgentId, {
+              type: "tool_call",
+              callId: `paseo-system:compaction:${bgCompactionMessageId}`,
+              name: "heartbeat",
+              status: "completed",
+              error: null,
+              detail: { type: "plain_text", text: summary, icon: "sparkles" },
+              metadata: {
+                mainChatBackground: {
+                  foldable: true,
+                  kind: "compaction",
+                  trigger: compactionReason,
+                  label:
+                    compactionReason === "idle_precompact"
+                      ? "空闲自动压缩 · 原生 /compact"
+                      : "上下文压缩 · 原生 /compact",
+                  ...(activityId ? { activityId } : {}),
+                  quiet: true,
+                },
+              },
+            })
+            .catch(() => undefined);
+        }
+      }
+      return summary;
+    }
+
     const execute = async (): Promise<MainChatCompactResult> => {
       await store.load();
       if (signal?.aborted) {
@@ -2364,21 +2650,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         let summary: string;
         if (nativeSupported) {
           strategy = "native";
-          const command = instructions?.trim() ? `/compact ${instructions.trim()}` : "/compact";
-          const dispatch = await sendPromptToAgent({
-            agentId: mainAgentId,
-            prompt: command,
-            agentManager: deps.agentManager,
-            agentStorage: deps.agentStorage,
-            logger,
-            unarchive: false,
-          });
-          if (dispatch.disposition === "turn_started") {
-            await dispatch.started;
-          }
-          summary = instructions?.trim()
-            ? `已通过底层引擎原生 /compact 完成上下文压缩（${instructions.trim().slice(0, 80)}）`
-            : "已通过底层引擎原生 /compact 完成上下文压缩";
+          summary = await executeNativeCompaction(reason, instructions, activityId);
         } else {
           strategy = "handoff_summary";
           const fleet = await contextSnapshots.collectFleet(mainAgentId, { bypassCache: true });
@@ -2492,7 +2764,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       lastActivityAtMs > 0
         ? turnQueue.getIdleDurationMs(mainAgentId)
         : Math.max(0, getNowMs() - live.updatedAt.getTime());
-    if (idleMs < idlePrecompactMinIdleMs) {
+    if (idleMs < resolveEffectiveIdlePrecompactMinIdleMs()) {
       return { allowed: false, lastActivityAtMs };
     }
     const watermark = lastPrecompactWatermarkByAgent.get(mainAgentId);
@@ -2884,6 +3156,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
       const migratedChildAgents = await migrateChildAgents(oldMainAgentId, created.agentId);
       const storeMigration = await store.migrateMainAgent(oldMainAgentId, created.agentId);
+      await routinesManager
+        ?.rebindMainAgentRoutines(oldMainAgentId, created.agentId)
+        .catch((error) => {
+          logger.warn(
+            { err: error, oldMainAgentId, nextMainAgentId: created.agentId },
+            "Failed to rebind main-chat routines to replacement agent",
+          );
+        });
       await conversationManager.load();
       await conversationManager.rebindMainConversationAgent(created.agentId, created.workspaceId);
 
@@ -2892,6 +3172,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
 
       turnQueue.clearAgentState(oldMainAgentId);
+      cacheKeepalive.clearAgent(oldMainAgentId);
       compactionStatusByAgent.delete(oldMainAgentId);
       lastPrecompactWatermarkByAgent.delete(oldMainAgentId);
       contextSnapshots.resetDelta(oldMainAgentId);
@@ -3327,6 +3608,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
     turnQueue.start();
     supervisor.start();
+    cacheKeepalive.start();
     if (!idlePrecompactTimer && idlePrecompactCheckIntervalMs > 0) {
       idlePrecompactTimer = setInterval(() => {
         void checkIdlePrecompactionInternal().catch((error) => {
@@ -3339,6 +3621,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
   function stopActiveRuntime(): void {
     runtimeActive = false;
+    cacheKeepalive.stop();
     if (idlePrecompactTimer) {
       clearInterval(idlePrecompactTimer);
       idlePrecompactTimer = null;
@@ -3432,6 +3715,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     async updateSettings(patch) {
       await store.load();
+      if (patch.compaction?.idlePrecompactMinIdleMin !== undefined) {
+        idlePrecompactMinIdlePatched = true;
+      }
       const previous = store.getSettings();
       const previousScope = resolveMainChatFleetScope(previous, deps.serverId);
       const normalizedPatch: MainChatSettingsPatch = patch.fleetScope
@@ -3538,6 +3824,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return prompt;
       }
       supervisor.notifyUserForegroundActivity(getNowMs());
+      cacheKeepalive.notifyRealActivity(agentId);
       await turnQueue.preemptForForegroundUser(agentId);
       const handoffSummary = await store.consumePendingHandoffSummary(agentId);
       const snapshot = await contextSnapshots.buildTurnContext(agentId, {
@@ -3993,7 +4280,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         suppressedQuietBadgeCount: store.getSuppressedQuietBadgeCount(),
         pendingSignalCount: supervisor.getPendingSignalCount(),
         nightModeStatus: supervisor.getNightModeStatus(),
+        cacheKeepaliveStatus: cacheKeepalive.getStatus(),
         tokenUsage: store.getTokenUsageSummary(getNowMs()),
+        settingsProposals: store.listSettingsProposals({
+          mainAgentId: resolvedMainAgentId ?? undefined,
+          includeResolved: true,
+        }),
+        recentLimitFallbacks: store.listLimitFallbackEvents(12),
       };
     },
 
@@ -4610,6 +4903,187 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
 
       return null;
+    },
+
+    getCacheKeepaliveStatus() {
+      return cacheKeepalive.getStatus();
+    },
+
+    async checkCacheKeepalive() {
+      return cacheKeepalive.tick();
+    },
+
+    async listRoutines(options) {
+      if (!routinesManager) return [];
+      return routinesManager.listRoutines(options);
+    },
+
+    async createRoutine(input) {
+      if (!routinesManager) {
+        throw new Error("当前 Daemon 未启用定时任务调度服务，无法创建例行任务");
+      }
+      return routinesManager.createRoutine(input);
+    },
+
+    async pauseRoutine(routineId) {
+      if (!routinesManager) {
+        throw new Error("当前 Daemon 未启用定时任务调度服务");
+      }
+      return routinesManager.pauseRoutine(routineId);
+    },
+
+    async resumeRoutine(routineId) {
+      if (!routinesManager) {
+        throw new Error("当前 Daemon 未启用定时任务调度服务");
+      }
+      return routinesManager.resumeRoutine(routineId);
+    },
+
+    async runRoutineOnce(routineId) {
+      if (!routinesManager) {
+        throw new Error("当前 Daemon 未启用定时任务调度服务");
+      }
+      return routinesManager.runRoutineOnce(routineId);
+    },
+
+    async deleteRoutine(routineId) {
+      if (!routinesManager) {
+        throw new Error("当前 Daemon 未启用定时任务调度服务");
+      }
+      return routinesManager.deleteRoutine(routineId);
+    },
+
+    async executeScheduledAgentRoutine(schedule, runId) {
+      if (!routinesManager) return null;
+      return routinesManager.executeIfOwnedRoutine(schedule, runId);
+    },
+
+    async proposeSettingsPatch(input) {
+      await store.load();
+      const resolvedMainAgentId =
+        input.mainAgentId?.trim() || (await findExistingMainChat())?.agentId || "main";
+      const currentSettings = store.getSettings();
+      const built = buildSettingsProposal(
+        {
+          mainAgentId: resolvedMainAgentId,
+          title: input.title,
+          reason: input.reason,
+          changes: input.changes,
+        },
+        currentSettings,
+        new Date(getNowMs()).toISOString(),
+      );
+      if (built.proposal) {
+        await store.putSettingsProposal(built.proposal);
+        contextSnapshots.invalidateCache();
+      }
+      return built;
+    },
+
+    async listSettingsProposals(options) {
+      await store.load();
+      return store.listSettingsProposals(options);
+    },
+
+    async resolveSettingsProposal(input) {
+      await store.load();
+      const existing = store.getSettingsProposal(input.proposalId);
+      if (!existing) {
+        throw new Error(`找不到配置变更提案：${input.proposalId}`);
+      }
+      if (existing.status !== "pending") {
+        return {
+          proposal: existing,
+          settings: store.getSettings(),
+          nightModeStatus: supervisor.getNightModeStatus(),
+          cacheKeepaliveStatus: cacheKeepalive.getStatus(),
+        };
+      }
+
+      const nowIso = new Date(getNowMs()).toISOString();
+      const note = trimOptional(input.note);
+
+      if (input.decision === "reject") {
+        const rejected: MainChatSettingsProposalRecord = {
+          ...existing,
+          status: "rejected",
+          resolvedAt: nowIso,
+          resolvedNote: note,
+          appliedError: null,
+        };
+        await store.putSettingsProposal(rejected);
+        await store.appendActivity({
+          id: makeId("act"),
+          mainAgentId: existing.mainAgentId,
+          kind: "background_turn",
+          trigger: "settings_proposal_rejected",
+          summary: `用户拒绝配置变更提案「${existing.title}」`,
+          silent: true,
+          status: "completed",
+          createdAt: nowIso,
+          completedAt: nowIso,
+          detail: note,
+        });
+        contextSnapshots.invalidateCache();
+        return {
+          proposal: rejected,
+          settings: store.getSettings(),
+          nightModeStatus: supervisor.getNightModeStatus(),
+          cacheKeepaliveStatus: cacheKeepalive.getStatus(),
+        };
+      }
+
+      // Approve and apply validated patch.
+      if (existing.patch.compaction?.idlePrecompactMinIdleMin !== undefined) {
+        idlePrecompactMinIdlePatched = true;
+      }
+      const updatedSettings = await store.updateSettings(existing.patch);
+      supervisor.refreshSchedule();
+      syncRuntimeEnabledState();
+      contextSnapshots.invalidateCache();
+
+      const approved: MainChatSettingsProposalRecord = {
+        ...existing,
+        status: "approved",
+        resolvedAt: nowIso,
+        resolvedNote: note,
+        appliedError: null,
+      };
+      await store.putSettingsProposal(approved);
+      await store.appendActivity({
+        id: makeId("act"),
+        mainAgentId: existing.mainAgentId,
+        kind: "background_turn",
+        trigger: "settings_proposal_approved",
+        summary: `用户确认应用配置变更「${existing.title}」`,
+        silent: false,
+        status: "completed",
+        createdAt: nowIso,
+        completedAt: nowIso,
+        detail: existing.changes
+          .map((c) => `${c.label}: ${c.beforeDisplay} → ${c.afterDisplay}`)
+          .join("；"),
+      });
+
+      return {
+        proposal: approved,
+        settings: updatedSettings,
+        nightModeStatus: supervisor.getNightModeStatus(),
+        cacheKeepaliveStatus: cacheKeepalive.getStatus(),
+      };
+    },
+
+    async listRecentLimitFallbacks(limit) {
+      await store.load();
+      return store.listLimitFallbackEvents(limit);
+    },
+
+    async tryLimitFallbackForAgent(agentId, errorMessage) {
+      const live = deps.agentManager.getAgent(agentId);
+      if (!live) {
+        return { switched: false, reason: "agent_missing" };
+      }
+      return limitFallbackController.handleTurnLimitError(live, errorMessage);
     },
   };
 }

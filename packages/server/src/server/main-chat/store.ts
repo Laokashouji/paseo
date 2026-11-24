@@ -10,11 +10,13 @@ import {
   MainChatCompactionStrategySchema,
   MainChatDecisionRecordSchema,
   MainChatDurationSampleSchema,
+  MainChatLimitFallbackEventSchema,
   MainChatMetricsSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
   MainChatRuleSuggestionSchema,
   MainChatSessionTriageSchema,
+  MainChatSettingsProposalRecordSchema,
   MainChatSettingsSchema,
   MainChatStandingAuthorizationSchema,
   MainChatStandingAuthorizationScopeSchema,
@@ -34,7 +36,10 @@ import {
   isMainChatTasksQuiet,
   mergeMainChatSettings,
   resolveActiveMainChatStylePresetId,
+  resolveMainChatCacheKeepaliveConfig,
+  resolveMainChatCompactionConfig,
   resolveMainChatCustomPresets,
+  resolveMainChatLimitFallbacks,
   resolveMainChatNightMode,
   resolveMainChatProfile,
   type MainChatActivityEntry,
@@ -45,6 +50,7 @@ import {
   type MainChatCompactionStrategy,
   type MainChatDecisionRecord,
   type MainChatDurationSample,
+  type MainChatLimitFallbackEvent,
   type MainChatMetrics,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
@@ -52,6 +58,7 @@ import {
   type MainChatSessionTriage,
   type MainChatSettings,
   type MainChatSettingsPatch,
+  type MainChatSettingsProposalRecord,
   type MainChatStandingAuthorization,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
@@ -155,6 +162,8 @@ const PersistedMainChatStateSchema = z.object({
   lastWakeupAt: z.string().nullable().optional(),
   metrics: PartialMetricsSchema.optional(),
   tokenUsage: PersistedMainChatTokenUsageSchema.optional(),
+  settingsProposals: z.record(z.string(), MainChatSettingsProposalRecordSchema).optional(),
+  limitFallbackEvents: z.array(MainChatLimitFallbackEventSchema).optional(),
 });
 
 interface MainChatStateFile {
@@ -183,11 +192,15 @@ interface MainChatStateFile {
   lastWakeupAt: string | null;
   metrics: MainChatFullMetrics;
   tokenUsage: PersistedMainChatTokenUsage;
+  settingsProposals: Record<string, MainChatSettingsProposalRecord>;
+  limitFallbackEvents: MainChatLimitFallbackEvent[];
 }
 
 export const MAX_RETAINED_ACTIVITIES = 200;
 const MAX_RETAINED_PLANS = 200;
 const MAX_RETAINED_DECISIONS = 200;
+const MAX_RETAINED_SETTINGS_PROPOSALS = 100;
+const MAX_RETAINED_LIMIT_FALLBACK_EVENTS = 50;
 const MAX_RETAINED_TRIAGES = 200;
 const MAX_RETAINED_STANDING_AUTHS = 300;
 const MAX_RETAINED_RULE_SUGGESTIONS = 100;
@@ -393,6 +406,8 @@ function emptyState(): MainChatStateFile {
     lastWakeupAt: null,
     metrics: emptyMetrics(),
     tokenUsage: emptyPersistedTokenUsage(),
+    settingsProposals: {},
+    limitFallbackEvents: [],
   };
 }
 
@@ -607,6 +622,16 @@ export interface MainChatStore {
   recordTokenUsage(input: RecordMainChatTokenUsageInput): Promise<MainChatTokenUsageSummary>;
   getTokenUsageSummary(nowMs?: number): MainChatTokenUsageSummary;
   resetTokenUsage(): Promise<MainChatTokenUsageSummary>;
+  getSettingsProposal(proposalId: string): MainChatSettingsProposalRecord | null;
+  listSettingsProposals(options?: {
+    mainAgentId?: string;
+    includeResolved?: boolean;
+  }): MainChatSettingsProposalRecord[];
+  putSettingsProposal(
+    proposal: MainChatSettingsProposalRecord,
+  ): Promise<MainChatSettingsProposalRecord>;
+  appendLimitFallbackEvent(event: MainChatLimitFallbackEvent): Promise<MainChatLimitFallbackEvent>;
+  listLimitFallbackEvents(limit?: number): MainChatLimitFallbackEvent[];
 }
 
 function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
@@ -792,6 +817,9 @@ function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
     ...raw,
     enabled: isMainChatEnabled(raw),
     autoCompactEnabled: isMainChatAutoCompactEnabled(raw),
+    compaction: resolveMainChatCompactionConfig(raw),
+    cacheKeepalive: resolveMainChatCacheKeepaliveConfig(raw),
+    limitFallbacks: resolveMainChatLimitFallbacks(raw),
     mainBackgroundFolded: isMainChatBackgroundFolded(raw),
     mainTasksQuiet: isMainChatTasksQuiet(raw),
     profile: resolveMainChatProfile(raw),
@@ -846,6 +874,10 @@ function hydratePersistedState(
     lastWakeupAt: data.lastWakeupAt ?? null,
     metrics: { ...emptyMetrics(), ...data.metrics },
     tokenUsage: hydrateTokenUsage(data.tokenUsage, nowMs),
+    settingsProposals: data.settingsProposals ?? {},
+    limitFallbackEvents: (data.limitFallbackEvents ?? []).slice(
+      -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
+    ),
   };
 }
 
@@ -873,7 +905,17 @@ export function createMainChatStore(
     const nowMs = getNowMs();
     pruneMapByTimestamp(state.plans, MAX_RETAINED_PLANS, (entry) => entry.createdAt);
     pruneMapByTimestamp(state.decisions, MAX_RETAINED_DECISIONS, (entry) => entry.createdAt);
+    pruneMapByTimestamp(
+      state.settingsProposals,
+      MAX_RETAINED_SETTINGS_PROPOSALS,
+      (entry) => entry.createdAt,
+    );
     pruneMapByTimestamp(state.triages, MAX_RETAINED_TRIAGES, (entry) => entry.updatedAt);
+    if (state.limitFallbackEvents.length > MAX_RETAINED_LIMIT_FALLBACK_EVENTS) {
+      state.limitFallbackEvents = state.limitFallbackEvents.slice(
+        -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
+      );
+    }
     state.tasks = pruneTaskRecordList(state.tasks, MAX_RETAINED_TASKS);
     state.durationSamples = pruneDurationSamples(state.durationSamples, nowMs);
     if (state.receipts.length > MAX_RETAINED_RECEIPTS) {
@@ -1199,6 +1241,11 @@ export function createMainChatStore(
         if (decision.mainAgentId === fromMainAgentId) {
           state.decisions[decisionId] = { ...decision, mainAgentId: toMainAgentId };
           migratedDecisions += 1;
+        }
+      }
+      for (const [proposalId, proposal] of Object.entries(state.settingsProposals)) {
+        if (proposal.mainAgentId === fromMainAgentId) {
+          state.settingsProposals[proposalId] = { ...proposal, mainAgentId: toMainAgentId };
         }
       }
       state.receipts = state.receipts.map((receipt) => {
@@ -1689,6 +1736,56 @@ export function createMainChatStore(
       state.tokenUsage = emptyPersistedTokenUsage();
       await persist();
       return buildTokenUsageSummary(state.tokenUsage, getNowMs());
+    },
+
+    getSettingsProposal(proposalId) {
+      const entry = state.settingsProposals[proposalId];
+      return entry ? { ...entry, changes: [...entry.changes] } : null;
+    },
+
+    listSettingsProposals(options) {
+      const includeResolved = options?.includeResolved !== false;
+      const list = Object.values(state.settingsProposals).filter((entry) => {
+        if (options?.mainAgentId && entry.mainAgentId !== options.mainAgentId) return false;
+        if (!includeResolved && entry.status !== "pending") return false;
+        return true;
+      });
+      list.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const cloned: MainChatSettingsProposalRecord[] = [];
+      for (const entry of list) {
+        cloned.push({ ...entry, changes: [...entry.changes] });
+      }
+      return cloned;
+    },
+
+    async putSettingsProposal(proposal) {
+      state.settingsProposals[proposal.id] = {
+        ...proposal,
+        changes: [...proposal.changes],
+      };
+      await persist();
+      return { ...proposal, changes: [...proposal.changes] };
+    },
+
+    async appendLimitFallbackEvent(event) {
+      state.limitFallbackEvents.push({ ...event });
+      if (state.limitFallbackEvents.length > MAX_RETAINED_LIMIT_FALLBACK_EVENTS) {
+        state.limitFallbackEvents = state.limitFallbackEvents.slice(
+          -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
+        );
+      }
+      await persist();
+      return { ...event };
+    },
+
+    listLimitFallbackEvents(limit = 20) {
+      const clamped = Math.max(1, Math.min(MAX_RETAINED_LIMIT_FALLBACK_EVENTS, Math.trunc(limit)));
+      const recent = state.limitFallbackEvents.slice(-clamped).toReversed();
+      const cloned: MainChatLimitFallbackEvent[] = [];
+      for (const entry of recent) {
+        cloned.push({ ...entry });
+      }
+      return cloned;
     },
   };
 }

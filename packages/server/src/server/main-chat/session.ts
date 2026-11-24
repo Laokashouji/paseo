@@ -39,6 +39,14 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.memory_read.request" }
   | { type: "main_chat.memory_write.request" }
   | { type: "main_chat.memory_delete.request" }
+  | { type: "main_chat.routines_list.request" }
+  | { type: "main_chat.routines_create.request" }
+  | { type: "main_chat.routines_pause.request" }
+  | { type: "main_chat.routines_resume.request" }
+  | { type: "main_chat.routines_run_once.request" }
+  | { type: "main_chat.routines_delete.request" }
+  | { type: "main_chat.list_settings_proposals.request" }
+  | { type: "main_chat.resolve_settings_proposal.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -80,6 +88,14 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.memory_read.request",
   "main_chat.memory_write.request",
   "main_chat.memory_delete.request",
+  "main_chat.routines_list.request",
+  "main_chat.routines_create.request",
+  "main_chat.routines_pause.request",
+  "main_chat.routines_resume.request",
+  "main_chat.routines_run_once.request",
+  "main_chat.routines_delete.request",
+  "main_chat.list_settings_proposals.request",
+  "main_chat.resolve_settings_proposal.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -281,6 +297,38 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
     type: "main_chat.memory_delete.response",
     payload: { requestId: msg.requestId, deleted: false, error },
   }),
+  "main_chat.routines_list.request": (msg, error) => ({
+    type: "main_chat.routines_list.response",
+    payload: { requestId: msg.requestId, routines: [], error },
+  }),
+  "main_chat.routines_create.request": (msg, error) => ({
+    type: "main_chat.routines_create.response",
+    payload: { requestId: msg.requestId, routine: null, error },
+  }),
+  "main_chat.routines_pause.request": (msg, error) => ({
+    type: "main_chat.routines_pause.response",
+    payload: { requestId: msg.requestId, routine: null, error },
+  }),
+  "main_chat.routines_resume.request": (msg, error) => ({
+    type: "main_chat.routines_resume.response",
+    payload: { requestId: msg.requestId, routine: null, error },
+  }),
+  "main_chat.routines_run_once.request": (msg, error) => ({
+    type: "main_chat.routines_run_once.response",
+    payload: { requestId: msg.requestId, routine: null, error },
+  }),
+  "main_chat.routines_delete.request": (msg, error) => ({
+    type: "main_chat.routines_delete.response",
+    payload: { requestId: msg.requestId, routineId: msg.routineId, deleted: false, error },
+  }),
+  "main_chat.list_settings_proposals.request": (msg, error) => ({
+    type: "main_chat.list_settings_proposals.response",
+    payload: { requestId: msg.requestId, proposals: [], error },
+  }),
+  "main_chat.resolve_settings_proposal.request": (msg, error) => ({
+    type: "main_chat.resolve_settings_proposal.response",
+    payload: { requestId: msg.requestId, proposal: null, settings: null, error },
+  }),
 };
 
 function sendUnconfiguredError(msg: MainChatSessionMessage, send: SendFn): void {
@@ -480,9 +528,16 @@ async function handleStewardConfigMessages(
     try {
       const settings = await service.getSettings();
       const nightModeStatus = service.getNightModeStatus();
+      const cacheKeepaliveStatus = service.getCacheKeepaliveStatus();
       send({
         type: "main_chat.get_settings.response",
-        payload: { requestId: msg.requestId, settings, nightModeStatus, error: null },
+        payload: {
+          requestId: msg.requestId,
+          settings,
+          nightModeStatus,
+          cacheKeepaliveStatus,
+          error: null,
+        },
       });
     } catch (error) {
       send({
@@ -497,9 +552,16 @@ async function handleStewardConfigMessages(
     try {
       const settings = await service.updateSettings(msg.patch);
       const nightModeStatus = service.getNightModeStatus();
+      const cacheKeepaliveStatus = service.getCacheKeepaliveStatus();
       send({
         type: "main_chat.update_settings.response",
-        payload: { requestId: msg.requestId, settings, nightModeStatus, error: null },
+        payload: {
+          requestId: msg.requestId,
+          settings,
+          nightModeStatus,
+          cacheKeepaliveStatus,
+          error: null,
+        },
       });
     } catch (error) {
       send({
@@ -1325,6 +1387,201 @@ async function handleMemoryDelete(
   }
 }
 
+async function handleRoutinesList(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_list.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const routines = await service.listRoutines({
+      conversationId: msg.conversationId,
+      includeCompleted: msg.includeCompleted,
+    });
+    send({
+      type: "main_chat.routines_list.response",
+      payload: { requestId: msg.requestId, routines, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_list.response",
+      payload: { requestId: msg.requestId, routines: [], error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRoutinesCreate(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_create.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const routine = await service.createRoutine({
+      name: msg.name,
+      prompt: msg.prompt,
+      kind: msg.kind,
+      cadence: msg.cadence,
+      runAt: msg.runAt,
+      delayMinutes: msg.delayMinutes,
+      conversationId: msg.conversationId,
+      maxRuns: msg.maxRuns,
+      expiresAt: msg.expiresAt,
+      runOnCreate: msg.runOnCreate,
+    });
+    send({
+      type: "main_chat.routines_create.response",
+      payload: { requestId: msg.requestId, routine, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_create.response",
+      payload: { requestId: msg.requestId, routine: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRoutinesPause(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_pause.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const routine = await service.pauseRoutine(msg.routineId);
+    send({
+      type: "main_chat.routines_pause.response",
+      payload: { requestId: msg.requestId, routine, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_pause.response",
+      payload: { requestId: msg.requestId, routine: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRoutinesResume(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_resume.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const routine = await service.resumeRoutine(msg.routineId);
+    send({
+      type: "main_chat.routines_resume.response",
+      payload: { requestId: msg.requestId, routine, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_resume.response",
+      payload: { requestId: msg.requestId, routine: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRoutinesRunOnce(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_run_once.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const routine = await service.runRoutineOnce(msg.routineId);
+    send({
+      type: "main_chat.routines_run_once.response",
+      payload: { requestId: msg.requestId, routine, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_run_once.response",
+      payload: { requestId: msg.requestId, routine: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleRoutinesDelete(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.routines_delete.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.deleteRoutine(msg.routineId);
+    send({
+      type: "main_chat.routines_delete.response",
+      payload: {
+        requestId: msg.requestId,
+        routineId: msg.routineId,
+        deleted: result.deleted,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.routines_delete.response",
+      payload: {
+        requestId: msg.requestId,
+        routineId: msg.routineId,
+        deleted: false,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleListSettingsProposals(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.list_settings_proposals.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const proposals = await service.listSettingsProposals({
+      mainAgentId: msg.mainAgentId,
+      includeResolved: msg.includeResolved,
+    });
+    send({
+      type: "main_chat.list_settings_proposals.response",
+      payload: { requestId: msg.requestId, proposals, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_settings_proposals.response",
+      payload: { requestId: msg.requestId, proposals: [], error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleResolveSettingsProposal(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.resolve_settings_proposal.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.resolveSettingsProposal({
+      proposalId: msg.proposalId,
+      decision: msg.decision,
+      note: msg.note,
+    });
+    send({
+      type: "main_chat.resolve_settings_proposal.response",
+      payload: {
+        requestId: msg.requestId,
+        proposal: result.proposal,
+        settings: result.settings,
+        nightModeStatus: result.nightModeStatus,
+        cacheKeepaliveStatus: result.cacheKeepaliveStatus,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.resolve_settings_proposal.response",
+      payload: {
+        requestId: msg.requestId,
+        proposal: null,
+        settings: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -1362,6 +1619,14 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.memory_read.request": handleMemoryRead,
   "main_chat.memory_write.request": handleMemoryWrite,
   "main_chat.memory_delete.request": handleMemoryDelete,
+  "main_chat.routines_list.request": handleRoutinesList,
+  "main_chat.routines_create.request": handleRoutinesCreate,
+  "main_chat.routines_pause.request": handleRoutinesPause,
+  "main_chat.routines_resume.request": handleRoutinesResume,
+  "main_chat.routines_run_once.request": handleRoutinesRunOnce,
+  "main_chat.routines_delete.request": handleRoutinesDelete,
+  "main_chat.list_settings_proposals.request": handleListSettingsProposals,
+  "main_chat.resolve_settings_proposal.request": handleResolveSettingsProposal,
 };
 
 export async function handleMainChatSessionMessage(

@@ -284,6 +284,14 @@ const INBOUND_PERMISSION = {
   "main_chat.memory_read.request": "workspace.read",
   "main_chat.memory_write.request": ["workspace.write", "hub.execute"],
   "main_chat.memory_delete.request": ["workspace.write", "hub.execute"],
+  "main_chat.routines_list.request": "workspace.read",
+  "main_chat.routines_create.request": ["workspace.write", "hub.execute"],
+  "main_chat.routines_pause.request": ["workspace.write", "hub.execute"],
+  "main_chat.routines_resume.request": ["workspace.write", "hub.execute"],
+  "main_chat.routines_run_once.request": ["workspace.write", "hub.execute"],
+  "main_chat.routines_delete.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_settings_proposals.request": "workspace.read",
+  "main_chat.resolve_settings_proposal.request": ["workspace.write", "hub.execute"],
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -587,6 +595,14 @@ const OUTBOUND_PERMISSION = {
   "main_chat.memory_read.response": "workspace.read",
   "main_chat.memory_write.response": ["workspace.write", "hub.execute"],
   "main_chat.memory_delete.response": ["workspace.write", "hub.execute"],
+  "main_chat.routines_list.response": "workspace.read",
+  "main_chat.routines_create.response": ["workspace.write", "hub.execute"],
+  "main_chat.routines_pause.response": ["workspace.write", "hub.execute"],
+  "main_chat.routines_resume.response": ["workspace.write", "hub.execute"],
+  "main_chat.routines_run_once.response": ["workspace.write", "hub.execute"],
+  "main_chat.routines_delete.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_settings_proposals.response": "workspace.read",
+  "main_chat.resolve_settings_proposal.response": ["workspace.write", "hub.execute"],
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

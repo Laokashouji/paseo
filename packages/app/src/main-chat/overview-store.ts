@@ -8,6 +8,7 @@ import type {
   MainChatReceiptCheck,
   MainChatReviewTaskResponsePayload,
   MainChatRuleKind,
+  MainChatSettingsProposalRecord,
   MainChatTaskRecord,
   MainChatTaskReviewVerdict,
 } from "@getpaseo/protocol/main-chat";
@@ -25,6 +26,7 @@ export interface MainChatActiveAgentOverride {
 interface MainChatOverviewStoreState {
   overviewsByKey: Record<string, MainChatOverview | undefined>;
   decisionsByKey: Record<string, MainChatDecisionRecord | undefined>;
+  settingsProposalsByKey: Record<string, MainChatSettingsProposalRecord | undefined>;
   activeAgentOverrideByServerId: Record<string, MainChatActiveAgentOverride | undefined>;
   setActiveAgentOverride: (serverId: string, override: MainChatActiveAgentOverride) => void;
   clearActiveAgentOverride: (serverId: string) => void;
@@ -46,6 +48,12 @@ interface MainChatOverviewStoreState {
     input: { decisionId: string; optionId?: string; answer: string },
     client: DaemonClient,
   ) => Promise<MainChatDecisionRecord>;
+  resolveSettingsProposal: (
+    serverId: string,
+    mainAgentId: string,
+    input: { proposalId: string; decision: "approve" | "reject"; note?: string },
+    client: DaemonClient,
+  ) => Promise<MainChatSettingsProposalRecord>;
   addPermissionRule: (
     serverId: string,
     mainAgentId: string,
@@ -101,6 +109,10 @@ export function decisionStoreKey(serverId: string, decisionId: string): string {
   return `${serverId}:${decisionId}`;
 }
 
+export function settingsProposalStoreKey(serverId: string, proposalId: string): string {
+  return `${serverId}:${proposalId}`;
+}
+
 function indexDecisions(
   serverId: string,
   decisions: readonly MainChatDecisionRecord[],
@@ -108,6 +120,17 @@ function indexDecisions(
   const map: Record<string, MainChatDecisionRecord> = {};
   for (const decision of decisions) {
     map[decisionStoreKey(serverId, decision.id)] = decision;
+  }
+  return map;
+}
+
+function indexSettingsProposals(
+  serverId: string,
+  proposals: readonly MainChatSettingsProposalRecord[] | undefined,
+): Record<string, MainChatSettingsProposalRecord> {
+  const map: Record<string, MainChatSettingsProposalRecord> = {};
+  for (const proposal of proposals ?? []) {
+    map[settingsProposalStoreKey(serverId, proposal.id)] = proposal;
   }
   return map;
 }
@@ -134,6 +157,7 @@ function replacePlanInList(
 export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set) => ({
   overviewsByKey: {},
   decisionsByKey: {},
+  settingsProposalsByKey: {},
   activeAgentOverrideByServerId: {},
 
   setActiveAgentOverride(serverId, override) {
@@ -180,11 +204,17 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
     if (overview.settings) {
       useMainChatSettingsStore
         .getState()
-        .hydrateSettings(serverId, overview.settings, overview.nightModeStatus);
+        .hydrateSettings(
+          serverId,
+          overview.settings,
+          overview.nightModeStatus,
+          overview.cacheKeepaliveStatus,
+        );
     }
-    if (overview.nightModeStatus || overview.tokenUsage) {
+    if (overview.nightModeStatus || overview.cacheKeepaliveStatus || overview.tokenUsage) {
       useMainChatSettingsStore.getState().hydrateTelemetry(serverId, {
         nightModeStatus: overview.nightModeStatus,
+        cacheKeepaliveStatus: overview.cacheKeepaliveStatus,
         tokenUsage: overview.tokenUsage,
       });
     }
@@ -199,6 +229,10 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
       decisionsByKey: {
         ...state.decisionsByKey,
         ...indexDecisions(serverId, overview.decisions),
+      },
+      settingsProposalsByKey: {
+        ...state.settingsProposalsByKey,
+        ...indexSettingsProposals(serverId, overview.settingsProposals),
       },
     }));
     return overview;
@@ -275,6 +309,63 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
         decisionsByKey: {
           ...state.decisionsByKey,
           [decisionStoreKey(serverId, updated.id)]: updated,
+        },
+        ...(nextOverview
+          ? {
+              overviewsByKey: {
+                ...state.overviewsByKey,
+                [key]: nextOverview,
+              },
+            }
+          : {}),
+      };
+    });
+    return updated;
+  },
+
+  async resolveSettingsProposal(serverId, mainAgentId, input, client) {
+    const response = await client.resolveMainChatSettingsProposal(input);
+    if (response.error || !response.proposal) {
+      throw new Error(response.error ?? "Failed to resolve settings proposal");
+    }
+    const updated = response.proposal;
+    if (response.settings) {
+      useMainChatSettingsStore
+        .getState()
+        .hydrateSettings(
+          serverId,
+          response.settings,
+          response.nightModeStatus,
+          response.cacheKeepaliveStatus,
+        );
+    }
+    const key = overviewStoreKey(serverId, mainAgentId);
+    set((state) => {
+      const existingOverview = state.overviewsByKey[key];
+      const existingProposals = existingOverview?.settingsProposals;
+      let nextProposals: MainChatSettingsProposalRecord[];
+      if (!existingProposals) {
+        nextProposals = [updated];
+      } else if (existingProposals.some((item) => item.id === updated.id)) {
+        nextProposals = existingProposals.map((item) => (item.id === updated.id ? updated : item));
+      } else {
+        nextProposals = [updated, ...existingProposals];
+      }
+      const nextOverview = existingOverview
+        ? {
+            ...existingOverview,
+            settingsProposals: nextProposals,
+            ...(response.settings ? { settings: response.settings } : {}),
+            ...(response.nightModeStatus ? { nightModeStatus: response.nightModeStatus } : {}),
+            ...(response.cacheKeepaliveStatus
+              ? { cacheKeepaliveStatus: response.cacheKeepaliveStatus }
+              : {}),
+          }
+        : existingOverview;
+      return {
+        settingsProposalsByKey: {
+          ...state.settingsProposalsByKey,
+          [settingsProposalStoreKey(serverId, updated.id)]: updated,
         },
         ...(nextOverview
           ? {
