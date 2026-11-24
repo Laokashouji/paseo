@@ -1,6 +1,7 @@
 import { MAIN_CHAT_DEFAULT_TITLE } from "@getpaseo/protocol/main-chat";
 import { usePathname } from "expo-router";
 import { useCallback } from "react";
+import { useWindowDimensions } from "react-native";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useSessionStore } from "@/stores/session-store";
 import { buildMainChatRoute, isMainChatPathname } from "@/utils/host-routes";
@@ -86,8 +87,20 @@ export function openMainChatTaskTarget(input: OpenMainChatTaskTargetInput): Open
   return "full-page";
 }
 
+const COMPACT_BREAKPOINT_MAX_WIDTH = 600;
+
+/**
+ * Uses Unistyles' reactive compact breakpoint and honors live `< 600px` (`md`) viewport widths
+ * when the test stub leaves `rt.breakpoint` undefined (e.g., Chromium viewport resizing tests).
+ */
+export function useIsCompactMainChatLayout(): boolean {
+  const compactFromBreakpoint = useIsCompactFormFactor();
+  const { width } = useWindowDimensions();
+  return compactFromBreakpoint || (width > 0 && width < COMPACT_BREAKPOINT_MAX_WIDTH);
+}
+
 export function useOpenMainChatTaskTarget() {
-  const isCompact = useIsCompactFormFactor();
+  const isCompact = useIsCompactMainChatLayout();
   const pathname = usePathname();
   const shellContext = useMainChatShellContext();
 

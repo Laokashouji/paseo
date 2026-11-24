@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Maximize2,
   Minimize2,
@@ -41,15 +42,17 @@ import type { Theme } from "@/styles/theme";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
 import {
   buildMainChatActionBarModel,
+  selectCompactDockEntries,
   type ActionBarBucketKey,
   type ActionBarLiveAgentSnapshot,
   type ActionBarNeedsYouItem,
   type ActionBarPendingPermissionInput,
   type ActionBarTaskItem,
+  type CompactDockEntry,
 } from "./action-bar-model";
 import { ChildPermissionWrapper } from "./child-permission-wrapper";
 import { MainChatDecisionCard } from "./decision-card";
-import { useOpenMainChatTaskTarget } from "./open-task-target";
+import { useIsCompactMainChatLayout, useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
@@ -60,6 +63,7 @@ const ThemedAtIcon = withUnistyles(AtSign);
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
+const ThemedChevronUp = withUnistyles(ChevronUp);
 const ThemedClockIcon = withUnistyles(Clock);
 const ThemedMaximizeIcon = withUnistyles(Maximize2);
 const ThemedMinimizeIcon = withUnistyles(Minimize2);
@@ -69,6 +73,7 @@ const ThemedReworkIcon = withUnistyles(RotateCcw);
 const ThemedXIcon = withUnistyles(X);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const invertedIconMapping = (theme: Theme) => ({ color: theme.colors.surface0 });
 const successIconMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 
@@ -197,7 +202,16 @@ export interface MainChatActionBarProps {
 interface MainChatActionBarDrawerStoreState {
   openBucketByKey: Record<string, ActionBarBucketKey | null>;
   expandedByKey: Record<string, boolean>;
+  compactDockCollapsedByKey: Record<string, boolean>;
+  focusedNeedsIdByKey: Record<string, string | null>;
   toggleBucket: (key: string, bucket: ActionBarBucketKey) => void;
+  openBucketWithFocus: (
+    key: string,
+    bucket: ActionBarBucketKey,
+    focusNeedsId?: string | null,
+  ) => void;
+  consumeFocusedNeedsId: (key: string) => void;
+  setCompactDockCollapsed: (key: string, collapsed: boolean) => void;
   closeDrawer: (key: string) => void;
   toggleExpanded: (key: string) => void;
   reset: () => void;
@@ -206,24 +220,51 @@ interface MainChatActionBarDrawerStoreState {
 export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerStoreState>((set) => ({
   openBucketByKey: {},
   expandedByKey: {},
+  compactDockCollapsedByKey: {},
+  focusedNeedsIdByKey: {},
   toggleBucket(key, bucket) {
     set((state) => {
       const current = state.openBucketByKey[key] ?? null;
       const next = current === bucket ? null : bucket;
       return {
         openBucketByKey: { ...state.openBucketByKey, [key]: next },
+        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
         ...(next === null ? { expandedByKey: { ...state.expandedByKey, [key]: false } } : {}),
       };
     });
   },
+  openBucketWithFocus(key, bucket, focusNeedsId = null) {
+    set((state) => ({
+      openBucketByKey: { ...state.openBucketByKey, [key]: bucket },
+      focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: focusNeedsId },
+    }));
+  },
+  consumeFocusedNeedsId(key) {
+    set((state) => {
+      if (!state.focusedNeedsIdByKey?.[key]) return state;
+      return {
+        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
+      };
+    });
+  },
+  setCompactDockCollapsed(key, collapsed) {
+    set((state) => ({
+      compactDockCollapsedByKey: { ...state.compactDockCollapsedByKey, [key]: collapsed },
+    }));
+  },
   closeDrawer(key) {
     set((state) => {
-      if ((state.openBucketByKey[key] ?? null) === null && !state.expandedByKey[key]) {
+      if (
+        (state.openBucketByKey[key] ?? null) === null &&
+        !state.expandedByKey[key] &&
+        !state.focusedNeedsIdByKey?.[key]
+      ) {
         return state;
       }
       return {
         openBucketByKey: { ...state.openBucketByKey, [key]: null },
         expandedByKey: { ...state.expandedByKey, [key]: false },
+        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
       };
     });
   },
@@ -233,9 +274,17 @@ export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerSto
     }));
   },
   reset() {
-    set({ openBucketByKey: {}, expandedByKey: {} });
+    set({
+      openBucketByKey: {},
+      expandedByKey: {},
+      compactDockCollapsedByKey: {},
+      focusedNeedsIdByKey: {},
+    });
   },
 }));
+
+const SELECTED_ACCESSIBILITY_STATE = { selected: true } as const;
+const UNSELECTED_ACCESSIBILITY_STATE = { selected: false } as const;
 
 const CapsuleButton = memo(function CapsuleButton({
   bucket,
@@ -262,21 +311,17 @@ const CapsuleButton = memo(function CapsuleButton({
       break;
     case "inProgress":
       label = t("mainChat.actionBar.capsuleInProgress", { count });
-      leading = isRunning ? (
-        <View style={styles.ringWrap}>
-          <StatusRing />
-        </View>
-      ) : (
-        <View style={styles.dotMuted} />
-      );
+      leading = isRunning ? <View style={styles.dotRunning} /> : <View style={styles.dotMuted} />;
       break;
     case "awaitingReview":
       label = t("mainChat.actionBar.capsuleAwaitingReview", { count });
-      leading = <View style={styles.dotReviewNeutral} />;
+      leading = <View style={selected ? styles.dotInvertedMuted : styles.dotReviewNeutral} />;
       break;
     case "parked":
       label = t("mainChat.actionBar.capsuleParked", { count });
-      leading = <ThemedPauseIcon size={11} uniProps={mutedIconMapping} />;
+      leading = (
+        <ThemedPauseIcon size={11} uniProps={selected ? invertedIconMapping : mutedIconMapping} />
+      );
       break;
     case "completed24h":
       label = t("mainChat.actionBar.capsuleCompleted", { count });
@@ -284,27 +329,22 @@ const CapsuleButton = memo(function CapsuleButton({
       break;
   }
 
-  const isUrgent = bucket === "needsYou";
-  const pillStyle = useMemo(
-    () => [styles.capsule, isUrgent && styles.capsuleNeedsYou, selected && styles.capsuleSelected],
-    [isUrgent, selected],
-  );
+  const pillStyle = useMemo(() => [styles.capsule, selected && styles.capsuleSelected], [selected]);
   const textStyle = useMemo(
-    () => [
-      styles.capsuleText,
-      isUrgent && styles.capsuleTextNeedsYou,
-      selected && styles.capsuleTextSelected,
-    ],
-    [isUrgent, selected],
+    () => [styles.capsuleText, selected && styles.capsuleTextSelected],
+    [selected],
   );
+  const dataSet = useMemo(() => ({ selected: selected ? "true" : "false" }), [selected]);
 
   return (
     <PressHighlight
       onPress={handlePress}
       style={pillStyle}
-      highlightStyle={styles.rowPressed}
+      highlightStyle={selected ? styles.capsuleSelectedPressed : styles.rowPressed}
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={selected ? SELECTED_ACCESSIBILITY_STATE : UNSELECTED_ACCESSIBILITY_STATE}
+      dataSet={dataSet}
       testID={`main-chat-action-capsule-${bucket}`}
     >
       {leading}
@@ -312,6 +352,160 @@ const CapsuleButton = memo(function CapsuleButton({
         {label}
       </Text>
     </PressHighlight>
+  );
+});
+
+const CompactStatusDockRow = memo(function CompactStatusDockRow({
+  entry,
+  isFirst,
+  isCompact,
+  hiddenCountBadge,
+  onPressNeedsYou,
+  onPressInProgress,
+  onDismiss,
+}: {
+  entry: CompactDockEntry;
+  isFirst: boolean;
+  isCompact: boolean;
+  hiddenCountBadge: number;
+  onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
+  onPressInProgress: (item: ActionBarTaskItem) => void;
+  onDismiss: () => void;
+}) {
+  const { t } = useTranslation();
+
+  const handlePress = useCallback(() => {
+    if (entry.kind === "needsYou") {
+      onPressNeedsYou(entry.item);
+    } else {
+      onPressInProgress(entry.item);
+    }
+  }, [entry, onPressInProgress, onPressNeedsYou]);
+
+  const isNeedsYou = entry.kind === "needsYou";
+  const isFailed = isNeedsYou && entry.item.kind === "task" && entry.item.isFailed;
+  const title = entry.item.title;
+  const secondaryText = useMemo(() => {
+    if (isCompact) return null;
+    if (entry.kind === "needsYou") {
+      const candidate = entry.item.reason ?? entry.item.hostLabel;
+      return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
+    }
+    const candidate = entry.item.summary ?? entry.item.workspaceLabel ?? entry.item.hostLabel;
+    return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
+  }, [entry, isCompact]);
+
+  const statusLabel = isNeedsYou
+    ? t(resolveNeedsYouKindKey(entry.item))
+    : t("mainChat.actionBar.compactDockStatusWorking");
+
+  const rowContainerStyle = useMemo(
+    () => [styles.compactDockRow, !isFirst && styles.compactDockRowDivider],
+    [isFirst],
+  );
+  const statusTextStyle = useMemo(
+    () => [
+      styles.compactDockStatus,
+      isNeedsYou && (isFailed ? styles.compactDockStatusFailed : styles.compactDockStatusNeedsYou),
+    ],
+    [isFailed, isNeedsYou],
+  );
+
+  return (
+    <View
+      style={rowContainerStyle}
+      testID={`main-chat-compact-dock-row-${entry.kind}-${entry.item.id}`}
+    >
+      <PressHighlight
+        onPress={handlePress}
+        style={styles.compactDockRowPress}
+        highlightStyle={styles.rowPressed}
+        accessibilityRole="button"
+        accessibilityLabel={title}
+        testID={`main-chat-compact-dock-trigger-${entry.kind}-${entry.item.id}`}
+      >
+        {isNeedsYou ? (
+          <View style={isFailed ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
+            <View style={isFailed ? styles.haloFailedInner : styles.haloNeedsYouInner} />
+          </View>
+        ) : (
+          <View style={styles.ringWrap}>
+            <StatusRing />
+          </View>
+        )}
+
+        <View style={styles.compactDockTextRun}>
+          <Text style={styles.compactDockTitle} numberOfLines={1} ellipsizeMode="tail">
+            {title}
+          </Text>
+          {secondaryText ? (
+            <Text style={styles.compactDockMeta} numberOfLines={1} ellipsizeMode="tail">
+              {`· ${secondaryText}`}
+            </Text>
+          ) : null}
+        </View>
+
+        <View style={styles.compactDockTrailing}>
+          <Text style={statusTextStyle} numberOfLines={1}>
+            {statusLabel}
+          </Text>
+          {hiddenCountBadge > 0 ? (
+            <Text style={styles.compactDockMore} numberOfLines={1}>
+              {t("mainChat.actionBar.compactDockMore", { count: hiddenCountBadge })}
+            </Text>
+          ) : null}
+          <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
+        </View>
+      </PressHighlight>
+
+      {isFirst ? (
+        <PressHighlight
+          onPress={onDismiss}
+          style={styles.compactDockDismissBtn}
+          highlightStyle={styles.rowPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.actionBar.compactDockCollapse")}
+          testID="main-chat-compact-dock-dismiss"
+        >
+          <ThemedXIcon size={13} uniProps={mutedIconMapping} />
+        </PressHighlight>
+      ) : null}
+    </View>
+  );
+});
+
+const CompactStatusDock = memo(function CompactStatusDock({
+  entries,
+  hiddenCount,
+  isCompact,
+  onPressNeedsYou,
+  onPressInProgress,
+  onDismiss,
+}: {
+  entries: readonly CompactDockEntry[];
+  hiddenCount: number;
+  isCompact: boolean;
+  onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
+  onPressInProgress: (item: ActionBarTaskItem) => void;
+  onDismiss: () => void;
+}) {
+  if (entries.length === 0) return null;
+
+  return (
+    <View style={styles.compactDockCard} testID="main-chat-compact-dock">
+      {entries.map((entry, index) => (
+        <CompactStatusDockRow
+          key={`${entry.kind}:${entry.item.id}`}
+          entry={entry}
+          isFirst={index === 0}
+          isCompact={isCompact}
+          hiddenCountBadge={index === entries.length - 1 ? hiddenCount : 0}
+          onPressNeedsYou={onPressNeedsYou}
+          onPressInProgress={onPressInProgress}
+          onDismiss={onDismiss}
+        />
+      ))}
+    </View>
   );
 });
 
@@ -567,8 +761,17 @@ const NeedsYouRow = memo(function NeedsYouRow({
     metaText = item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
   }
 
+  const cardStyle = useMemo(
+    () => [styles.needsCard, isFailedTask && styles.needsCardFailed],
+    [isFailedTask],
+  );
+  const statusTextStyle = useMemo(
+    () => [styles.needsKindText, isFailedTask && styles.needsKindTextFailed],
+    [isFailedTask],
+  );
+
   return (
-    <View style={styles.needsCard} testID={`main-chat-action-needs-item-${item.id}`}>
+    <View style={cardStyle} testID={`main-chat-action-needs-item-${item.id}`}>
       <View style={styles.needsRowHeader}>
         <PressHighlight
           onPress={handleToggle}
@@ -578,22 +781,14 @@ const NeedsYouRow = memo(function NeedsYouRow({
           accessibilityLabel={item.title}
           testID={`main-chat-action-needs-toggle-${item.id}`}
         >
-          {expanded ? (
-            <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
-          ) : (
-            <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
-          )}
-          <View style={styles.dotNeedsYou} />
+          <View style={isFailedTask ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
+            <View style={isFailedTask ? styles.haloFailedInner : styles.haloNeedsYouInner} />
+          </View>
           <View style={styles.rowTextCol}>
             <View style={styles.rowTitleLine}>
-              <Text style={styles.rowTitle} numberOfLines={1}>
+              <Text style={styles.needsRowTitle} numberOfLines={1}>
                 {item.title}
               </Text>
-              <StatusBadge
-                size="xs"
-                variant={isFailedTask ? "error" : "warning"}
-                label={kindLabel}
-              />
               {item.kind === "permission" && item.permissions.length > 1 ? (
                 <StatusBadge size="xs" variant="muted" label={`${item.permissions.length}`} />
               ) : null}
@@ -603,6 +798,16 @@ const NeedsYouRow = memo(function NeedsYouRow({
                 {metaText}
               </Text>
             ) : null}
+          </View>
+          <View style={styles.needsTrailingStatus}>
+            <Text style={statusTextStyle} numberOfLines={1}>
+              {kindLabel}
+            </Text>
+            {expanded ? (
+              <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
+            ) : (
+              <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
+            )}
           </View>
         </PressHighlight>
 
@@ -788,6 +993,7 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
 const TaskBucketRow = memo(function TaskBucketRow({
   bucket,
   item,
+  showTopDivider,
   busyTaskId,
   onOpenTask,
   onDirectRoute,
@@ -797,6 +1003,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
 }: {
   bucket: Exclude<ActionBarBucketKey, "needsYou">;
   item: ActionBarTaskItem;
+  showTopDivider: boolean;
   busyTaskId: string | null;
   onOpenTask: (item: ActionBarTaskItem) => void;
   onDirectRoute: (target: ActionBarDirectTarget) => void;
@@ -843,8 +1050,13 @@ const TaskBucketRow = memo(function TaskBucketRow({
     bucket === "parked" && item.parkedReason ? item.parkedReason : item.summary,
   ].filter(Boolean);
 
+  const rowStyle = useMemo(
+    () => [styles.taskRowListItem, showTopDivider && styles.taskRowDivider],
+    [showTopDivider],
+  );
+
   return (
-    <View style={styles.taskRowCard} testID={`main-chat-action-task-${bucket}-${item.id}`}>
+    <View style={rowStyle} testID={`main-chat-action-task-${bucket}-${item.id}`}>
       <View style={styles.taskRowMain}>
         <PressHighlight
           onPress={handleOpen}
@@ -969,11 +1181,12 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
 
   return (
     <>
-      {activeItems.map((item) => (
+      {activeItems.map((item, index) => (
         <TaskBucketRow
           key={item.id}
           bucket="inProgress"
           item={item}
+          showTopDivider={index > 0}
           busyTaskId={busyTaskId}
           onOpenTask={onOpenTask}
           onDirectRoute={onDirectRoute}
@@ -983,7 +1196,10 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
         />
       ))}
       {staleItems.length > 0 ? (
-        <View style={styles.staleGroup} testID="main-chat-action-stale-section">
+        <View
+          style={[styles.staleGroup, activeItems.length > 0 && styles.taskRowDivider]}
+          testID="main-chat-action-stale-section"
+        >
           <PressHighlight
             onPress={onToggleStale}
             style={styles.staleHeader}
@@ -1004,11 +1220,12 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
             </Text>
           </PressHighlight>
           {staleExpanded
-            ? staleItems.map((item) => (
+            ? staleItems.map((item, index) => (
                 <TaskBucketRow
                   key={item.id}
                   bucket="inProgress"
                   item={item}
+                  showTopDivider={index > 0}
                   busyTaskId={busyTaskId}
                   onOpenTask={onOpenTask}
                   onDirectRoute={onDirectRoute}
@@ -1118,7 +1335,11 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
 
       <ScrollView
         style={drawerExpanded ? styles.drawerScrollExpanded : styles.drawerScroll}
-        contentContainerStyle={styles.drawerScrollContent}
+        contentContainerStyle={
+          openBucket === "needsYou"
+            ? styles.drawerScrollContentNeeds
+            : styles.drawerScrollContentLight
+        }
         keyboardShouldPersistTaps="handled"
       >
         {openBucket === "needsYou"
@@ -1155,11 +1376,12 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
         (openBucket === "awaitingReview" ||
           openBucket === "parked" ||
           openBucket === "completed24h")
-          ? simpleBucketItems.map((item) => (
+          ? simpleBucketItems.map((item, index) => (
               <TaskBucketRow
                 key={item.id}
                 bucket={openBucket}
                 item={item}
+                showTopDivider={index > 0}
                 busyTaskId={busyTaskId}
                 onOpenTask={onOpenTaskItem}
                 onDirectRoute={onDirectRoute}
@@ -1352,6 +1574,12 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   const drawerExpanded = useMainChatActionBarDrawerStore((state) =>
     Boolean(state.expandedByKey[overviewKey]),
   );
+  const focusedNeedsId = useMainChatActionBarDrawerStore(
+    (state) => state.focusedNeedsIdByKey?.[overviewKey] ?? null,
+  );
+  const consumeFocusedNeedsId = useMainChatActionBarDrawerStore(
+    (state) => state.consumeFocusedNeedsId,
+  );
   const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
   const toggleExpanded = useMainChatActionBarDrawerStore((state) => state.toggleExpanded);
 
@@ -1360,11 +1588,21 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
 
   useEffect(() => {
+    if (openBucket === "needsYou" && focusedNeedsId) {
+      setExpandedNeedsIds((prev) => {
+        if (prev.has(focusedNeedsId)) return prev;
+        const next = new Set(prev);
+        next.add(focusedNeedsId);
+        return next;
+      });
+      consumeFocusedNeedsId(overviewKey);
+      return;
+    }
     if (openBucket === "needsYou" && model && model.needsYou.length === 1) {
       const onlyId = model.needsYou[0]!.id;
       setExpandedNeedsIds((prev) => (prev.has(onlyId) ? prev : new Set([onlyId])));
     }
-  }, [model, openBucket]);
+  }, [consumeFocusedNeedsId, focusedNeedsId, model, openBucket, overviewKey]);
 
   useEffect(() => {
     if (!model) return;
@@ -1604,6 +1842,9 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   agentId,
   drawerMode = "floating",
 }: MainChatActionBarProps): ReactElement | null {
+  const { t } = useTranslation();
+  const isCompact = useIsCompactMainChatLayout();
+  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
   const { client, overviewKey, loadOverview, sessionSnapshot, model } = useMainChatActionBarData(
     serverId,
     agentId,
@@ -1611,7 +1852,14 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const openBucket = useMainChatActionBarDrawerStore(
     (state) => state.openBucketByKey[overviewKey] ?? null,
   );
+  const compactDockCollapsed = useMainChatActionBarDrawerStore((state) =>
+    Boolean(state.compactDockCollapsedByKey?.[overviewKey]),
+  );
   const toggleBucket = useMainChatActionBarDrawerStore((state) => state.toggleBucket);
+  const openBucketWithFocus = useMainChatActionBarDrawerStore((state) => state.openBucketWithFocus);
+  const setCompactDockCollapsed = useMainChatActionBarDrawerStore(
+    (state) => state.setCompactDockCollapsed,
+  );
   const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
 
   useMainChatActionBarSilentRefresh({
@@ -1638,6 +1886,44 @@ export const MainChatActionBar = memo(function MainChatActionBar({
     [overviewKey, toggleBucket],
   );
 
+  const handlePressDockNeedsYou = useCallback(
+    (item: ActionBarNeedsYouItem) => {
+      openBucketWithFocus(overviewKey, "needsYou", item.id);
+    },
+    [openBucketWithFocus, overviewKey],
+  );
+
+  const handlePressDockInProgress = useCallback(
+    (item: ActionBarTaskItem) => {
+      if (item.agentId) {
+        openMainChatTaskTarget({
+          serverId: item.serverId,
+          agentId: item.agentId,
+          workspaceId: item.workspaceId,
+          title: item.title,
+          taskId: item.taskId,
+        });
+        return;
+      }
+      openBucketWithFocus(overviewKey, "inProgress", null);
+    },
+    [openBucketWithFocus, openMainChatTaskTarget, overviewKey],
+  );
+
+  const handleDismissCompactDock = useCallback(() => {
+    setCompactDockCollapsed(overviewKey, true);
+  }, [overviewKey, setCompactDockCollapsed]);
+
+  const handleRestoreCompactDock = useCallback(() => {
+    setCompactDockCollapsed(overviewKey, false);
+  }, [overviewKey, setCompactDockCollapsed]);
+
+  const dockMaxRows = isCompact ? 1 : 2;
+  const dockSelection = useMemo(
+    () => selectCompactDockEntries(model, dockMaxRows),
+    [dockMaxRows, model],
+  );
+
   if (!model || model.counts.total === 0) {
     return null;
   }
@@ -1645,6 +1931,8 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const visibleCapsules = (
     ["needsYou", "inProgress", "awaitingReview", "parked", "completed24h"] as const
   ).filter((bucket) => model.counts[bucket] > 0);
+  const hasEligibleDock = dockSelection.entries.length > 0;
+  const showCompactDock = hasEligibleDock && !compactDockCollapsed && openBucket === null;
 
   return (
     <View style={styles.outer} dataSet={CHAT_COLUMN_RAIL_DATASET} testID="main-chat-action-bar">
@@ -1670,6 +1958,17 @@ export const MainChatActionBar = memo(function MainChatActionBar({
       ) : null}
 
       <View style={styles.inner} testID="main-chat-action-bar-inner">
+        {showCompactDock ? (
+          <CompactStatusDock
+            entries={dockSelection.entries}
+            hiddenCount={dockSelection.hiddenCount}
+            isCompact={isCompact}
+            onPressNeedsYou={handlePressDockNeedsYou}
+            onPressInProgress={handlePressDockInProgress}
+            onDismiss={handleDismissCompactDock}
+          />
+        ) : null}
+
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -1687,6 +1986,18 @@ export const MainChatActionBar = memo(function MainChatActionBar({
               onPress={handleSelectBucket}
             />
           ))}
+          {hasEligibleDock && compactDockCollapsed && openBucket === null ? (
+            <PressHighlight
+              onPress={handleRestoreCompactDock}
+              style={styles.compactDockRestoreBtn}
+              highlightStyle={styles.rowPressed}
+              accessibilityRole="button"
+              accessibilityLabel={t("mainChat.actionBar.compactDockExpand")}
+              testID="main-chat-compact-dock-restore"
+            >
+              <ThemedChevronUp size={13} uniProps={mutedIconMapping} />
+            </PressHighlight>
+          ) : null}
         </ScrollView>
       </View>
     </View>
@@ -1731,6 +2042,96 @@ const styles = StyleSheet.create((theme) => ({
     maxWidth: theme.contentMaxWidth,
     gap: theme.spacing[1.5],
   },
+  compactDockCard: {
+    width: "100%",
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    borderRadius: theme.borderRadius.xl,
+    backgroundColor: theme.colors.surface0,
+    overflow: "hidden",
+    ...theme.shadow.sm,
+  },
+  compactDockRow: {
+    height: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingLeft: 10,
+    paddingRight: theme.spacing[2],
+    gap: theme.spacing[1],
+  },
+  compactDockRowDivider: {
+    borderTopWidth: theme.borderWidth[1],
+    borderTopColor: theme.colors.border,
+  },
+  compactDockRowPress: {
+    flex: 1,
+    minWidth: 0,
+    height: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    borderRadius: theme.borderRadius.md,
+  },
+  compactDockTextRun: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
+    overflow: "hidden",
+  },
+  compactDockTitle: {
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foreground,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  compactDockMeta: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    flexShrink: 2,
+    minWidth: 0,
+  },
+  compactDockTrailing: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    flexShrink: 0,
+  },
+  compactDockStatus: {
+    fontSize: 12,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
+  },
+  compactDockStatusNeedsYou: {
+    color: theme.colors.statusWarning,
+  },
+  compactDockStatusFailed: {
+    color: theme.colors.statusDanger,
+  },
+  compactDockMore: {
+    fontSize: 12,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
+  },
+  compactDockDismissBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: theme.borderRadius.full,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  compactDockRestoreBtn: {
+    width: 28,
+    height: 30,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.surface2,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
   capsuleRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1739,48 +2140,44 @@ const styles = StyleSheet.create((theme) => ({
   capsule: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[1.5],
-    height: 28,
-    paddingHorizontal: theme.spacing[2],
+    gap: 6,
+    height: 30,
+    paddingHorizontal: 10,
     borderRadius: theme.borderRadius.full,
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
-  },
-  capsuleNeedsYou: {
-    borderColor: theme.colors.statusWarning,
-    backgroundColor: theme.colors.statusWarningTint,
+    borderColor: "transparent",
+    backgroundColor: theme.colors.surface2,
   },
   capsuleSelected: {
-    borderColor: theme.colors.primary,
-    backgroundColor: theme.colors.surface2,
+    borderColor: theme.colors.foreground,
+    backgroundColor: theme.colors.foreground,
+  },
+  capsuleSelectedPressed: {
+    opacity: 0.88,
   },
   capsuleText: {
     fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-  },
-  capsuleTextNeedsYou: {
-    color: theme.colors.statusWarning,
     fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foreground,
   },
   capsuleTextSelected: {
-    color: theme.colors.foreground,
-    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.surface0,
+    fontWeight: theme.fontWeight.semibold,
   },
   drawer: {
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.borderAccent,
+    borderColor: theme.colors.border,
     borderRadius: theme.borderRadius.xl,
-    backgroundColor: theme.colors.surface1,
+    backgroundColor: theme.colors.surface0,
     overflow: "hidden",
-    maxHeight: 360,
+    maxHeight: 380,
     ...theme.shadow.lg,
   },
   drawerExpanded: {
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.borderAccent,
+    borderColor: theme.colors.border,
     borderRadius: theme.borderRadius.xl,
-    backgroundColor: theme.colors.surface1,
+    backgroundColor: theme.colors.surface0,
     overflow: "hidden",
     maxHeight: 540,
     ...theme.shadow.lg,
@@ -1789,10 +2186,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1.5],
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: theme.colors.border,
+    paddingHorizontal: 14,
+    paddingTop: theme.spacing[3],
+    paddingBottom: theme.spacing[2],
     backgroundColor: theme.colors.surface0,
   },
   drawerHeaderActions: {
@@ -1801,47 +2197,75 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
   },
   drawerTitle: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
   },
   drawerScroll: {
-    maxHeight: 316,
+    maxHeight: 326,
   },
   drawerScrollExpanded: {
-    maxHeight: 496,
+    maxHeight: 486,
   },
-  drawerScrollContent: {
-    padding: theme.spacing[2],
-    gap: theme.spacing[1.5],
+  drawerScrollContentNeeds: {
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: 2,
+    paddingBottom: theme.spacing[3],
+    gap: theme.spacing[2],
+  },
+  drawerScrollContentLight: {
+    paddingHorizontal: 14,
+    paddingTop: 2,
+    paddingBottom: 10,
+    gap: 0,
   },
   needsCard: {
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    borderRadius: theme.borderRadius.lg,
-    backgroundColor: theme.colors.surface0,
+    borderRadius: theme.borderRadius.xl,
+    backgroundColor: theme.colors.surface2,
     overflow: "hidden",
+  },
+  needsCardFailed: {
+    backgroundColor: theme.colors.statusDangerTint,
   },
   needsRowHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[1],
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1.5],
+    gap: 6,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: 10,
   },
   needsRowToggle: {
     flex: 1,
     minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[1.5],
-    paddingVertical: theme.spacing[0.5],
+    gap: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
+  },
+  needsRowTitle: {
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.semibold,
+    color: theme.colors.foreground,
+    flexShrink: 1,
+  },
+  needsTrailingStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    flexShrink: 0,
+  },
+  needsKindText: {
+    fontSize: 12,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.statusWarning,
+  },
+  needsKindTextFailed: {
+    color: theme.colors.statusDanger,
   },
   inlineBody: {
     borderTopWidth: theme.borderWidth[1],
     borderTopColor: theme.colors.border,
-    padding: theme.spacing[2],
+    padding: theme.spacing[3],
     backgroundColor: theme.colors.surface1,
   },
   inlineStack: {
@@ -1885,14 +2309,14 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1.5],
     paddingTop: theme.spacing[0.5],
   },
-  taskRowCard: {
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    borderRadius: theme.borderRadius.lg,
-    backgroundColor: theme.colors.surface0,
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1.5],
-    gap: theme.spacing[1.5],
+  taskRowListItem: {
+    backgroundColor: "transparent",
+    paddingVertical: 10,
+    gap: 6,
+  },
+  taskRowDivider: {
+    borderTopWidth: theme.borderWidth[1],
+    borderTopColor: theme.colors.border,
   },
   taskRowMain: {
     flexDirection: "row",
@@ -1923,10 +2347,10 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.md,
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
+    backgroundColor: theme.colors.surface0,
   },
   inlineActionLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 12,
     color: theme.colors.foreground,
   },
   smallIconButton: {
@@ -1938,12 +2362,12 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
   },
   rowPressed: {
-    backgroundColor: theme.colors.surface2,
+    backgroundColor: theme.colors.surface3,
   },
   rowTextCol: {
     flex: 1,
     minWidth: 0,
-    gap: 1,
+    gap: 2,
   },
   rowTitleLine: {
     flexDirection: "row",
@@ -1958,19 +2382,18 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 1,
   },
   rowMeta: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 12,
     color: theme.colors.foregroundMuted,
   },
   staleGroup: {
-    gap: theme.spacing[1.5],
+    gap: 0,
     paddingTop: theme.spacing[1],
   },
   staleHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1.5],
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1],
+    paddingVertical: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
   },
   staleHeaderText: {
@@ -1982,7 +2405,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
-    paddingTop: theme.spacing[1],
+    paddingTop: theme.spacing[1.5],
     borderTopWidth: theme.borderWidth[1],
     borderTopColor: theme.colors.border,
   },
@@ -2005,6 +2428,36 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     flexShrink: 0,
   },
+  haloNeedsYouOuter: {
+    width: 16,
+    height: 16,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusWarningTint,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  haloNeedsYouInner: {
+    width: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    height: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusWarning,
+  },
+  haloFailedOuter: {
+    width: 16,
+    height: 16,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusDangerTint,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  haloFailedInner: {
+    width: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    height: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusDanger,
+  },
   dotNeedsYou: {
     width: STATUS_INDICATOR_FILLED_DOT_SIZE,
     height: STATUS_INDICATOR_FILLED_DOT_SIZE,
@@ -2012,11 +2465,25 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.statusWarning,
     flexShrink: 0,
   },
+  dotRunning: {
+    width: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    height: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.statusDotRunning,
+    flexShrink: 0,
+  },
   dotReviewNeutral: {
     width: STATUS_INDICATOR_FILLED_DOT_SIZE,
     height: STATUS_INDICATOR_FILLED_DOT_SIZE,
     borderRadius: theme.borderRadius.full,
     backgroundColor: theme.colors.foregroundMuted,
+    flexShrink: 0,
+  },
+  dotInvertedMuted: {
+    width: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    height: STATUS_INDICATOR_FILLED_DOT_SIZE,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.surface0,
     flexShrink: 0,
   },
   dotMuted: {

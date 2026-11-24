@@ -12,6 +12,7 @@ import {
   COMPLETED_WINDOW_MS,
   STALE_IN_PROGRESS_THRESHOLD_MS,
   buildMainChatActionBarModel,
+  selectCompactDockEntries,
   type ActionBarLiveAgentSnapshot,
   type ActionBarPendingPermissionInput,
 } from "./action-bar-model";
@@ -444,6 +445,162 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
     expect(model.inProgress.active.map((item) => item.taskId)).toEqual(["just_under_48h"]);
     expect(model.inProgress.stale.map((item) => item.taskId)).toEqual(["at_48h"]);
     expect(model.completed24h.map((item) => item.taskId)).toEqual(["at_24h"]);
+  });
+
+  it("selectCompactDockEntries prioritizes permission > decision > plan > task > inProgress.active and respects maxRows", () => {
+    const overview = makeOverview({
+      plans: [
+        {
+          id: "plan_open_1",
+          mainAgentId: "agent_main",
+          status: "open",
+          autoStarted: false,
+          summary: "Launch migration plan",
+          createdAt: isoAgo(1_000),
+          updatedAt: isoAgo(1_000),
+          tasks: [
+            {
+              id: "pt_1",
+              title: "Migrate schema",
+              goal: "Migrate schema",
+              mode: "write",
+              isolation: "worktree",
+              doneWhen: ["tests pass"],
+              outOfBounds: [],
+              quiet: true,
+              status: "pending",
+              agentId: null,
+              workspaceId: null,
+              startError: null,
+            },
+          ],
+        } as unknown as MainChatPlanRecord,
+      ],
+      decisions: [
+        {
+          id: "dec_1",
+          mainAgentId: "agent_main",
+          taskId: null,
+          title: "Choose cache strategy",
+          question: "Use Redis or in-memory?",
+          options: [{ id: "a", label: "Redis" }],
+          createdAt: isoAgo(5_000),
+          answeredAt: null,
+        } as unknown as MainChatDecisionRecord,
+      ],
+      tasks: [
+        makeTask({
+          id: "task_running_1",
+          title: "Run integration suite",
+          status: "running",
+          activeAgentId: "ag_running_1",
+          lastActivityAt: isoAgo(500),
+        }),
+        makeTask({
+          id: "task_needs_1",
+          title: "Fix flaky worker",
+          status: "needs_you",
+          activeAgentId: "ag_needs_1",
+          lastActivityAt: isoAgo(200),
+        }),
+      ],
+    });
+
+    const permission: ActionBarPendingPermissionInput = {
+      serverId: "srv_1",
+      sourceAgentTitle: "Deploy helper",
+      permission: {
+        key: "perm_1",
+        agentId: "ag_perm_1",
+        request: {
+          id: "req_1",
+          name: "Bash",
+          title: "Run npm test",
+          description: "Run test suite",
+          kind: "tool",
+        },
+      } as unknown as PendingPermission,
+    };
+
+    const model = buildMainChatActionBarModel({
+      serverId: "srv_1",
+      mainAgentId: "agent_main",
+      overview,
+      liveAgents: [
+        makeLiveAgent({
+          agentId: "ag_perm_1",
+          title: "Deploy helper",
+          updatedAtMs: NOW_MS - 10_000,
+        }),
+        makeLiveAgent({
+          agentId: "ag_running_1",
+          title: "Run integration suite",
+          status: "running",
+          turnPhase: "open",
+        }),
+      ],
+      pendingPermissions: [permission],
+      nowMs: NOW_MS,
+    });
+
+    // Wide: maxRows = 2 -> permission first, then decision
+    const wide = selectCompactDockEntries(model, 2);
+    expect(wide.totalEligible).toBe(5);
+    expect(wide.hiddenCount).toBe(3);
+    expect(
+      wide.entries.map((entry) => (entry.kind === "needsYou" ? entry.item.kind : "inProgress")),
+    ).toEqual(["permission", "decision"]);
+
+    // Compact: maxRows = 1 -> permission only
+    const compact = selectCompactDockEntries(model, 1);
+    expect(compact.entries).toHaveLength(1);
+    expect(compact.hiddenCount).toBe(4);
+    expect(compact.entries[0]?.kind === "needsYou" && compact.entries[0].item.kind).toBe(
+      "permission",
+    );
+
+    // All 5 ordered strictly: permission > decision > plan > task > inProgress.active
+    const allFive = selectCompactDockEntries(model, 10);
+    expect(
+      allFive.entries.map((entry) => (entry.kind === "needsYou" ? entry.item.kind : "inProgress")),
+    ).toEqual(["permission", "decision", "plan", "task", "inProgress"]);
+  });
+
+  it("selectCompactDockEntries stays empty when only awaitingReview, parked, stale, or completed24h exist", () => {
+    const overview = makeOverview({
+      tasks: [
+        makeTask({ id: "t_review", title: "Review PR", status: "awaiting_review" }),
+        makeTask({ id: "t_parked", title: "Parked", status: "parked" }),
+        makeTask({
+          id: "t_stale",
+          title: "Stale",
+          status: "running",
+          lastActivityAt: isoAgo(STALE_IN_PROGRESS_THRESHOLD_MS + 1_000),
+        }),
+        makeTask({
+          id: "t_done",
+          title: "Done",
+          status: "completed",
+          completedAt: isoAgo(60_000),
+        }),
+      ],
+    });
+
+    const model = buildMainChatActionBarModel({
+      serverId: "srv_1",
+      mainAgentId: "agent_main",
+      overview,
+      liveAgents: [],
+      pendingPermissions: [],
+      nowMs: NOW_MS,
+    });
+
+    expect(model.counts.total).toBe(4);
+    expect(selectCompactDockEntries(model, 2)).toEqual({
+      entries: [],
+      totalEligible: 0,
+      hiddenCount: 0,
+    });
   });
 });
 

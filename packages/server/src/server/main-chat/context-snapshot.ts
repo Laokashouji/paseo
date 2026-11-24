@@ -20,10 +20,11 @@ export const SNAPSHOT_FOREGROUND_TIMEOUT_MS = 1_500;
 export const SNAPSHOT_STALE_FALLBACK_MAX_AGE_MS = 30 * 60 * 1_000;
 export const MAX_INLINE_RUNNING_ITEMS = 3;
 
-const MAX_SINGLE_LINE_CHARS = 280;
+const MAX_SINGLE_LINE_CHARS = 320;
 const GLOBAL_CACHE_KEY = "__global__";
 
 export interface FleetSessionSnapshotItem {
+  serverId?: string | null;
   agentId: string;
   workspaceId: string | null;
   title: string;
@@ -130,10 +131,23 @@ function summarizePermission(permission: {
   return label;
 }
 
-function formatDetailedRow(item: FleetSessionSnapshotItem): SnapshotRow {
+export function formatMainChatSessionLink(agentId: string, serverId?: string | null): string {
+  const trimmedAgentId = agentId.trim();
+  const trimmedServerId = serverId?.trim();
+  if (trimmedServerId) {
+    return `paseo://agent/${encodeURIComponent(trimmedServerId)}/${encodeURIComponent(trimmedAgentId)}`;
+  }
+  return `paseo://agent/${encodeURIComponent(trimmedAgentId)}`;
+}
+
+function formatDetailedRow(
+  item: FleetSessionSnapshotItem,
+  fallbackServerId?: string | null,
+): SnapshotRow {
   const tag = item.managedByMainChat ? "管家派发" : "手动会话";
-  const shortLabel = `「${truncateText(item.title, 40)}」[${item.projectName} · id=${item.agentId}]`;
-  const base = `「${truncateText(item.title, 48)}」[${tag} · ${item.projectName} · id=${item.agentId}]`;
+  const link = formatMainChatSessionLink(item.agentId, item.serverId ?? fallbackServerId);
+  const shortLabel = `「${truncateText(item.title, 40)}」[${item.projectName} · id=${item.agentId} · link=${link}]`;
+  const base = `「${truncateText(item.title, 44)}」[${tag} · ${item.projectName} · id=${item.agentId} · link=${link}]`;
   const parts: string[] = [];
   if (item.pendingPermissionLabels.length > 0) {
     parts.push(`待审批：${item.pendingPermissionLabels.slice(0, 2).join("；")}`);
@@ -159,10 +173,14 @@ function formatDetailedRow(item: FleetSessionSnapshotItem): SnapshotRow {
   };
 }
 
-function formatCompactWorkingRow(item: FleetSessionSnapshotItem): SnapshotRow {
+function formatCompactWorkingRow(
+  item: FleetSessionSnapshotItem,
+  fallbackServerId?: string | null,
+): SnapshotRow {
   const tag = item.managedByMainChat ? "管家" : "手动";
-  const shortLabel = `「${truncateText(item.title, 36)}」[${item.projectName} · id=${item.agentId}]`;
-  const text = `「${truncateText(item.title, 36)}」[${tag} · ${item.projectName} · id=${item.agentId}]`;
+  const link = formatMainChatSessionLink(item.agentId, item.serverId ?? fallbackServerId);
+  const shortLabel = `「${truncateText(item.title, 36)}」[${item.projectName} · id=${item.agentId} · link=${link}]`;
+  const text = `「${truncateText(item.title, 36)}」[${tag} · ${item.projectName} · id=${item.agentId} · link=${link}]`;
   return {
     id: item.agentId,
     text: truncateText(text, MAX_SINGLE_LINE_CHARS),
@@ -237,9 +255,14 @@ function buildDecisionRows(openDecisions: readonly MainChatDecisionRecord[]): Sn
   }));
 }
 
-function buildWorkingRows(running: readonly FleetSessionSnapshotItem[]): SnapshotRow[] {
+function buildWorkingRows(
+  running: readonly FleetSessionSnapshotItem[],
+  fallbackServerId?: string | null,
+): SnapshotRow[] {
   if (running.length === 0) return [];
-  const inline = running.slice(0, MAX_INLINE_RUNNING_ITEMS).map(formatCompactWorkingRow);
+  const inline = running
+    .slice(0, MAX_INLINE_RUNNING_ITEMS)
+    .map((item) => formatCompactWorkingRow(item, fallbackServerId));
   const foldedCount = running.length - inline.length;
   if (foldedCount > 0) {
     inline.push({
@@ -326,6 +349,7 @@ function packSectionBlock(input: {
 }
 
 export function createMainChatContextSnapshotBuilder(deps: {
+  serverId?: string | null;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   store: MainChatStore;
@@ -336,6 +360,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
   foregroundTimeoutMs?: number;
   maxSnapshotChars?: number;
 }): MainChatContextSnapshotBuilder {
+  const localServerId = deps.serverId?.trim() || null;
   const getNowMs = deps.now ?? (() => Date.now());
   const cacheTtlMs = deps.cacheTtlMs ?? SNAPSHOT_CACHE_TTL_MS;
   const foregroundTimeoutMs = deps.foregroundTimeoutMs ?? SNAPSHOT_FOREGROUND_TIMEOUT_MS;
@@ -360,6 +385,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
     );
     const title = agent.config.title?.trim() || basenameOf(agent.cwd);
     return {
+      serverId: localServerId,
       agentId: agent.id,
       workspaceId: agent.workspaceId ?? null,
       title,
@@ -387,6 +413,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
     );
     const title = record.title?.trim() || basenameOf(record.cwd);
     return {
+      serverId: localServerId,
       agentId: record.id,
       workspaceId: record.workspaceId ?? null,
       title,
@@ -587,7 +614,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
       {
         key: "needs_you",
         title: "等你拍板 / 待审批",
-        rows: fleet.needsYou.map(formatDetailedRow),
+        rows: fleet.needsYou.map((item) => formatDetailedRow(item, localServerId)),
       },
       {
         key: "decisions",
@@ -597,7 +624,7 @@ export function createMainChatContextSnapshotBuilder(deps: {
       {
         key: "problematic",
         title: "异常中断 / 停滞 / 空转",
-        rows: fleet.problematic.map(formatDetailedRow),
+        rows: fleet.problematic.map((item) => formatDetailedRow(item, localServerId)),
       },
       {
         key: "plans",
@@ -607,12 +634,12 @@ export function createMainChatContextSnapshotBuilder(deps: {
       {
         key: "running",
         title: "进行中工作态摘要",
-        rows: buildWorkingRows(fleet.running),
+        rows: buildWorkingRows(fleet.running, localServerId),
       },
       {
         key: "completed",
         title: "刚完成 / 待查收 / 等外部条件",
-        rows: fleet.attentionDone.map(formatDetailedRow),
+        rows: fleet.attentionDone.map((item) => formatDetailedRow(item, localServerId)),
       },
       {
         key: "other",

@@ -66,6 +66,10 @@ export function createMarkdownStyles(
       },
       link: { color: theme.colors.accentBright, underline: false },
       linkVariants: {
+        "^paseo://(agent|task)/": {
+          color: theme.colors.accentBright,
+          underline: true,
+        },
         "^(?!https?://).+": {
           color: theme.colors.accentBright,
         },

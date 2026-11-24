@@ -1000,3 +1000,71 @@ export function buildMainChatActionBarModel(
     },
   };
 }
+
+export type CompactDockEntry =
+  | {
+      kind: "needsYou";
+      item: ActionBarNeedsYouItem;
+    }
+  | {
+      kind: "inProgress";
+      item: ActionBarTaskItem;
+    };
+
+export interface CompactDockSelection {
+  entries: CompactDockEntry[];
+  totalEligible: number;
+  hiddenCount: number;
+}
+
+function resolveNeedsYouDockPriority(item: ActionBarNeedsYouItem): number {
+  switch (item.kind) {
+    case "permission":
+      return 0;
+    case "decision":
+      return 1;
+    case "plan":
+      return 2;
+    case "task":
+      return 3;
+  }
+}
+
+/**
+ * Selects up to `maxRows` entries for the persistent compact status dock card above the capsules:
+ * - Only shows when `needsYou` or `inProgress.active` is non-empty.
+ * - Priority order: permission > decision > plan > needs-you task > active in-progress item.
+ */
+export function selectCompactDockEntries(
+  model: MainChatActionBarModel | null | undefined,
+  maxRows: number,
+): CompactDockSelection {
+  if (!model || maxRows <= 0) {
+    return { entries: [], totalEligible: 0, hiddenCount: 0 };
+  }
+
+  const prioritizedNeeds: CompactDockEntry[] = [...model.needsYou]
+    .sort((left, right) => {
+      const prioDiff = resolveNeedsYouDockPriority(left) - resolveNeedsYouDockPriority(right);
+      if (prioDiff !== 0) return prioDiff;
+      return right.updatedAtMs - left.updatedAtMs;
+    })
+    .map((item) => ({ kind: "needsYou", item }));
+
+  const activeRunning: CompactDockEntry[] = model.inProgress.active.map((item) => ({
+    kind: "inProgress",
+    item,
+  }));
+
+  const combined = [...prioritizedNeeds, ...activeRunning];
+  if (combined.length === 0) {
+    return { entries: [], totalEligible: 0, hiddenCount: 0 };
+  }
+
+  const entries = combined.slice(0, maxRows);
+  return {
+    entries,
+    totalEligible: combined.length,
+    hiddenCount: Math.max(0, combined.length - entries.length),
+  };
+}
