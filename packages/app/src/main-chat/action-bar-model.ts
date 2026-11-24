@@ -113,8 +113,12 @@ export interface ActionBarTaskNeedsYouItem {
   title: string;
   hostLabel: string | null;
   workspaceLabel: string | null;
+  cwd: string | null;
   mode: MainChatTaskMode | null;
   reason: string | null;
+  summary: string | null;
+  suggestedAction: string | null;
+  goal: string | null;
   isFailed: boolean;
   taskRecord: MainChatTaskRecord | null;
   updatedAtMs: number;
@@ -588,6 +592,8 @@ function collectDecisionNeedsYou(ctx: ActionBarBuildContext): void {
     if (isAgentClaimed(ctx, srvId, decision.agentId)) continue;
     if (linkedTask && ctx.claimedTaskIds.has(linkedTask.id)) continue;
     const live = lookupLiveAgent(ctx, srvId, decision.agentId);
+    // Drop stale open decisions immediately once the target session is archived or running again.
+    if (live?.archived || (live && isLiveAgentRunning(live))) continue;
 
     ctx.needsYou.push({
       kind: "decision",
@@ -640,33 +646,55 @@ function collectPlanNeedsYou(ctx: ActionBarBuildContext): void {
   }
 }
 
+function isLiveAgentResumedWithoutBlock(live: ActionBarLiveAgentSnapshot | undefined): boolean {
+  if (!live) return false;
+  if (live.archived) return true;
+  return (
+    isLiveAgentRunning(live) && live.status !== "error" && live.attentionReason !== "permission"
+  );
+}
+
+function buildTaskNeedsYouRecord(
+  ctx: ActionBarBuildContext,
+  task: MainChatTaskRecord,
+  srvId: string,
+  primaryAgentId: string | null,
+  live: ActionBarLiveAgentSnapshot | undefined,
+): ActionBarTaskNeedsYouItem {
+  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  return {
+    kind: "task",
+    id: `task:${task.id}`,
+    serverId: srvId,
+    agentId: primaryAgentId,
+    workspaceId: firstNonEmptyText(live?.workspaceId, task.workspaceId),
+    taskId: task.id,
+    title: task.title,
+    hostLabel: resolveTaskHostLabel(task, srvId, ctx.input.hostLabelsByServerId),
+    workspaceLabel: task.workspaceLabel || directoryBasename(task.cwd),
+    cwd: firstNonEmptyText(live?.cwd, task.cwd),
+    mode: task.mode,
+    reason: firstNonEmptyText(triage?.waitReason, triage?.summary, task.brief.goal),
+    summary: firstNonEmptyText(triage?.summary),
+    suggestedAction: firstNonEmptyText(triage?.suggestedAction),
+    goal: firstNonEmptyText(task.brief.goal),
+    isFailed: task.status === "failed" || live?.status === "error",
+    taskRecord: task,
+    updatedAtMs: resolveTaskActivityMs(task, live),
+  };
+}
+
 function collectTaskNeedsYou(ctx: ActionBarBuildContext): void {
   for (const task of ctx.tasks) {
-    if (task.supersededByTaskId) continue;
+    if (task.supersededByTaskId || ctx.claimedTaskIds.has(task.id)) continue;
     if (task.status !== "needs_you" && task.status !== "failed") continue;
-    if (ctx.claimedTaskIds.has(task.id)) continue;
     const srvId = resolveTaskServerId(task, ctx.input.serverId);
     const primaryAgentId = resolveTaskPrimaryAgentId(task);
     if (isAgentClaimed(ctx, srvId, primaryAgentId)) continue;
     const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
-    const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+    if (isLiveAgentResumedWithoutBlock(live)) continue;
 
-    ctx.needsYou.push({
-      kind: "task",
-      id: `task:${task.id}`,
-      serverId: srvId,
-      agentId: primaryAgentId,
-      workspaceId: firstNonEmptyText(live?.workspaceId, task.workspaceId),
-      taskId: task.id,
-      title: task.title,
-      hostLabel: resolveTaskHostLabel(task, srvId, ctx.input.hostLabelsByServerId),
-      workspaceLabel: task.workspaceLabel || directoryBasename(task.cwd),
-      mode: task.mode,
-      reason: firstNonEmptyText(triage?.waitReason, triage?.summary, task.brief.goal),
-      isFailed: task.status === "failed" || live?.status === "error",
-      taskRecord: task,
-      updatedAtMs: resolveTaskActivityMs(task, live),
-    });
+    ctx.needsYou.push(buildTaskNeedsYouRecord(ctx, task, srvId, primaryAgentId, live));
     claimTask(ctx, task);
   }
 }
@@ -697,11 +725,44 @@ function isLiveAgentBlockedForUser(
   agent: ActionBarLiveAgentSnapshot,
   triage: MainChatSessionTriage | undefined,
 ): boolean {
-  return (
-    agent.attentionReason === "permission" ||
-    agent.status === "error" ||
-    triage?.phase === "blocked_user"
-  );
+  if (agent.attentionReason === "permission" || agent.status === "error") {
+    return true;
+  }
+  // Ignore stale blocked_user triage once the session is actively running again.
+  if (isLiveAgentRunning(agent)) {
+    return false;
+  }
+  return triage?.phase === "blocked_user";
+}
+
+function buildLiveAgentNeedsYouRecord(
+  ctx: ActionBarBuildContext,
+  agent: ActionBarLiveAgentSnapshot,
+  linkedTask: MainChatTaskRecord | null,
+  triage: MainChatSessionTriage | undefined,
+): ActionBarTaskNeedsYouItem {
+  return {
+    kind: "task",
+    id: `agent:${agent.serverId}:${agent.agentId}`,
+    serverId: agent.serverId,
+    agentId: agent.agentId,
+    workspaceId: agent.workspaceId,
+    taskId: linkedTask ? linkedTask.id : null,
+    title:
+      firstNonEmptyText(linkedTask?.title, agent.title, directoryBasename(agent.cwd)) ??
+      agent.agentId,
+    hostLabel: ctx.input.hostLabelsByServerId?.[agent.serverId] ?? null,
+    workspaceLabel: firstNonEmptyText(linkedTask?.workspaceLabel, directoryBasename(agent.cwd)),
+    cwd: firstNonEmptyText(agent.cwd, linkedTask?.cwd),
+    mode: linkedTask ? linkedTask.mode : agent.mode,
+    reason: firstNonEmptyText(triage?.waitReason, triage?.summary),
+    summary: firstNonEmptyText(triage?.summary),
+    suggestedAction: firstNonEmptyText(triage?.suggestedAction),
+    goal: firstNonEmptyText(linkedTask?.brief.goal),
+    isFailed: agent.status === "error",
+    taskRecord: linkedTask,
+    updatedAtMs: agent.updatedAtMs,
+  };
 }
 
 function collectLiveAgentNeedsYou(ctx: ActionBarBuildContext): void {
@@ -714,24 +775,7 @@ function collectLiveAgentNeedsYou(ctx: ActionBarBuildContext): void {
     const triage = ctx.triageByAgentId.get(agent.agentId);
     if (!isLiveAgentBlockedForUser(agent, triage)) continue;
 
-    ctx.needsYou.push({
-      kind: "task",
-      id: `agent:${agent.serverId}:${agent.agentId}`,
-      serverId: agent.serverId,
-      agentId: agent.agentId,
-      workspaceId: agent.workspaceId,
-      taskId: linkedTask ? linkedTask.id : null,
-      title:
-        firstNonEmptyText(linkedTask?.title, agent.title, directoryBasename(agent.cwd)) ??
-        agent.agentId,
-      hostLabel: ctx.input.hostLabelsByServerId?.[agent.serverId] ?? null,
-      workspaceLabel: firstNonEmptyText(linkedTask?.workspaceLabel, directoryBasename(agent.cwd)),
-      mode: linkedTask ? linkedTask.mode : agent.mode,
-      reason: firstNonEmptyText(triage?.waitReason, triage?.summary),
-      isFailed: agent.status === "error",
-      taskRecord: linkedTask,
-      updatedAtMs: agent.updatedAtMs,
-    });
+    ctx.needsYou.push(buildLiveAgentNeedsYouRecord(ctx, agent, linkedTask, triage));
     claimAgent(ctx, agent.serverId, agent.agentId);
     claimTask(ctx, linkedTask);
   }
@@ -762,12 +806,14 @@ function collectParkedTasks(ctx: ActionBarBuildContext): void {
 function collectInProgressTasks(ctx: ActionBarBuildContext): void {
   for (const task of ctx.tasks) {
     if (task.supersededByTaskId) continue;
-    if (task.status !== "running" && task.status !== "open") continue;
     if (ctx.claimedTaskIds.has(task.id)) continue;
     const srvId = resolveTaskServerId(task, ctx.input.serverId);
     const primaryAgentId = resolveTaskPrimaryAgentId(task);
     if (isAgentClaimed(ctx, srvId, primaryAgentId)) continue;
     const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
+    const isResumedNeedsYou =
+      task.status === "needs_you" && Boolean(live) && !live!.archived && isLiveAgentRunning(live);
+    if (task.status !== "running" && task.status !== "open" && !isResumedNeedsYou) continue;
     const lastActivityAtMs = resolveTaskActivityMs(task, live);
     const stale48h =
       lastActivityAtMs > 0 && ctx.nowMs - lastActivityAtMs >= STALE_IN_PROGRESS_THRESHOLD_MS;

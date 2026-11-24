@@ -14,6 +14,8 @@ export interface PaneContextValue {
   target: WorkspaceTabTarget;
   state?: JsonValue;
   panelRevision?: number;
+  /** Mounts Main Chat's `+` multi-source attach/queue & quick-steps bar above MainChatActionBar. */
+  showMainChatComposerEnhancements?: boolean;
   openTab: (target: WorkspaceTabTarget) => void;
   openPreferredTarget: (target: WorkspaceTabTarget, source: OpenInSidePaneSource) => void;
   openTargetToSide?: (target: WorkspaceTabTarget) => void;

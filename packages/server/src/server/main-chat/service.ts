@@ -3,6 +3,7 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
 import {
+  MAIN_CHAT_COMPACT_WINDOW_RATIO,
   MAIN_CHAT_CONVERSATION_ID_LABEL,
   MAIN_CHAT_FORMER_ROLE_VALUE,
   MAIN_CHAT_REPLACED_BY_LABEL,
@@ -18,6 +19,7 @@ import {
   extractMainChatPermissionRuleCandidate,
   getMainChatTaskMetaFromLabels,
   isHostAllowedInFleetScope,
+  isMainChatAutoCompactEnabled,
   isMainChatEnabled,
   isMainChatLabels,
   normalizeMainChatFleetScope,
@@ -82,7 +84,7 @@ import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "../workspace-registry.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../worktree-session.js";
 import { createAgentCommand, type EnsureWorkspaceForCreate } from "../agent/create-agent/create.js";
-import { sendPromptToAgent } from "../agent/agent-prompt.js";
+import { sendPreparedPromptToAgent, sendPromptToAgent } from "../agent/agent-prompt.js";
 import { createPaseoWorktreeCommand } from "../worktree/commands.js";
 import { expandUserPath } from "../path-utils.js";
 import {
@@ -137,7 +139,6 @@ import type { RunSemanticTriageInput, SemanticTriageOutput } from "./triage.js";
 
 const MAX_REWORK_ROUNDS = 2;
 export const DEFAULT_MAIN_CHAT_COMPACT_THRESHOLD_TOKENS = 400_000;
-const IDLE_PRECOMPACT_RATIO = 0.75;
 const DEFAULT_IDLE_PRECOMPACT_MIN_IDLE_MS = 10 * 60 * 1_000;
 const DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS = 60 * 1_000;
 
@@ -491,6 +492,7 @@ export interface MainChatService {
   dismissRuleSuggestion(suggestionId: string): Promise<boolean>;
   listPendingSignals?: (conversationId?: string | null) => MainChatSupervisionSignal[];
   listTrackedApprovals?: () => ApprovalInterceptionEntry[];
+  handleAgentArchived(agentId: string): Promise<void>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -2084,24 +2086,74 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return total;
   }
 
-  function resolveCompactThresholdTokens(mainAgentId: string): number {
+  function toPositiveTokenCount(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : null;
+  }
+
+  function findSnapshotModelContextWindow(
+    models: ReadonlyArray<{
+      id: string;
+      aliases?: readonly string[];
+      isDefault?: boolean;
+      contextWindowMaxTokens?: number | null;
+    }>,
+    requestedModel: string | undefined,
+  ): number | null {
+    if (models.length === 0) return null;
+    const matched = requestedModel
+      ? models.find(
+          (model) =>
+            model.id === requestedModel ||
+            (Array.isArray(model.aliases) && model.aliases.includes(requestedModel)),
+        )
+      : (models.find((model) => model.isDefault) ?? models[0]);
+    return toPositiveTokenCount(matched?.contextWindowMaxTokens);
+  }
+
+  function resolveContextWindowMaxTokens(mainAgentId: string): number | null {
     const live = deps.agentManager.getAgent(mainAgentId);
-    const maxTokens = live?.lastUsage?.contextWindowMaxTokens;
-    if (typeof maxTokens === "number" && maxTokens > 0) {
-      return Math.max(
-        1_000,
-        Math.min(configuredCompactThresholdTokens, Math.floor(maxTokens * 0.85)),
+    const liveMax = toPositiveTokenCount(live?.lastUsage?.contextWindowMaxTokens);
+    if (liveMax !== null) return liveMax;
+    if (!live) return null;
+    try {
+      const snapshot = deps.providerSnapshotManager.getSnapshot(
+        live.cwd || path.join(deps.paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME),
       );
+      const providerEntry = snapshot.records
+        .map((record) => record.entry)
+        .find((entry) => entry.provider === live.provider);
+      return findSnapshotModelContextWindow(providerEntry?.models ?? [], live.config.model?.trim());
+    } catch {
+      // Provider snapshot may be unavailable in minimal harnesses or before initial scan.
+      return null;
+    }
+  }
+
+  function resolveCompactThresholdTokens(
+    mainAgentId: string,
+    contextWindowMaxTokens?: number | null,
+  ): number {
+    const maxTokens =
+      contextWindowMaxTokens !== undefined
+        ? contextWindowMaxTokens
+        : resolveContextWindowMaxTokens(mainAgentId);
+    if (typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0) {
+      return Math.max(1_000, Math.floor(maxTokens * MAIN_CHAT_COMPACT_WINDOW_RATIO));
     }
     return Math.max(1_000, configuredCompactThresholdTokens);
   }
 
   function buildCompactionState(mainAgentId: string | null): MainChatCompactionState {
+    const autoCompactEnabled = isMainChatAutoCompactEnabled(store.getSettings());
     if (!mainAgentId) {
       return {
         status: "idle",
         estimatedTokens: 0,
         thresholdTokens: Math.max(1_000, configuredCompactThresholdTokens),
+        contextWindowMaxTokens: null,
+        autoCompactEnabled,
         lastCompactedAt: null,
         lastError: null,
         summary: null,
@@ -2119,10 +2171,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     } else if (persisted.lastCompactedAt) {
       derivedStatus = "succeeded";
     }
+    const contextWindowMaxTokens = resolveContextWindowMaxTokens(mainAgentId);
     return {
       status: derivedStatus,
       estimatedTokens: estimateContextTokens(mainAgentId),
-      thresholdTokens: resolveCompactThresholdTokens(mainAgentId),
+      thresholdTokens: resolveCompactThresholdTokens(mainAgentId, contextWindowMaxTokens),
+      contextWindowMaxTokens,
+      autoCompactEnabled,
       lastCompactedAt: persisted.lastCompactedAt,
       lastError: persisted.lastError,
       summary: persisted.summary,
@@ -2276,7 +2331,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
             reason,
             instructions,
           });
-          const dispatch = await sendPromptToAgent({
+          const dispatch = await sendPreparedPromptToAgent({
             agentId: mainAgentId,
             prompt: formatSystemNotificationPrompt(checkpointPrompt),
             agentManager: deps.agentManager,
@@ -2347,49 +2402,65 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return task;
   }
 
-  async function checkIdlePrecompactionInternal(requestedMainAgentId?: string): Promise<boolean> {
-    await store.load();
-    if (!isMainChatEnabled(store.getSettings())) return false;
-    if (supervisor.getNightModeStatus().state === "hibernating") return false;
-    const mainAgentId = requestedMainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
-    if (!mainAgentId) return false;
-    if (compactionInFlightByAgent.has(mainAgentId)) return false;
-    if (turnQueue.isForegroundActive(mainAgentId) || turnQueue.isBackgroundBusy(mainAgentId)) {
-      return false;
+  function canRunIdlePrecompaction(mainAgentId: string): {
+    allowed: boolean;
+    lastActivityAtMs: number;
+  } {
+    if (
+      compactionInFlightByAgent.has(mainAgentId) ||
+      turnQueue.isForegroundActive(mainAgentId) ||
+      turnQueue.isBackgroundBusy(mainAgentId) ||
+      deps.agentManager.hasInFlightRun(mainAgentId)
+    ) {
+      return { allowed: false, lastActivityAtMs: 0 };
     }
-    if (deps.agentManager.hasInFlightRun(mainAgentId)) {
-      return false;
-    }
-
     const live = deps.agentManager.getAgent(mainAgentId);
-    if (!live || live.lifecycle === "running") return false;
-
+    if (!live || live.lifecycle === "running") {
+      return { allowed: false, lastActivityAtMs: 0 };
+    }
     const lastActivityAtMs = turnQueue.getLastActivityAtMs(mainAgentId);
     const idleMs =
       lastActivityAtMs > 0
         ? turnQueue.getIdleDurationMs(mainAgentId)
         : Math.max(0, getNowMs() - live.updatedAt.getTime());
     if (idleMs < idlePrecompactMinIdleMs) {
-      return false;
+      return { allowed: false, lastActivityAtMs };
     }
-
     const watermark = lastPrecompactWatermarkByAgent.get(mainAgentId);
     if (watermark !== undefined && watermark === lastActivityAtMs) {
+      return { allowed: false, lastActivityAtMs };
+    }
+    return { allowed: true, lastActivityAtMs };
+  }
+
+  async function checkIdlePrecompactionInternal(requestedMainAgentId?: string): Promise<boolean> {
+    await store.load();
+    const currentSettings = store.getSettings();
+    if (!isMainChatEnabled(currentSettings) || !isMainChatAutoCompactEnabled(currentSettings)) {
+      return false;
+    }
+    if (supervisor.getNightModeStatus().state === "hibernating") return false;
+    const mainAgentId = requestedMainAgentId ?? (await findExistingMainChat())?.agentId ?? null;
+    if (!mainAgentId) return false;
+    if (!canRunIdlePrecompaction(mainAgentId).allowed) return false;
+
+    const estimated = estimateContextTokens(mainAgentId);
+    const contextWindowMaxTokens = resolveContextWindowMaxTokens(mainAgentId);
+    const threshold = resolveCompactThresholdTokens(mainAgentId, contextWindowMaxTokens);
+    if (estimated < threshold) {
       return false;
     }
 
-    const estimated = estimateContextTokens(mainAgentId);
-    const threshold = resolveCompactThresholdTokens(mainAgentId);
-    if (estimated < Math.floor(threshold * IDLE_PRECOMPACT_RATIO)) {
-      return false;
-    }
+    const windowLabel = contextWindowMaxTokens
+      ? `${estimated}/${contextWindowMaxTokens} tokens（已达 80% 阈值 ${threshold}）`
+      : `${estimated}/${threshold} tokens`;
 
     const result = await turnQueue.enqueueBackground({
       mainAgentId,
       dedupeKey: "compaction:idle_precompact",
       trigger: "idle_precompact",
       priority: 1,
-      summary: `上下文估算已达 ${estimated}/${threshold} tokens，后台静默执行空闲预压缩`,
+      summary: `上下文占用已达 ${windowLabel}，后台静默执行空闲自动压缩`,
       requeueOnPreempt: false,
       customExecute: async (signal) => {
         if (signal.aborted || turnQueue.isForegroundActive(mainAgentId)) {
@@ -4389,6 +4460,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     listTrackedApprovals() {
       return supervisor.getApprovalTracker().list();
+    },
+
+    async handleAgentArchived(agentId) {
+      await store.load();
+      await supervisor.handleAgentArchived(agentId);
     },
   };
 }

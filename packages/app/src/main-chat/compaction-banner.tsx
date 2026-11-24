@@ -1,5 +1,8 @@
-import type { MainChatCompactionState } from "@getpaseo/protocol/main-chat";
-import { AlertTriangle, Minimize2, RefreshCw } from "lucide-react-native";
+import {
+  MAIN_CHAT_COMPACT_WINDOW_RATIO,
+  type MainChatCompactionState,
+} from "@getpaseo/protocol/main-chat";
+import { AlertTriangle, Minimize2, RefreshCw, Sparkles } from "lucide-react-native";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
@@ -10,12 +13,14 @@ import { useToast } from "@/contexts/toast-context";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
+import { useMainChatSettingsStore } from "./settings-store";
 
-export const COMPACTION_WARNING_RATIO = 0.7;
+export const COMPACTION_WARNING_RATIO = MAIN_CHAT_COMPACT_WINDOW_RATIO;
 
 const ThemedAlertIcon = withUnistyles(AlertTriangle);
 const ThemedMinimizeIcon = withUnistyles(Minimize2);
 const ThemedRefreshIcon = withUnistyles(RefreshCw);
+const ThemedSparklesIcon = withUnistyles(Sparkles);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
@@ -24,12 +29,20 @@ const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMute
 
 export function computeCompactionUsageRatio(
   compaction:
-    | Pick<MainChatCompactionState, "estimatedTokens" | "thresholdTokens">
+    | Pick<
+        MainChatCompactionState,
+        "estimatedTokens" | "thresholdTokens" | "contextWindowMaxTokens"
+      >
     | null
     | undefined,
 ): number {
-  if (!compaction || compaction.thresholdTokens <= 0) return 0;
-  return Math.max(0, compaction.estimatedTokens / compaction.thresholdTokens);
+  if (!compaction) return 0;
+  const denominator =
+    typeof compaction.contextWindowMaxTokens === "number" && compaction.contextWindowMaxTokens > 0
+      ? compaction.contextWindowMaxTokens
+      : compaction.thresholdTokens;
+  if (denominator <= 0) return 0;
+  return Math.max(0, compaction.estimatedTokens / denominator);
 }
 
 export function shouldShowCompactionBanner(
@@ -39,11 +52,24 @@ export function shouldShowCompactionBanner(
   if (compaction.status === "running" || compaction.status === "failed") {
     return true;
   }
-  return computeCompactionUsageRatio(compaction) >= COMPACTION_WARNING_RATIO;
+  if (compaction.thresholdTokens > 0 && compaction.estimatedTokens >= compaction.thresholdTokens) {
+    return true;
+  }
+  if (
+    typeof compaction.contextWindowMaxTokens === "number" &&
+    compaction.contextWindowMaxTokens > 0
+  ) {
+    return computeCompactionUsageRatio(compaction) >= COMPACTION_WARNING_RATIO;
+  }
+  return false;
 }
 
 export function formatTokenCount(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens < 0) return "0";
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number(millions.toFixed(millions >= 10 ? 0 : 1))}M`;
+  }
   if (tokens >= 1000) {
     const thousands = tokens / 1000;
     return `${thousands >= 100 ? Math.round(thousands) : Number(thousands.toFixed(1))}k`;
@@ -76,6 +102,7 @@ function buildCompactionHeadline(
   compaction: MainChatCompactionState,
   isRunning: boolean,
   isFailed: boolean,
+  hasWindowLimit: boolean,
   ratioPct: number,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
@@ -88,8 +115,116 @@ function buildCompactionHeadline(
       ? t("mainChat.compaction.failedWithError", { error: trimmedError })
       : t("mainChat.compaction.failedTitle");
   }
+  if (!hasWindowLimit) {
+    return t("mainChat.compaction.highUsageFallbackTitle");
+  }
   return t("mainChat.compaction.highUsageTitle", { percent: ratioPct });
 }
+
+const ACCESSIBILITY_CHECKED = { checked: true } as const;
+const ACCESSIBILITY_UNCHECKED = { checked: false } as const;
+
+function buildCompactionDisplayModel(input: {
+  compaction: MainChatCompactionState;
+  isRunning: boolean;
+  isFailed: boolean;
+  autoCompactEnabled: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}): {
+  headline: string;
+  metaText: string;
+  autoButtonLabel: string;
+  compactButtonLabel: string;
+} {
+  const { compaction, isRunning, isFailed, autoCompactEnabled, t } = input;
+  const hasWindowLimit =
+    typeof compaction.contextWindowMaxTokens === "number" && compaction.contextWindowMaxTokens > 0;
+  const ratioPct = Math.min(999, Math.round(computeCompactionUsageRatio(compaction) * 100));
+  const tokensText = hasWindowLimit
+    ? t("mainChat.compaction.usageWindowTokens", {
+        used: formatTokenCount(compaction.estimatedTokens),
+        window: formatTokenCount(compaction.contextWindowMaxTokens!),
+        percent: ratioPct,
+      })
+    : t("mainChat.compaction.usageTokens", {
+        used: formatTokenCount(compaction.estimatedTokens),
+        threshold: formatTokenCount(compaction.thresholdTokens),
+        percent: ratioPct,
+      });
+  const lastTime = formatCompactedTime(compaction.lastCompactedAt);
+  const autoMeta = autoCompactEnabled
+    ? t("mainChat.compaction.autoEnabledMeta")
+    : t("mainChat.compaction.autoDisabledMeta");
+  const metaParts = [
+    tokensText,
+    autoMeta,
+    lastTime ? t("mainChat.compaction.lastCompactedAt", { time: lastTime }) : null,
+  ].filter(Boolean);
+
+  return {
+    headline: buildCompactionHeadline(compaction, isRunning, isFailed, hasWindowLimit, ratioPct, t),
+    metaText: metaParts.join(" · "),
+    autoButtonLabel: autoCompactEnabled
+      ? t("mainChat.compaction.autoOnButton")
+      : t("mainChat.compaction.autoOffButton"),
+    compactButtonLabel: isFailed
+      ? t("mainChat.compaction.retryButton")
+      : t("mainChat.compaction.compactButton"),
+  };
+}
+
+const MainChatCompactionActions = memo(function MainChatCompactionActions({
+  autoCompactEnabled,
+  togglingAutoCompact,
+  autoToggleDisabled,
+  autoButtonLabel,
+  onToggleAutoCompact,
+  isRunning,
+  isFailed,
+  actionDisabled,
+  compactButtonLabel,
+  onCompact,
+}: {
+  autoCompactEnabled: boolean;
+  togglingAutoCompact: boolean;
+  autoToggleDisabled: boolean;
+  autoButtonLabel: string;
+  onToggleAutoCompact: () => void;
+  isRunning: boolean;
+  isFailed: boolean;
+  actionDisabled: boolean;
+  compactButtonLabel: string;
+  onCompact: () => void;
+}): ReactElement {
+  return (
+    <View style={styles.actions}>
+      <Button
+        variant={autoCompactEnabled ? "outline" : "ghost"}
+        size="sm"
+        loading={togglingAutoCompact}
+        disabled={autoToggleDisabled}
+        leftIcon={ThemedSparklesIcon}
+        onPress={onToggleAutoCompact}
+        accessibilityState={autoCompactEnabled ? ACCESSIBILITY_CHECKED : ACCESSIBILITY_UNCHECKED}
+        testID="main-chat-compaction-auto-toggle"
+      >
+        {autoButtonLabel}
+      </Button>
+
+      <Button
+        variant={isFailed ? "outline" : "secondary"}
+        size="sm"
+        loading={isRunning}
+        disabled={actionDisabled}
+        leftIcon={isFailed ? ThemedRefreshIcon : ThemedMinimizeIcon}
+        onPress={onCompact}
+        testID="main-chat-compaction-action"
+      >
+        {compactButtonLabel}
+      </Button>
+    </View>
+  );
+});
 
 export interface MainChatCompactionBannerProps {
   serverId: string | null;
@@ -100,7 +235,8 @@ export interface MainChatCompactionBannerProps {
 
 /**
  * Compact context-compaction status strip shown below the Main Chat shell header only when
- * compaction is running, failed, or estimated token usage reaches >= 70% of the threshold.
+ * compaction is running, failed, or estimated token usage reaches >= 80% of the model's real
+ * context window (or the fallback threshold when the model window is unavailable).
  */
 export const MainChatCompactionBanner = memo(function MainChatCompactionBanner({
   serverId,
@@ -116,14 +252,20 @@ export const MainChatCompactionBanner = memo(function MainChatCompactionBanner({
   );
   const compactMainChat = useMainChatOverviewStore((state) => state.compactMainChat);
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
+  const settingsAutoCompact = useMainChatSettingsStore((state) =>
+    serverId ? state.settingsByServerId[serverId]?.autoCompactEnabled : undefined,
+  );
+  const updateSettings = useMainChatSettingsStore((state) => state.updateSettings);
   const client = useSessionStore((state) =>
     serverId ? (state.sessions[serverId]?.client ?? null) : null,
   );
 
   const [submitting, setSubmitting] = useState(false);
+  const [togglingAutoCompact, setTogglingAutoCompact] = useState(false);
 
   const compaction = compactionOverride !== undefined ? compactionOverride : storeCompaction;
   const visible = shouldShowCompactionBanner(compaction);
+  const autoCompactEnabled = settingsAutoCompact ?? compaction?.autoCompactEnabled ?? true;
 
   const handleCompact = useCallback(() => {
     if (!serverId || !mainAgentId || !client || submitting) return;
@@ -143,6 +285,43 @@ export const MainChatCompactionBanner = memo(function MainChatCompactionBanner({
       });
   }, [client, compactMainChat, loadOverview, mainAgentId, serverId, submitting, t, toast]);
 
+  const handleToggleAutoCompact = useCallback(() => {
+    if (!serverId || !client || togglingAutoCompact) return;
+    const nextValue = !autoCompactEnabled;
+    setTogglingAutoCompact(true);
+    void updateSettings(serverId, { autoCompactEnabled: nextValue }, client)
+      .then(() => {
+        toast.show(
+          nextValue
+            ? t("mainChat.compaction.autoEnabledToast")
+            : t("mainChat.compaction.autoDisabledToast"),
+          { variant: "success" },
+        );
+        if (mainAgentId && typeof client.getMainChatOverview === "function") {
+          return loadOverview(serverId, mainAgentId, client);
+        }
+        return null;
+      })
+      .catch((error) => {
+        toast.error(
+          error instanceof Error ? error.message : t("mainChat.compaction.autoToggleFailedToast"),
+        );
+      })
+      .finally(() => {
+        setTogglingAutoCompact(false);
+      });
+  }, [
+    autoCompactEnabled,
+    client,
+    loadOverview,
+    mainAgentId,
+    serverId,
+    t,
+    toast,
+    togglingAutoCompact,
+    updateSettings,
+  ]);
+
   const isRunning = compaction?.status === "running" || submitting;
   const isFailed = !isRunning && compaction?.status === "failed";
 
@@ -155,19 +334,15 @@ export const MainChatCompactionBanner = memo(function MainChatCompactionBanner({
     return null;
   }
 
-  const ratioPct = Math.min(999, Math.round(computeCompactionUsageRatio(compaction) * 100));
-  const tokensText = t("mainChat.compaction.usageTokens", {
-    used: formatTokenCount(compaction.estimatedTokens),
-    threshold: formatTokenCount(compaction.thresholdTokens),
-    percent: ratioPct,
+  const display = buildCompactionDisplayModel({
+    compaction,
+    isRunning,
+    isFailed,
+    autoCompactEnabled,
+    t,
   });
-  const lastTime = formatCompactedTime(compaction.lastCompactedAt);
-  const headline = buildCompactionHeadline(compaction, isRunning, isFailed, ratioPct, t);
-  const metaParts = [
-    tokensText,
-    lastTime ? t("mainChat.compaction.lastCompactedAt", { time: lastTime }) : null,
-  ].filter(Boolean);
   const actionDisabled = isRunning || !client || !serverId || !mainAgentId;
+  const autoToggleDisabled = togglingAutoCompact || !client || !serverId;
 
   return (
     <View style={bannerStyle} testID="main-chat-compaction-banner">
@@ -179,24 +354,25 @@ export const MainChatCompactionBanner = memo(function MainChatCompactionBanner({
           numberOfLines={1}
           testID="main-chat-compaction-headline"
         >
-          {headline}
+          {display.headline}
         </Text>
         <Text style={styles.meta} numberOfLines={1} testID="main-chat-compaction-meta">
-          {metaParts.join(" · ")}
+          {display.metaText}
         </Text>
       </View>
 
-      <Button
-        variant={isFailed ? "outline" : "secondary"}
-        size="sm"
-        loading={isRunning}
-        disabled={actionDisabled}
-        leftIcon={isFailed ? ThemedRefreshIcon : ThemedMinimizeIcon}
-        onPress={handleCompact}
-        testID="main-chat-compaction-action"
-      >
-        {isFailed ? t("mainChat.compaction.retryButton") : t("mainChat.compaction.compactButton")}
-      </Button>
+      <MainChatCompactionActions
+        autoCompactEnabled={autoCompactEnabled}
+        togglingAutoCompact={togglingAutoCompact}
+        autoToggleDisabled={autoToggleDisabled}
+        autoButtonLabel={display.autoButtonLabel}
+        onToggleAutoCompact={handleToggleAutoCompact}
+        isRunning={isRunning}
+        isFailed={isFailed}
+        actionDisabled={actionDisabled}
+        compactButtonLabel={display.compactButtonLabel}
+        onCompact={handleCompact}
+      />
     </View>
   );
 });
@@ -239,5 +415,11 @@ const styles = StyleSheet.create((theme) => ({
   meta: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
+  },
+  actions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1.5],
+    flexShrink: 0,
   },
 }));

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAIN_CHAT_COMPACT_WINDOW_RATIO,
   MAIN_CHAT_FORMER_ROLE_VALUE,
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
@@ -15,10 +16,16 @@ import {
   isFormerMainChatLabels,
   isHostAllowedInFleetScope,
   isMainChatEnabled,
+  isMainChatAutoCompactEnabled,
   isMainChatLabels,
   mergeMainChatSettings,
   normalizeMainChatFleetScope,
+  parseTaskAskUserToolPayload,
+  parseTaskCompleteToolPayload,
+  parseTaskPlanToolOutput,
+  parseTaskReworkToolPayload,
   resolveMainChatFleetScope,
+  unwrapToolPayloadObject,
 } from "../src/main-chat.js";
 import { SessionInboundMessageSchema } from "../src/messages.js";
 import { validateWSOutboundMessage } from "../src/validation/ws-outbound.js";
@@ -318,5 +325,163 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
       },
     });
     expect(legacy.success).toBe(true);
+  });
+
+  it("supports configurable autoCompactEnabled and model contextWindowMaxTokens on compaction state", () => {
+    expect(MAIN_CHAT_COMPACT_WINDOW_RATIO).toBe(0.8);
+    const defaults = createDefaultMainChatSettings();
+    expect(isMainChatAutoCompactEnabled(defaults)).toBe(true);
+
+    const disabled = mergeMainChatSettings(defaults, { autoCompactEnabled: false });
+    expect(isMainChatAutoCompactEnabled(disabled)).toBe(false);
+
+    // Preset changes preserve explicit autoCompactEnabled preference.
+    const afterPreset = mergeMainChatSettings(disabled, { applyPreset: "proactive" });
+    expect(isMainChatAutoCompactEnabled(afterPreset)).toBe(false);
+
+    const state = MainChatCompactionStateSchema.parse({
+      status: "idle",
+      estimatedTokens: 820_000,
+      thresholdTokens: 800_000,
+      contextWindowMaxTokens: 1_000_000,
+      autoCompactEnabled: false,
+      lastCompactedAt: null,
+      lastError: null,
+      summary: null,
+    });
+    expect(state.contextWindowMaxTokens).toBe(1_000_000);
+    expect(state.autoCompactEnabled).toBe(false);
+
+    const outbound = validateWSOutboundMessage({
+      type: "session",
+      message: {
+        type: "main_chat.compact.response",
+        payload: {
+          requestId: "req_compact_1m",
+          mainAgentId: "agent_main",
+          compaction: state,
+          error: null,
+        },
+      },
+    });
+    expect(outbound.success).toBe(true);
+  });
+
+  it("recursively unwraps Claude { output: ... } MCP envelopes for all 4 main-chat inline card parsers", () => {
+    const samplePlan = {
+      id: "plan_claude_1",
+      mainAgentId: "agent_main",
+      status: "open",
+      autoStarted: false,
+      summary: "修复主对话 7 项问题",
+      createdAt: "2026-11-24T08:00:00.000Z",
+      startedAt: null,
+      cancelledAt: null,
+      tasks: [
+        {
+          id: "t1",
+          title: "补齐协议层解包",
+          goal: "修复 Claude MCP 外包 output 壳",
+          mode: "write",
+          isolation: "worktree",
+          workspaceId: "ws_1",
+          cwd: "/repo/paseo-fork",
+          workspaceLabel: "paseo-fork",
+          reason: "恢复内联卡片渲染",
+          doneWhen: ["4 类卡片均能解析"],
+          outOfBounds: ["不触碰线上 daemon"],
+          provider: "claude",
+          modeId: null,
+          thinkingOptionId: null,
+          branchName: "feat/fix",
+          baseBranch: "main",
+          agentId: null,
+          startedAt: null,
+          startError: null,
+        },
+      ],
+    };
+
+    const sampleDecision = {
+      id: "dec_claude_1",
+      mainAgentId: "agent_main",
+      title: "是否合并改动",
+      question: "请选择执行策略",
+      agentId: "agent_child_1",
+      planId: "plan_claude_1",
+      taskId: "t1",
+      options: [
+        { id: "opt_a", label: "方案 A", leadsTo: "一并交付" },
+        { id: "opt_b", label: "方案 B", leadsTo: "分批交付" },
+      ],
+      recommendedOptionId: "opt_a",
+      reason: "统一验证更稳妥",
+      answer: null,
+      answeredOptionId: null,
+      answeredAt: null,
+      createdAt: "2026-11-24T08:05:00.000Z",
+    };
+
+    const sampleReceipt = {
+      title: "修复主对话卡片",
+      summary: "4 类内联卡片全部恢复正常渲染",
+      agentId: "agent_child_1",
+      planId: "plan_claude_1",
+      taskId: "t1",
+      checks: [{ criterion: "单测通过", met: true, evidence: "vitest 全部通过" }],
+      nextSteps: ["打开浏览器复核 UI"],
+    };
+
+    const sampleRework = {
+      title: "补齐边界单测",
+      agentId: "agent_child_1",
+      planId: "plan_claude_1",
+      taskId: "t1",
+      round: 1,
+      maxRounds: 2,
+      gaps: ["补充 Claude output 嵌套数组用例"],
+      note: "请再核对一次",
+    };
+
+    // 1. task_plan wrapped in Claude `{ output: [{ type: "text", text: JSON }] }`
+    const claudePlanEnvelope = {
+      output: [{ type: "text", text: JSON.stringify({ plan: samplePlan }) }],
+    };
+    const parsedPlan = parseTaskPlanToolOutput(claudePlanEnvelope);
+    expect(parsedPlan?.id).toBe("plan_claude_1");
+    expect(parsedPlan?.tasks).toHaveLength(1);
+    expect(parsedPlan?.tasks[0]?.title).toBe("补齐协议层解包");
+
+    // 2. task_ask_user wrapped in `{ output: { content: [{ type: "text", text: JSON }] } }`
+    const claudeDecisionEnvelope = {
+      output: {
+        content: [{ type: "text", text: JSON.stringify({ decision: sampleDecision }) }],
+      },
+    };
+    const parsedDecision = parseTaskAskUserToolPayload(claudeDecisionEnvelope);
+    expect(parsedDecision?.id).toBe("dec_claude_1");
+    expect(parsedDecision?.options).toHaveLength(2);
+
+    // 3. task_complete wrapped in `{ output: { structuredContent: { receipt } } }`
+    const claudeReceiptEnvelope = {
+      output: {
+        structuredContent: { receipt: sampleReceipt },
+      },
+    };
+    const parsedReceipt = parseTaskCompleteToolPayload(null, claudeReceiptEnvelope);
+    expect(parsedReceipt?.title).toBe("修复主对话卡片");
+    expect(parsedReceipt?.checks).toHaveLength(1);
+
+    // 4. task_rework wrapped in `{ output: JSONString }`
+    const claudeReworkEnvelope = {
+      output: JSON.stringify({ rework: sampleRework }),
+    };
+    const parsedRework = parseTaskReworkToolPayload(null, claudeReworkEnvelope);
+    expect(parsedRework?.round).toBe(1);
+    expect(parsedRework?.gaps).toEqual(["补充 Claude output 嵌套数组用例"]);
+
+    // Plain non-JSON string `output` must NOT clobber the outer object.
+    const plainOuter = { title: "保留外层字段", output: "plain log line" };
+    expect(unwrapToolPayloadObject(plainOuter)).toEqual(plainOuter);
   });
 });

@@ -57,6 +57,7 @@ const ThemedQueueIcon = withUnistyles(ListTodo);
 const ThemedXIcon = withUnistyles(X);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const foregroundIconMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 const placeholderColorMapping = (theme: Theme) => ({
   placeholderTextColor: theme.colors.foregroundExtraMuted,
@@ -399,31 +400,31 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
 
   return (
     <View style={styles.container} testID="main-chat-composer-enhancements">
-      <MainChatQueuePanel serverId={serverId} agentId={agentId} onSendMessage={onSendMessage} />
+      <View style={styles.inner} dataSet={CHAT_COLUMN_RAIL_DATASET}>
+        <MainChatQueuePanel serverId={serverId} agentId={agentId} onSendMessage={onSendMessage} />
 
-      {activePickerKind ? (
-        <View style={styles.rail} dataSet={CHAT_COLUMN_RAIL_DATASET}>
-          <InlineMentionPicker
-            kind={activePickerKind}
-            items={pickerItems}
-            onSelect={handleSelectMentionItem}
-            onClose={handleClosePicker}
-          />
-        </View>
-      ) : null}
+        {activePickerKind ? (
+          <View style={styles.rail}>
+            <InlineMentionPicker
+              kind={activePickerKind}
+              items={pickerItems}
+              onSelect={handleSelectMentionItem}
+              onClose={handleClosePicker}
+            />
+          </View>
+        ) : null}
 
-      {quickQueueOpen ? (
-        <View style={styles.rail} dataSet={CHAT_COLUMN_RAIL_DATASET}>
-          <QuickQueueBar
-            value={quickQueueDraft}
-            onChange={setQuickQueueDraft}
-            onSubmit={handleSubmitQuickQueue}
-            onClose={handleCloseQuickQueue}
-          />
-        </View>
-      ) : null}
+        {quickQueueOpen ? (
+          <View style={styles.rail}>
+            <QuickQueueBar
+              value={quickQueueDraft}
+              onChange={setQuickQueueDraft}
+              onSubmit={handleSubmitQuickQueue}
+              onClose={handleCloseQuickQueue}
+            />
+          </View>
+        ) : null}
 
-      <View style={styles.rail} dataSet={CHAT_COLUMN_RAIL_DATASET}>
         <View style={styles.toolbarRow}>
           <DropdownMenu compactMode="sheet">
             <DropdownMenuTrigger
@@ -433,7 +434,7 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
               accessibilityLabel={t("mainChat.composer.attachMenu.triggerLabel")}
               testID="main-chat-composer-attach-trigger"
             >
-              <ThemedPlusIcon size={15} uniProps={mutedIconMapping} />
+              <ThemedPlusIcon size={15} uniProps={foregroundIconMapping} />
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
@@ -508,14 +509,18 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
 const styles = StyleSheet.create((theme) => ({
   container: {
     width: "100%",
+    alignItems: "center",
     paddingHorizontal: theme.spacing[3],
-    paddingTop: theme.spacing[1],
-    paddingBottom: theme.spacing[2],
-    backgroundColor: theme.colors.surface0,
+    paddingTop: theme.spacing[1.5],
+    paddingBottom: theme.spacing[0.5],
+  },
+  inner: {
+    width: "100%",
+    maxWidth: theme.contentMaxWidth,
+    gap: theme.spacing[1.5],
   },
   rail: {
     width: "100%",
-    paddingBottom: theme.spacing[1],
   },
   toolbarRow: {
     flexDirection: "row",
@@ -527,8 +532,8 @@ const styles = StyleSheet.create((theme) => ({
     height: 28,
     borderRadius: theme.borderRadius.full,
     borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
+    borderColor: theme.colors.borderAccent,
+    backgroundColor: theme.colors.surface2,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,

@@ -401,5 +401,9 @@ describe("Single-row Main Chat tray consolidation", () => {
     expect(metricsRow.textContent).toContain('"autoContinued":4');
     expect(metricsRow.textContent).toContain('"rework":2');
     expect(metricsRow.textContent).toContain('"interrupts":1');
+
+    // Auto-compaction section and toggle switch are rendered in MainChatSettingsSection.
+    expect(view.getByTestId("settings-main-chat-compaction")).toBeTruthy();
+    expect(view.getByTestId("settings-main-chat-auto-compact")).toBeTruthy();
   });
 });

@@ -19,7 +19,6 @@ import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store"
 import { useSessionStore } from "@/stores/session-store";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
-import { MainChatComposerEnhancements } from "./composer-enhancements";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 
 export interface MainChatAgentHostProps {
@@ -86,26 +85,11 @@ function useViewedMainChatAgent(input: {
  * Provides timeline catch-up, isolated composer editing scope, and pane context without wrapping
  * the conversation in `WorkspaceScreen` tabs, terminal, explorer, or git chrome.
  */
-interface MainChatAgentHostContentProps {
-  serverId: string;
-  agentId: string;
-  showComposerEnhancements: boolean;
-}
-
-const MainChatAgentHostContent = memo(function MainChatAgentHostContent({
-  serverId,
-  agentId,
-  showComposerEnhancements,
-}: MainChatAgentHostContentProps) {
+const MainChatAgentHostContent = memo(function MainChatAgentHostContent() {
   return (
-    <>
-      <View style={styles.panelHost}>
-        <AgentConversationPanel />
-      </View>
-      {showComposerEnhancements ? (
-        <MainChatComposerEnhancements serverId={serverId} agentId={agentId} />
-      ) : null}
-    </>
+    <View style={styles.panelHost}>
+      <AgentConversationPanel />
+    </View>
   );
 });
 
@@ -159,6 +143,7 @@ export const MainChatAgentHost = memo(function MainChatAgentHost({
   const editingWorkspaceKey = `main-chat-editing:${sourceId}`;
   const editingTabIds = useMemo(() => [tabId], [tabId]);
   const targetKey = `agent:${serverId}:${agentId}`;
+  const showComposerEnhancements = !sourceId.startsWith("main-chat-drawer:");
 
   const paneContextValue = useMemo<PaneContextValue>(
     () => ({
@@ -167,6 +152,7 @@ export const MainChatAgentHost = memo(function MainChatAgentHost({
       host: "main",
       tabId,
       target: { kind: "agent", agentId },
+      showMainChatComposerEnhancements: showComposerEnhancements,
       openTab: handleOpenTarget,
       openPreferredTarget: handleOpenTarget,
       closeCurrentTab: noop,
@@ -175,7 +161,15 @@ export const MainChatAgentHost = memo(function MainChatAgentHost({
       openFileInWorkspace: handleOpenFileInWorkspace,
       openImportSheet: noop,
     }),
-    [agentId, handleOpenFileInWorkspace, handleOpenTarget, serverId, tabId, workspaceId],
+    [
+      agentId,
+      handleOpenFileInWorkspace,
+      handleOpenTarget,
+      serverId,
+      showComposerEnhancements,
+      tabId,
+      workspaceId,
+    ],
   );
 
   const paneFocusValue = useMemo(
@@ -193,8 +187,6 @@ export const MainChatAgentHost = memo(function MainChatAgentHost({
     return false;
   }, [onFocusPane]);
 
-  const showComposerEnhancements = !sourceId.startsWith("main-chat-drawer:");
-
   return (
     <View
       style={styles.root}
@@ -208,11 +200,7 @@ export const MainChatAgentHost = memo(function MainChatAgentHost({
           <ComposerEditingScope tabId={tabId} targetKey={targetKey}>
             <PaneProvider value={paneContextValue}>
               <PaneFocusProvider value={paneFocusValue}>
-                <MainChatAgentHostContent
-                  serverId={serverId}
-                  agentId={agentId}
-                  showComposerEnhancements={showComposerEnhancements}
-                />
+                <MainChatAgentHostContent />
               </PaneFocusProvider>
             </PaneProvider>
           </ComposerEditingScope>

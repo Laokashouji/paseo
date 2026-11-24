@@ -346,7 +346,7 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
     }
   });
 
-  it("triggers silent idle pre-compaction at >=75% token threshold after continuous idle and yields to active user", async () => {
+  it("triggers silent idle pre-compaction at >=80% real context window (uncapped beyond 400k), respects autoCompactEnabled, and yields to active user", async () => {
     let nowMs = 1_700_000_000_000;
     const harness = makeLifecycleHarness({
       supportsNativeCompact: true,
@@ -358,13 +358,31 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
     const { agentId: mainId } = await harness.service.ensureMainChat();
 
     const mainAgent = harness.agents.get(mainId)!;
-    // Below 75% threshold -> should NOT trigger even after long idle.
-    mainAgent.lastUsage = { contextWindowUsedTokens: 60_000 };
+    // With a 1M model context window, 80% threshold is 800k — NOT capped at 400k.
+    mainAgent.lastUsage = {
+      contextWindowUsedTokens: 600_000,
+      contextWindowMaxTokens: 1_000_000,
+    };
+    const state600k = await harness.service.getCompactionState(mainId);
+    expect(state600k.contextWindowMaxTokens).toBe(1_000_000);
+    expect(state600k.thresholdTokens).toBe(800_000);
+    expect(state600k.autoCompactEnabled).toBe(true);
+
+    // 600k / 1M (60%) -> should NOT trigger even after long idle.
     nowMs += 120_000;
     expect(await harness.service.checkIdlePrecompaction(mainId)).toBe(false);
 
-    // Above 75% threshold (80k / 100k), but user is currently active -> MUST yield & not run!
-    mainAgent.lastUsage = { contextWindowUsedTokens: 80_000 };
+    // 820k / 1M (82% >= 80%), but autoCompactEnabled is disabled -> MUST NOT trigger!
+    mainAgent.lastUsage = {
+      contextWindowUsedTokens: 820_000,
+      contextWindowMaxTokens: 1_000_000,
+    };
+    await harness.service.updateSettings({ autoCompactEnabled: false });
+    expect((await harness.service.getCompactionState(mainId)).autoCompactEnabled).toBe(false);
+    expect(await harness.service.checkIdlePrecompaction(mainId)).toBe(false);
+
+    // Re-enable autoCompactEnabled, but user is currently active -> MUST yield & not run!
+    await harness.service.updateSettings({ autoCompactEnabled: true });
     const releaseForeground = harness.service.beginForegroundUserSend(mainId);
     expect(await harness.service.checkIdlePrecompaction(mainId)).toBe(false);
     releaseForeground?.();
@@ -381,6 +399,12 @@ describe("main-chat M2 lifecycle: compact, idle precompact, /clear, new_session 
     // Repeated idle check without new activity MUST NOT loop pre-compaction!
     nowMs += 120_000;
     expect(await harness.service.checkIdlePrecompaction(mainId)).toBe(false);
+
+    // When model window is unavailable, falls back cleanly to configured threshold (100k).
+    mainAgent.lastUsage = { contextWindowUsedTokens: 90_000 };
+    const fallbackState = await harness.service.getCompactionState(mainId);
+    expect(fallbackState.contextWindowMaxTokens).toBeNull();
+    expect(fallbackState.thresholdTokens).toBe(100_000);
 
     harness.service.stop();
   });
