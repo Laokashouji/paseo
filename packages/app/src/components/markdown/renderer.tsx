@@ -8,6 +8,7 @@ import {
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { matchCommandLink, useAgentCommandHints, type CommandHints } from "@/agent-commands";
 import { useForgeShorthand } from "@/git/forge-shorthand";
+import { isMainChatSessionLink, useMainChatSessionLinkOpener } from "@/main-chat/session-link";
 import { pluginOverviewUrl } from "@getpaseo/protocol/plugin-overview";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { AttachmentLightbox, type ImageLightboxSource } from "@/components/attachment-lightbox";
@@ -15,7 +16,7 @@ import type { Theme } from "@/styles/theme";
 import { isWeb } from "@/constants/platform";
 import { density, resolveDensity } from "@/styles/density";
 import { MarkdownBlockStack } from "./block-stack";
-import { WEB_RENDERERS } from "./renderers";
+import { WEB_EXTERNAL_RENDERERS, WEB_RENDERERS } from "./renderers";
 import { createMarkdownStyles } from "./styles";
 import { PENDING_MARKDOWN_IMAGE } from "./source";
 import { splitStreamingMarkdown } from "./streaming";
@@ -101,6 +102,7 @@ const MarkdownPart = memo(function MarkdownPart({
 }: MarkdownRendererProps & { commandHints?: CommandHints | null }) {
   const environment = useAssistantFileLinkEnvironment();
   const actions = useAssistantFileLinkActions();
+  const openSessionLink = useMainChatSessionLinkOpener(environment.serverId);
   const workspaceForgeShorthand = useForgeShorthand();
   const forgeShorthand = external ? null : workspaceForgeShorthand;
   const client =
@@ -130,6 +132,10 @@ const MarkdownPart = memo(function MarkdownPart({
       if (safe) void openExternalUrl(safe);
       return;
     }
+    if (isMainChatSessionLink(url)) {
+      openSessionLink(url);
+      return;
+    }
     const command = commandHints && matchCommandLink(url, sourceType, commandHints.names);
     if (command) {
       commandHints.insert(command);
@@ -153,6 +159,10 @@ const MarkdownPart = memo(function MarkdownPart({
       isWeb ? [{ kind: "markdown", id: "0", source: markdown }] : splitMermaidFences(markdown),
     [markdown],
   );
+  let renderers = undefined;
+  if (isWeb) {
+    renderers = external ? WEB_EXTERNAL_RENDERERS : WEB_RENDERERS;
+  }
   return (
     <MermaidStreamingContext.Provider value={streaming}>
       <MarkdownBlockStack imageSources={imageSources}>
@@ -175,7 +185,7 @@ const MarkdownPart = memo(function MarkdownPart({
               streamingAnimation={false}
               onLinkPress={pressLink}
               onImagePress={pressImage}
-              renderers={isWeb ? WEB_RENDERERS : undefined}
+              renderers={renderers}
             />
           ),
         )}

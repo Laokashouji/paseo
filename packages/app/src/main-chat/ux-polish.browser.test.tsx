@@ -13,10 +13,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React, { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Text, View } from "react-native";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, UnistylesRuntime } from "react-native-unistyles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { CHAT_COLUMN_RAIL_DATASET, ChatColumnRailSurface } from "@/chat-rail";
+import { MarkdownRenderer } from "@/components/markdown/renderer";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
 import { providersSnapshotQueryKey } from "@/hooks/use-providers-snapshot";
 import { i18n } from "@/i18n/i18next";
@@ -27,9 +28,11 @@ import {
   MainChatActionBarDrawerOverlay,
   useMainChatActionBarDrawerStore,
 } from "./action-bar";
+import { useMainChatCameFromStore } from "./came-from-store";
 import { MainChatCompactionBanner } from "./compaction-banner";
 import { MainChatComposerEnhancements } from "./composer-enhancements";
 import { MainChatDecisionCard } from "./decision-card";
+import { useMainChatDrawerStore } from "./drawer-store";
 import { MainChatFirstSetupView } from "./first-setup-view";
 import { MainChatHandoffCard } from "./handoff-card";
 import { MainChatNextStepsBar } from "./next-steps-bar";
@@ -40,7 +43,16 @@ import { MainChatReceiptCard } from "./receipt-card";
 import { MainChatReworkCard } from "./rework-card";
 import { MainChatRouteBanner } from "./route-banner";
 import { useMainChatSettingsStore } from "./settings-store";
+import { MainChatShellProvider } from "./shell-context";
 import { renderMainChatInlineToolCard } from "./stream-card";
+
+const { navigateToAgentMock } = vi.hoisted(() => ({
+  navigateToAgentMock: vi.fn(),
+}));
+
+vi.mock("@/utils/navigate-to-agent", () => ({
+  navigateToAgent: navigateToAgentMock,
+}));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -50,6 +62,11 @@ const RAIL_ALIGNMENT_ROUTE_TARGET = {
   targetServerId: "srv_1",
   targetAgentId: "child_browser_1",
   targetTitle: "修复底部 Rail 对齐与设置项",
+};
+const SESSION_LINK_SHELL_CONTEXT_VALUE = {
+  inMainChatShell: true,
+  originRoute: "/main",
+  originTitle: "主对话",
 };
 const noopClearRoute = () => undefined;
 const SCREENSHOT_DIR = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
@@ -185,10 +202,12 @@ const WIDE_STREAM_REWORK_OUTPUT = {
   },
 };
 
+const toastShowMock = vi.fn(() => () => undefined);
+const toastErrorMock = vi.fn();
 const toastApi: ComponentProps<typeof ToastApiProvider>["api"] = {
-  show: () => () => undefined,
-  error: () => () => undefined,
-  copied: () => () => undefined,
+  show: toastShowMock,
+  error: toastErrorMock,
+  copied: vi.fn(),
 };
 
 function countPaintedLines(element: HTMLElement): number {
@@ -342,11 +361,16 @@ describe("Main Chat UX polish browser layout & style verification", () => {
   afterEach(async () => {
     act(() => root.unmount());
     host.remove();
+    document.body.style.backgroundColor = "";
+    UnistylesRuntime.setTheme("light");
     useSessionStore.setState({ sessions: {} });
     useMainChatOverviewStore.setState({ overviewsByKey: {}, decisionsByKey: {} });
     useMainChatSettingsStore.setState({ settingsByServerId: {} });
-    useMainChatActionBarDrawerStore.setState({ openBucketByKey: {}, expandedByKey: {} });
+    useMainChatActionBarDrawerStore.getState().reset();
+    useMainChatDrawerStore.getState().closeDrawer();
+    useMainChatCameFromStore.getState().clearCameFrom();
     useMainChatQueueStore.setState({ queuesByAgentId: {} });
+    vi.clearAllMocks();
     await i18n.changeLanguage("en");
     vi.unstubAllGlobals();
   });
@@ -450,7 +474,7 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     });
     seedMainChatSession(overview, [blockedChild]);
 
-    useMainChatActionBarDrawerStore.setState({ openBucketByKey: {}, expandedByKey: {} });
+    useMainChatActionBarDrawerStore.getState().reset();
     renderInBrowser(
       <View style={BROWSER_SHELL_STYLE}>
         <View style={BROWSER_STREAM_VIEWPORT_STYLE}>
@@ -459,6 +483,9 @@ describe("Main Chat UX polish browser layout & style verification", () => {
         <View>
           <MainChatComposerEnhancements serverId="srv_1" agentId="agent_main" />
           <MainChatActionBar serverId="srv_1" agentId="agent_main" drawerMode="external" />
+          <View style={railTestStyles.simulatedComposerInner} testID="composer-anchor-box">
+            <Text>Composer</Text>
+          </View>
         </View>
       </View>,
     );
@@ -467,15 +494,24 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       '[data-testid="main-chat-composer-enhancements"]',
     );
     const actionBarEl = host.querySelector<HTMLElement>('[data-testid="main-chat-action-bar"]');
+    const composerAnchorEl = host.querySelector<HTMLElement>('[data-testid="composer-anchor-box"]');
+    const compactDockBefore = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-compact-dock"]',
+    );
     expect(enhancementsEl).toBeTruthy();
     expect(actionBarEl).toBeTruthy();
+    expect(composerAnchorEl).toBeTruthy();
+    expect(compactDockBefore).toBeTruthy();
 
     const enhRectBefore = enhancementsEl!.getBoundingClientRect();
     const barRectBefore = actionBarEl!.getBoundingClientRect();
+    const composerRectBefore = composerAnchorEl!.getBoundingClientRect();
     expect(enhRectBefore.bottom).toBeLessThanOrEqual(barRectBefore.top + 1);
 
-    // Open NeedsYou drawer and confirm the floating overlay drawer renders cleanly above
-    // MainChatComposerEnhancements with zero overlap and zero layout shift.
+    // Open NeedsYou drawer and confirm:
+    // 1) Compact dock hides to avoid duplication with the drawer
+    // 2) Composer top stays anchored with 0px shift
+    // 3) Floating overlay drawer renders cleanly above MainChatComposerEnhancements without overlap
     const needsCapsule = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-capsule-needsYou"]',
     );
@@ -484,15 +520,15 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       needsCapsule!.click();
     });
 
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
     const drawerEl = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-panel-needsYou"]',
     );
     expect(drawerEl).toBeTruthy();
     const enhRectAfter = enhancementsEl!.getBoundingClientRect();
-    const barRectAfter = actionBarEl!.getBoundingClientRect();
+    const composerRectAfter = composerAnchorEl!.getBoundingClientRect();
     const drawerRect = drawerEl!.getBoundingClientRect();
-    expect(Math.abs(enhRectAfter.top - enhRectBefore.top)).toBeLessThanOrEqual(1);
-    expect(Math.abs(barRectAfter.top - barRectBefore.top)).toBeLessThanOrEqual(1);
+    expect(Math.abs(composerRectAfter.top - composerRectBefore.top)).toBeLessThanOrEqual(1);
     expect(drawerRect.bottom).toBeLessThanOrEqual(enhRectAfter.top + 1);
 
     const questionEl = host.querySelector<HTMLElement>(
@@ -1246,6 +1282,673 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     );
     expect(parseFloat(window.getComputedStyle(reworkGapEl!).fontSize)).toBeGreaterThanOrEqual(14);
   });
+
+  function seedSessionLinksAndCompactDockFixture() {
+    const now = new Date("2026-11-24T10:15:00.000Z");
+    const mainAgent = makeAgent({
+      id: "agent_main",
+      serverId: "srv_1",
+      title: "主对话",
+      labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
+    });
+    const permChild = makeAgent({
+      id: "ag_auth1234_full",
+      serverId: "srv_1",
+      title: "重构登录鉴权链路",
+      status: "idle",
+      requiresAttention: true,
+      attentionReason: "permission",
+      workspaceId: "ws_repo",
+      cwd: "/repo/paseo-fork",
+      updatedAt: now,
+    });
+    const runningChild1 = makeAgent({
+      id: "ag_netw5678_unit",
+      serverId: "srv_1",
+      title: "补齐网络层单元测试",
+      status: "running",
+      turn: {
+        phase: "open",
+        turnId: "turn_net_1",
+        startedAt: now,
+        cancellationRequestId: null,
+      },
+      workspaceId: "ws_repo",
+      cwd: "/repo/paseo-fork",
+      updatedAt: now,
+    });
+    const runningChild2 = makeAgent({
+      id: "ag_perf4321_query",
+      serverId: "srv_1",
+      title: "排查 /orders 接口慢查询",
+      status: "running",
+      turn: {
+        phase: "open",
+        turnId: "turn_perf_1",
+        startedAt: now,
+        cancellationRequestId: null,
+      },
+      workspaceId: "ws_repo",
+      cwd: "/repo/paseo-fork",
+      updatedAt: new Date("2026-11-24T10:12:00.000Z"),
+    });
+    const failedChild = makeAgent({
+      id: "ag_fail9999_err",
+      serverId: "srv_1",
+      title: "设置页按钮对齐修复",
+      status: "error",
+      workspaceId: "ws_repo",
+      cwd: "/repo/paseo-fork",
+      updatedAt: new Date("2026-11-24T10:08:00.000Z"),
+    });
+    const remoteChild = makeAgent({
+      id: "ag_gpu98765_eval",
+      serverId: "srv_gpu",
+      title: "跨机模型评测回归",
+      status: "running",
+      turn: {
+        phase: "open",
+        turnId: "turn_gpu_1",
+        startedAt: now,
+        cancellationRequestId: null,
+      },
+      workspaceId: "ws_gpu",
+      cwd: "/srv/eval-suite",
+      updatedAt: new Date("2026-11-24T10:14:00.000Z"),
+    });
+
+    const overview = makeOverview({
+      decisions: [
+        {
+          id: "dec_cache_01",
+          mainAgentId: "agent_main",
+          taskId: null,
+          title: "缓存层选型拍板",
+          question: "生产环境会话快照缓存优先走内存 LRU 还是本地 SQLite 持久化？",
+          options: [
+            { id: "lru", label: "内存 LRU + 定期落盘（推荐）", recommended: true },
+            { id: "sqlite", label: "纯 SQLite 同步落盘" },
+          ],
+          createdAt: "2026-11-24T10:13:00.000Z",
+          answeredAt: null,
+        } as unknown as MainChatDecisionRecord,
+      ],
+      plans: [
+        {
+          ...WIDE_STREAM_PLAN,
+          id: "plan_heic_01",
+          summary: "同步脚本支持 HEIC 照片转换与 EXIF 保留",
+          createdAt: "2026-11-24T10:10:00.000Z",
+        },
+      ],
+      tasks: [
+        {
+          id: "task_run_net",
+          mainAgentId: "agent_main",
+          planId: "plan_exec_1",
+          serverId: "srv_1",
+          workspaceId: "ws_repo",
+          hostLabel: "DevBox",
+          cwd: "/repo/paseo-fork",
+          title: "补齐网络层单元测试",
+          status: "running",
+          activeAgentId: "ag_netw5678_unit",
+          agentIds: ["ag_netw5678_unit"],
+          brief: {
+            goal: "补齐重试与超时边界单测",
+            mode: "write",
+            isolation: "worktree",
+            doneWhen: ["vitest 全绿"],
+            outOfBounds: [],
+            scopeRevision: 1,
+          },
+          lastSummary: "正在补充超时重连与断网重放用例",
+          createdAt: "2026-11-24T10:00:00.000Z",
+          updatedAt: "2026-11-24T10:15:00.000Z",
+          lastActivityAt: "2026-11-24T10:15:00.000Z",
+          completedAt: null,
+          supersededByTaskId: null,
+          parkedReason: null,
+        },
+        {
+          id: "task_run_perf",
+          mainAgentId: "agent_main",
+          planId: "plan_exec_1",
+          serverId: "srv_1",
+          workspaceId: "ws_repo",
+          hostLabel: "DevBox",
+          cwd: "/repo/paseo-fork",
+          title: "排查 /orders 接口慢查询",
+          status: "running",
+          activeAgentId: "ag_perf4321_query",
+          agentIds: ["ag_perf4321_query"],
+          brief: {
+            goal: "消除订单列表 N+1 查询",
+            mode: "write",
+            isolation: "worktree",
+            doneWhen: ["P95 < 80ms"],
+            outOfBounds: [],
+            scopeRevision: 1,
+          },
+          lastSummary: "已定位订单明细 N+1，正在改成单次 JOIN",
+          createdAt: "2026-11-24T09:50:00.000Z",
+          updatedAt: "2026-11-24T10:12:00.000Z",
+          lastActivityAt: "2026-11-24T10:12:00.000Z",
+          completedAt: null,
+          supersededByTaskId: null,
+          parkedReason: null,
+        },
+        {
+          id: "task_fail_ui",
+          mainAgentId: "agent_main",
+          planId: "plan_exec_1",
+          serverId: "srv_1",
+          workspaceId: "ws_repo",
+          hostLabel: "DevBox",
+          cwd: "/repo/paseo-fork",
+          title: "设置页按钮对齐修复",
+          status: "failed",
+          activeAgentId: "ag_fail9999_err",
+          agentIds: ["ag_fail9999_err"],
+          brief: {
+            goal: "对齐设置页底部操作按钮",
+            mode: "write",
+            isolation: "worktree",
+            doneWhen: ["按钮对齐"],
+            outOfBounds: [],
+            scopeRevision: 1,
+          },
+          lastSummary: "rpc: connection closed",
+          createdAt: "2026-11-24T09:40:00.000Z",
+          updatedAt: "2026-11-24T10:08:00.000Z",
+          lastActivityAt: "2026-11-24T10:08:00.000Z",
+          completedAt: null,
+          supersededByTaskId: null,
+          parkedReason: null,
+        },
+      ] as unknown as MainChatOverview["tasks"],
+    });
+
+    const client = {
+      getMainChatOverview: vi.fn(async () => ({ requestId: "r_ov", overview, error: null })),
+      respondToPermission: vi.fn(async () => undefined),
+    } as unknown as DaemonClient;
+
+    const pendingPermissions = new Map([
+      [
+        "perm_auth_1",
+        {
+          key: "perm_auth_1",
+          agentId: "ag_auth1234_full",
+          request: {
+            id: "req_auth_1",
+            name: "Bash",
+            title: "运行鉴权集成测试",
+            description: "npm test --workspace=@getpaseo/server -- auth",
+            kind: "tool",
+          },
+        },
+      ],
+    ]);
+
+    useSessionStore.setState({
+      sessions: {
+        srv_1: {
+          serverId: "srv_1",
+          hasHydratedAgents: true,
+          agents: new Map([
+            [mainAgent.id, mainAgent],
+            [permChild.id, permChild],
+            [runningChild1.id, runningChild1],
+            [runningChild2.id, runningChild2],
+            [failedChild.id, failedChild],
+          ]),
+          agentDetails: new Map(),
+          pendingPermissions,
+          client,
+          workspaces: new Map([
+            [
+              "ws_repo",
+              {
+                id: "ws_repo",
+                projectDisplayName: "paseo-fork",
+                workspaceDirectory: "/repo/paseo-fork",
+              },
+            ],
+          ]),
+          projects: [],
+          serverInfo: {
+            hostname: "DevBox",
+            features: {
+              agentTimelinePromptIndex: true,
+              providersSnapshot: false,
+            },
+          },
+        } as unknown as SessionState,
+        srv_gpu: {
+          serverId: "srv_gpu",
+          hasHydratedAgents: true,
+          agents: new Map([[remoteChild.id, remoteChild]]),
+          agentDetails: new Map(),
+          pendingPermissions: new Map(),
+          client: null,
+          workspaces: new Map([
+            [
+              "ws_gpu",
+              {
+                id: "ws_gpu",
+                projectDisplayName: "eval-suite",
+                workspaceDirectory: "/srv/eval-suite",
+              },
+            ],
+          ]),
+          projects: [],
+          serverInfo: {
+            hostname: "GPU-Node",
+            features: {
+              agentTimelinePromptIndex: false,
+              providersSnapshot: false,
+            },
+          },
+        } as unknown as SessionState,
+      },
+    });
+    useMainChatOverviewStore.setState({
+      overviewsByKey: {
+        [overviewStoreKey("srv_1", "agent_main")]: overview,
+      },
+      decisionsByKey: {},
+    });
+    useMainChatSettingsStore.setState({
+      settingsByServerId: { srv_1: createDefaultMainChatSettings() },
+    });
+  }
+
+  function renderSessionLinksAndDockScene(height: number) {
+    const assistantReportMarkdown = [
+      "当前全机态势已同步，以下会话可直接点击标题进入查看：",
+      "",
+      "- **等你处理**：[重构登录鉴权链路](paseo://agent/srv_1/ag_auth1234_full) 等待审批运行集成测试；另有「缓存层选型拍板」待你确认。",
+      "- **正在执行**：[补齐网络层单元测试](paseo://agent/srv_1/ag_netw5678)（8 位短 ID 直达）与远端 [跨机模型评测回归](paseo://agent/ag_gpu98765_eval) 正常运行中。",
+      "- **历史归档**：[已清理的旧会话](paseo://agent/srv_1/ag_missing_0000) 已不在当前活跃列表中。",
+    ].join("\n");
+
+    const rootHeightStyle =
+      height === 844 ? railTestStyles.surfaceRoot844 : railTestStyles.surfaceRoot880;
+
+    renderInBrowser(
+      <MainChatShellProvider value={SESSION_LINK_SHELL_CONTEXT_VALUE}>
+        <View style={rootHeightStyle}>
+          <ChatColumnRailSurface serverId="srv_1">
+            <View style={railTestStyles.streamViewport}>
+              <View style={railTestStyles.messageOuter} dataSet={CHAT_COLUMN_RAIL_DATASET}>
+                <View style={railTestStyles.messageInner} testID="session-links-message-column">
+                  <MarkdownRenderer text={assistantReportMarkdown} />
+                </View>
+              </View>
+              <MainChatActionBarDrawerOverlay serverId="srv_1" agentId="agent_main" />
+            </View>
+            <View style={railTestStyles.bottomStack}>
+              <MainChatActionBar serverId="srv_1" agentId="agent_main" drawerMode="external" />
+              <View
+                style={railTestStyles.simulatedComposerOuter}
+                dataSet={CHAT_COLUMN_RAIL_DATASET}
+              >
+                <View
+                  style={railTestStyles.simulatedComposerInner}
+                  testID="simulated-composer-content"
+                >
+                  <Text style={railTestStyles.simulatedComposerLabel}>
+                    给主对话发消息…（按 Enter 发送）
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </ChatColumnRailSurface>
+        </View>
+      </MainChatShellProvider>,
+    );
+  }
+
+  it("verifies wide 1440x900 session links, 2-row compact dock <=96px, Persona layered drawers, Esc dismiss, pixel alignment <=1px, and 0px empty collapse", async () => {
+    await page.viewport(1440, 900);
+    host.style.width = "100%";
+    host.style.padding = "0px";
+    host.style.margin = "0";
+
+    seedSessionLinksAndCompactDockFixture();
+    useMainChatActionBarDrawerStore.getState().reset();
+
+    renderSessionLinksAndDockScene(880);
+    await waitForLayoutFrame();
+
+    expect(host.querySelector('[data-chat-rail-active="true"]')).toBeTruthy();
+
+    const composerEl = host.querySelector<HTMLElement>(
+      '[data-testid="simulated-composer-content"]',
+    );
+    const compactDockEl = host.querySelector<HTMLElement>('[data-testid="main-chat-compact-dock"]');
+    const actionBarInnerEl = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-bar-inner"]',
+    );
+    expect(composerEl).toBeTruthy();
+    expect(compactDockEl).toBeTruthy();
+    expect(actionBarInnerEl).toBeTruthy();
+
+    const composerRectBefore = composerEl!.getBoundingClientRect();
+    const compactDockRect = compactDockEl!.getBoundingClientRect();
+    // Wide screen compact dock: max 2 rows, total height <= 96px, single-line no wrapping
+    const dockRows = compactDockEl!.querySelectorAll<HTMLElement>(
+      '[data-testid^="main-chat-compact-dock-row-"]',
+    );
+    expect(dockRows.length).toBe(2);
+    expect(compactDockRect.height).toBeLessThanOrEqual(96);
+    for (const row of Array.from(dockRows)) {
+      expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(42);
+    }
+    // Priority: permission row comes before decision row (both before inProgress)
+    expect(dockRows[0]!.getAttribute("data-testid")).toContain("needsYou");
+    expect(dockRows[1]!.getAttribute("data-testid")).toContain("needsYou");
+
+    // Pixel-level left/right alignment <= 1px against Composer
+    expectAlignedToComposer("Wide CompactStatusDock", compactDockEl, composerRectBefore);
+    expectAlignedToComposer("Wide ActionBar inner", actionBarInnerEl, composerRectBefore);
+
+    // Screenshot 1: wide message session links + 2-row compact dock
+    if (SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}/01-wide-session-links-compact-dock.png`,
+      });
+    }
+
+    // Session links inside MarkdownRenderer: restrained styling, in-app href, modifier pass-through, wide drawer open, 0-hit toast
+    const sessionLinks = host.querySelectorAll<HTMLAnchorElement>('a[data-session-link="true"]');
+    expect(sessionLinks.length).toBe(4);
+    const exactLink = sessionLinks[0]!;
+    const prefixLink = sessionLinks[1]!;
+    const crossHostLink = sessionLinks[2]!;
+    const missingLink = sessionLinks[3]!;
+
+    expect(exactLink.childElementCount).toBe(0);
+    expect(exactLink.getAttribute("href")).not.toContain("paseo://");
+    expect(exactLink.getAttribute("href")).toContain("/h/srv_1/workspace/ws_repo");
+    expect(prefixLink.getAttribute("data-session-link-status")).toBe("prefix");
+    expect(crossHostLink.getAttribute("href")).toContain("/h/srv_gpu/workspace/ws_gpu");
+    expect(missingLink.getAttribute("href")).not.toContain("paseo://");
+    expect(window.getComputedStyle(exactLink).textUnderlineOffset).toBe("3px");
+    expect(exactLink.style.textDecorationColor).toContain("0.38");
+
+    // Modifier Cmd-click is NOT intercepted by the link component (passes through to browser)
+    let modifierPreventedByLink: boolean | null = null;
+    const stopIframeNav = (event: MouseEvent) => {
+      modifierPreventedByLink = event.defaultPrevented;
+      event.preventDefault();
+    };
+    host.addEventListener("click", stopIframeNav);
+    const cmdClick = new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true });
+    act(() => {
+      exactLink.dispatchEvent(cmdClick);
+    });
+    host.removeEventListener("click", stopIframeNav);
+    expect(modifierPreventedByLink).toBe(false);
+    expect(useMainChatDrawerStore.getState().activeTarget).toBeNull();
+
+    // Plain click opens right-hand TaskPanelDrawer on wide screens (never navigates full-page)
+    const plainClick = new MouseEvent("click", { bubbles: true, cancelable: true });
+    act(() => {
+      exactLink.dispatchEvent(plainClick);
+    });
+    expect(plainClick.defaultPrevented).toBe(true);
+    expect(useMainChatDrawerStore.getState().activeTarget?.agentId).toBe("ag_auth1234_full");
+    expect(navigateToAgentMock).not.toHaveBeenCalled();
+
+    // 8-char prefix click resolves and opens right drawer
+    act(() => {
+      prefixLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(useMainChatDrawerStore.getState().activeTarget?.agentId).toBe("ag_netw5678_unit");
+
+    // 0-hit link shows non-blocking error toast without navigating
+    act(() => {
+      missingLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+
+    // Open Needs you drawer: compact dock hides, capsule inverts, Composer top shift === 0px, alignment <= 1px
+    const needsCapsule = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-capsule-needsYou"]',
+    )!;
+    const unselectedBg = window.getComputedStyle(needsCapsule).backgroundColor;
+    act(() => {
+      needsCapsule.click();
+    });
+    await waitForLayoutFrame();
+
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
+    expect(needsCapsule.getAttribute("data-selected")).toBe("true");
+    expect(window.getComputedStyle(needsCapsule).backgroundColor).not.toBe(unselectedBg);
+
+    const needsDrawerPanel = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-panel-needsYou"]',
+    );
+    const drawerFrameEl = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-bar-drawer-frame"]',
+    );
+    expect(needsDrawerPanel).toBeTruthy();
+    const composerRectDuringNeeds = composerEl!.getBoundingClientRect();
+    expect(Math.abs(composerRectDuringNeeds.top - composerRectBefore.top)).toBeLessThanOrEqual(1);
+    expectAlignedToComposer("Wide NeedsYou drawer frame", drawerFrameEl, composerRectDuringNeeds);
+    expectAlignedToComposer(
+      "Wide NeedsYou drawer panel",
+      needsDrawerPanel,
+      composerRectDuringNeeds,
+    );
+
+    // Screenshot 2: wide Needs you Persona soft-block drawer
+    if (SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}/02-wide-needs-you-drawer.png`,
+      });
+    }
+
+    // Switch to In progress drawer: flat list with hairline dividers, Composer top shift === 0px
+    const inProgressCapsule = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-capsule-inProgress"]',
+    )!;
+    act(() => {
+      inProgressCapsule.click();
+    });
+    await waitForLayoutFrame();
+
+    expect(inProgressCapsule.getAttribute("data-selected")).toBe("true");
+    expect(needsCapsule.getAttribute("data-selected")).toBe("false");
+    const inProgressPanel = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-panel-inProgress"]',
+    );
+    expect(inProgressPanel).toBeTruthy();
+    const composerRectDuringInProgress = composerEl!.getBoundingClientRect();
+    expect(Math.abs(composerRectDuringInProgress.top - composerRectBefore.top)).toBeLessThanOrEqual(
+      1,
+    );
+    expectAlignedToComposer(
+      "Wide InProgress drawer panel",
+      inProgressPanel,
+      composerRectDuringInProgress,
+    );
+
+    const inProgressRows = inProgressPanel!.querySelectorAll<HTMLElement>(
+      '[data-testid^="main-chat-action-task-inProgress-"]',
+    );
+    expect(inProgressRows.length).toBeGreaterThanOrEqual(2);
+    expect(window.getComputedStyle(inProgressRows[0]!).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(window.getComputedStyle(inProgressRows[1]!).borderTopWidth).toBe("1px");
+
+    // Screenshot 3: wide In progress flat hairline-divider drawer
+    if (SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}/03-wide-in-progress-drawer.png`,
+      });
+    }
+
+    // Escape closes the drawer on Web and restores compact dock
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitForLayoutFrame();
+    expect(host.querySelector('[data-testid="main-chat-action-panel-inProgress"]')).toBeNull();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeTruthy();
+
+    // One-click dismiss collapses compact dock while keeping capsules, and restore brings it back
+    const dismissBtn = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-compact-dock-dismiss"]',
+    )!;
+    act(() => {
+      dismissBtn.click();
+    });
+    await waitForLayoutFrame();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
+    const restoreBtn = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-compact-dock-restore"]',
+    );
+    expect(restoreBtn).toBeTruthy();
+    act(() => {
+      restoreBtn!.click();
+    });
+    await waitForLayoutFrame();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeTruthy();
+
+    // Empty state: MainChatActionBar collapses to 0px height (unmounts cleanly)
+    seedMainChatSession(makeOverview(), []);
+    renderSessionLinksAndDockScene(880);
+    await waitForLayoutFrame();
+    expect(host.querySelector('[data-testid="main-chat-action-bar"]')).toBeNull();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
+  });
+
+  it("verifies narrow 390x844 1-row compact dock <=48px, alignment <=1px, Composer 0px shift, and full-page navigation with CameFrom", async () => {
+    await page.viewport(390, 844);
+    host.style.width = "390px";
+    host.style.padding = "0px";
+    host.style.margin = "0";
+
+    seedSessionLinksAndCompactDockFixture();
+    useMainChatActionBarDrawerStore.getState().reset();
+    useMainChatDrawerStore.getState().closeDrawer();
+    useMainChatCameFromStore.getState().clearCameFrom();
+    navigateToAgentMock.mockClear();
+
+    renderSessionLinksAndDockScene(844);
+    await waitForLayoutFrame();
+
+    const composerEl = host.querySelector<HTMLElement>(
+      '[data-testid="simulated-composer-content"]',
+    )!;
+    const compactDockEl = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-compact-dock"]',
+    )!;
+    const actionBarInnerEl = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-bar-inner"]',
+    )!;
+    expect(compactDockEl).toBeTruthy();
+
+    const composerRectBefore = composerEl.getBoundingClientRect();
+    const dockRect = compactDockEl.getBoundingClientRect();
+    const dockRows = compactDockEl.querySelectorAll<HTMLElement>(
+      '[data-testid^="main-chat-compact-dock-row-"]',
+    );
+    // Narrow screen: max 1 row, total height <= 48px
+    expect(dockRows.length).toBe(1);
+    expect(dockRect.height).toBeLessThanOrEqual(48);
+
+    expectAlignedToComposer("Narrow 390 CompactStatusDock", compactDockEl, composerRectBefore);
+    expectAlignedToComposer("Narrow 390 ActionBar inner", actionBarInnerEl, composerRectBefore);
+
+    // Screenshot 4: narrow 390x844 1-row compact dock state
+    if (SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}/04-narrow-390-compact-dock.png`,
+      });
+    }
+
+    // Open Needs you drawer on narrow screen: Composer top shift <= 1px and drawer aligned <= 1px
+    const needsCapsule = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-capsule-needsYou"]',
+    )!;
+    act(() => {
+      needsCapsule.click();
+    });
+    await waitForLayoutFrame();
+    const drawerPanel = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-panel-needsYou"]',
+    )!;
+    expect(drawerPanel).toBeTruthy();
+    const composerRectAfter = composerEl.getBoundingClientRect();
+    expect(Math.abs(composerRectAfter.top - composerRectBefore.top)).toBeLessThanOrEqual(1);
+    expectAlignedToComposer("Narrow 390 NeedsYou drawer", drawerPanel, composerRectAfter);
+
+    // Close drawer before clicking message link
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    await waitForLayoutFrame();
+
+    // Clicking a session link on narrow 390px navigates full-page and records CameFrom (no right drawer)
+    const exactLink = host.querySelector<HTMLAnchorElement>('a[data-session-link="true"]')!;
+    act(() => {
+      exactLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(useMainChatDrawerStore.getState().activeTarget).toBeNull();
+    expect(navigateToAgentMock).toHaveBeenCalledWith({
+      serverId: "srv_1",
+      agentId: "ag_auth1234_full",
+      workspaceId: "ws_repo",
+    });
+    expect(useMainChatCameFromStore.getState().entry?.targetAgentId).toBe("ag_auth1234_full");
+  });
+
+  it("renders dark theme wide layout with session links, inverted capsule, and Persona NeedsYou drawer", async () => {
+    await page.viewport(1440, 900);
+    host.style.width = "100%";
+    host.style.padding = "0px";
+    host.style.margin = "0";
+    document.body.style.backgroundColor = "#0a0a0a";
+    UnistylesRuntime.setTheme("dark");
+
+    seedSessionLinksAndCompactDockFixture();
+    useMainChatActionBarDrawerStore.setState({
+      openBucketByKey: { [overviewStoreKey("srv_1", "agent_main")]: "needsYou" },
+      expandedByKey: {},
+      compactDockCollapsedByKey: {},
+      focusedNeedsIdByKey: {},
+    });
+
+    renderSessionLinksAndDockScene(880);
+    await waitForLayoutFrame();
+
+    const composerEl = host.querySelector<HTMLElement>(
+      '[data-testid="simulated-composer-content"]',
+    )!;
+    const needsPanel = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-panel-needsYou"]',
+    )!;
+    const needsCapsule = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-action-capsule-needsYou"]',
+    )!;
+    expect(needsPanel).toBeTruthy();
+    expect(needsCapsule.getAttribute("data-selected")).toBe("true");
+    expectAlignedToComposer(
+      "Dark NeedsYou drawer panel",
+      needsPanel,
+      composerEl.getBoundingClientRect(),
+    );
+
+    // Screenshot 5: dark theme wide state
+    if (SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}/05-wide-dark-theme.png`,
+      });
+    }
+  });
 });
 
 const railTestStyles = StyleSheet.create((theme) => ({
@@ -1270,10 +1973,31 @@ const railTestStyles = StyleSheet.create((theme) => ({
     height: 680,
     backgroundColor: theme.colors.surface0,
   },
+  surfaceRoot880: {
+    width: "100%",
+    height: 880,
+    backgroundColor: theme.colors.surface0,
+  },
+  surfaceRoot844: {
+    width: "100%",
+    height: 844,
+    backgroundColor: theme.colors.surface0,
+  },
   streamViewport: {
     flex: 1,
     position: "relative",
     minHeight: 0,
+  },
+  messageOuter: {
+    width: "100%",
+    alignItems: "center",
+    paddingHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[6],
+  },
+  messageInner: {
+    width: "100%",
+    maxWidth: theme.contentMaxWidth,
+    gap: theme.spacing[2],
   },
   bottomStack: {
     width: "100%",

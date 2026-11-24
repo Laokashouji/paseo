@@ -290,6 +290,7 @@ function toSnapshotItem(
   const title = agent.title.trim() || basenameOf(agent.cwd);
 
   return {
+    serverId: agent.serverId,
     agentId: agent.agentId,
     workspaceId: agent.workspaceId,
     title,

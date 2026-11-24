@@ -10,7 +10,7 @@ import {
   type MainChatTaskBrief,
   type MainChatTaskDecisionEntry,
 } from "@getpaseo/protocol/main-chat";
-import type { FleetSnapshotSummary } from "./context-snapshot.js";
+import { formatMainChatSessionLink, type FleetSnapshotSummary } from "./context-snapshot.js";
 import { formatSupervisionDigest } from "./signal-queue.js";
 import { formatTaskDecisionsPromptSection } from "./task-ledger.js";
 
@@ -83,6 +83,7 @@ export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): s
 
 ## 实时全局快照与主动回应原则（核心）
 - 用户每条消息前，系统会自动附加一段 \`<paseo-main-context>\` 实时全局快照（当前时间、所有工作区的活跃会话状态、待审批/待拍板项、异常中断/空转项、刚完成未看项）。这不是用户手打的内容，请先基于它直接掌握全局，需要细节时再调用 \`task_list\` 或 \`get_agent_activity\`。
+- **会话标题直达链接**：快照中每个会话行都附带 \`link=paseo://agent/<serverId>/<agentId>\`。在向用户汇报、点名或总结任何子会话时，请直接用 Markdown 链接格式 \`[会话标题](link)\`（例如 \`[重构登录接口](paseo://agent/srv_1/ag_123)\`）引用该会话，方便用户一键直达；不要凭空编造 \`paseo://\` 链接，也不要把普通正文名词强行写成会话链接。
 - **严禁做空洞客套的被动机器人**：当用户只说「你好」「在吗」「现在什么情况」或刚切进对话时，**不要只回「有什么可以帮你的」**。先用 2-5 条简明要点直接汇报当前全机最需要关注的事（谁在等你拍板、谁卡住/报错了、谁刚做完待查收、谁正在跑），并给出明确下一步建议；只有在全机确实没有任何活跃或待办事项时，才一句话告知当前一切安静。
 - 当你收到 \`<paseo-system>\` 主动巡检/督办消息时，那是后台自动唤醒你处理全机变化：
   - 先核实真正值得用户知道的信息，用结论先行、短列表的方式主动汇报；
@@ -172,7 +173,7 @@ export function buildMainChatPatrolWakeupPrompt(input: {
     input.contextSnapshot,
     "",
     "处理要求：",
-    "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。",
+    "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。提及具体会话时，请直接用快照里的 `link=` 以 `[会话标题](link)` 格式引用，便于用户一键直达。",
     "- 若某会话需要用户做明确二选一/多选一，可调用 `task_ask_user` 生成拍板卡；若需要核实细节，先用 `get_agent_activity` 读取对应会话最后输出。",
     "- 如果你是保守模式，对手动会话不要擅自调用发送消息工具；直接给用户清晰摘要和建议动作即可。",
     "- 如果经核对所有信号均已解决或无需打扰用户，请直接只回复 `[SILENT]`。",
@@ -209,7 +210,7 @@ export function buildMainChatSupervisionWakeupPrompt(input: {
     input.contextSnapshot,
     "",
     "处理要求：",
-    "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。",
+    "- 结论先行、短段落/短列表，把真正需要用户知道或拍板的事说清楚（不要复述本系统通知）。提及具体会话时，请直接用快照里的 `link=` 以 `[会话标题](link)` 格式引用，便于用户一键直达。",
     "- 涉及对外发消息、删数据、git push/合入主分支、生产发布或修改凭据权限的红线操作，严禁擅自代答或放行，必须交给用户拍板。",
     "- 若某会话需要用户做明确二选一/多选一，可调用 `task_ask_user` 生成拍板卡；若需要核实细节，先用 `get_agent_activity` 读取对应会话最后输出。",
     "- 如果你是保守模式，对手动会话不要擅自调用发送消息工具；直接给用户清晰摘要和建议动作即可。",
@@ -229,7 +230,7 @@ export function buildMainChatInitialBriefingPrompt(input: {
     input.contextSnapshot,
     "",
     "汇报要求：",
-    `- 直接告诉用户你已经就位（当前为${styleMeta.briefingLabel}，可随时在设置里切换或重命名），并用 2-4 条要点列出当前最需要关注的会话（待拍板 / 异常 / 运行中 / 刚完成）。`,
+    `- 直接告诉用户你已经就位（当前为${styleMeta.briefingLabel}，可随时在设置里切换或重命名），并用 2-4 条要点列出当前最需要关注的会话（待拍板 / 异常 / 运行中 / 刚完成），点名会话时用快照中的 \`link=\` 写成 \`[会话标题](link)\` 格式。`,
     ...(styleMeta.customGuidance ? [`- 遵守当前自定义风格指引：${styleMeta.customGuidance}`] : []),
     "- 如果当前没有其他活跃会话，用两句话说明你负责的事（统一派活、全局盯盘、防卡顿防报错、只在关键节点找你）即可，不要啰嗦。",
   ].join("\n");
@@ -353,8 +354,9 @@ export function buildMainChatHandoffSummary(input: MainChatHandoffSummaryInput):
         item.lastError ??
         item.attentionReason ??
         item.lifecycle;
+      const link = formatMainChatSessionLink(item.agentId, item.serverId);
       lines.push(
-        `- 「${clipSummaryLine(item.title, 36)}」[${item.projectName} · id=${item.agentId}]：${clipSummaryLine(detail, 90)}`,
+        `- 「${clipSummaryLine(item.title, 36)}」[${item.projectName} · id=${item.agentId} · link=${link}]：${clipSummaryLine(detail, 90)}`,
       );
     }
   }

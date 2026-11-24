@@ -733,6 +733,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   let unsubscribeFleetEvents: (() => void) | null = null;
 
   const contextSnapshots = createMainChatContextSnapshotBuilder({
+    serverId: deps.serverId,
     agentManager: deps.agentManager,
     agentStorage: deps.agentStorage,
     store,

@@ -10,7 +10,13 @@ import {
   SNAPSHOT_CACHE_TTL_MS,
   SNAPSHOT_FOREGROUND_TIMEOUT_MS,
   createMainChatContextSnapshotBuilder,
+  formatMainChatSessionLink,
 } from "./context-snapshot.js";
+import {
+  buildMainChatInitialBriefingPrompt,
+  buildMainChatSupervisionWakeupPrompt,
+  buildMainChatSystemPrompt,
+} from "./prompts.js";
 import { createMainChatStore } from "./store.js";
 
 function makeLiveAgent(input: {
@@ -387,5 +393,91 @@ describe("main-chat context-snapshot v2", () => {
     expect(refreshedContext).not.toContain("缓存略旧");
     expect(refreshedContext).toContain("后台刷新后的新任务");
     expect(refreshedContext).not.toContain("旧缓存任务");
+  });
+
+  it("injects link=paseo://agent/<serverId>/<agentId> into local and cross-host snapshot rows and guides prompts to use [title](link)", async () => {
+    const store = createMainChatStore(tempDir);
+    await store.load();
+    const runningAgent = makeLiveAgent({
+      id: "ag_local_run_01",
+      title: "本地联调任务",
+      lifecycle: "running",
+    });
+    const blockedAgent = makeLiveAgent({
+      id: "ag_local_perm_02",
+      title: "待审批发布任务",
+      pendingPermissionTitle: "运行集成测试",
+    });
+
+    const builder = createMainChatContextSnapshotBuilder({
+      serverId: "srv_devbox",
+      agentManager: {
+        listAgents: () => [runningAgent, blockedAgent],
+      } as unknown as AgentManager,
+      agentStorage: { listActive: async () => [] } as unknown as AgentStorage,
+      store,
+    });
+
+    const snapshot = await builder.buildTurnContext("agent_main", { forceFull: true });
+    expect(snapshot).toContain("link=paseo://agent/srv_devbox/ag_local_perm_02");
+    expect(snapshot).toContain("link=paseo://agent/srv_devbox/ag_local_run_01");
+
+    // Cross-host item carries its remote serverId in link=paseo://agent/<remoteServerId>/<agentId>
+    const crossHostBuilder = createMainChatContextSnapshotBuilder({
+      serverId: "srv_devbox",
+      agentManager: { listAgents: () => [] } as unknown as AgentManager,
+      agentStorage: { listActive: async () => [] } as unknown as AgentStorage,
+      store,
+      collectMultiHostFleet: async () => ({
+        totalActive: 1,
+        needsYou: [],
+        problematic: [],
+        running: [
+          {
+            serverId: "srv_gpu_02",
+            agentId: "ag_remote_99",
+            workspaceId: "ws_gpu",
+            title: "远端训练评测",
+            cwd: "/srv/eval",
+            projectName: "[GPU-02] eval",
+            managedByMainChat: true,
+            lifecycle: "running",
+            requiresAttention: false,
+            attentionReason: null,
+            pendingPermissionLabels: [],
+            lastError: null,
+            updatedAtIso: new Date().toISOString(),
+            triage: null,
+          },
+        ],
+        attentionDone: [],
+        idleOther: [],
+      }),
+    });
+
+    const crossSnapshot = await crossHostBuilder.buildTurnContext("agent_main", {
+      forceFull: true,
+    });
+    expect(crossSnapshot).toContain("link=paseo://agent/srv_gpu_02/ag_remote_99");
+    expect(formatMainChatSessionLink("ag_only")).toBe("paseo://agent/ag_only");
+
+    // Prompt builders instruct the assistant to report sessions with [会话标题](link)
+    const settings = store.getSettings();
+    const systemPrompt = buildMainChatSystemPrompt(settings);
+    expect(systemPrompt).toContain("[会话标题](link)");
+    expect(systemPrompt).toContain("link=paseo://agent/<serverId>/<agentId>");
+
+    const wakePrompt = buildMainChatSupervisionWakeupPrompt({
+      settings,
+      signals: [],
+      contextSnapshot: snapshot,
+    });
+    expect(wakePrompt).toContain("[会话标题](link)");
+
+    const briefingPrompt = buildMainChatInitialBriefingPrompt({
+      settings,
+      contextSnapshot: snapshot,
+    });
+    expect(briefingPrompt).toContain("[会话标题](link)");
   });
 });

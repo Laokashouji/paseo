@@ -1,6 +1,6 @@
 import { createElement, type ElementType } from "react";
-import { lightHighlightColors } from "@getpaseo/highlight";
-import { lightTheme } from "../src/styles/theme";
+import { darkHighlightColors, lightHighlightColors } from "@getpaseo/highlight";
+import { darkTheme, lightTheme } from "../src/styles/theme";
 
 const pinnedTheme = {
   colorScheme: "light",
@@ -102,6 +102,30 @@ const testTheme = {
   },
 };
 
+const testDarkTheme = {
+  ...darkTheme,
+  colorScheme: "dark",
+  colors: {
+    ...darkTheme.colors,
+    syntax: darkHighlightColors,
+    palette: { ...darkTheme.colors.palette },
+  },
+  borderWidth: { ...darkTheme.borderWidth, 1: 1 },
+  spacing: [0, 4, 8, 12, 16, 20, 24, 28, 32],
+  fontSize: { ...darkTheme.fontSize, xs: 12, sm: 14, base: 16 },
+  fontFamily: { ui: "sans-serif", mono: "monospace" },
+  fontWeight: { ...darkTheme.fontWeight, normal: "400", medium: "500" },
+  borderRadius: { ...darkTheme.borderRadius, base: 4, md: 6, lg: 8, xl: 12, full: 9999 },
+  iconSize: { ...darkTheme.iconSize, sm: 16, md: 20 },
+  opacity: { ...darkTheme.opacity, 50: 0.5 },
+};
+
+let activeThemeName: "light" | "dark" = "light";
+
+function getActiveTheme(): typeof testTheme {
+  return (activeThemeName === "dark" ? testDarkTheme : testTheme) as typeof testTheme;
+}
+
 type StyleFactory<T> = (theme: typeof testTheme) => T;
 
 function isStyleFactory<T>(styles: T | StyleFactory<T>): styles is StyleFactory<T> {
@@ -154,8 +178,34 @@ function resolveStyles<T>(styles: T): T {
 }
 
 export const StyleSheet = {
-  create: <T>(styles: T | StyleFactory<T>): T =>
-    resolveStyles(isStyleFactory(styles) ? styles(testTheme) : styles),
+  create: <T>(styles: T | StyleFactory<T>): T => {
+    if (!isStyleFactory(styles)) {
+      return resolveStyles(styles);
+    }
+    const cache: Partial<Record<"light" | "dark", T>> = {};
+    const getResolved = (): T => {
+      let resolved = cache[activeThemeName];
+      if (!resolved) {
+        resolved = resolveStyles(styles(getActiveTheme()));
+        cache[activeThemeName] = resolved;
+      }
+      return resolved;
+    };
+    return new Proxy({} as object, {
+      get(_target, prop) {
+        return Reflect.get(getResolved() as object, prop);
+      },
+      ownKeys() {
+        return Reflect.ownKeys(getResolved() as object);
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        return Reflect.getOwnPropertyDescriptor(getResolved() as object, prop);
+      },
+      has(_target, prop) {
+        return Reflect.has(getResolved() as object, prop);
+      },
+    }) as T;
+  },
 };
 
 type UniPropsMapping = (theme: typeof testTheme, runtime: object) => Record<string, unknown>;
@@ -166,10 +216,11 @@ type UniPropsMapping = (theme: typeof testTheme, runtime: object) => Record<stri
  */
 export const withUnistyles = <T>(Component: T, mapping?: UniPropsMapping): T => {
   function ThemedComponent({ uniProps, ...props }: { uniProps?: UniPropsMapping }) {
+    const currentTheme = getActiveTheme();
     // Explicit props win over mapped ones, as in Unistyles' `deepMergeObjects(mappings, uniProps, props)`.
     return createElement(Component as ElementType, {
-      ...mapping?.(testTheme, {}),
-      ...uniProps?.(testTheme, {}),
+      ...mapping?.(currentTheme, {}),
+      ...uniProps?.(currentTheme, {}),
       ...props,
     });
   }
@@ -177,12 +228,16 @@ export const withUnistyles = <T>(Component: T, mapping?: UniPropsMapping): T => 
 };
 
 export const useUnistyles = () => ({
-  theme: testTheme,
+  theme: getActiveTheme(),
   rt: {},
   breakpoint: undefined,
 });
 
 export const UnistylesRuntime = {
-  setTheme: () => undefined,
-  themeName: "light",
+  setTheme: (name: string) => {
+    activeThemeName = name === "dark" ? "dark" : "light";
+  },
+  get themeName() {
+    return activeThemeName;
+  },
 };
