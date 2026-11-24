@@ -2,6 +2,11 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.518 - 2026-11-24
+
+- **Daemon 一键在线自更新全面切换至 Fork GitHub Release**：移除对官方 npm `@getpaseo/cli` 的更新依赖，Host 设置页「更新 Daemon」按钮改为直接拉取 `Laokashouji/paseo` 最新发布清单（`latest-daemon.json`），下载对应平台的预编译包并校验 SHA-256，解压到独立运行目录 `~/.local/share/paseo-fork/releases/<version>` 后原子切换 `current` 软链，自动清理旧版本（同时保护运行中的 Supervisor 与当前 Worker 目录）并原地重启 Worker（保留所有运行中终端）；`Supervisor` 同步支持按 `current` 软链动态定位最新 Worker，彻底消除 DevBox 与 macOS 桌面端的版本号偏差。
+- **CI 发版流水线并行构建 Linux x64 Daemon 预编译包与托管安装脚本**：`fork-release.yml` 新增 `build-daemon` 任务，发版 `fork-v*` 时与 macOS 桌面端并行构建包含 Web UI、内置插件与服务端补丁的独立运行时压缩包并自动汇总上传 `latest-daemon.json`；新增 `./scripts/fork/install-release-cli.sh` 支持任意 Linux 主机一键初始化托管运行目录（兼容 `--from-tarball` 离线安装与 `--restore-official` 一键回滚），并补全「更新 Daemon」卡片及完成提示的中文翻译。
+
 ## 0.17.517 - 2026-11-24
 
 - **原生主对话多管家隔离与可配置管辖主机范围**：支持「1 台启用主对话的 Paseo Daemon = 1 个独立管家」，每台主机均可在「设置 → 对话管理」独立配置管辖主机范围（仅管本机 `local_only` / 仅指定主机 `allowlist` / 所有已连接主机 `all_connected`），与底层 `ConnectedHosts` 物理连接彻底解耦；服务端由 `FleetAggregator` 与标准 Paseo MCP 工具双层强制过滤，严禁越权读写范围外主机。
