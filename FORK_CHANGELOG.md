@@ -2,6 +2,12 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.528 - 2026-11-25
+
+- **多用途模型槽位、性能档位原子切换与失败任务一键换模型重试**：「设置 → 对话管理」新增「模型槽位与性能档位」面板，支持按 5 类用途槽位（`main` 主对话、`directionLead` 子方向负责人、`subagentDefault` 子任务默认、`subagentReadonly` 只读子任务、`backgroundTriage` 后台分诊）分层绑定模型并沿继承链自动解析；内置「性能档 / 平衡档 / 经济档」并支持保存最多 12 个自定义配置组，切换时全量原子校验后一次落盘并提供一键回滚上一档位（保留最近 20 条切换审计记录）；受管子任务失败时可在主对话顶部动作条与任务抽屉一键「换模型重试」（优先按显式覆写或 `limitFallbacks` 候选模型在同一任务卡原地重启，严格仅作用于主对话受管失败任务，绝不触碰手动会话或 handoff 中断会话）；新增 2 个 WebSocket RPC（`main_chat.switch_model_profile` / `main_chat.retry_task_with_fallback`）并向 `settings_propose_patch` 开放 `modelConfig.activeProfileId` / `modelConfig.slots` 自助提议。
+- **通知分级、低打扰强制穿透与投递回执账本**：「设置 → 对话管理」新增「通知分级与低打扰」面板，支持 3 档打扰模式预设（全量提醒 `all` / 平衡分级 `balanced` / 低打扰 `low_distraction`）、4 级通知等级（`critical` / `actionable` / `digest` / `silent`）与 8 类事件分级覆盖；4 类关键阻塞事件（`permission_approval` 权限审批、`decision_required` 人工决策、`task_failed` 任务失败、`delivery_gate_blocked` 交付门禁阻断）及红线升级强制穿透低打扰且不可降级，低优进度与常规巡检按策略折叠进摘要箱或夜间静默；新增持久化通知投递回执账本（保留最近 120 条，记录 `queued` / `delivered` / `suppressed_quiet` / `suppressed_night` / `acknowledged` / `read` 状态与投递通道，支持单条与全部标为已读），并在主对话动作条与任务抽屉展示低打扰与未读统计胶囊；新增 2 个 WebSocket RPC（`main_chat.list_notification_receipts` / `main_chat.ack_notification_receipt`）并开放 `notificationPolicy.*` 自助提议。
+- **零 Token 确定性规则细化与持久化检测**：服务端新增零 Token 确定性规则引擎（不触发任何模型调用），支持 3 类细化异常检出：`read_without_reply`（已读未回，识别空文本或纯寒暄确认语收尾且豁免实质技术答复）、`missing_wrap_up`（漏收尾，识别有写入改动但缺少验证证据、收尾总结过简或未交代 `doneWhen` 验收项）与 `tool_loop`（工具循环，识别连续同参重复 `exact_repeat` ≥ 4 次并豁免 ≥ 30s 慢轮询、周期 2/3 交替循环 `alternating_ab` ≥ 3 轮、同签名连续报错 `repeated_error` ≥ 3 次）；工具调用滑动窗口与去重标记持久化至主对话存储，Daemon 重启后不丢失检测上下文，并在主对话顶部动作条与任务抽屉原生展示零 Token 规则诊断徽章与详情横幅。
+
 ## 0.17.527 - 2026-11-25
 
 - **主对话项目级复盘教训自动沉淀与注入**：「设置 → 对话管理」新增「项目经验库」面板（支持按规范化项目/仓库路径分组浏览、手动添加与二次确认删除，任务板顶部同步提供「经验库」快捷入口）；子任务在经历返工（`auto_rework`）或带纠偏建议验收（`auto_review`）时，服务端按规范化项目路径自动提炼 1–3 条避坑教训（支持 `repeated_mistake` / `missing_context` / `wasted_step` / `improvement` 四类），按归一化键去重累加命中次数与来源任务（默认 90 天新鲜度与退隐防复发），向同一项目派活时按确定性预算（最多 5 条、每类最多 2 条、上限 `1800` 字节）自动注入「项目历史教训」上下文；新增 3 个 MCP 工具（`lesson_list` / `lesson_add` / `lesson_delete`）、3 个 WebSocket RPC（`main_chat.lessons_list` / `lessons_add` / `lessons_delete`）与可自助提议开关 `taskLessonsEnabled`（默认开启）。
