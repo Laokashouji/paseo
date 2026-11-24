@@ -5,7 +5,6 @@ import { memo, useCallback, useEffect, useRef, useState, type ReactElement } fro
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -466,7 +465,7 @@ export const MainChatQueuePanel = memo(function MainChatQueuePanel({
   const canSend = Boolean(onSendMessage || client);
 
   return (
-    <View style={styles.rail} dataSet={CHAT_COLUMN_RAIL_DATASET}>
+    <View style={styles.rail}>
       <View style={styles.card} testID="main-chat-queue-panel">
         <View style={styles.header}>
           <View style={styles.headerLeft}>

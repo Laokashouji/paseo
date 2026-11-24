@@ -970,6 +970,32 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  function trimUndefined(value: string | undefined): string | undefined {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
+  async function resolveRecentAgentProviderConfig(): Promise<{
+    provider: AgentProvider;
+    model?: string;
+    modeId?: string;
+    thinkingOptionId?: string;
+  } | null> {
+    const storedAgents = await deps.agentStorage.listActive();
+    const recentCandidate = storedAgents
+      .filter((record) => !record.archivedAt && !record.background)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (!recentCandidate) {
+      return null;
+    }
+    return {
+      provider: recentCandidate.provider as AgentProvider,
+      model: recentCandidate.config?.model ?? recentCandidate.runtimeInfo?.model ?? undefined,
+      modeId: recentCandidate.config?.modeId ?? recentCandidate.lastModeId ?? undefined,
+      thinkingOptionId: recentCandidate.config?.thinkingOptionId ?? undefined,
+    };
+  }
+
   async function resolveDefaultMainChatProviderConfig(
     homeDir: string,
     requested?: EnsureMainChatInput,
@@ -979,30 +1005,31 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     modeId?: string;
     thinkingOptionId?: string;
   }> {
+    const requestedModel = trimUndefined(requested?.model);
+    const requestedModeId = trimUndefined(requested?.modeId);
+    const requestedThinkingOptionId = trimUndefined(requested?.thinkingOptionId);
     if (requested?.provider) {
       const parsed = parseProviderSpec(requested.provider);
       return {
         provider: parsed.provider,
-        model: requested.model ?? parsed.model,
-        modeId: requested.modeId,
-        thinkingOptionId: requested.thinkingOptionId,
+        model: requestedModel ?? parsed.model,
+        modeId: requestedModeId,
+        thinkingOptionId: requestedThinkingOptionId,
       };
     }
 
-    const storedAgents = await deps.agentStorage.listActive();
-    const recentCandidate = storedAgents
-      .filter((record) => !record.archivedAt && !record.background)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-    if (recentCandidate) {
-      return {
-        provider: recentCandidate.provider as AgentProvider,
-        model: recentCandidate.config?.model ?? recentCandidate.runtimeInfo?.model ?? undefined,
-        modeId: recentCandidate.config?.modeId ?? recentCandidate.lastModeId ?? undefined,
-        thinkingOptionId: recentCandidate.config?.thinkingOptionId ?? undefined,
-      };
-    }
-
-    return resolveSnapshotDefaultProvider(homeDir);
+    const base: {
+      provider: AgentProvider;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
+    } = (await resolveRecentAgentProviderConfig()) ?? resolveSnapshotDefaultProvider(homeDir);
+    return {
+      provider: base.provider,
+      model: requestedModel ?? base.model,
+      modeId: requestedModeId ?? base.modeId,
+      thinkingOptionId: requestedThinkingOptionId ?? base.thinkingOptionId,
+    };
   }
 
   async function resolvePlannedTaskLocation(

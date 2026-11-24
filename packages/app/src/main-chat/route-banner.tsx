@@ -141,32 +141,34 @@ export const MainChatRouteBanner = memo(function MainChatRouteBanner({
 
   return (
     <View style={styles.rail} dataSet={CHAT_COLUMN_RAIL_DATASET}>
-      <View style={styles.banner} testID={`main-chat-route-banner-${target.targetAgentId}`}>
-        <ThemedAtIcon size={13} uniProps={primaryIconMapping} />
-        <Text style={styles.label} numberOfLines={1}>
-          {t("mainChat.directRoute.bannerLabel", { title: target.targetTitle })}
-        </Text>
-        <PressHighlight
-          onPress={handleOpenTarget}
-          style={styles.actionButton}
-          highlightStyle={styles.actionButtonPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.openChildAgent")}
-        >
-          <Text style={styles.actionText}>{t("mainChat.openChildAgent")}</Text>
-          <ThemedArrowIcon size={12} uniProps={mutedIconMapping} />
-        </PressHighlight>
-        <PressHighlight
-          onPress={onClear}
-          style={styles.actionButton}
-          highlightStyle={styles.actionButtonPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.directRoute.clear")}
-          testID="main-chat-route-banner-clear"
-        >
-          <Text style={styles.actionText}>{t("mainChat.directRoute.clear")}</Text>
-          <ThemedXIcon size={12} uniProps={mutedIconMapping} />
-        </PressHighlight>
+      <View style={styles.inner} testID="main-chat-route-banner-inner">
+        <View style={styles.banner} testID={`main-chat-route-banner-${target.targetAgentId}`}>
+          <ThemedAtIcon size={13} uniProps={primaryIconMapping} />
+          <Text style={styles.label} numberOfLines={1}>
+            {t("mainChat.directRoute.bannerLabel", { title: target.targetTitle })}
+          </Text>
+          <PressHighlight
+            onPress={handleOpenTarget}
+            style={styles.actionButton}
+            highlightStyle={styles.actionButtonPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.openChildAgent")}
+          >
+            <Text style={styles.actionText}>{t("mainChat.openChildAgent")}</Text>
+            <ThemedArrowIcon size={12} uniProps={mutedIconMapping} />
+          </PressHighlight>
+          <PressHighlight
+            onPress={onClear}
+            style={styles.actionButton}
+            highlightStyle={styles.actionButtonPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.directRoute.clear")}
+            testID="main-chat-route-banner-clear"
+          >
+            <Text style={styles.actionText}>{t("mainChat.directRoute.clear")}</Text>
+            <ThemedXIcon size={12} uniProps={mutedIconMapping} />
+          </PressHighlight>
+        </View>
       </View>
     </View>
   );
@@ -175,7 +177,13 @@ export const MainChatRouteBanner = memo(function MainChatRouteBanner({
 const styles = StyleSheet.create((theme) => ({
   rail: {
     width: "100%",
+    alignItems: "center",
+    paddingHorizontal: theme.spacing[4],
     paddingBottom: theme.spacing[1.5],
+  },
+  inner: {
+    width: "100%",
+    maxWidth: theme.contentMaxWidth,
   },
   banner: {
     flexDirection: "row",

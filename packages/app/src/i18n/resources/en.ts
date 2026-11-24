@@ -3702,9 +3702,15 @@ export const en = {
     firstSetup: {
       title: "Choose a model for Main Chat",
       description:
-        "Before starting {{title}} for the first time, pick the provider and model you want to use. You can switch providers anytime later in the composer or Settings.",
+        "Before starting {{title}} for the first time, pick the provider, model, thinking intensity, and safety mode you want to use. You can switch them anytime later in the composer or Settings.",
       modelLabel: "Provider & model",
       modelPlaceholder: "Select provider & model",
+      thinkingLabel: "Thinking intensity",
+      thinkingPlaceholder: "Select thinking intensity",
+      noThinkingOptions: "This model does not support thinking levels",
+      modeLabel: "Safety mode",
+      modePlaceholder: "Select safety mode",
+      noModes: "This provider has no configurable safety modes",
       startButton: "Start Main Chat",
       startingButton: "Starting...",
       noProvidersHint:

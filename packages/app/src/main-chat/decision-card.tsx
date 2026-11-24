@@ -280,9 +280,8 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.xl,
-    padding: theme.spacing[3],
-    gap: theme.spacing[2],
-    maxWidth: 640,
+    padding: theme.spacing[4],
+    gap: theme.spacing[3],
     width: "100%",
   },
   compactCard: {
@@ -293,9 +292,8 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.lg,
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1.5],
-    maxWidth: 640,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
     width: "100%",
   },
   compactToggle: {
@@ -310,13 +308,15 @@ const styles = StyleSheet.create((theme) => ({
   compactTitle: {
     flex: 1,
     minWidth: 0,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 20,
     color: theme.colors.foreground,
   },
   compactText: {
     flex: 1,
     minWidth: 0,
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.foregroundMuted,
   },
   collapseIconBtn: {
@@ -331,7 +331,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    lineHeight: 22,
+    fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
     flexShrink: 1,
   },
@@ -348,29 +349,32 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface2,
   },
   openLinkText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 18,
     color: theme.colors.foregroundMuted,
   },
   question: {
     fontSize: theme.fontSize.base,
+    lineHeight: 22,
     color: theme.colors.foreground,
     fontWeight: theme.fontWeight.medium,
   },
   reason: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 20,
     color: theme.colors.foregroundMuted,
   },
   optionsList: {
-    gap: theme.spacing[1.5],
+    gap: theme.spacing[2],
   },
   optionRow: {
     borderWidth: 1,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface0,
     borderRadius: theme.borderRadius.lg,
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[3.5],
     paddingVertical: theme.spacing[2],
-    gap: theme.spacing[0.5],
+    gap: theme.spacing[1],
   },
   optionRowRecommended: {
     borderColor: theme.colors.statusSuccess,
@@ -385,16 +389,19 @@ const styles = StyleSheet.create((theme) => ({
     flexWrap: "wrap",
   },
   optionLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 21,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
   },
   optionLeadsTo: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.foregroundMuted,
   },
   errorText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.statusDanger,
   },
 }));

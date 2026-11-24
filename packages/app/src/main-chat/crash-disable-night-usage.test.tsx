@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import {
   MAIN_CHAT_DEFAULT_TITLE,
   MAIN_CHAT_ROLE_LABEL,
@@ -82,13 +83,7 @@ vi.mock("@/hooks/use-directory-demand", () => ({
 }));
 
 const mockProviderSnapshotEntries = vi.hoisted<{
-  value: Array<{
-    provider: string;
-    label: string;
-    enabled: boolean;
-    status: "ready";
-    models: Array<{ id: string; label: string; isDefault?: boolean }>;
-  }>;
+  value: ProviderSnapshotEntry[];
 }>(() => ({ value: [] }));
 
 vi.mock("@/hooks/use-providers-snapshot", () => ({
@@ -717,14 +712,18 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
         label: "Codex",
         enabled: true,
         status: "ready",
-        models: [{ id: "gpt-5.6-terra", label: "GPT-5.6-Terra", isDefault: true }],
+        models: [
+          { provider: "codex", id: "gpt-5.6-terra", label: "GPT-5.6-Terra", isDefault: true },
+        ],
       },
       {
         provider: "claude",
         label: "Claude Code",
         enabled: true,
         status: "ready",
-        models: [{ id: "claude-opus-4-6", label: "Claude Opus 4.6", isDefault: true }],
+        models: [
+          { provider: "claude", id: "claude-opus-4-6", label: "Claude Opus 4.6", isDefault: true },
+        ],
       },
     ];
     try {
@@ -748,6 +747,9 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
       // Must show first-time setup UI and NEVER auto-call ensureMainChat()
       expect(view.getByTestId("main-chat-first-setup")).toBeTruthy();
       expect(ensureMainChat).not.toHaveBeenCalled();
+      // Thinking & safety mode fields stay hidden until user chooses a provider/model
+      expect(view.queryByTestId("main-chat-first-setup-thinking-field")).toBeNull();
+      expect(view.queryByTestId("main-chat-first-setup-mode-field")).toBeNull();
       // Host group orchestration capsule remains accessible on /main during first setup
       expect(view.getByTestId("main-chat-host-sync-banner")).toBeTruthy();
       // Start button stays disabled until the user explicitly chooses a model
@@ -755,6 +757,146 @@ describe("Main Chat crash fix, global disable, night mode, and token usage UI", 
       expect(startButton.getAttribute("aria-disabled")).toBe("true");
       fireEvent.click(startButton);
       expect(ensureMainChat).not.toHaveBeenCalled();
+    } finally {
+      mockProviderSnapshotEntries.value = [];
+    }
+  });
+
+  it("dynamically links thinking intensity and safety mode to selected provider/model and forwards both to ensureMainChat", async () => {
+    mockProviderSnapshotEntries.value = [
+      {
+        provider: "claude",
+        label: "Claude Code",
+        enabled: true,
+        status: "ready",
+        defaultModeId: "acceptEdits",
+        modes: [
+          { id: "default", label: "Ask before editing", description: "Ask before running tools" },
+          { id: "acceptEdits", label: "Edit automatically", description: "Auto-approve edits" },
+          { id: "bypassPermissions", label: "Full access", description: "Run without prompts" },
+        ],
+        models: [
+          {
+            provider: "claude",
+            id: "claude-opus-5-5",
+            label: "Claude Opus 5.5",
+            isDefault: true,
+            defaultThinkingOptionId: "high",
+            thinkingOptions: [
+              { id: "low", label: "Low" },
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+          {
+            provider: "claude",
+            id: "claude-haiku-legacy",
+            label: "Claude Haiku Legacy",
+            thinkingOptions: [],
+          },
+        ],
+      },
+      {
+        provider: "minimal",
+        label: "Minimal Provider",
+        enabled: true,
+        status: "ready",
+        modes: [],
+        models: [
+          {
+            provider: "minimal",
+            id: "minimal-fast",
+            label: "Minimal Fast",
+            isDefault: true,
+          },
+        ],
+      },
+    ];
+    try {
+      const enabledSettings = createDefaultMainChatSettings("conservative");
+      enabledSettings.enabled = true;
+      const { ensureMainChat } = seedHost({ settings: enabledSettings });
+
+      act(() => {
+        clearAgentsForServer("srv_1");
+      });
+
+      const view = render(
+        <ToastApiProvider api={noopToastApi}>
+          <KeyboardActionDispatcherProvider>
+            <MainChatScreen />
+          </KeyboardActionDispatcherProvider>
+        </ToastApiProvider>,
+      );
+
+      // Helper to pick a model through CombinedModelSelector (supports provider drill-down)
+      async function selectProviderAndModel(providerLabel: string | null, modelLabel: string) {
+        fireEvent.click(view.getByTestId("combined-model-selector"));
+        if (providerLabel) {
+          const backButton = view.queryByLabelText(/back|modelSelector\.back/i);
+          if (backButton && !view.queryByText(providerLabel)) {
+            fireEvent.click(backButton);
+          }
+          const providerEl = await view.findByText(providerLabel);
+          fireEvent.click(providerEl);
+        }
+        const modelEl = await view.findByText(modelLabel);
+        fireEvent.click(modelEl);
+      }
+
+      // Select Claude Opus 5.5 from CombinedModelSelector
+      await selectProviderAndModel("Claude Code", "Claude Opus 5.5");
+
+      // Thinking & safety mode selectors appear with model/provider defaults
+      const thinkingTrigger = await view.findByTestId("main-chat-first-setup-thinking");
+      const modeTrigger = await view.findByTestId("main-chat-first-setup-mode");
+      expect(thinkingTrigger.textContent).toContain("High");
+      expect(modeTrigger.textContent).toContain("Edit automatically");
+
+      // Switch thinking to Max and safety mode to Full access
+      fireEvent.click(thinkingTrigger);
+      fireEvent.click(await view.findByTestId("main-chat-first-setup-thinking-option-max"));
+      expect(view.getByTestId("main-chat-first-setup-thinking").textContent).toContain("Max");
+
+      fireEvent.click(view.getByTestId("main-chat-first-setup-mode"));
+      fireEvent.click(
+        await view.findByTestId("main-chat-first-setup-mode-option-bypassPermissions"),
+      );
+      expect(view.getByTestId("main-chat-first-setup-mode").textContent).toContain("Full access");
+
+      // Switching to a model without thinkingOptions hides thinking selector while keeping mode
+      await selectProviderAndModel(null, "Claude Haiku Legacy");
+      await waitFor(() => {
+        expect(view.queryByTestId("main-chat-first-setup-thinking-field")).toBeNull();
+      });
+      expect(view.getByTestId("main-chat-first-setup-mode-field")).toBeTruthy();
+
+      // Switching to a provider without modes hides both thinking & mode selectors
+      await selectProviderAndModel("Minimal Provider", "Minimal Fast");
+      await waitFor(() => {
+        expect(view.queryByTestId("main-chat-first-setup-thinking-field")).toBeNull();
+        expect(view.queryByTestId("main-chat-first-setup-mode-field")).toBeNull();
+      });
+
+      // Switch back to Claude Opus 5.5, set Max + bypassPermissions, and submit
+      await selectProviderAndModel("Claude Code", "Claude Opus 5.5");
+      await view.findByTestId("main-chat-first-setup-thinking");
+      fireEvent.click(view.getByTestId("main-chat-first-setup-thinking"));
+      fireEvent.click(await view.findByTestId("main-chat-first-setup-thinking-option-max"));
+      fireEvent.click(view.getByTestId("main-chat-first-setup-mode"));
+      fireEvent.click(
+        await view.findByTestId("main-chat-first-setup-mode-option-bypassPermissions"),
+      );
+
+      fireEvent.click(view.getByTestId("main-chat-first-setup-start"));
+      await waitFor(() => {
+        expect(ensureMainChat).toHaveBeenCalledWith({
+          provider: "claude",
+          model: "claude-opus-5-5",
+          modeId: "bypassPermissions",
+          thinkingOptionId: "max",
+        });
+      });
     } finally {
       mockProviderSnapshotEntries.value = [];
     }

@@ -31,6 +31,7 @@ import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { MainChatHostGroupsPanel } from "@/main-chat/host-groups-panel";
+import { buildMainChatFirstSetupSubmission } from "@/main-chat/first-setup-options";
 import { overviewStoreKey, useMainChatOverviewStore } from "@/main-chat/overview-store";
 import { findMainChatAgentOnHost } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
@@ -870,10 +871,17 @@ const MainChatForegroundModelSection = memo(function MainChatForegroundModelSect
       void (async () => {
         try {
           if (!mainChatAgentId || !liveMainAgent) {
-            const ensured = await client.ensureMainChat({
+            const submission = buildMainChatFirstSetupSubmission({
               provider: nextProvider,
-              ...(nextModelId ? { model: nextModelId } : {}),
+              model: nextModelId,
+              entry: targetEntry,
             });
+            const ensured = await client.ensureMainChat(
+              submission ?? {
+                provider: nextProvider,
+                ...(nextModelId ? { model: nextModelId } : {}),
+              },
+            );
             if (ensured.error || !ensured.agentId) {
               throw new Error(ensured.error ?? t("mainChat.modelSwitch.switchFailed"));
             }

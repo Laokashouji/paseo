@@ -454,6 +454,49 @@ describe("main-chat service, tools, and session", () => {
     service.stop();
   });
 
+  it("writes explicit model, modeId, and thinkingOptionId from ensureMainChat into created agent config without overwriting", async () => {
+    const { service } = makeHarness();
+    await service.start();
+
+    const ensured = await service.ensureMainChat({
+      provider: "claude",
+      model: "claude-opus-5-5",
+      modeId: "bypassPermissions",
+      thinkingOptionId: "xhigh",
+    });
+
+    expect(ensured.created).toBe(true);
+    const createdAgent = agents.get(ensured.agentId);
+    expect(createdAgent?.provider).toBe("claude");
+    expect(createdAgent?.config.model).toBe("claude-opus-5-5");
+    expect(createdAgent?.config.modeId).toBe("bypassPermissions");
+    expect(createdAgent?.config.thinkingOptionId).toBe("xhigh");
+    expect(createdAgent?.currentModeId).toBe("bypassPermissions");
+
+    service.stop();
+  });
+
+  it("ignores blank modeId and thinkingOptionId strings in ensureMainChat", async () => {
+    const { service } = makeHarness();
+    await service.start();
+
+    const ensured = await service.ensureMainChat({
+      provider: "claude",
+      model: "claude-sonnet-5-5",
+      modeId: "   ",
+      thinkingOptionId: "",
+    });
+
+    expect(ensured.created).toBe(true);
+    const createdAgent = agents.get(ensured.agentId);
+    expect(createdAgent?.provider).toBe("claude");
+    expect(createdAgent?.config.model).toBe("claude-sonnet-5-5");
+    expect(createdAgent?.config.modeId).toBe("default");
+    expect(createdAgent?.config.thinkingOptionId).toBeUndefined();
+
+    service.stop();
+  });
+
   it("auto-starts readonly plans, pauses write plans until approved, and honors trust rules", async () => {
     const { service } = makeHarness();
     await service.start();

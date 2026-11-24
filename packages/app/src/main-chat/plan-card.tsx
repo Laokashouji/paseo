@@ -1033,14 +1033,12 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.xl,
-    padding: theme.spacing[3],
-    gap: theme.spacing[2],
-    maxWidth: 640,
+    padding: theme.spacing[4],
+    gap: theme.spacing[3],
     width: "100%",
   },
   handoffStack: {
-    gap: theme.spacing[1.5],
-    maxWidth: 640,
+    gap: theme.spacing[2],
     width: "100%",
   },
   compactCard: {
@@ -1051,13 +1049,13 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.lg,
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[3.5],
     paddingVertical: theme.spacing[2],
-    maxWidth: 640,
     width: "100%",
   },
   compactMutedText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 20,
     color: theme.colors.foregroundMuted,
     flex: 1,
   },
@@ -1069,18 +1067,20 @@ const styles = StyleSheet.create((theme) => ({
   },
   headerTitle: {
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    lineHeight: 22,
+    fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
   },
   summaryText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 21,
     color: theme.colors.foregroundMuted,
   },
   taskList: {
     gap: 0,
   },
   plannedTaskRow: {
-    paddingVertical: theme.spacing[2],
+    paddingVertical: theme.spacing[3],
     gap: theme.spacing[1.5],
   },
   plannedTaskRowBorder: {
@@ -1109,7 +1109,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   taskTitle: {
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    lineHeight: 21,
+    fontWeight: theme.fontWeight.semibold,
     color: theme.colors.foreground,
     flexShrink: 1,
   },
@@ -1123,22 +1124,25 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],
-    paddingHorizontal: theme.spacing[1.5],
-    paddingVertical: theme.spacing[0.5],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
     borderRadius: theme.borderRadius.md,
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.border,
   },
   editButtonLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 18,
     color: theme.colors.foregroundMuted,
   },
   taskGoal: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 21,
     color: theme.colors.foreground,
   },
   continuesNote: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.statusWarning,
   },
   metaRow: {
@@ -1147,22 +1151,25 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1.5],
   },
   metaText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.foregroundMuted,
     flex: 1,
     minWidth: 0,
   },
   criteriaBox: {
     paddingLeft: theme.spacing[2],
-    gap: theme.spacing[0.5],
+    gap: theme.spacing[1],
   },
   criteriaHeading: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,
   },
   criteriaItem: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 20,
     color: theme.colors.foregroundMuted,
   },
   rememberRow: {
@@ -1174,7 +1181,8 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.md,
   },
   rememberLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.foregroundMuted,
     flex: 1,
   },
@@ -1186,7 +1194,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[1],
   },
   errorText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 19,
     color: theme.colors.statusDanger,
   },
   liveTaskRowPressed: {
@@ -1197,7 +1206,7 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     borderRadius: theme.borderRadius.lg,
     backgroundColor: theme.colors.surface0,
-    padding: theme.spacing[2],
+    padding: theme.spacing[3],
     gap: theme.spacing[2],
   },
   editorField: {
@@ -1239,7 +1248,8 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface2,
   },
   pillToggleText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 18,
     color: theme.colors.foregroundMuted,
   },
   pillToggleTextSelected: {
@@ -1247,7 +1257,8 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
   },
   editorLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
+    lineHeight: 18,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,
   },
@@ -1259,7 +1270,8 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1.5],
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    lineHeight: 20,
   },
   editorMultiline: {
     minHeight: 56,

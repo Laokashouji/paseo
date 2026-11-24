@@ -27,6 +27,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { create } from "zustand";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { PermissionRequestCard } from "@/agent-stream/view";
+import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
 import { StatusRing } from "@/components/status-ring";
 import { Button } from "@/components/ui/button";
 import { PressHighlight } from "@/components/ui/press-highlight";
@@ -1574,10 +1575,15 @@ export const MainChatActionBarDrawerOverlay = memo(function MainChatActionBarDra
   return (
     <View
       style={styles.streamDrawerOverlay}
+      dataSet={CHAT_COLUMN_RAIL_DATASET}
       pointerEvents="box-none"
       testID="main-chat-action-bar-drawer-overlay"
     >
-      <View style={styles.drawerWidthConstraint} pointerEvents="box-none">
+      <View
+        style={styles.drawerWidthConstraint}
+        pointerEvents="box-none"
+        testID="main-chat-action-bar-drawer-frame"
+      >
         <MainChatActionBarDrawerContent
           serverId={serverId}
           agentId={agentId}
@@ -1641,14 +1647,19 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   ).filter((bucket) => model.counts[bucket] > 0);
 
   return (
-    <View style={styles.outer} testID="main-chat-action-bar">
+    <View style={styles.outer} dataSet={CHAT_COLUMN_RAIL_DATASET} testID="main-chat-action-bar">
       {drawerMode === "floating" && openBucket ? (
         <View
           style={styles.floatingDrawerAnchor}
+          dataSet={CHAT_COLUMN_RAIL_DATASET}
           pointerEvents="box-none"
           testID="main-chat-action-bar-drawer-overlay"
         >
-          <View style={styles.drawerWidthConstraint} pointerEvents="box-none">
+          <View
+            style={styles.drawerWidthConstraint}
+            pointerEvents="box-none"
+            testID="main-chat-action-bar-drawer-frame"
+          >
             <MainChatActionBarDrawerContent
               serverId={serverId}
               agentId={agentId}
@@ -1658,7 +1669,7 @@ export const MainChatActionBar = memo(function MainChatActionBar({
         </View>
       ) : null}
 
-      <View style={styles.inner}>
+      <View style={styles.inner} testID="main-chat-action-bar-inner">
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -1687,7 +1698,7 @@ const styles = StyleSheet.create((theme) => ({
     position: "relative",
     width: "100%",
     alignItems: "center",
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[1],
     zIndex: 25,
@@ -1698,7 +1709,7 @@ const styles = StyleSheet.create((theme) => ({
     right: 0,
     bottom: "100%",
     alignItems: "center",
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
     paddingBottom: theme.spacing[1.5],
     zIndex: 30,
   },
@@ -1708,7 +1719,7 @@ const styles = StyleSheet.create((theme) => ({
     right: 0,
     bottom: theme.spacing[2],
     alignItems: "center",
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
     zIndex: 25,
   },
   drawerWidthConstraint: {

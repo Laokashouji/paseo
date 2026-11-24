@@ -399,8 +399,12 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
   }, []);
 
   return (
-    <View style={styles.container} testID="main-chat-composer-enhancements">
-      <View style={styles.inner} dataSet={CHAT_COLUMN_RAIL_DATASET}>
+    <View
+      style={styles.container}
+      dataSet={CHAT_COLUMN_RAIL_DATASET}
+      testID="main-chat-composer-enhancements"
+    >
+      <View style={styles.inner} testID="main-chat-composer-enhancements-inner">
         <MainChatQueuePanel serverId={serverId} agentId={agentId} onSendMessage={onSendMessage} />
 
         {activePickerKind ? (
@@ -510,7 +514,7 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     width: "100%",
     alignItems: "center",
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
     paddingTop: theme.spacing[1.5],
     paddingBottom: theme.spacing[0.5],
   },
