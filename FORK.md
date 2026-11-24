@@ -134,27 +134,43 @@ gh run watch --repo Laokashouji/paseo
 - **更新公告与 Release 联动**：仓库根目录的 `FORK_CHANGELOG.md` 独立记录 Fork 变更（不修改上游 `CHANGELOG.md`，零合并冲突）。桌面端在打包时自动注入 `EXPO_PUBLIC_FORK_CHANGELOG_URL` 与 `EXPO_PUBLIC_CHANGELOG_WEB_URL`，应用内「新功能 / 更新内容」弹窗会并发拉取 `FORK_CHANGELOG.md` 与上游 `CHANGELOG.md` 按发布日期倒序混排展示（同天 Fork 置顶并带 `Fork` 徽章）；`release.sh` 会在发版前校验并预览对应版本条目，CI 也会将同一份内容同步写入 GitHub Release 说明。
 - **后续所有更新**：`Paseo.app` 内的 `app-update.yml` 已自动指向 `Laokashouji/paseo`，且 `rolloutHours` 为 `0`（即时生效）。每次发版完成后，MacBook / Mac mini 上的 Paseo Desktop 都会直接检测到新版本并在应用内一键自动更新（原地替换 `/Applications/Paseo.app`）。
 
-## 5. 更新 Linux DevBox CLI / Daemon
+## 5. 安装与更新 Linux / DevBox CLI / Daemon
 
 ### 方式 A：托管 Fork Release 运行时（推荐，支持应用内一键「更新 Daemon」）
 
 每次执行 `./scripts/fork/release.sh --push` 发布 `fork-vX.Y.Z` 时，CI 会与 macOS 桌面端并行构建 Linux x64 预编译包 `paseo-daemon-<version>-linux-x64.tar.gz` 及 `latest-daemon.json` 清单。
 
-首次在 DevBox 或任意 Linux 主机初始化托管运行时（安装到 `~/.local/share/paseo-fork/releases/<version>` 并通过 `current` 软链切换，完全脱离本地开发仓库）：
+#### 1）全新 Linux 主机首次安装（无需克隆仓库）
+
+前提：机器为 `linux-x64` 架构并已安装 `node` 与 `tar`（若处于 HTTP 代理环境，脚本会自动为下载步骤启用 `NODE_USE_ENV_PROXY=1`）。直接运行：
 
 ```bash
-# 从最新 Fork GitHub Release 安装并切换默认 ~/.local/bin/paseo
+curl -fsSL https://raw.githubusercontent.com/Laokashouji/paseo/fork/scripts/fork/install-release-cli.sh | bash
+paseo
+```
+
+- 脚本会将运行时安装到 `~/.local/share/paseo-fork/releases/<version>` 并建立 `current` 软链；检测到机器上尚无 `paseo` 命令时，会自动创建 `~/.local/bin/paseo -> ~/.local/bin/paseo-fork`（若 `~/.local/bin` 不在 `$PATH` 中，会提示添加到 `~/.bashrc` / `~/.zshrc`）。
+- 如需后台常驻，可按需自行配置 `systemd` 用户服务（与官方 `npm install -g @getpaseo/cli` 一致）；后续发新版时直接在 Paseo 应用的「Host 设置 → 更新 Daemon」点击 **「更新」** 即可一键自更新，无需再次手动执行脚本。
+
+#### 2）已有官方 npm 版或源码版 DevBox 迁移切换（仅首次需要）
+
+如果机器上已经装过官方 npm 版或本地源码版 `paseo`，脚本默认不会覆盖现有入口；加 `--switch-default` 完成一次性切换（自动备份原路径）并重启一次 `systemd` 服务：
+
+```bash
+# 在仓库目录执行（或直接用上面的 curl 管道追加 -s -- --switch-default）
 ./scripts/fork/install-release-cli.sh --switch-default
 
 # 首次切换需通过 systemd 完整重启一次，让 Supervisor 切到托管运行时
 systemctl --user restart paseo-daemon.service
 ```
 
-完成上述一次性切换后：
-- DevBox 显示与 Mac 桌面端完全一致的 Fork 版本号（如 `v0.17.518`）。
+完成切换后：
+- DevBox 显示与 Mac 桌面端完全一致的 Fork 版本号（如 `v0.17.519`）。
 - 后续每次发布新 `fork-v*` 版本，直接在 Paseo 应用的「Host 设置 → 更新 Daemon」点击 **「更新」** 即可自动从 `Laokashouji/paseo` 下载预编译包、校验 SHA-256、原子切换 `current` 软链并原地重启 Worker（保留运行中终端）。
-- 如需离线或发版前测试本地打包产物，可使用 `./scripts/fork/install-release-cli.sh --from-tarball <tar.gz> --switch-default`。
-- 随时切回官方 npm 安装版：`./scripts/fork/install-release-cli.sh --restore-official && systemctl --user restart paseo-daemon.service`。
+- 常用参数：
+  - 仅安装并存命令 `~/.local/bin/paseo-fork`（不动 `~/.local/bin/paseo`）：`--no-switch-default`
+  - 离线或发版前测试本地打包产物：`./scripts/fork/install-release-cli.sh --from-tarball <tar.gz> --switch-default`
+  - 随时切回官方 npm 安装版：`./scripts/fork/install-release-cli.sh --restore-official && systemctl --user restart paseo-daemon.service`
 
 ### 方式 B：本地源码目录直连构建（适合未发版的服务端快速联调）
 
