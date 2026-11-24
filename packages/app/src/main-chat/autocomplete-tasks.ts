@@ -20,6 +20,7 @@ import {
 } from "./mention-sources";
 import { removeTaskMentionToken, useMainChatRouteStore } from "./route-store";
 import { selectMainChatDockTasks, type MainChatDockTaskItem } from "./selectors";
+import { useStewardAllowedServerIds } from "./use-steward-roster";
 
 export type MainChatTaskAutocompleteOption = AutocompleteOption & {
   type: "main_chat_task";
@@ -75,14 +76,15 @@ export function useMainChatAutocompleteTasks(input: {
 }): readonly MainChatDockTaskItem[] {
   const { serverId, agentId, mode, isDraftContext } = input;
   const enabled = mode === "file" && !isDraftContext;
+  const allowedServerIds = useStewardAllowedServerIds(serverId);
   return useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
       (state) =>
         enabled && serverId && agentId
-          ? selectMainChatDockTasks(state, serverId, agentId)
+          ? selectMainChatDockTasks(state, serverId, agentId, allowedServerIds)
           : EMPTY_TASKS,
-      [agentId, enabled, serverId],
+      [agentId, allowedServerIds, enabled, serverId],
     ),
     equal,
   );
@@ -101,6 +103,7 @@ export function useMainChatAutocompleteMentions(input: {
   const { serverId, agentId, mode, isDraftContext } = input;
   const enabled = mode === "file" && !isDraftContext && Boolean(serverId) && Boolean(agentId);
   const hosts = useHosts();
+  const allowedServerIds = useStewardAllowedServerIds(serverId);
   const hostLabelsByServerId = useMemo(() => {
     const map: Record<string, string> = {};
     for (const host of hosts) {
@@ -126,10 +129,11 @@ export function useMainChatAutocompleteMentions(input: {
           sources: collectMainChatMentionSources({
             sessions: state.sessions,
             excludeAgentId: agentId,
+            allowedServerIds,
           }),
         };
       },
-      [agentId, enabled, serverId],
+      [agentId, allowedServerIds, enabled, serverId],
     ),
     equal,
   );

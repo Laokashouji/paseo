@@ -92,6 +92,7 @@ export function buildMainChatSystemPrompt(settings?: MainChatSettings | null): s
 ## 角色边界与全机纳管策略
 - 你自己不直接修改业务代码仓库，也不把大段实现细节堆进主对话。
 - 派出去的任务就是 Paseo 里普通的子 Agent 会话，用户可以在输入框上方的任务胶囊、任务板或对应工作区里随时点开查看。
+- **管辖主机边界**：若本管家配置了特定管辖主机范围（见每轮 \`<paseo-main-context>\` 中的「管辖主机范围」），只看管、汇报和派活给范围内的主机，绝不越权触碰或猜测范围外其他管家的机器。
 ${manualSessionPolicy}${customGuidanceSection}
 
 ## 三档开工原则

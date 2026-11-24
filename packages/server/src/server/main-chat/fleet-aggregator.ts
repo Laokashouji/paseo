@@ -49,7 +49,12 @@ const DEFAULT_REMOTE_TIMEOUT_MS = 4_000;
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 30_000;
 const DEFAULT_TAIL_LIMIT = 20;
 
-export type FleetHostErrorCode = "host_unknown" | "host_offline" | "dispatch_failed" | "timeout";
+export type FleetHostErrorCode =
+  | "host_unknown"
+  | "host_offline"
+  | "host_out_of_scope"
+  | "dispatch_failed"
+  | "timeout";
 
 export class FleetHostError extends Error {
   readonly code: FleetHostErrorCode;
@@ -327,6 +332,8 @@ export interface MainChatFleetAggregatorOptions {
   agentManager: FleetLocalAgentManager;
   agentStorage: FleetLocalAgentStorage;
   connectedHosts?: FleetConnectedHosts;
+  /** Optional steward host-scope predicate; when provided, remote hosts returning false are excluded. */
+  isHostAllowed?: (serverId: string) => boolean;
   remotePollIntervalMs?: number;
   remoteTimeoutMs?: number;
   logger?: Logger;
@@ -645,6 +652,7 @@ export class MainChatFleetAggregator {
   private readonly agentManager: FleetLocalAgentManager;
   private readonly agentStorage: FleetLocalAgentStorage;
   private readonly connectedHosts?: FleetConnectedHosts;
+  private readonly isHostAllowed?: (serverId: string) => boolean;
   private readonly remotePollIntervalMs: number;
   private readonly remoteTimeoutMs: number;
   private readonly logger: Logger;
@@ -665,10 +673,35 @@ export class MainChatFleetAggregator {
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
     this.connectedHosts = options.connectedHosts;
+    this.isHostAllowed = options.isHostAllowed;
     this.remotePollIntervalMs = options.remotePollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS;
     this.remoteTimeoutMs = options.remoteTimeoutMs ?? DEFAULT_REMOTE_TIMEOUT_MS;
     this.logger = options.logger ?? pino({ level: "silent" });
     this.sendLocalPromptOverride = options.sendLocalPrompt;
+  }
+
+  reconcileScope(): void {
+    this.reconcileHosts(true);
+  }
+
+  listAvailableRemoteHosts(): AggregatedHostSummary[] {
+    const normalized = this.normalizeConnectedHosts({ ignoreScope: true });
+    return normalized.map((entry) => {
+      const state = this.remoteStates.get(entry.serverId);
+      const { status, error } = this.resolveRemoteHostStatus(entry, state);
+      const cachedAgents =
+        state && entry.summary?.status !== "disabled" ? Array.from(state.agents.values()) : [];
+      return {
+        serverId: entry.serverId,
+        label: entry.label,
+        isLocal: false,
+        status,
+        agentCount: cachedAgents.length,
+        needsAttentionCount: cachedAgents.filter(agentNeedsAttention).length,
+        lastSyncedAt: state?.lastSyncedAt ?? entry.summary?.lastOnlineAt ?? null,
+        error,
+      };
+    });
   }
 
   start(): void {
@@ -1255,8 +1288,13 @@ export class MainChatFleetAggregator {
     return Array.from(byId.values());
   }
 
-  private normalizeConnectedHosts(): NormalizedKnownHost[] {
+  private shouldIncludeHost(serverId: string, ignoreScope: boolean): boolean {
+    return ignoreScope || !this.isHostAllowed || this.isHostAllowed(serverId);
+  }
+
+  private normalizeConnectedHosts(options?: { ignoreScope?: boolean }): NormalizedKnownHost[] {
     if (!this.connectedHosts) return [];
+    const ignoreScope = Boolean(options?.ignoreScope);
 
     const acceptedHandles = this.connectedHosts.listAcceptedHosts();
     const acceptedByServerId = new Map<string, FleetAcceptedHostHandle>();
@@ -1264,16 +1302,16 @@ export class MainChatFleetAggregator {
       acceptedByServerId.set(handle.serverId, handle);
     }
 
-    const knownSummaries = this.connectedHosts.listKnownHosts();
     const entries: NormalizedKnownHost[] = [];
     const seenServerIds = new Set<string>();
 
-    for (const summary of knownSummaries) {
+    for (const summary of this.connectedHosts.listKnownHosts()) {
       const remoteServerId =
         summary.serverId !== null && summary.serverId !== this.localServerId
           ? summary.serverId
           : null;
       const serverId = remoteServerId ?? summary.registrationId;
+      if (!this.shouldIncludeHost(serverId, ignoreScope)) continue;
       const acceptedHandle = remoteServerId
         ? (acceptedByServerId.get(remoteServerId) ?? null)
         : null;
@@ -1293,6 +1331,7 @@ export class MainChatFleetAggregator {
 
     for (const handle of acceptedHandles) {
       if (handle.serverId === this.localServerId || seenServerIds.has(handle.serverId)) continue;
+      if (!this.shouldIncludeHost(handle.serverId, ignoreScope)) continue;
       entries.push({
         key: handle.serverId,
         serverId: handle.serverId,
@@ -1969,6 +2008,15 @@ export class MainChatFleetAggregator {
   ): { kind: "local" } | { kind: "remote"; client: FleetRemoteDaemonClient; label: string } {
     if (serverId === this.localServerId) {
       return { kind: "local" };
+    }
+
+    if (this.isHostAllowed && !this.isHostAllowed(serverId)) {
+      throw new FleetHostError(
+        "host_out_of_scope",
+        `Host ${serverId} is outside this steward's configured host scope`,
+        serverId,
+        { operation },
+      );
     }
 
     if (!this.connectedHosts) {

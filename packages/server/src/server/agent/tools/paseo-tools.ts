@@ -732,7 +732,35 @@ function createToolCatalog(
     lockedCwd: callerContext?.lockedCwd,
     hosts: () => {
       if (!options.hosts) throw new Error("Connected hosts are not configured");
-      return options.hosts();
+      const rawHosts = options.hosts();
+      const stewardService = options.mainChatService;
+      if (
+        !stewardService?.isManagedConversationAgent ||
+        !stewardService.isHostAllowedForSteward ||
+        !callerAgentId ||
+        !stewardService.isManagedConversationAgent(callerAgentId)
+      ) {
+        return rawHosts;
+      }
+      return {
+        async directory() {
+          const dir = await rawHosts.directory();
+          return {
+            self: dir.self,
+            hosts: dir.hosts.filter((host) =>
+              host.serverId ? stewardService.isHostAllowedForSteward!(host.serverId) : false,
+            ),
+          };
+        },
+        use(destination, action, signal) {
+          if (!stewardService.isHostAllowedForSteward!(destination)) {
+            throw new PaseoToolInputError(
+              `Host ${destination} is outside this steward's configured host scope`,
+            );
+          }
+          return rawHosts.use(destination, action, signal);
+        },
+      };
     },
     local: {
       createAgent: (args, context) => localHostOperations.get("create_agent")!(args, context),

@@ -77,6 +77,7 @@ import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
 import { selectMainChatSidebarSummary } from "./selectors";
+import { useMainChatStewardRoster, useStewardAllowedServerIds } from "./use-steward-roster";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
@@ -112,6 +113,7 @@ const sideBadgeLeading = <ThemedMessageSquare size={11} uniProps={mutedIconMappi
 
 export interface MainChatConversationScreenProps {
   conversationId: string;
+  serverId?: string | null;
 }
 
 interface ResolvedConversation {
@@ -391,6 +393,7 @@ function selectConversationScopedSessionData(
   serverId: string | null,
   conversationId: string,
   conversationAgentId: string | null,
+  allowedServerIds?: ReadonlySet<string> | null,
 ): ConversationScopedSessionData {
   if (!serverId || !conversationAgentId) {
     return {
@@ -411,6 +414,9 @@ function selectConversationScopedSessionData(
   const pendingPermissions: ActionBarPendingPermissionInput[] = [];
 
   for (const [hostId, session] of Object.entries(state.sessions)) {
+    if (allowedServerIds && allowedServerIds.size > 0 && !allowedServerIds.has(hostId)) {
+      continue;
+    }
     collectHostScopedSessionData({
       hostId,
       session,
@@ -1045,6 +1051,7 @@ const ConversationActionBar = memo(function ConversationActionBar({
  */
 export function MainChatConversationScreen({
   conversationId,
+  serverId,
 }: MainChatConversationScreenProps): ReactElement {
   const isFocused = useIsFocused();
 
@@ -1052,7 +1059,12 @@ export function MainChatConversationScreen({
     return <View style={styles.inactiveContainer} />;
   }
 
-  return <MainChatConversationScreenContent conversationId={conversationId} />;
+  return (
+    <MainChatConversationScreenContent
+      conversationId={conversationId}
+      serverId={serverId ?? null}
+    />
+  );
 }
 
 function buildResolvedConversation(
@@ -1115,12 +1127,19 @@ function useConversationAutoFetch(input: {
   return fetchStatus;
 }
 
-function useConversationRecordLookup(conversationId: string, preferredServerId: string | null) {
+function useConversationRecordLookup(
+  conversationId: string,
+  preferredServerId: string | null,
+  strictServerId: boolean,
+) {
   const mainSummary = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId),
-      [preferredServerId],
+      (state) =>
+        selectMainChatSidebarSummary(state, preferredServerId, null, {
+          strictServerId,
+        }),
+      [preferredServerId, strictServerId],
     ),
     equal,
   );
@@ -1168,13 +1187,25 @@ function useConversationRecordLookup(conversationId: string, preferredServerId: 
   };
 }
 
-function useResolvedConversationData(conversationId: string) {
+function useResolvedConversationData(conversationId: string, routeServerId: string | null) {
   const hosts = useHosts();
   const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const fallbackPreferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const { activeServerId, roster, hasMultipleStewards, selectSteward } = useMainChatStewardRoster({
+    routeServerId,
+    fallbackPreferredServerId,
+  });
+  const preferredServerId = activeServerId ?? fallbackPreferredServerId;
+  const strictServerId = Boolean(routeServerId || roster.length > 0);
+
+  useEffect(() => {
+    if (routeServerId) {
+      selectSteward(routeServerId);
+    }
+  }, [routeServerId, selectSteward]);
 
   const { targetServerId, rootMainAgentId, overview, matchedRecordHit, fallbackFromSession } =
-    useConversationRecordLookup(conversationId, preferredServerId);
+    useConversationRecordLookup(conversationId, preferredServerId, strictServerId);
 
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const hydrateFromOverview = useMainChatConversationsStore((state) => state.hydrateFromOverview);
@@ -1182,6 +1213,7 @@ function useResolvedConversationData(conversationId: string) {
   const resolvedServerId =
     matchedRecordHit?.serverId || fallbackFromSession?.serverId || targetServerId;
   const resolvedAgentId = matchedRecordHit?.record.agentId ?? fallbackFromSession?.agentId ?? null;
+  const allowedServerIds = useStewardAllowedServerIds(resolvedServerId);
 
   const scopedSession = useStoreWithEqualityFn(
     useSessionStore,
@@ -1192,8 +1224,9 @@ function useResolvedConversationData(conversationId: string) {
           resolvedServerId,
           conversationId,
           resolvedAgentId,
+          allowedServerIds,
         ),
-      [conversationId, resolvedAgentId, resolvedServerId],
+      [allowedServerIds, conversationId, resolvedAgentId, resolvedServerId],
     ),
     equal,
   );
@@ -1258,6 +1291,7 @@ function useResolvedConversationData(conversationId: string) {
     client,
     actionBarModel,
     isLoading: !resolved && fetchStatus === "loading",
+    hasMultipleStewards,
   };
 }
 
@@ -1412,8 +1446,9 @@ const ConversationExtraMenuItems = memo(function ConversationExtraMenuItems({
 function useConversationMutations(input: {
   resolved: ResolvedConversation | null;
   client: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
+  navServerId: string | undefined;
 }) {
-  const { resolved, client } = input;
+  const { resolved, client, navServerId } = input;
   const { t } = useTranslation();
   const toast = useToast();
   const [mutating, setMutating] = useState(false);
@@ -1464,7 +1499,7 @@ function useConversationMutations(input: {
           { variant: "success" },
         );
         if (archiving) {
-          router.push(buildMainChatRoute());
+          router.push(buildMainChatRoute(navServerId));
         }
         return null;
       })
@@ -1474,7 +1509,7 @@ function useConversationMutations(input: {
         );
       })
       .finally(() => setMutating(false));
-  }, [archiveConversation, client, mutating, resolved, t, toast]);
+  }, [archiveConversation, client, mutating, navServerId, resolved, t, toast]);
 
   const handleConversationUpdated = useCallback(() => {
     toast.show(t("mainChat.directions.toasts.updated"), { variant: "success" });
@@ -1495,15 +1530,17 @@ function resolveShellHeaderMeta(input: {
   rootMainAgentId: string | null;
   actionBarModel: MainChatActionBarModel | null;
   fallbackTitle: string;
+  navServerId: string | undefined;
 }) {
-  const { conversationId, resolved, rootMainAgentId, actionBarModel, fallbackTitle } = input;
+  const { conversationId, resolved, rootMainAgentId, actionBarModel, fallbackTitle, navServerId } =
+    input;
   return {
     title: resolved ? resolved.title : fallbackTitle,
     serverId: resolved ? resolved.serverId : null,
     mainAgentId: rootMainAgentId ?? (resolved ? resolved.agentId : null),
     originRoute: conversationId.trim()
-      ? buildMainChatConversationRoute(conversationId)
-      : buildMainChatRoute(),
+      ? buildMainChatConversationRoute(conversationId, navServerId)
+      : buildMainChatRoute(navServerId),
     isRunning: resolved ? resolved.isRunning : false,
     needsYouCount: actionBarModel ? actionBarModel.counts.needsYou : 0,
     runningCount: actionBarModel ? actionBarModel.counts.inProgress : 0,
@@ -1512,23 +1549,33 @@ function resolveShellHeaderMeta(input: {
 
 function MainChatConversationScreenContent({
   conversationId,
+  serverId,
 }: MainChatConversationScreenProps): ReactElement {
   const { t } = useTranslation();
   const [activePane, setActivePane] = useState<"main" | "drawer">("main");
   const [editModalOpen, setEditModalOpen] = useState(false);
 
-  const { resolved, rootMainAgentId, client, actionBarModel, isLoading } =
-    useResolvedConversationData(conversationId);
+  const { resolved, rootMainAgentId, client, actionBarModel, isLoading, hasMultipleStewards } =
+    useResolvedConversationData(conversationId, serverId ?? null);
+  const effectiveServerId = resolved?.serverId ?? serverId ?? null;
+  const navServerId =
+    hasMultipleStewards || Boolean(serverId) ? (effectiveServerId ?? undefined) : undefined;
   const {
     mutating,
     updateConversation,
     handleToggleLeader,
     handleToggleArchive,
     handleConversationUpdated,
-  } = useConversationMutations({ resolved, client });
+  } = useConversationMutations({ resolved, client, navServerId });
 
-  const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
-  const handleOpenHistory = useCallback(() => router.push(buildMainChatHistoryRoute()), []);
+  const handleBackToMain = useCallback(
+    () => router.push(buildMainChatRoute(navServerId)),
+    [navServerId],
+  );
+  const handleOpenHistory = useCallback(
+    () => router.push(buildMainChatHistoryRoute(navServerId)),
+    [navServerId],
+  );
   const handleFocusMainPane = useCallback(() => setActivePane("main"), []);
   const handleOpenEditModal = useCallback(() => setEditModalOpen(true), []);
   const handleCloseEditModal = useCallback(() => setEditModalOpen(false), []);
@@ -1553,6 +1600,7 @@ function MainChatConversationScreenContent({
     rootMainAgentId,
     actionBarModel,
     fallbackTitle: t("mainChat.shell.roleConversation"),
+    navServerId,
   });
 
   return (
@@ -1561,6 +1609,7 @@ function MainChatConversationScreenContent({
         variant="conversation"
         title={shellMeta.title}
         serverId={shellMeta.serverId}
+        routeServerId={navServerId}
         mainAgentId={shellMeta.mainAgentId}
         originRoute={shellMeta.originRoute}
         isRunning={shellMeta.isRunning}

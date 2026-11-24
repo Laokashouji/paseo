@@ -32,6 +32,7 @@ import { resolveShortcutKeysForAction } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { selectMainChatSidebarSummary } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
+import { useMainChatStewardRoster } from "@/main-chat/use-steward-roster";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -135,18 +136,28 @@ export function CommandCenterRootActions() {
   const toast = useToast();
   const activeWorkspace = useActiveWorkspaceSelection();
   const preferredServerId = activeWorkspace?.serverId ?? null;
+  const {
+    roster: stewardRoster,
+    activeServerId: activeStewardServerId,
+    activeSteward,
+    hasMultipleStewards,
+    selectSteward,
+  } = useMainChatStewardRoster({
+    fallbackPreferredServerId: preferredServerId,
+  });
+  const effectiveStewardPreferred = activeStewardServerId ?? preferredServerId;
   const mainChatSummary = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
       (state) => {
-        const summary = selectMainChatSidebarSummary(state, preferredServerId);
+        const summary = selectMainChatSidebarSummary(state, effectiveStewardPreferred);
         return {
           supportsMainChat: summary.supportsMainChat,
           targetServerId: summary.targetServerId,
           displayTitle: summary.displayTitle,
         };
       },
-      [preferredServerId],
+      [effectiveStewardPreferred],
     ),
     equal,
   );
@@ -155,8 +166,12 @@ export function CommandCenterRootActions() {
       ? state.settingsByServerId[mainChatSummary.targetServerId]
       : undefined,
   );
-  const mainChatEnabled = configuredMainChatSettings?.enabled !== false;
-  const mainChatTitle = configuredMainChatSettings?.title?.trim() || mainChatSummary.displayTitle;
+  const mainChatEnabled =
+    stewardRoster.length > 0 ? true : configuredMainChatSettings?.enabled !== false;
+  const mainChatTitle =
+    configuredMainChatSettings?.title?.trim() ||
+    activeSteward?.title ||
+    mainChatSummary.displayTitle;
   const browserHostLabel = getDesktopHost()?.browserHostLabel;
   const { overrides } = useKeyboardShortcutOverrides();
   const shortcutsAvailable = useHardwareKeyboardPresent();
@@ -293,7 +308,7 @@ export function CommandCenterRootActions() {
           icon: SchedulesIcon,
         },
       },
-      ...(mainChatSummary.supportsMainChat && mainChatEnabled
+      ...((stewardRoster.length > 0 || mainChatSummary.supportsMainChat) && mainChatEnabled
         ? [
             {
               id: "open-main-chat",
@@ -304,7 +319,11 @@ export function CommandCenterRootActions() {
               visibility: "always" as const,
               run: () => {
                 clearCommandCenterFocusRestoreElement();
-                router.push(buildMainChatRoute());
+                router.push(
+                  hasMultipleStewards
+                    ? buildMainChatRoute(activeStewardServerId)
+                    : buildMainChatRoute(),
+                );
               },
               presentation: {
                 kind: "action" as const,
@@ -316,6 +335,38 @@ export function CommandCenterRootActions() {
                   undefined,
               },
             },
+            ...(hasMultipleStewards
+              ? stewardRoster.map((steward, index) => ({
+                  id: `open-main-chat-steward-${steward.serverId}`,
+                  group: "actions" as const,
+                  groupRank: 0,
+                  rank: 5.51 + index * 0.01,
+                  keywords: [
+                    "main chat",
+                    "steward",
+                    "管家",
+                    "主对话",
+                    steward.title,
+                    steward.hostLabel,
+                    ...steward.managedHostLabels,
+                  ],
+                  visibility: "always" as const,
+                  run: () => {
+                    clearCommandCenterFocusRestoreElement();
+                    selectSteward(steward.serverId);
+                    router.push(buildMainChatRoute(steward.serverId));
+                  },
+                  presentation: {
+                    kind: "action" as const,
+                    title: t("mainChat.stewards.commandOpenNamed", {
+                      title: steward.title,
+                      host: steward.hostLabel,
+                    }),
+                    sectionTitle: t("shell.commandCenter.actions"),
+                    icon: MainChatIcon,
+                  },
+                }))
+              : []),
           ]
         : []),
       {
@@ -430,8 +481,10 @@ export function CommandCenterRootActions() {
 
     return availableActions;
   }, [
+    activeStewardServerId,
     browserHostLabel,
     groupMode,
+    hasMultipleStewards,
     homeRoute,
     keyboardActionDispatcher,
     mainChatEnabled,
@@ -441,11 +494,13 @@ export function CommandCenterRootActions() {
     openImportSession,
     overrides,
     schedulesRoute,
+    selectSteward,
     sessionsRoute,
     setGroupMode,
     setShortcutsDialogOpen,
     settingsRoute,
     shortcutPlatform,
+    stewardRoster,
     shortcutsAvailable,
     t,
     toast,

@@ -111,6 +111,7 @@ export interface MainChatShellProps {
   variant: "main" | "conversation";
   title: string;
   serverId: string | null;
+  routeServerId?: string | null;
   mainAgentId?: string | null;
   originRoute: string;
   isRunning?: boolean;
@@ -394,11 +395,7 @@ const StylePresetCapsuleMenu = memo(function StylePresetCapsuleMenu({
           uniProps={isProactive ? warningIconMapping : mutedIconMapping}
         />
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        width={256}
-        sheetTitle={t("mainChat.actions.switchStyle")}
-      >
+      <DropdownMenuContent align="end" width={256} sheetTitle={t("mainChat.actions.switchStyle")}>
         <DropdownMenuLabel>{t("mainChat.settings.style.builtinGroupLabel")}</DropdownMenuLabel>
         {builtinPresets.map((preset) => (
           <StylePresetMenuOptionItem
@@ -723,6 +720,7 @@ export const MainChatShell = memo(function MainChatShell({
   variant,
   title,
   serverId,
+  routeServerId,
   mainAgentId,
   originRoute,
   isRunning = false,
@@ -756,8 +754,14 @@ export const MainChatShell = memo(function MainChatShell({
   const hostLabelsByServerId = useHostLabelsByServerId();
   const [standingAuthModalOpen, setStandingAuthModalOpen] = useState(false);
 
-  const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
-  const handleOpenHistory = useCallback(() => router.push(buildMainChatHistoryRoute()), []);
+  const handleBackToMain = useCallback(
+    () => router.push(buildMainChatRoute(routeServerId)),
+    [routeServerId],
+  );
+  const handleOpenHistory = useCallback(
+    () => router.push(buildMainChatHistoryRoute(routeServerId)),
+    [routeServerId],
+  );
   const handleOpenStandingAuth = useCallback(() => setStandingAuthModalOpen(true), []);
   const handleCloseStandingAuth = useCallback(() => setStandingAuthModalOpen(false), []);
   const handleOpenSettings = useCallback(

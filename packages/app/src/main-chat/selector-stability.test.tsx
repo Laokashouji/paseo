@@ -44,6 +44,7 @@ vi.mock("react-i18next", () => ({
     t: (key: string) => key,
     i18n: { language: "zh-CN" },
   }),
+  initReactI18next: { type: "3rdParty", init: () => undefined },
 }));
 
 vi.mock("@/constants/layout", async (importOriginal) => {

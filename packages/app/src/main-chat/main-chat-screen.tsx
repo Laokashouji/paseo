@@ -29,6 +29,7 @@ import { MainChatShell } from "./main-chat-shell";
 import { useMainChatOverviewStore } from "./overview-store";
 import { selectMainChatSidebarSummary, type MainChatAgentRef } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
+import { useMainChatStewardRoster } from "./use-steward-roster";
 
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedPower = withUnistyles(Power);
@@ -46,19 +47,23 @@ type EnsureState =
   | { kind: "resolved"; ref: MainChatAgentRef }
   | { kind: "error"; serverId: string; message: string };
 
+export interface MainChatScreenProps {
+  serverId?: string | null;
+}
+
 /**
  * Primary top-level `/main` screen.
  * Unmounts its conversation host while blurred so returning to `/main` re-establishes a clean
  * bottom-anchored scroll position while preserving drafts in `useDraftStore`.
  */
-export function MainChatScreen(): ReactElement {
+export function MainChatScreen({ serverId }: MainChatScreenProps = {}): ReactElement {
   const isFocused = useIsFocused();
 
   if (!isFocused) {
     return <View style={styles.inactiveContainer} />;
   }
 
-  return <MainChatScreenContent />;
+  return <MainChatScreenContent routeServerId={serverId ?? null} />;
 }
 
 function resolveEffectiveOverrideRef(
@@ -302,16 +307,33 @@ function useMainChatScreenDataSync(params: {
   }, [client, effectiveServerId, isDisabled, refreshConversations, refreshFleetHosts]);
 }
 
-function useMainChatTargetSession() {
+function useMainChatTargetSession(routeServerId: string | null) {
   const hosts = useHosts();
   const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const fallbackPreferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const { activeServerId, activeAllowedServerIds, roster, hasMultipleStewards, selectSteward } =
+    useMainChatStewardRoster({
+      routeServerId,
+      fallbackPreferredServerId,
+    });
+  const preferredServerId = activeServerId ?? fallbackPreferredServerId;
+  const strictServerId = Boolean(routeServerId || roster.length > 0);
+
+  useEffect(() => {
+    if (routeServerId) {
+      selectSteward(routeServerId);
+    }
+  }, [routeServerId, selectSteward]);
 
   const summary = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId),
-      [preferredServerId],
+      (state) =>
+        selectMainChatSidebarSummary(state, preferredServerId, null, {
+          allowedServerIds: activeAllowedServerIds,
+          strictServerId,
+        }),
+      [activeAllowedServerIds, preferredServerId, strictServerId],
     ),
     equal,
   );
@@ -361,10 +383,35 @@ function useMainChatTargetSession() {
     isDisabled: settings !== undefined && !isMainChatEnabled(settings),
     effectiveOverrideRef,
     updateSettings,
+    hasMultipleStewards,
   };
 }
 
-function MainChatScreenContent(): ReactElement {
+function resolveMainChatScreenNavServerId(
+  hasMultipleStewards: boolean,
+  routeServerId: string | null,
+  effectiveServerId: string | null,
+): string | undefined {
+  return hasMultipleStewards || Boolean(routeServerId)
+    ? (effectiveServerId ?? undefined)
+    : undefined;
+}
+
+function resolveMainChatEnsuringState(input: {
+  isDisabled: boolean;
+  ensureKind: string;
+  targetServerId: string | null;
+  connectionStatus: string;
+  supportsMainChat: boolean;
+}): boolean {
+  if (input.isDisabled) return false;
+  if (input.ensureKind === "ensuring") return true;
+  return Boolean(
+    input.targetServerId && (input.connectionStatus === "connecting" || input.supportsMainChat),
+  );
+}
+
+function MainChatScreenContent({ routeServerId }: { routeServerId: string | null }): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
   const {
@@ -376,7 +423,8 @@ function MainChatScreenContent(): ReactElement {
     isDisabled,
     effectiveOverrideRef,
     updateSettings,
-  } = useMainChatTargetSession();
+    hasMultipleStewards,
+  } = useMainChatTargetSession(routeServerId);
 
   const [retryCount, setRetryCount] = useState(0);
   const [enabling, setEnabling] = useState(false);
@@ -438,10 +486,13 @@ function MainChatScreenContent(): ReactElement {
   }, []);
 
   const displayTitle = configuredTitle?.trim() || summary.displayTitle;
-  const isEnsuring =
-    !isDisabled &&
-    (ensureState.kind === "ensuring" ||
-      Boolean(targetServerId && (connectionStatus === "connecting" || summary.supportsMainChat)));
+  const isEnsuring = resolveMainChatEnsuringState({
+    isDisabled,
+    ensureKind: ensureState.kind,
+    targetServerId,
+    connectionStatus,
+    supportsMainChat: summary.supportsMainChat,
+  });
 
   const body = (
     <MainChatScreenBody
@@ -459,13 +510,20 @@ function MainChatScreenContent(): ReactElement {
     />
   );
 
+  const navServerId = resolveMainChatScreenNavServerId(
+    hasMultipleStewards,
+    routeServerId,
+    effectiveServerId,
+  );
+
   return (
     <MainChatShell
       variant="main"
       title={displayTitle}
       serverId={effectiveServerId}
+      routeServerId={navServerId}
       mainAgentId={resolvedRef?.agentId ?? null}
-      originRoute={buildMainChatRoute()}
+      originRoute={buildMainChatRoute(navServerId)}
       isRunning={!isDisabled && summary.isMainRunning}
       needsYouCount={isDisabled ? 0 : summary.needsYouCount}
       runningCount={isDisabled ? 0 : summary.runningCount}

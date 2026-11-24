@@ -546,19 +546,32 @@ export function normalizeHostSectionSlug(value: string): HostSectionSlug | null 
   return LEGACY_HOST_SECTION_SLUGS[value] ?? null;
 }
 
-export function buildMainChatRoute() {
+export function buildMainChatRoute(serverId?: NullableString) {
+  const normalizedServerId = trimNonEmpty(serverId);
+  if (normalizedServerId) {
+    return `/main?serverId=${encodeSegment(normalizedServerId)}` as const;
+  }
   return "/main" as const;
 }
 
-export function buildMainChatConversationRoute(conversationId: string) {
+export function buildMainChatConversationRoute(conversationId: string, serverId?: NullableString) {
   const normalized = trimNonEmpty(conversationId);
   if (!normalized) {
     throw new Error("buildMainChatConversationRoute requires a non-empty conversationId");
   }
-  return `/main/c/${encodeSegment(normalized)}` as const;
+  const normalizedServerId = trimNonEmpty(serverId);
+  const base = `/main/c/${encodeSegment(normalized)}` as const;
+  if (normalizedServerId) {
+    return `${base}?serverId=${encodeSegment(normalizedServerId)}` as const;
+  }
+  return base;
 }
 
-export function buildMainChatHistoryRoute() {
+export function buildMainChatHistoryRoute(serverId?: NullableString) {
+  const normalizedServerId = trimNonEmpty(serverId);
+  if (normalizedServerId) {
+    return `/main/history?serverId=${encodeSegment(normalizedServerId)}` as const;
+  }
   return "/main/history" as const;
 }
 

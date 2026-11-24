@@ -951,6 +951,10 @@ async function handleMultiConversationAndFleetMessages(
         requestId: msg.requestId,
         localServerId: result.localServerId,
         hosts: result.hosts,
+        ...(result.fleetScope ? { fleetScope: result.fleetScope } : {}),
+        ...(result.availableRemoteHosts
+          ? { availableRemoteHosts: result.availableRemoteHosts }
+          : {}),
         error: null,
       },
     });

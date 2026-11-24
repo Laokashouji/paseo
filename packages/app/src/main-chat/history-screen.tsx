@@ -73,6 +73,7 @@ import {
   type MainChatDockTaskItem,
 } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
+import { useMainChatStewardRoster } from "./use-steward-roster";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
@@ -151,11 +152,15 @@ function isAssistantConversationAgent(agent: { labels: Record<string, unknown> }
 function selectAssistantConversations(
   state: ReturnType<typeof useSessionStore.getState>,
   activeMain: { serverId: string; agentId: string } | null,
+  scopedServerId?: string | null,
 ): AssistantConversationListItem[] {
   const items: AssistantConversationListItem[] = [];
   const seen = new Set<string>();
 
   for (const [serverId, session] of Object.entries(state.sessions)) {
+    if (scopedServerId && serverId !== scopedServerId) {
+      continue;
+    }
     const candidates = [...session.agents.values(), ...session.agentDetails.values()];
     for (const agent of candidates) {
       const key = `${serverId}:${agent.id}`;
@@ -993,26 +998,88 @@ function useMainChatActivityAudit(input: {
   };
 }
 
+export interface MainChatHistoryScreenProps {
+  serverId?: string | null;
+}
+
 /**
  * `/main/history` — Assistant conversation history and M2 background activity audit view.
  */
-export function MainChatHistoryScreen(): ReactElement {
+export function MainChatHistoryScreen({ serverId }: MainChatHistoryScreenProps = {}): ReactElement {
   const isFocused = useIsFocused();
 
   if (!isFocused) {
     return <View style={styles.inactiveContainer} />;
   }
 
-  return <MainChatHistoryScreenContent />;
+  return <MainChatHistoryScreenContent routeServerId={serverId ?? null} />;
 }
 
-const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(): ReactElement {
+function mergeOverviewConversationsIntoList(
+  conversationsFromStore: readonly AssistantConversationListItem[],
+  overviewConversations: readonly MainChatConversationRecord[] | undefined,
+  activeMainRef: { serverId: string; agentId: string } | null,
+  targetServerId: string | null,
+): AssistantConversationListItem[] {
+  if (!overviewConversations || overviewConversations.length === 0) {
+    return [...conversationsFromStore];
+  }
+  const existingKeys = new Set(
+    conversationsFromStore.map((item) => `${item.serverId}:${item.agentId}`),
+  );
+  const merged = [...conversationsFromStore];
+  for (const conv of overviewConversations) {
+    const srvId = conv.serverId ?? targetServerId ?? "";
+    if (!srvId) continue;
+    const key = `${srvId}:${conv.agentId}`;
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    merged.push({
+      serverId: srvId,
+      agentId: conv.agentId,
+      title: conv.title,
+      archived: conv.archivedAt !== null,
+      isActiveMain:
+        conv.kind === "main" && conv.archivedAt === null && activeMainRef?.agentId === conv.agentId,
+      isFormerMain: conv.kind === "main" && conv.archivedAt !== null,
+      updatedAtMs: Date.parse(conv.updatedAt) || 0,
+    });
+  }
+  return merged;
+}
+
+function resolveHistoryNavServerId(
+  hasMultipleStewards: boolean,
+  routeServerId: string | null,
+  targetServerId: string | null,
+): string | undefined {
+  return hasMultipleStewards || Boolean(routeServerId) ? (targetServerId ?? undefined) : undefined;
+}
+
+const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent({
+  routeServerId,
+}: {
+  routeServerId: string | null;
+}): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
   const isCompact = useIsCompactFormFactor();
   const hosts = useHosts();
   const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const fallbackPreferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
+  const { activeServerId, activeAllowedServerIds, roster, hasMultipleStewards, selectSteward } =
+    useMainChatStewardRoster({
+      routeServerId,
+      fallbackPreferredServerId,
+    });
+  const preferredServerId = activeServerId ?? fallbackPreferredServerId;
+  const strictServerId = Boolean(routeServerId || roster.length > 0);
+
+  useEffect(() => {
+    if (routeServerId) {
+      selectSteward(routeServerId);
+    }
+  }, [routeServerId, selectSteward]);
 
   const [activeTab, setActiveTab] = useState<HistoryTab>("conversations");
   const [activityFilter, setActivityFilter] = useState<MainChatActivityFilter>("all");
@@ -1023,8 +1090,12 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
   const summary = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectMainChatSidebarSummary(state, preferredServerId),
-      [preferredServerId],
+      (state) =>
+        selectMainChatSidebarSummary(state, preferredServerId, null, {
+          allowedServerIds: activeAllowedServerIds,
+          strictServerId,
+        }),
+      [activeAllowedServerIds, preferredServerId, strictServerId],
     ),
     equal,
   );
@@ -1037,7 +1108,10 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
 
   const conversationsFromStore = useStoreWithEqualityFn(
     useSessionStore,
-    useCallback((state) => selectAssistantConversations(state, activeMainRef), [activeMainRef]),
+    useCallback(
+      (state) => selectAssistantConversations(state, activeMainRef, targetServerId),
+      [activeMainRef, targetServerId],
+    ),
     equal,
   );
 
@@ -1046,9 +1120,14 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     useCallback(
       (state) =>
         activeMainRef
-          ? selectMainChatDockTasks(state, activeMainRef.serverId, activeMainRef.agentId)
+          ? selectMainChatDockTasks(
+              state,
+              activeMainRef.serverId,
+              activeMainRef.agentId,
+              activeAllowedServerIds,
+            )
           : [],
-      [activeMainRef],
+      [activeAllowedServerIds, activeMainRef],
     ),
     equal,
   );
@@ -1102,35 +1181,16 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     enabled: activeTab === "activity",
   });
 
-  const conversations = useMemo(() => {
-    if (!overview?.conversations || overview.conversations.length === 0) {
-      return conversationsFromStore;
-    }
-    const existingKeys = new Set(
-      conversationsFromStore.map((item) => `${item.serverId}:${item.agentId}`),
-    );
-    const merged = [...conversationsFromStore];
-    for (const conv of overview.conversations) {
-      const srvId = conv.serverId ?? targetServerId ?? "";
-      if (!srvId) continue;
-      const key = `${srvId}:${conv.agentId}`;
-      if (existingKeys.has(key)) continue;
-      existingKeys.add(key);
-      merged.push({
-        serverId: srvId,
-        agentId: conv.agentId,
-        title: conv.title,
-        archived: conv.archivedAt !== null,
-        isActiveMain:
-          conv.kind === "main" &&
-          conv.archivedAt === null &&
-          activeMainRef?.agentId === conv.agentId,
-        isFormerMain: conv.kind === "main" && conv.archivedAt !== null,
-        updatedAtMs: Date.parse(conv.updatedAt) || 0,
-      });
-    }
-    return merged;
-  }, [activeMainRef?.agentId, conversationsFromStore, overview?.conversations, targetServerId]);
+  const conversations = useMemo(
+    () =>
+      mergeOverviewConversationsIntoList(
+        conversationsFromStore,
+        overview?.conversations,
+        activeMainRef,
+        targetServerId,
+      ),
+    [activeMainRef, conversationsFromStore, overview?.conversations, targetServerId],
+  );
 
   const hostLabelByServerId = useMemo(
     () => new Map(hosts.map((host) => [host.serverId, host.label])),
@@ -1153,7 +1213,12 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     [t],
   );
 
-  const handleBackToMain = useCallback(() => router.push(buildMainChatRoute()), []);
+  const navServerId = resolveHistoryNavServerId(hasMultipleStewards, routeServerId, targetServerId);
+
+  const handleBackToMain = useCallback(
+    () => router.push(buildMainChatRoute(navServerId)),
+    [navServerId],
+  );
 
   const handlePatrolNow = useCallback(() => {
     if (!targetServerId || !client || isPatrolling) return;
@@ -1192,13 +1257,20 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
     triggerPatrol,
   ]);
 
-  const handleOpenConversation = useCallback((item: AssistantConversationListItem) => {
-    if (item.isActiveMain) {
-      router.push(buildMainChatRoute());
-      return;
-    }
-    router.push(buildMainChatConversationRoute(`${item.serverId}:${item.agentId}`));
-  }, []);
+  const handleOpenConversation = useCallback(
+    (item: AssistantConversationListItem) => {
+      const itemRouteServerId =
+        hasMultipleStewards || Boolean(routeServerId) ? item.serverId : undefined;
+      if (item.isActiveMain) {
+        router.push(buildMainChatRoute(itemRouteServerId));
+        return;
+      }
+      router.push(
+        buildMainChatConversationRoute(`${item.serverId}:${item.agentId}`, itemRouteServerId),
+      );
+    },
+    [hasMultipleStewards, routeServerId],
+  );
 
   const handleOpenTask = useCallback(
     (task: MainChatDockTaskItem) => {
@@ -1209,14 +1281,14 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
         title: task.title,
         isCompact,
         inMainChatRoute: true,
-        originRoute: buildMainChatHistoryRoute(),
+        originRoute: buildMainChatHistoryRoute(navServerId),
         originTitle: t("mainChat.history.title"),
       });
       if (mode === "drawer") {
-        router.push(buildMainChatRoute());
+        router.push(buildMainChatRoute(navServerId));
       }
     },
-    [isCompact, t],
+    [isCompact, navServerId, t],
   );
 
   const handleOpenRelatedAgent = useCallback(
@@ -1227,14 +1299,14 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
         agentId,
         isCompact,
         inMainChatRoute: true,
-        originRoute: buildMainChatHistoryRoute(),
+        originRoute: buildMainChatHistoryRoute(navServerId),
         originTitle: t("mainChat.history.title"),
       });
       if (mode === "drawer") {
-        router.push(buildMainChatRoute());
+        router.push(buildMainChatRoute(navServerId));
       }
     },
-    [isCompact, t, targetServerId],
+    [isCompact, navServerId, t, targetServerId],
   );
 
   const handleRefreshActivities = useCallback(() => {
@@ -1255,14 +1327,17 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
       toast.show(t("mainChat.directions.toasts.created", { title: created.title }), {
         variant: "success",
       });
-      router.push(buildMainChatConversationRoute(created.id));
+      router.push(buildMainChatConversationRoute(created.id, navServerId));
     },
-    [t, toast],
+    [navServerId, t, toast],
   );
 
-  const handleOpenManagedConversation = useCallback((record: MainChatConversationRecord) => {
-    router.push(buildMainChatConversationRoute(record.id));
-  }, []);
+  const handleOpenManagedConversation = useCallback(
+    (record: MainChatConversationRecord) => {
+      router.push(buildMainChatConversationRoute(record.id, navServerId));
+    },
+    [navServerId],
+  );
 
   const handleToggleManagedLeader = useCallback(
     (record: MainChatConversationRecord) => {

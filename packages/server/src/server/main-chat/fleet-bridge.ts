@@ -77,6 +77,7 @@ export interface FleetAggregatorLike {
     action: CrossHostAgentControlAction,
   ): Promise<void>;
   subscribe(listener: (event: FleetAggregatorEvent) => void): () => void;
+  listAvailableRemoteHosts?: () => AggregatedHostSummary[];
 }
 
 export interface CollectMultiHostFleetOptions {
@@ -106,6 +107,7 @@ export interface GetFleetHostsOptions {
 export interface GetFleetHostsResult {
   localServerId: string;
   hosts: MainChatFleetHostStatus[];
+  availableRemoteHosts?: MainChatFleetHostStatus[];
 }
 
 export interface DispatchTaskToTargetHostInput {
@@ -423,6 +425,9 @@ function translateHostError(error: unknown, serverId: string, operation: string)
       case "host_unknown":
         message = `未找到已接入的远端主机 ${targetId}，无法${opLabel}。请先在主对话设置中将该主机接入 ConnectedHosts。`;
         break;
+      case "host_out_of_scope":
+        message = `目标主机 ${targetId} 不在本管家配置的管辖主机范围内，无法${opLabel}。如需操作该主机，请先在「设置 → 对话管理 → 管辖主机范围」中将其勾选纳入。`;
+        break;
       case "timeout":
         message = `向主机 ${targetId} ${opLabel}超时，请先核对目标主机状态，避免重复触发。`;
         break;
@@ -542,9 +547,13 @@ export function createMainChatFleetBridge(deps: MainChatFleetBridgeDeps): MainCh
 
     async getFleetHosts(options) {
       const collected = await collectMultiHostFleet({ forceRefresh: options?.forceRefresh });
+      const availableRemoteHosts = deps.fleetAggregator
+        .listAvailableRemoteHosts?.()
+        .map((host) => toFleetHostStatus(host));
       return {
         localServerId: collected.localServerId,
         hosts: collected.hosts,
+        ...(availableRemoteHosts ? { availableRemoteHosts } : {}),
       };
     },
 

@@ -41,6 +41,7 @@ import { openMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
+import { useMainChatStewardRoster } from "./use-steward-roster";
 
 const ThemedPlus = withUnistyles(Plus);
 const ThemedHistory = withUnistyles(History);
@@ -116,11 +117,48 @@ interface DirectionsSessionSnapshot {
   hostnamesByServerId: Record<string, string>;
 }
 
+function collectHostLiveAgents(
+  hostId: string,
+  hostSession: SessionStoreState["sessions"][string],
+  liveAgents: DirectionTreeLiveAgent[],
+): void {
+  const pendingAgentIds = new Set<string>();
+  for (const perm of hostSession.pendingPermissions.values()) {
+    pendingAgentIds.add(perm.agentId);
+  }
+
+  for (const agent of hostSession.agents.values()) {
+    if (agent.archivedAt || agent.background) continue;
+    const isRunning =
+      agent.turn.phase === "open" ||
+      isAgentRunning({ status: agent.status, backgroundWork: agent.backgroundWork });
+    const needsYou =
+      pendingAgentIds.has(agent.id) ||
+      agent.pendingPermissions.length > 0 ||
+      agent.attentionReason === "permission";
+
+    liveAgents.push({
+      serverId: hostId,
+      agentId: agent.id,
+      workspaceId: agent.workspaceId ?? null,
+      title: agent.title?.trim() || agent.id,
+      isRunning,
+      isFailed: agent.status === "error",
+      needsYou,
+    });
+  }
+}
+
 function selectDirectionsSessionSnapshot(
   state: SessionStoreState,
   preferredServerId: string | null,
+  allowedServerIds?: ReadonlySet<string> | null,
+  strictServerId?: boolean,
 ): DirectionsSessionSnapshot {
-  const summary = selectMainChatSidebarSummary(state, preferredServerId);
+  const summary = selectMainChatSidebarSummary(state, preferredServerId, null, {
+    allowedServerIds,
+    strictServerId,
+  });
   if (!summary.supportsMainChat) {
     return {
       supportsMainChat: false,
@@ -137,36 +175,14 @@ function selectDirectionsSessionSnapshot(
   const hostnamesByServerId: Record<string, string> = {};
 
   for (const [hostId, hostSession] of Object.entries(state.sessions)) {
+    if (allowedServerIds && allowedServerIds.size > 0 && !allowedServerIds.has(hostId)) {
+      continue;
+    }
     const hostname = hostSession.serverInfo?.hostname?.trim();
     if (hostname) {
       hostnamesByServerId[hostId] = hostname;
     }
-
-    const pendingAgentIds = new Set<string>();
-    for (const perm of hostSession.pendingPermissions.values()) {
-      pendingAgentIds.add(perm.agentId);
-    }
-
-    for (const agent of hostSession.agents.values()) {
-      if (agent.archivedAt || agent.background) continue;
-      const isRunning =
-        agent.turn.phase === "open" ||
-        isAgentRunning({ status: agent.status, backgroundWork: agent.backgroundWork });
-      const needsYou =
-        pendingAgentIds.has(agent.id) ||
-        agent.pendingPermissions.length > 0 ||
-        agent.attentionReason === "permission";
-
-      liveAgents.push({
-        serverId: hostId,
-        agentId: agent.id,
-        workspaceId: agent.workspaceId ?? null,
-        title: agent.title?.trim() || agent.id,
-        isRunning,
-        isFailed: agent.status === "error",
-        needsYou,
-      });
-    }
+    collectHostLiveAgents(hostId, hostSession, liveAgents);
   }
 
   return {
@@ -227,12 +243,15 @@ const EMPTY_DIRECTIONS: readonly MainChatDirectionEntry[] = [];
 function useSidebarDirectionsState(
   preferredServerId: string | null,
   directions: readonly MainChatDirectionEntry[],
+  allowedServerIds: ReadonlySet<string> | null,
+  strictServerId: boolean,
 ) {
   const snapshot = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectDirectionsSessionSnapshot(state, preferredServerId),
-      [preferredServerId],
+      (state) =>
+        selectDirectionsSessionSnapshot(state, preferredServerId, allowedServerIds, strictServerId),
+      [allowedServerIds, preferredServerId, strictServerId],
     ),
     equal,
   );
@@ -323,12 +342,21 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
   const isCompact = useIsCompactFormFactor();
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
-  const preferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
+  const fallbackPreferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
+  const { activeServerId, activeAllowedServerIds, roster, hasMultipleStewards } =
+    useMainChatStewardRoster({
+      fallbackPreferredServerId,
+    });
+  const preferredServerId = activeServerId ?? fallbackPreferredServerId;
+  const strictServerId = roster.length > 0;
 
   const { snapshot, targetServerId, client, treeModel } = useSidebarDirectionsState(
     preferredServerId,
     directions,
+    activeAllowedServerIds,
+    strictServerId,
   );
+  const routeServerId = hasMultipleStewards ? targetServerId : undefined;
   const mainChatSettings = useMainChatSettingsStore((state) =>
     targetServerId ? state.settingsByServerId[targetServerId] : undefined,
   );
@@ -359,8 +387,8 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
 
   const handleOpenHistory = useCallback(() => {
     onBeforeNavigate?.();
-    router.push(buildMainChatHistoryRoute());
-  }, [onBeforeNavigate]);
+    router.push(buildMainChatHistoryRoute(routeServerId));
+  }, [onBeforeNavigate, routeServerId]);
 
   const handlePressAdd = useCallback(() => {
     if (client && typeof client.createMainChatConversation === "function") {
@@ -378,23 +406,23 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
     (created: MainChatConversationRecord) => {
       setCreateModalVisible(false);
       onBeforeNavigate?.();
-      router.push(buildMainChatConversationRoute(created.id));
+      router.push(buildMainChatConversationRoute(created.id, routeServerId));
     },
-    [onBeforeNavigate],
+    [onBeforeNavigate, routeServerId],
   );
 
   const handleOpenConversation = useCallback(
     (conversationId: string) => {
       onBeforeNavigate?.();
-      router.push(buildMainChatConversationRoute(conversationId));
+      router.push(buildMainChatConversationRoute(conversationId, routeServerId));
     },
-    [onBeforeNavigate],
+    [onBeforeNavigate, routeServerId],
   );
 
   const handleOpenDirectionAgent = useCallback(
     (input: OpenDirectionAgentTargetInput) => {
       onBeforeNavigate?.();
-      const directionRoute = buildMainChatConversationRoute(input.conversationId);
+      const directionRoute = buildMainChatConversationRoute(input.conversationId, routeServerId);
       const mode = openMainChatTaskTarget({
         serverId: input.serverId,
         agentId: input.agentId,
@@ -410,7 +438,7 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
         router.push(directionRoute);
       }
     },
-    [isCompact, onBeforeNavigate, pathname],
+    [isCompact, onBeforeNavigate, pathname, routeServerId],
   );
 
   const runRowMutation = useCallback(

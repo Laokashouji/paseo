@@ -9,12 +9,16 @@ function readParam(value: string | string[] | undefined): string {
 }
 
 export default function MainChatConversationRoute() {
-  const params = useLocalSearchParams<{ conversationId?: string | string[] }>();
+  const params = useLocalSearchParams<{
+    conversationId?: string | string[];
+    serverId?: string | string[];
+  }>();
   const conversationId = readParam(params.conversationId);
+  const serverId = readParam(params.serverId) || null;
 
   return (
     <HostRouteBootstrapBoundary>
-      <MainChatConversationScreen conversationId={conversationId} />
+      <MainChatConversationScreen conversationId={conversationId} serverId={serverId} />
     </HostRouteBootstrapBoundary>
   );
 }
