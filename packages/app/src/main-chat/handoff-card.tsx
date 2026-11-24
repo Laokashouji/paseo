@@ -321,9 +321,8 @@ const styles = StyleSheet.create((theme) => {
       borderColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
       borderRadius: theme.borderRadius.lg,
-      paddingHorizontal: theme.spacing[3],
-      paddingVertical: theme.spacing[2],
-      maxWidth: 640,
+      paddingHorizontal: theme.spacing[3.5],
+      paddingVertical: theme.spacing[3],
       width: "100%",
     },
     cardPressed: {
@@ -338,7 +337,7 @@ const styles = StyleSheet.create((theme) => {
     body: {
       flex: 1,
       minWidth: 0,
-      gap: 2,
+      gap: theme.spacing[1],
     },
     topRow: {
       flexDirection: "row",
@@ -347,13 +346,15 @@ const styles = StyleSheet.create((theme) => {
       flexWrap: "wrap",
     },
     title: {
-      fontSize: theme.fontSize.sm,
+      fontSize: theme.fontSize.base,
+      lineHeight: 20,
       fontWeight: theme.fontWeight.medium,
       color: theme.colors.foreground,
       flexShrink: 1,
     },
     meta: {
-      fontSize: theme.fontSize.sm,
+      fontSize: 13,
+      lineHeight: 19,
       color: theme.colors.foregroundMuted,
     },
     metaError: {
@@ -372,7 +373,8 @@ const styles = StyleSheet.create((theme) => {
       flexShrink: 0,
     },
     openChipText: {
-      fontSize: theme.fontSize.sm,
+      fontSize: 13,
+      lineHeight: 18,
       color: theme.colors.foregroundMuted,
     },
     ringWrap: {

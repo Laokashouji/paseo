@@ -3449,9 +3449,15 @@ export const zhCN: TranslationResources = {
     firstSetup: {
       title: "选择主对话模型后开始",
       description:
-        "首次使用「{{title}}」前，请先选择要使用的 Provider 与模型；创建后可随时在输入框或设置页自由切换。",
+        "首次使用「{{title}}」前，请先选择要使用的 Provider、模型、思考强度与安全模式；创建后可随时在输入框或设置页自由切换。",
       modelLabel: "Provider 与模型",
       modelPlaceholder: "请选择 Provider 与模型",
+      thinkingLabel: "思考强度",
+      thinkingPlaceholder: "请选择思考强度",
+      noThinkingOptions: "当前模型不支持思考强度设置",
+      modeLabel: "安全模式",
+      modePlaceholder: "请选择安全模式",
+      noModes: "当前 Provider 无可选安全模式",
       startButton: "启动主对话",
       startingButton: "正在启动…",
       noProvidersHint: "当前主机还没有可用的 Provider，请先前往设置中启用并配置至少一个 Provider。",

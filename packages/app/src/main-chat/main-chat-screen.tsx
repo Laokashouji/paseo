@@ -1,22 +1,18 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import { isMainChatEnabled } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
 import equal from "fast-deep-equal";
 import { CircleAlert, Power, RefreshCw, Settings, Sparkles } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
-import { CombinedModelSelector } from "@/components/combined-model-selector";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useToast } from "@/contexts/toast-context";
 import { useDirectoryDemand } from "@/hooks/use-directory-demand";
-import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
-import { buildSelectableProviderSelectorProviders } from "@/provider-selection/provider-selection";
 import { useHostRuntimeConnectionStatus, useHosts } from "@/runtime/host-runtime";
 import { useLastWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -29,12 +25,17 @@ import {
 } from "@/utils/host-routes";
 import { MainChatAgentHost } from "./agent-host";
 import { useMainChatConversationsStore } from "./conversations-store";
+import { type MainChatFirstSetupSelection } from "./first-setup-options";
+import { MainChatFirstSetupView } from "./first-setup-view";
 import { HostSyncBanner } from "./host-sync-banner";
 import { MainChatShell } from "./main-chat-shell";
 import { useMainChatOverviewStore } from "./overview-store";
 import { selectMainChatSidebarSummary, type MainChatAgentRef } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import { useMainChatStewardRoster } from "./use-steward-roster";
+
+export { MainChatFirstSetupView };
+export type { MainChatFirstSetupSelection };
 
 const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedPower = withUnistyles(Power);
@@ -44,7 +45,6 @@ const ThemedSettings = withUnistyles(Settings);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
-const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 const dangerIconMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 
 type EnsureState =
@@ -92,143 +92,6 @@ function resolveEffectiveOverrideRef(
   };
 }
 
-function MainChatFirstSetupView({
-  serverId,
-  title,
-  starting,
-  errorMessage,
-  onStart,
-  onOpenProviderSettings,
-}: {
-  serverId: string;
-  title: string;
-  starting: boolean;
-  errorMessage: string | null;
-  onStart: (selection: { provider: AgentProvider; model?: string }) => void;
-  onOpenProviderSettings: () => void;
-}): ReactElement {
-  const { t } = useTranslation();
-  const snapshot = useProvidersSnapshot(serverId);
-  const [selectedProvider, setSelectedProvider] = useState<string>("");
-  const [selectedModel, setSelectedModel] = useState<string>("");
-
-  useEffect(() => {
-    setSelectedProvider("");
-    setSelectedModel("");
-  }, [serverId]);
-
-  const providers = useMemo(
-    () =>
-      buildSelectableProviderSelectorProviders(snapshot.entries, {
-        selectedProvider: selectedProvider || null,
-      }),
-    [selectedProvider, snapshot.entries],
-  );
-
-  const handleSelectModel = useCallback((provider: AgentProvider, modelId: string) => {
-    setSelectedProvider(provider);
-    setSelectedModel(modelId);
-  }, []);
-
-  const handleOpenSelector = useCallback(() => {
-    snapshot.refetchIfStale?.(selectedProvider || undefined);
-  }, [selectedProvider, snapshot]);
-
-  const handleRetryProvider = useCallback(
-    (provider: AgentProvider) => {
-      void snapshot.refresh?.([provider]);
-    },
-    [snapshot],
-  );
-
-  const handleStartPress = useCallback(() => {
-    if (!selectedProvider || starting) return;
-    onStart({
-      provider: selectedProvider as AgentProvider,
-      ...(selectedModel ? { model: selectedModel } : {}),
-    });
-  }, [onStart, selectedModel, selectedProvider, starting]);
-
-  const isSnapshotLoading = Boolean(snapshot.isLoading || snapshot.isFetching);
-  const hasNoProviders = !isSnapshotLoading && providers.length === 0;
-
-  return (
-    <View style={styles.centerState} testID="main-chat-first-setup">
-      <View style={styles.setupCard}>
-        <View style={styles.setupHeader}>
-          <View style={styles.setupIconBadge}>
-            <ThemedSparkles size={20} uniProps={primaryIconMapping} />
-          </View>
-          <View style={styles.setupHeaderText}>
-            <Text style={styles.setupTitle}>{t("mainChat.firstSetup.title")}</Text>
-            <Text style={styles.setupDescription}>
-              {t("mainChat.firstSetup.description", { title })}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.setupField}>
-          <Text style={styles.setupFieldLabel}>{t("mainChat.firstSetup.modelLabel")}</Text>
-          <CombinedModelSelector
-            providers={providers}
-            selectedProvider={selectedProvider}
-            selectedModel={selectedModel}
-            onSelect={handleSelectModel}
-            isLoading={isSnapshotLoading}
-            onOpen={handleOpenSelector}
-            onRetryProvider={handleRetryProvider}
-            isRetryingProvider={Boolean(snapshot.isRefreshing)}
-            disabled={starting || hasNoProviders}
-            serverId={serverId}
-            desktopPlacement="bottom-start"
-            desktopMinWidth={360}
-          />
-        </View>
-
-        {hasNoProviders ? (
-          <Text style={styles.setupEmptyHint} testID="main-chat-first-setup-no-providers">
-            {t("mainChat.firstSetup.noProvidersHint")}
-          </Text>
-        ) : null}
-
-        {errorMessage ? (
-          <Text style={styles.setupErrorText} testID="main-chat-first-setup-error">
-            {errorMessage}
-          </Text>
-        ) : null}
-
-        <View style={styles.setupActions}>
-          {hasNoProviders ? (
-            <Button
-              variant="secondary"
-              size="sm"
-              leftIcon={ThemedSettings}
-              onPress={onOpenProviderSettings}
-              testID="main-chat-first-setup-open-providers"
-            >
-              {t("mainChat.firstSetup.openProviderSettings")}
-            </Button>
-          ) : (
-            <Button
-              variant="default"
-              size="sm"
-              leftIcon={ThemedSparkles}
-              loading={starting}
-              disabled={!selectedProvider || starting}
-              onPress={handleStartPress}
-              testID="main-chat-first-setup-start"
-            >
-              {starting
-                ? t("mainChat.firstSetup.startingButton")
-                : t("mainChat.firstSetup.startButton")}
-            </Button>
-          )}
-        </View>
-      </View>
-    </View>
-  );
-}
-
 function MainChatScreenBody({
   isDisabled,
   enabling,
@@ -259,7 +122,7 @@ function MainChatScreenBody({
   isEnsuring: boolean;
   activePane: "main" | "drawer";
   onFocusMainPane: () => void;
-  onStartWithModel: (selection: { provider: AgentProvider; model?: string }) => void;
+  onStartWithModel: (selection: MainChatFirstSetupSelection) => void;
   onRetry: () => void;
   onEnableMainChat: () => void;
   onOpenSettings: () => void;
@@ -379,7 +242,7 @@ function useMainChatEnsureController(params: {
   isDisabled: boolean;
 }): {
   ensureState: EnsureState;
-  startWithSelection: (selection: { provider: AgentProvider; model?: string }) => void;
+  startWithSelection: (selection: MainChatFirstSetupSelection) => void;
   resetError: () => void;
 } {
   const { targetServerId, client, existing, supportsMainChat, settingsLoaded, isDisabled } = params;
@@ -411,7 +274,7 @@ function useMainChatEnsureController(params: {
   }, [existing, targetServerId]);
 
   const startWithSelection = useCallback(
-    (selection: { provider: AgentProvider; model?: string }) => {
+    (selection: MainChatFirstSetupSelection) => {
       if (!targetServerId || !client || !supportsMainChat || isDisabled) {
         return;
       }
@@ -425,6 +288,8 @@ function useMainChatEnsureController(params: {
         .ensureMainChat({
           provider: selection.provider,
           ...(selection.model ? { model: selection.model } : {}),
+          ...(selection.modeId ? { modeId: selection.modeId } : {}),
+          ...(selection.thinkingOptionId ? { thinkingOptionId: selection.thinkingOptionId } : {}),
         })
         .then((result) => {
           if (result.error || !result.agentId || !result.workspaceId) {
@@ -789,68 +654,6 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     paddingHorizontal: theme.spacing[6],
     gap: theme.spacing[3],
-  },
-  setupCard: {
-    width: "100%",
-    maxWidth: 460,
-    borderRadius: theme.borderRadius.xl,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
-    padding: theme.spacing[4],
-    gap: theme.spacing[4],
-  },
-  setupHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: theme.spacing[3],
-  },
-  setupIconBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: theme.borderRadius.lg,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  },
-  setupHeaderText: {
-    flex: 1,
-    minWidth: 0,
-    gap: theme.spacing[1],
-  },
-  setupTitle: {
-    fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.semibold,
-    color: theme.colors.foreground,
-  },
-  setupDescription: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    lineHeight: 20,
-  },
-  setupField: {
-    gap: theme.spacing[1.5],
-  },
-  setupFieldLabel: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foreground,
-  },
-  setupEmptyHint: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    lineHeight: 18,
-  },
-  setupErrorText: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.statusDanger,
-  },
-  setupActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    gap: theme.spacing[2],
   },
   stateActions: {
     flexDirection: "row",
