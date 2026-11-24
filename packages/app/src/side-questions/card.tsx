@@ -6,8 +6,8 @@ import {
   Check,
   ChevronDown,
   Copy,
-  CornerDownLeft,
   GitBranch,
+  Quote,
   RotateCw,
   Sparkles,
   Trash2,
@@ -35,7 +35,7 @@ const ThemedTrash2 = withUnistyles(Trash2);
 const ThemedX = withUnistyles(X);
 const ThemedCopy = withUnistyles(Copy);
 const ThemedCheck = withUnistyles(Check);
-const ThemedCornerDownLeft = withUnistyles(CornerDownLeft);
+const ThemedQuote = withUnistyles(Quote);
 const ThemedRotateCw = withUnistyles(RotateCw);
 const ThemedArrowUp = withUnistyles(ArrowUp);
 const ThemedGitBranch = withUnistyles(GitBranch);
@@ -50,14 +50,14 @@ const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMut
 export interface SideQuestionCardProps {
   serverId: string;
   agentId: string;
-  onInsertToComposer?: (text: string) => void;
+  onQuoteToComposer?: (turn: SideQuestionTurnEntry) => void;
   onForkToBranch?: (turn: SideQuestionTurnEntry) => void;
 }
 
 export const SideQuestionCard = memo(function SideQuestionCard({
   serverId,
   agentId,
-  onInsertToComposer,
+  onQuoteToComposer,
   onForkToBranch,
 }: SideQuestionCardProps): ReactElement | null {
   const { t } = useTranslation();
@@ -218,7 +218,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
                 key={turn.id}
                 turn={turn}
                 onRetry={handleRetry}
-                onInsertToComposer={onInsertToComposer}
+                onQuoteToComposer={onQuoteToComposer}
                 onForkToBranch={onForkToBranch}
               />
             ))}
@@ -263,12 +263,12 @@ export const SideQuestionCard = memo(function SideQuestionCard({
 const SideQuestionTurnView = memo(function SideQuestionTurnView({
   turn,
   onRetry,
-  onInsertToComposer,
+  onQuoteToComposer,
   onForkToBranch,
 }: {
   turn: SideQuestionTurnEntry;
   onRetry: (turnId: string) => void;
-  onInsertToComposer?: (text: string) => void;
+  onQuoteToComposer?: (turn: SideQuestionTurnEntry) => void;
   onForkToBranch?: (turn: SideQuestionTurnEntry) => void;
 }) {
   const { t } = useTranslation();
@@ -276,19 +276,18 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
 
   const handleCopy = useCallback(() => {
     if (!turn.response) return;
-    void writeMarkdownToRichClipboard(
-      turn.response,
-      getDefaultMarkdownClipboardEnvironment(),
-    ).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    });
+    void writeMarkdownToRichClipboard(turn.response, getDefaultMarkdownClipboardEnvironment()).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1600);
+      },
+    );
   }, [turn.response]);
 
-  const handleInsert = useCallback(() => {
-    if (!turn.response || !onInsertToComposer) return;
-    onInsertToComposer(turn.response);
-  }, [onInsertToComposer, turn.response]);
+  const handleQuote = useCallback(() => {
+    if (!turn.response || !onQuoteToComposer) return;
+    onQuoteToComposer(turn);
+  }, [onQuoteToComposer, turn]);
 
   const handleRetryPress = useCallback(() => {
     onRetry(turn.id);
@@ -363,15 +362,15 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
                 {copied ? t("message.actions.copied") : t("sideQuestion.copyAnswer")}
               </Text>
             </Pressable>
-            {onInsertToComposer ? (
+            {onQuoteToComposer ? (
               <Pressable
                 accessibilityRole="button"
-                onPress={handleInsert}
+                onPress={handleQuote}
                 style={styles.actionChip}
-                testID={`side-question-insert-${turn.id}`}
+                testID={`side-question-quote-${turn.id}`}
               >
-                <ThemedCornerDownLeft size={12} uniProps={mutedColorMapping} />
-                <Text style={styles.actionChipText}>{t("sideQuestion.insertToComposer")}</Text>
+                <ThemedQuote size={12} uniProps={mutedColorMapping} />
+                <Text style={styles.actionChipText}>{t("sideQuestion.quoteResult")}</Text>
               </Pressable>
             ) : null}
             {onForkToBranch ? (

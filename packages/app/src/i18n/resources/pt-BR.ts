@@ -2114,7 +2114,9 @@ export const ptBR: TranslationResources = {
     thinking: "Pensando…",
     failed: "Falha na pergunta lateral",
     copyAnswer: "Copiar",
-    insertToComposer: "Inserir na entrada",
+    quoteResult: "Citar resultado",
+    quoteSubtitle: "Citação BTW",
+    removeQuote: "Remover resultado citado",
     askInBranch: "Perguntar em nova ramificação",
     followUpPlaceholder: "Fazer uma pergunta adicional…",
     sendFollowUp: "Enviar",
@@ -2124,7 +2126,8 @@ export const ptBR: TranslationResources = {
     triggerLabel: "BTW",
     triggerTooltip: "Pergunta paralela (/btw) · cache compartilhado, fora do chat",
     askPlaceholder: "Faça uma pergunta paralela…",
-    emptyHint: "Pergunte sobre esta conversa sem adicionar ao histórico, reutilizando o cache ativo.",
+    emptyHint:
+      "Pergunte sobre esta conversa sem adicionar ao histórico, reutilizando o cache ativo.",
     continueInBranch: "Continuar em nova branch",
   },
   subagents: {

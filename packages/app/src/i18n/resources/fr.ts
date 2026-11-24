@@ -2128,7 +2128,9 @@ export const fr: TranslationResources = {
     thinking: "Réflexion…",
     failed: "Échec de la question annexe",
     copyAnswer: "Copier",
-    insertToComposer: "Insérer dans la saisie",
+    quoteResult: "Citer le résultat",
+    quoteSubtitle: "Citation BTW",
+    removeQuote: "Retirer le résultat cité",
     askInBranch: "Demander dans une branche",
     followUpPlaceholder: "Poser une question de suivi…",
     sendFollowUp: "Envoyer la suite",
@@ -2138,7 +2140,8 @@ export const fr: TranslationResources = {
     triggerLabel: "BTW",
     triggerTooltip: "Question annexe (/btw) · cache partagé, hors historique",
     askPlaceholder: "Poser une question annexe…",
-    emptyHint: "Posez une question sur cette conversation sans l’ajouter à l’historique, en réutilisant le cache.",
+    emptyHint:
+      "Posez une question sur cette conversation sans l’ajouter à l’historique, en réutilisant le cache.",
     continueInBranch: "Continuer dans une branche",
   },
   subagents: {

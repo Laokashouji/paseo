@@ -57,6 +57,7 @@ import {
   Image as ImageIcon,
   ClipboardPaste,
   Paperclip,
+  Quote,
 } from "lucide-react-native";
 import * as Clipboard from "expo-clipboard";
 import { FOOTER_HEIGHT } from "@/constants/layout";
@@ -150,6 +151,7 @@ import type { ForgeSearchItem } from "@getpaseo/protocol/messages";
 import type {
   AttachmentMetadata,
   ComposerAttachment,
+  SideQuestionQuoteComposerAttachment,
   UserComposerAttachment,
   WorkspaceFileComposerAttachment,
   WorkspaceComposerAttachment,
@@ -192,6 +194,10 @@ import {
   getWorkspaceFileAttachmentKey,
   getWorkspaceFileAttachmentSubtitle,
 } from "@/attachments/workspace-file";
+import {
+  getSideQuestionQuoteAttachmentKey,
+  getSideQuestionQuoteTitle,
+} from "@/attachments/side-question-quote";
 import {
   resolveWorkspaceFileDrop,
   type WorkspaceFileDragPayload,
@@ -362,6 +368,7 @@ interface RenderAttachmentTrayArgs {
     openImage: string;
     removeImage: string;
     removeFile: string;
+    removeQuote: string;
     openGithub: (kind: string, numberLabel: string) => string;
     removeGithub: (kind: string, numberLabel: string) => string;
   };
@@ -479,6 +486,18 @@ function renderComposerAttachmentPill(args: RenderComposerAttachmentPillArgs): R
         disabled={disabled}
         onRemove={onRemove}
         removeLabel={labels.removeFile}
+      />
+    );
+  }
+  if (attachment.kind === "side_question_quote") {
+    return (
+      <SideQuestionQuoteAttachmentPill
+        key={`side-question-quote:${getSideQuestionQuoteAttachmentKey(attachment)}`}
+        attachment={attachment}
+        index={index}
+        disabled={disabled}
+        onRemove={onRemove}
+        removeLabel={labels.removeQuote}
       />
     );
   }
@@ -903,6 +922,44 @@ function WorkspaceFileAttachmentPill({
         icon={filePillIcon}
         title={fileName}
         subtitle={getWorkspaceFileAttachmentSubtitle(attachment)}
+      />
+    </AttachmentPill>
+  );
+}
+
+interface SideQuestionQuoteAttachmentPillProps {
+  attachment: SideQuestionQuoteComposerAttachment;
+  index: number;
+  disabled: boolean;
+  onRemove: (index: number) => void;
+  removeLabel: string;
+}
+
+function SideQuestionQuoteAttachmentPill({
+  attachment,
+  index,
+  disabled,
+  onRemove,
+  removeLabel,
+}: SideQuestionQuoteAttachmentPillProps) {
+  const { t } = useTranslation();
+  const handleRemove = useCallback(() => {
+    onRemove(index);
+  }, [index, onRemove]);
+  const title = getSideQuestionQuoteTitle(attachment);
+  return (
+    <AttachmentPill
+      testID="composer-side-question-quote-attachment-pill"
+      onOpen={noopCallback}
+      onRemove={handleRemove}
+      openAccessibilityLabel={title}
+      removeAccessibilityLabel={removeLabel}
+      disabled={disabled}
+    >
+      <AttachmentLabel
+        icon={quotePillIcon}
+        title={title}
+        subtitle={t("sideQuestion.quoteSubtitle")}
       />
     </AttachmentPill>
   );
@@ -2490,6 +2547,7 @@ function ComposerContentImpl({
           openImage: t("composer.attachments.openImage"),
           removeImage: t("composer.attachments.removeImage"),
           removeFile: t("composer.attachments.removeFile"),
+          removeQuote: t("sideQuestion.removeQuote"),
           openGithub: (kind: string, numberLabel: string) =>
             t("composer.attachments.openGithub", { kind, number: numberLabel }),
           removeGithub: (kind: string, numberLabel: string) =>
@@ -2878,6 +2936,7 @@ const ThemedPaperclip = withUnistyles(Paperclip);
 const ThemedImageIcon = withUnistyles(ImageIcon);
 const ThemedClipboardPaste = withUnistyles(ClipboardPaste);
 const ThemedFileText = withUnistyles(FileText);
+const ThemedQuote = withUnistyles(Quote);
 const iconForegroundMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const iconForegroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const iconAccentForegroundMapping = (theme: Theme) => ({ color: theme.colors.accentForeground });
@@ -2895,6 +2954,7 @@ const githubIssuePillIcon = (
   <ThemedCircleDot size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
 );
 const filePillIcon = <ThemedFileText size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />;
+const quotePillIcon = <ThemedQuote size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />;
 
 const pendingFilePillIcon = (
   <ThemedAttachmentSpinner size={18} uniProps={iconForegroundMutedMapping} />

@@ -108,6 +108,12 @@ export const UserComposerAttachmentSchema: z.ZodType<UserComposerAttachment> = z
         }),
       ]),
     }),
+    z.strictObject({
+      kind: z.literal("side_question_quote"),
+      turnId: z.string(),
+      question: z.string(),
+      response: z.string(),
+    }),
     z.strictObject({ kind: z.literal("forge_issue"), item: IssueItemSchema }),
     z.strictObject({ kind: z.literal("forge_change_request"), item: ChangeRequestItemSchema }),
     z.strictObject({ kind: z.literal("github_issue"), item: IssueItemSchema }),
@@ -178,6 +184,14 @@ export function normalizeComposerAttachment(
       kind: "workspace_file",
       path: attachment.path.trim().replace(/^\.\//, ""),
       selection: attachment.selection,
+    };
+  }
+  if (attachment.kind === "side_question_quote") {
+    return {
+      kind: "side_question_quote",
+      turnId: attachment.turnId.trim(),
+      question: attachment.question.trim(),
+      response: attachment.response.trim(),
     };
   }
   return attachment;

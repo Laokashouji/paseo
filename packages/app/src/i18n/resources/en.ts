@@ -2108,7 +2108,9 @@ export const en = {
     thinking: "Thinking…",
     failed: "Side question failed",
     copyAnswer: "Copy",
-    insertToComposer: "Insert into input",
+    quoteResult: "Quote result",
+    quoteSubtitle: "BTW quote",
+    removeQuote: "Remove quoted result",
     askInBranch: "Ask in new branch",
     followUpPlaceholder: "Ask a follow-up…",
     sendFollowUp: "Send follow-up",
@@ -2118,7 +2120,8 @@ export const en = {
     triggerLabel: "BTW",
     triggerTooltip: "Side question (/btw) · shared cache, not added to chat",
     askPlaceholder: "Ask a side question…",
-    emptyHint: "Ask about this conversation without adding to chat history. Reuses active prompt cache.",
+    emptyHint:
+      "Ask about this conversation without adding to chat history. Reuses active prompt cache.",
     continueInBranch: "Continue in branch",
   },
   subagents: {

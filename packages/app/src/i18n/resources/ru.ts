@@ -2115,7 +2115,9 @@ export const ru: TranslationResources = {
     thinking: "Думаю…",
     failed: "Не удалось выполнить побочный вопрос",
     copyAnswer: "Копировать",
-    insertToComposer: "Вставить в поле ввода",
+    quoteResult: "Цитировать результат",
+    quoteSubtitle: "Цитата BTW",
+    removeQuote: "Удалить цитируемый результат",
     askInBranch: "Спросить в новой ветке",
     followUpPlaceholder: "Задать уточняющий вопрос…",
     sendFollowUp: "Отправить",
@@ -2125,7 +2127,8 @@ export const ru: TranslationResources = {
     triggerLabel: "BTW",
     triggerTooltip: "Побочный вопрос (/btw) · общий кэш, не добавляется в чат",
     askPlaceholder: "Задайте побочный вопрос…",
-    emptyHint: "Задавайте вопросы по контексту диалога без записи в основную историю, используя кэш.",
+    emptyHint:
+      "Задавайте вопросы по контексту диалога без записи в основную историю, используя кэш.",
     continueInBranch: "Продолжить в новой ветке",
   },
   subagents: {

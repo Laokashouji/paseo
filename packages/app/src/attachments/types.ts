@@ -103,10 +103,18 @@ export interface WorkspaceFileComposerAttachment {
   selection: WorkspaceFileSelection;
 }
 
+export interface SideQuestionQuoteComposerAttachment {
+  kind: "side_question_quote";
+  turnId: string;
+  question: string;
+  response: string;
+}
+
 export type UserComposerAttachment =
   | { kind: "image"; metadata: AttachmentMetadata }
   | { kind: "file"; attachment: UploadedFileAttachment }
   | WorkspaceFileComposerAttachment
+  | SideQuestionQuoteComposerAttachment
   | PluginResourceComposerAttachment
   | { kind: "forge_issue"; item: ForgeSearchItem }
   | { kind: "forge_change_request"; item: ForgeSearchItem }
