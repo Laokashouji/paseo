@@ -1652,6 +1652,9 @@ export async function createPaseoDaemon(
     logger,
   });
   agentManager.setMainChatSettingsReader(() => mainChatService.getCurrentSettings());
+  agentManager.setMainChatMemoryContextReader((opening) =>
+    mainChatService.assembleMemoryContextForAgent(opening),
+  );
   notifyMainChatAgentArchived = (agentId) => mainChatService.handleAgentArchived(agentId);
 
   const createAgentToolHostDependencies = (

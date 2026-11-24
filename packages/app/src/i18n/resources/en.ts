@@ -3826,6 +3826,76 @@ export const en = {
     backgroundTurn: {
       running: "Background running",
       completed: "Background turn",
+      kindPatrol: "Patrol",
+      kindSupervision: "Supervision",
+      kindRelay: "Auto-relay",
+      kindBriefing: "Briefing",
+      kindCompaction: "Compaction",
+      expand: "Expand",
+      collapse: "Collapse",
+    },
+    quietFold: {
+      sectionTitle: "Stream folding & quiet mode",
+      sectionDescription:
+        "Control how Main Chat displays background supervision/patrol rounds and the default quiet level for dispatched tasks.",
+      backgroundFoldedLabel: "Fold background turns by default",
+      backgroundFoldedHint:
+        "Collapse background supervision, patrol, and auto-relay rounds into a compact single-line summary bar in Main Chat; click to expand in place.",
+      backgroundFoldedEnabledToast: "Enabled default folding for background turns",
+      backgroundFoldedDisabledToast: "Disabled default folding for background turns",
+      tasksQuietLabel: "Default tasks to quiet mode",
+      tasksQuietHint:
+        "When task_plan omits quiet, default child tasks to quiet mode: suppress routine finish popups and unread noise, alerting only on decisions, permissions, or escalations.",
+      tasksQuietEnabledToast: "Main Chat tasks now default to quiet mode",
+      tasksQuietDisabledToast: "Main Chat tasks no longer default to quiet mode",
+    },
+    memoryProfile: {
+      sectionTitle: "Profile & memory",
+      sectionDescription:
+        "Manage your personal profile, per-direction leader notes, and lightweight files in ~/.paseo/main-chat/memory/ injected under a deterministic byte budget.",
+      aboutMeTitle: "About me",
+      aboutMeHint:
+        "Share your working style, technical preferences, and long-term context (Markdown, up to 4,000 chars).",
+      aboutMePlaceholder:
+        "e.g. Lead with conclusions; prefer small verified diffs; always confirm before release or destructive operations...",
+      aliasesLabel: "Names / aliases",
+      aliasesHint: "Add names, handles, or nicknames the steward should recognize (up to 12).",
+      aliasPlaceholder: "Enter alias and press add",
+      addAliasButton: "Add",
+      removeAliasLabel: "Remove alias {{alias}}",
+      saveProfileButton: "Save profile",
+      profileSavedToast: "Personal profile saved",
+      directionNotesTitle: "Direction notes",
+      directionNotesHint:
+        "Maintain dedicated notes per pinned direction leader (up to 4,000 chars), automatically injected into that leader and its child tasks.",
+      directionNotesEmpty:
+        "No pinned direction leaders yet. Pin or create a direction leader in the Main Chat sidebar to maintain direction-specific notes.",
+      directionNotesPlaceholder:
+        "Document architecture guardrails, acceptance criteria, or recurring conventions for this direction...",
+      saveNotesButton: "Save notes",
+      notesSavedToast: "Direction notes saved",
+      notesSaveFailed: "Failed to save direction notes",
+      filesTitle: "Persistent memory files",
+      filesHint:
+        "Stored under ~/.paseo/main-chat/memory/ and deterministically assembled within the byte budget (MEMORY.md first).",
+      refreshFiles: "Refresh",
+      newFileButton: "New file",
+      emptyFiles: "No memory files yet. Create MEMORY.md or topic notes to persist facts.",
+      filePathLabel: "Relative file path",
+      filePathPlaceholder: "e.g. MEMORY.md or projects/paseo.md",
+      fileContentLabel: "Content (Markdown / plain text)",
+      fileContentPlaceholder: "Write long-term preferences, repo context, or rules...",
+      saveFileButton: "Save file",
+      cancelButton: "Cancel",
+      deleteButton: "Delete",
+      confirmDeleteButton: "Confirm delete",
+      fileSavedToast: "Saved memory file {{path}}",
+      fileDeletedToast: "Deleted memory file {{path}}",
+      fileLoadFailed: "Failed to load memory files",
+      fileSaveFailed: "Failed to save memory file",
+      fileDeleteFailed: "Failed to delete memory file",
+      charCount: "{{count}} / {{max}} chars",
+      bytesCount: "{{size}}",
     },
     history: {
       title: "Assistant history & activity",

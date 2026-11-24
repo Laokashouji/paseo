@@ -1,6 +1,11 @@
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import {
+  MainChatBackgroundTurnKindSchema,
+  type MainChatBackgroundTurnKind,
+  type MainChatBackgroundTurnMetadata,
+} from "@getpaseo/protocol/main-chat";
 import type {
   AgentPromptContentBlock,
   AgentPromptInput,
@@ -213,7 +218,86 @@ function extractLegacyMainChatSystemEnvelopeBody(text: string): string | null {
   return inner;
 }
 
-function projectSystemNotificationToolCall(envelopeText: string, body: string): AgentTimelineItem {
+export interface SystemNotificationMetadata {
+  kind?: MainChatBackgroundTurnKind;
+  trigger?: string | null;
+  label?: string | null;
+  activityId?: string | null;
+  quiet?: boolean;
+}
+
+const ATTRIBUTED_BACKGROUND_ENVELOPE_PATTERN =
+  /^<paseo-system\s+kind="main-chat-background"((?:\s+[a-z-]+="[^"<>]*")*)>\n([\s\S]*)\n<\/paseo-system>$/;
+
+function inferMainChatBackgroundMetaFromBody(body: string): MainChatBackgroundTurnMetadata | null {
+  const trimmed = body.trimStart();
+  if (trimmed.startsWith("📋 督办 · 主动巡检唤醒：")) {
+    const isSupervision = trimmed.includes("后台督办");
+    return {
+      foldable: true,
+      kind: isSupervision ? "supervision" : "patrol",
+    };
+  }
+  if (trimmed.startsWith("👋 首次就绪简报：")) {
+    return { foldable: true, kind: "briefing" };
+  }
+  if (trimmed.startsWith("【系统自动补答提醒】")) {
+    return { foldable: true, kind: "recovery" };
+  }
+  if (
+    trimmed.startsWith("【后台空闲预压缩检查点】") ||
+    trimmed.startsWith("【主对话上下文压缩检查点】")
+  ) {
+    return { foldable: true, kind: "compaction" };
+  }
+  if (trimmed.startsWith("📣 方向进展汇报") || trimmed.startsWith("【方向进度汇报】")) {
+    return { foldable: true, kind: "relay" };
+  }
+  return null;
+}
+
+function parseBooleanAttribute(raw: string | undefined): boolean | undefined {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return undefined;
+}
+
+function parseAttributedBackgroundEnvelope(
+  text: string,
+): { body: string; backgroundMeta: MainChatBackgroundTurnMetadata } | null {
+  const match = ATTRIBUTED_BACKGROUND_ENVELOPE_PATTERN.exec(text);
+  if (!match) return null;
+  const attributes = new Map<string, string>();
+  for (const attr of match[1].matchAll(/\s+([a-z-]+)="([^"<>]*)"/g)) {
+    const value = unescapeXml(attr[2]);
+    if (value === null || attributes.has(attr[1])) return null;
+    attributes.set(attr[1], value);
+  }
+  const parsedKind = MainChatBackgroundTurnKindSchema.safeParse(attributes.get("bg-kind"));
+  const kind: MainChatBackgroundTurnKind = parsedKind.success ? parsedKind.data : "system";
+  const trigger = attributes.get("trigger") ?? null;
+  const label = attributes.get("label") ?? null;
+  const activityId = attributes.get("activity-id") ?? null;
+  const quiet = parseBooleanAttribute(attributes.get("quiet"));
+  return {
+    body: match[2],
+    backgroundMeta: {
+      foldable: true,
+      kind,
+      ...(trigger ? { trigger } : {}),
+      ...(label ? { label } : {}),
+      ...(activityId ? { activityId } : {}),
+      ...(quiet !== undefined ? { quiet } : {}),
+    },
+  };
+}
+
+function projectSystemNotificationToolCall(
+  envelopeText: string,
+  body: string,
+  explicitBackgroundMeta?: MainChatBackgroundTurnMetadata | null,
+): AgentTimelineItem {
+  const backgroundMeta = explicitBackgroundMeta ?? inferMainChatBackgroundMetaFromBody(body);
   return {
     type: "tool_call",
     callId: `paseo-system:${createHash("sha256").update(envelopeText).digest("hex")}`,
@@ -221,6 +305,7 @@ function projectSystemNotificationToolCall(envelopeText: string, body: string): 
     status: "completed",
     error: null,
     detail: { type: "plain_text", text: body, icon: "sparkles" },
+    ...(backgroundMeta ? { metadata: { mainChatBackground: backgroundMeta } } : {}),
   };
 }
 
@@ -229,6 +314,14 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
   const cleanedText = stripMainChatContextBlock(item.text);
   const message = parseAgentMessage(cleanedText);
   if (!message) {
+    const attributed = parseAttributedBackgroundEnvelope(cleanedText);
+    if (attributed) {
+      return projectSystemNotificationToolCall(
+        cleanedText,
+        attributed.body,
+        attributed.backgroundMeta,
+      );
+    }
     if (!isSystemInjectedEnvelope(cleanedText)) {
       return cleanedText === item.text ? item : { ...item, text: cleanedText };
     }
@@ -238,6 +331,14 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
   }
   const { source } = message;
   if (!source) {
+    const attributedLegacy = parseAttributedBackgroundEnvelope(message.text);
+    if (attributedLegacy) {
+      return projectSystemNotificationToolCall(
+        message.text,
+        attributedLegacy.body,
+        attributedLegacy.backgroundMeta,
+      );
+    }
     const legacySystemBody = extractLegacyMainChatSystemEnvelopeBody(message.text);
     if (legacySystemBody !== null) {
       return projectSystemNotificationToolCall(message.text, legacySystemBody);
@@ -254,6 +355,15 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
       detail: { type: "plain_text", text: message.text },
     };
   }
+  const relayMeta: MainChatBackgroundTurnMetadata | null =
+    source.kind === "agent-notification"
+      ? {
+          foldable: true,
+          kind: "relay",
+          trigger: `agent_notification:${source.event}`,
+          label: source.title ? `${source.title} (${source.event})` : source.event,
+        }
+      : null;
   return {
     type: "tool_call",
     callId: `paseo-agent-message:${message.id}`,
@@ -273,20 +383,44 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
     status: "completed",
     error: null,
     detail: { type: "plain_text", text: message.text, icon: "bot" },
+    ...(relayMeta ? { metadata: { mainChatBackground: relayMeta } } : {}),
   };
 }
 
 /**
  * Wrap a body in <paseo-system>…</paseo-system> so the receiving agent
  * recognizes the prompt as system-injected context — not a user turn.
- * Used by schedule fires; agent messages use the versioned envelope.
+ * Used by schedule fires and Main Chat background supervision/patrol/relay turns;
+ * agent messages use the versioned envelope.
  */
-export function formatSystemNotificationPrompt(reason: string): string {
-  return `<paseo-system>\n${reason}\n</paseo-system>`;
+export function formatSystemNotificationPrompt(
+  reason: string,
+  meta?: SystemNotificationMetadata,
+): string {
+  if (!meta) {
+    return `<paseo-system>\n${reason}\n</paseo-system>`;
+  }
+  const attrs: string[] = ['kind="main-chat-background"'];
+  if (meta.kind) {
+    attrs.push(`bg-kind="${escapeXml(meta.kind)}"`);
+  }
+  if (meta.trigger?.trim()) {
+    attrs.push(`trigger="${escapeXml(meta.trigger.trim().slice(0, 80))}"`);
+  }
+  if (meta.label?.trim()) {
+    attrs.push(`label="${escapeXml(meta.label.replace(/\s+/g, " ").trim().slice(0, 120))}"`);
+  }
+  if (meta.activityId?.trim()) {
+    attrs.push(`activity-id="${escapeXml(meta.activityId.trim().slice(0, 80))}"`);
+  }
+  if (typeof meta.quiet === "boolean") {
+    attrs.push(`quiet="${meta.quiet ? "true" : "false"}"`);
+  }
+  return `<paseo-system ${attrs.join(" ")}>\n${reason}\n</paseo-system>`;
 }
 
 const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;
 
 export function isSystemInjectedEnvelope(text: string): boolean {
-  return SYSTEM_ENVELOPE_PATTERN.test(text);
+  return SYSTEM_ENVELOPE_PATTERN.test(text) || ATTRIBUTED_BACKGROUND_ENVELOPE_PATTERN.test(text);
 }

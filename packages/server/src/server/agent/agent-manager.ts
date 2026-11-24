@@ -877,9 +877,26 @@ export class AgentManager {
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
   private mainChatSettingsReader: (() => MainChatSettings | null) | null = null;
+  private mainChatMemoryContextReader:
+    | ((opening?: {
+        purpose?: string;
+        labels?: Record<string, string>;
+      }) => Promise<string | null> | string | null)
+    | null = null;
 
   setMainChatSettingsReader(reader: (() => MainChatSettings | null) | null): void {
     this.mainChatSettingsReader = reader;
+  }
+
+  setMainChatMemoryContextReader(
+    reader:
+      | ((opening?: {
+          purpose?: string;
+          labels?: Record<string, string>;
+        }) => Promise<string | null> | string | null)
+      | null,
+  ): void {
+    this.mainChatMemoryContextReader = reader;
   }
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
@@ -6494,10 +6511,12 @@ export class AgentManager {
         mcpServerOwners = transformed.mcpServerOwners;
       }
     }
+    const mainChatMemoryContext = await this.readMainChatMemoryContext(agentId, opening);
     appendSystemPrompt = appendMainChatSystemPrompt(
       opening,
       appendSystemPrompt,
       this.mainChatSettingsReader?.(),
+      mainChatMemoryContext,
     );
     const context: AgentLaunchContext = {
       agentId,
@@ -6530,6 +6549,26 @@ export class AgentManager {
     }
     this.sessionOpenGenerations.set(agentId, generation);
     return context;
+  }
+
+  private async readMainChatMemoryContext(
+    agentId: string,
+    opening?: {
+      workspaceId?: string | null;
+      title?: string | null;
+      labels?: Record<string, string>;
+      metadata?: AgentMetadata;
+    },
+  ): Promise<string | null> {
+    if (!this.mainChatMemoryContextReader) {
+      return null;
+    }
+    try {
+      return await Promise.resolve(this.mainChatMemoryContextReader(opening));
+    } catch (error) {
+      this.logger.warn({ err: error, agentId }, "Failed to assemble main-chat memory context");
+      return null;
+    }
   }
 
   private resolveProviderLaunchConfig(

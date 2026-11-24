@@ -30,6 +30,7 @@ export interface CreateMainChatConversationInput {
   kind: "side" | "leader";
   title: string;
   directionSummary?: string | null;
+  notes?: string | null;
   initialPrompt?: string;
   provider?: string;
   model?: string;
@@ -41,6 +42,7 @@ export interface UpdateMainChatConversationInput {
   conversationId: string;
   title?: string;
   directionSummary?: string | null;
+  notes?: string | null;
   kind?: "side" | "leader";
   archived?: boolean;
 }

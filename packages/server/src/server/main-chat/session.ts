@@ -35,6 +35,10 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.dismiss_rule_suggestion.request" }
   | { type: "main_chat.get_usage.request" }
   | { type: "main_chat.reset_usage.request" }
+  | { type: "main_chat.memory_list.request" }
+  | { type: "main_chat.memory_read.request" }
+  | { type: "main_chat.memory_write.request" }
+  | { type: "main_chat.memory_delete.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -72,6 +76,10 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.dismiss_rule_suggestion.request",
   "main_chat.get_usage.request",
   "main_chat.reset_usage.request",
+  "main_chat.memory_list.request",
+  "main_chat.memory_read.request",
+  "main_chat.memory_write.request",
+  "main_chat.memory_delete.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -256,6 +264,22 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
   "main_chat.reset_usage.request": (msg, error) => ({
     type: "main_chat.reset_usage.response",
     payload: { requestId: msg.requestId, usage: null, error },
+  }),
+  "main_chat.memory_list.request": (msg, error) => ({
+    type: "main_chat.memory_list.response",
+    payload: { requestId: msg.requestId, files: [], error },
+  }),
+  "main_chat.memory_read.request": (msg, error) => ({
+    type: "main_chat.memory_read.response",
+    payload: { requestId: msg.requestId, file: null, error },
+  }),
+  "main_chat.memory_write.request": (msg, error) => ({
+    type: "main_chat.memory_write.response",
+    payload: { requestId: msg.requestId, file: null, error },
+  }),
+  "main_chat.memory_delete.request": (msg, error) => ({
+    type: "main_chat.memory_delete.response",
+    payload: { requestId: msg.requestId, deleted: false, error },
   }),
 };
 
@@ -897,6 +921,7 @@ async function handleMultiConversationAndFleetMessages(
         kind: msg.kind,
         title: msg.title,
         directionSummary: msg.directionSummary,
+        notes: msg.notes,
         initialPrompt: msg.initialPrompt,
         provider: msg.provider,
         model: msg.model,
@@ -929,6 +954,7 @@ async function handleMultiConversationAndFleetMessages(
         conversationId: msg.conversationId,
         title: msg.title,
         directionSummary: msg.directionSummary,
+        notes: msg.notes,
         kind: msg.kind,
         archived: msg.archived,
       });
@@ -1223,6 +1249,82 @@ async function handleResetUsage(
   }
 }
 
+async function handleMemoryList(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.memory_list.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const files = await service.listMemoryFiles();
+    send({
+      type: "main_chat.memory_list.response",
+      payload: { requestId: msg.requestId, files, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.memory_list.response",
+      payload: { requestId: msg.requestId, files: [], error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleMemoryRead(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.memory_read.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const file = await service.readMemoryFile(msg.path);
+    send({
+      type: "main_chat.memory_read.response",
+      payload: { requestId: msg.requestId, file, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.memory_read.response",
+      payload: { requestId: msg.requestId, file: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleMemoryWrite(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.memory_write.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const file = await service.writeMemoryFile(msg.path, msg.content);
+    send({
+      type: "main_chat.memory_write.response",
+      payload: { requestId: msg.requestId, file, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.memory_write.response",
+      payload: { requestId: msg.requestId, file: null, error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleMemoryDelete(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.memory_delete.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.deleteMemoryFile(msg.path);
+    send({
+      type: "main_chat.memory_delete.response",
+      payload: { requestId: msg.requestId, deleted: result.deleted, error: null },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.memory_delete.response",
+      payload: { requestId: msg.requestId, deleted: false, error: errorMessage(error) },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -1256,6 +1358,10 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.dismiss_rule_suggestion.request": handleDismissRuleSuggestion,
   "main_chat.get_usage.request": handleGetUsage,
   "main_chat.reset_usage.request": handleResetUsage,
+  "main_chat.memory_list.request": handleMemoryList,
+  "main_chat.memory_read.request": handleMemoryRead,
+  "main_chat.memory_write.request": handleMemoryWrite,
+  "main_chat.memory_delete.request": handleMemoryDelete,
 };
 
 export async function handleMainChatSessionMessage(

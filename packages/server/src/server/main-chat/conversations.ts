@@ -7,11 +7,14 @@ import {
   MAIN_CHAT_CONVERSATION_ID_LABEL,
   MAIN_CHAT_CONVERSATION_KIND_LABEL,
   MAIN_CHAT_DEFAULT_TITLE,
+  MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS,
+  MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
   MainChatConversationKindSchema,
   MainChatConversationRecordSchema,
   type MainChatConversationKind,
   type MainChatConversationRecord,
 } from "@getpaseo/protocol/main-chat";
+import { assembleMainChatMemoryContext } from "./memory.js";
 
 export const MAX_LEADER_CONVERSATIONS = 20;
 export const MAIN_CONVERSATION_ID = "conv_main";
@@ -98,7 +101,9 @@ export function buildConversationLabels(
 export type StaticConversationPromptTarget = Pick<
   MainChatConversationRecord,
   "id" | "title" | "directionSummary"
->;
+> & {
+  notes?: string | null;
+};
 
 /**
  * Static system prompt for a pinned direction leader conversation.
@@ -113,6 +118,21 @@ export function buildLeaderSystemPrompt(conversation: StaticConversationPromptTa
   const summary = conversation.directionSummary?.trim();
   if (summary) {
     sections.push("", "## 负责方向与目标范围", summary);
+  }
+
+  const notes = conversation.notes?.trim();
+  if (notes) {
+    const assembled = assembleMainChatMemoryContext({
+      directionTitle: conversation.title,
+      directionNotes: notes,
+      budget: {
+        totalMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+        directionNotesMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+      },
+    });
+    if (assembled.text) {
+      sections.push("", assembled.text);
+    }
   }
 
   sections.push(
@@ -200,6 +220,7 @@ export interface CreateConversationInput {
   kind: "side" | "leader";
   title: string;
   directionSummary?: string | null;
+  notes?: string | null;
   initialPrompt?: string;
   parentConversationId?: string | null;
   provider?: string;
@@ -212,6 +233,7 @@ export interface UpdateConversationInput {
   conversationId: string;
   title?: string;
   directionSummary?: string | null;
+  notes?: string | null;
   kind?: "side" | "leader";
   archived?: boolean;
 }
@@ -388,6 +410,19 @@ function normalizeDirectionSummary(raw: string | null | undefined): string | nul
   return trimmed;
 }
 
+function normalizeDirectionNotes(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS) {
+    throw new MainChatConversationError(
+      "invalid_input",
+      `方向笔记长度不能超过 ${MAIN_CHAT_DIRECTION_NOTES_MAX_CHARS} 个字符。`,
+    );
+  }
+  return trimmed;
+}
+
 function truncateText(text: string, maxChars: number): { value: string; truncated: boolean } {
   const normalized = text.trim();
   if (normalized.length <= maxChars) {
@@ -542,6 +577,8 @@ function buildUpdatedConversationRecord(
     input.directionSummary !== undefined
       ? normalizeDirectionSummary(input.directionSummary)
       : existing.directionSummary;
+  const nextNotes =
+    input.notes !== undefined ? normalizeDirectionNotes(input.notes) : (existing.notes ?? null);
   const nextKind: MainChatConversationKind =
     existing.kind === "main" ? "main" : (input.kind ?? existing.kind);
   const nextArchivedAt = resolveNextArchivedAt(existing.archivedAt, input.archived, timestamp);
@@ -552,6 +589,7 @@ function buildUpdatedConversationRecord(
     kind: nextKind,
     title: nextTitle,
     directionSummary: nextDirectionSummary,
+    notes: nextNotes,
     archivedAt: nextArchivedAt,
     pinnedAsLeaderAt: nextPinnedAsLeaderAt,
     updatedAt: timestamp,
@@ -565,7 +603,8 @@ function didConversationMetadataChange(
   return (
     previous.kind !== next.kind ||
     previous.title !== next.title ||
-    previous.directionSummary !== next.directionSummary
+    previous.directionSummary !== next.directionSummary ||
+    (previous.notes ?? null) !== (next.notes ?? null)
   );
 }
 
@@ -881,6 +920,7 @@ export function createMainChatConversationManager(
       await ensureLoaded();
       const title = normalizeTitle(input.title);
       const directionSummary = normalizeDirectionSummary(input.directionSummary);
+      const notes = normalizeDirectionNotes(input.notes);
       const trimmedInitialPrompt = input.initialPrompt?.trim() ?? "";
 
       if (trimmedInitialPrompt.length > 0 && !deps.sendPromptToAgent) {
@@ -908,6 +948,7 @@ export function createMainChatConversationManager(
         id: conversationId,
         title,
         directionSummary,
+        notes,
       });
 
       const createdAgent = await deps.createConversationAgent({
@@ -930,6 +971,7 @@ export function createMainChatConversationManager(
         workspaceId: createdAgent.workspaceId,
         title,
         directionSummary,
+        notes,
         parentConversationId,
         serverId: createdAgent.serverId ?? deps.defaultServerId ?? null,
         archivedAt: null,

@@ -2,6 +2,7 @@ import {
   ChunkedTransport,
   ChunkedTransportProtocolError,
 } from "@getpaseo/protocol/chunked-transport";
+import { isMainChatTaskQuietLabels } from "@getpaseo/protocol/main-chat";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import {
   createAgentMessageDelivery,
@@ -2989,15 +2990,19 @@ export class VoiceAssistantWebSocketServer {
       permissionRequest: findLatestPermissionRequest(agent.pendingPermissions),
     });
 
-    const plan = this.planOncePerUnreadFinish(
-      params,
-      computeNotificationPlan({
-        allStates,
-        focusTarget: { kind: "agent", id: params.agentId },
-        pushEligible: isPushEligibleAttentionReason(params.reason),
-        nowMs,
-      }),
-    );
+    const suppressQuietFinishNotification =
+      params.reason === "finished" && isMainChatTaskQuietLabels(agent.labels);
+    const plan = suppressQuietFinishNotification
+      ? { inAppRecipientIndex: null, shouldPush: false }
+      : this.planOncePerUnreadFinish(
+          params,
+          computeNotificationPlan({
+            allStates,
+            focusTarget: { kind: "agent", id: params.agentId },
+            pushEligible: isPushEligibleAttentionReason(params.reason),
+            nowMs,
+          }),
+        );
 
     if (plan.shouldPush) {
       void this.pushNotificationSender.send(notification).catch((err) => {

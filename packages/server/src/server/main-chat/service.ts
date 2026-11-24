@@ -22,8 +22,10 @@ import {
   isMainChatAutoCompactEnabled,
   isMainChatEnabled,
   isMainChatLabels,
+  isMainChatTasksQuiet,
   normalizeMainChatFleetScope,
   resolveMainChatFleetScope,
+  resolveMainChatProfile,
   type MainChatActivityEntry,
   type MainChatActivityKind,
   type MainChatApprovalClarification,
@@ -36,6 +38,8 @@ import {
   type MainChatDecisionRecord,
   type MainChatFleetHostStatus,
   type MainChatFleetScope,
+  type MainChatMemoryFileContent,
+  type MainChatMemoryFileMeta,
   type MainChatNightModeStatus,
   type MainChatOverview,
   type MainChatPatrolResult,
@@ -103,6 +107,7 @@ import {
   type LeaderProgressReportInput,
   type LeaderProgressReportResult,
 } from "./leader-tools.js";
+import { assembleMainChatMemoryContext, createMainChatMemoryStore } from "./memory.js";
 import {
   buildMainChatCompactionCheckpointPrompt,
   buildMainChatHandoffSummary,
@@ -436,6 +441,7 @@ export interface MainChatService {
     kind: "side" | "leader";
     title: string;
     directionSummary?: string | null;
+    notes?: string | null;
     initialPrompt?: string;
     provider?: string;
     model?: string;
@@ -446,6 +452,7 @@ export interface MainChatService {
     conversationId: string;
     title?: string;
     directionSummary?: string | null;
+    notes?: string | null;
     kind?: "side" | "leader";
     archived?: boolean;
   }): Promise<MainChatConversationRecord>;
@@ -493,6 +500,14 @@ export interface MainChatService {
   listPendingSignals?: (conversationId?: string | null) => MainChatSupervisionSignal[];
   listTrackedApprovals?: () => ApprovalInterceptionEntry[];
   handleAgentArchived(agentId: string): Promise<void>;
+  listMemoryFiles(): Promise<MainChatMemoryFileMeta[]>;
+  readMemoryFile(relativePath: string): Promise<MainChatMemoryFileContent>;
+  writeMemoryFile(relativePath: string, content: string): Promise<MainChatMemoryFileMeta>;
+  deleteMemoryFile(relativePath: string): Promise<{ deleted: boolean }>;
+  assembleMemoryContextForAgent(opening?: {
+    purpose?: string;
+    labels?: Record<string, string>;
+  }): Promise<string | null>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -519,6 +534,19 @@ function formatProviderModel(provider: string, model?: string | null): string {
   return trimmedModel ? `${provider}/${trimmedModel}` : provider;
 }
 
+function formatCompactionCheckpointNotificationPrompt(
+  checkpointPrompt: string,
+  reason: MainChatCompactionReason,
+): string {
+  const label = reason === "idle_precompact" ? "后台空闲预压缩检查点" : "主对话上下文压缩检查点";
+  return formatSystemNotificationPrompt(checkpointPrompt, {
+    kind: "compaction",
+    trigger: reason,
+    label,
+    quiet: true,
+  });
+}
+
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -543,6 +571,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     deps.idlePrecompactCheckIntervalMs ?? DEFAULT_IDLE_PRECOMPACT_CHECK_INTERVAL_MS;
 
   const store: MainChatStore = createMainChatStore(deps.paseoHome, { now: getNowMs });
+  const memoryStore = createMainChatMemoryStore({ paseoHome: deps.paseoHome });
 
   const localHostLabel = deps.hostLabel?.trim() || deps.serverId;
   const connectedHostsProxy: FleetConnectedHosts | undefined = deps.connectedHosts
@@ -1335,7 +1364,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       continuesTaskId,
       continuesWhy,
       expectedMinutes,
-      quiet: item.quiet ?? true,
+      quiet: item.quiet ?? isMainChatTasksQuiet(store.getSettings()),
       scopeRevision: continuedTask?.brief.scopeRevision ?? 1,
       taskRecordId: continuedTask?.id ?? null,
     };
@@ -1669,6 +1698,17 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         }
       : null;
 
+    const directionConversation = plan.conversationId
+      ? conversationManager.getConversation(plan.conversationId)
+      : null;
+    const directionNotes =
+      directionConversation && directionConversation.notes?.trim()
+        ? {
+            title: directionConversation.title,
+            notes: directionConversation.notes,
+          }
+        : null;
+
     return {
       resolvedTaskRecordId,
       existingRecord,
@@ -1676,6 +1716,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       initialPrompt: buildWorkerInitialPrompt(task, {
         brief: activeBrief,
         decisions: preExistingDecisions,
+        directionNotes,
         continuesFrom,
       }),
       labels: buildTaskAgentLabels({
@@ -2361,7 +2402,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           });
           const dispatch = await sendPreparedPromptToAgent({
             agentId: mainAgentId,
-            prompt: formatSystemNotificationPrompt(checkpointPrompt),
+            prompt: formatCompactionCheckpointNotificationPrompt(checkpointPrompt, reason),
             agentManager: deps.agentManager,
             agentStorage: deps.agentStorage,
             logger,
@@ -4493,6 +4534,82 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async handleAgentArchived(agentId) {
       await store.load();
       await supervisor.handleAgentArchived(agentId);
+    },
+
+    async listMemoryFiles() {
+      return memoryStore.listFiles();
+    },
+
+    async readMemoryFile(relativePath) {
+      return memoryStore.readFile(relativePath);
+    },
+
+    async writeMemoryFile(relativePath, content) {
+      return memoryStore.writeFile(relativePath, content);
+    },
+
+    async deleteMemoryFile(relativePath) {
+      return memoryStore.deleteFile(relativePath);
+    },
+
+    async assembleMemoryContextForAgent(opening) {
+      if ((opening?.purpose ?? "interactive") !== "interactive") {
+        return null;
+      }
+      const labels = opening?.labels;
+      if (!labels) return null;
+
+      const isMain = isMainChatLabels(labels);
+      const rawConvId =
+        typeof labels[MAIN_CHAT_CONVERSATION_ID_LABEL] === "string"
+          ? labels[MAIN_CHAT_CONVERSATION_ID_LABEL].trim()
+          : "";
+      const isManagedTask =
+        typeof labels[MAIN_CHAT_TASK_ID_LABEL] === "string" ||
+        typeof labels[MAIN_CHAT_TASK_PLAN_ID_LABEL] === "string";
+
+      if (!isMain && !rawConvId) {
+        return null;
+      }
+
+      await store.load();
+      const settings = store.getSettings();
+      const profile = resolveMainChatProfile(settings);
+
+      if (isMain) {
+        const memoryFiles = await memoryStore.readAllFilesForContext();
+        const assembled = assembleMainChatMemoryContext({
+          profile,
+          memoryFiles,
+        });
+        return assembled.text || null;
+      }
+
+      await conversationManager.load();
+      const conv = conversationManager.getConversation(rawConvId);
+      if (!conv) return null;
+
+      if (isManagedTask) {
+        if (!conv.notes?.trim()) return null;
+        const assembled = assembleMainChatMemoryContext({
+          directionTitle: conv.title,
+          directionNotes: conv.notes,
+        });
+        return assembled.text || null;
+      }
+
+      if (conv.kind === "leader") {
+        // Direction notes are already injected via buildLeaderSystemPrompt on the leader's
+        // static systemPrompt; append shared profile + persistent memory files here.
+        const memoryFiles = await memoryStore.readAllFilesForContext();
+        const assembled = assembleMainChatMemoryContext({
+          profile,
+          memoryFiles,
+        });
+        return assembled.text || null;
+      }
+
+      return null;
     },
   };
 }

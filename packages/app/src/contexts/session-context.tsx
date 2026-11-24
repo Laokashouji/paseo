@@ -23,6 +23,7 @@ import {
   type AgentAttentionNotificationPayload,
   type NotificationPermissionRequest,
 } from "@getpaseo/protocol/agent-attention-notification";
+import { isMainChatTaskQuietLabels } from "@getpaseo/protocol/main-chat";
 
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
@@ -70,6 +71,18 @@ interface BufferedAudioChunk {
 
 function decodeBase64Chunk(base64: string): Uint8Array {
   return Buffer.from(base64, "base64");
+}
+
+function isQuietFinishedMainChatTask(
+  session: SessionState | undefined,
+  agentId: string,
+  reason: "finished" | "error" | "permission",
+): boolean {
+  if (reason !== "finished") {
+    return false;
+  }
+  const agent = session?.agents?.get(agentId);
+  return isMainChatTaskQuietLabels(agent?.labels);
 }
 
 function buildAudioPlaybackSource(chunks: BufferedAudioChunk[]): AudioPlaybackSource {
@@ -263,7 +276,10 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       const appState = appStateRef.current;
       const session = useSessionStore.getState().sessions[serverId];
       const attentionFocusedAgentId = session?.focusedAgentId ?? null;
-      if (params.reason === "error") {
+      if (
+        params.reason === "error" ||
+        isQuietFinishedMainChatTask(session, params.agentId, params.reason)
+      ) {
         return;
       }
       const isActivelyVisible = getIsAppActivelyVisible(appState);

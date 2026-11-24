@@ -4,6 +4,7 @@ import { useAgentInteractiveCardsSync } from "@/interactive-cards/store";
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
 import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
+import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
@@ -588,6 +589,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
       return isMainChatAgent(current);
     });
+    const mainBackgroundFolded = useMainChatSettingsStore(
+      (state) => state.settingsByServerId[resolvedServerId]?.mainBackgroundFolded !== false,
+    );
     const presentation = useMemo(
       () =>
         presentStream({
@@ -599,7 +603,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           expandedTurnHostIds,
           isTurnActive,
           activeTurnId: effectiveTurnPresentation.turnId,
-          collapseBackgroundTurns: isMainChatContext,
+          collapseBackgroundTurns: isMainChatContext && mainBackgroundFolded,
         }),
       [
         presentStream,
@@ -612,6 +616,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         isTurnActive,
         effectiveTurnPresentation.turnId,
         isMainChatContext,
+        mainBackgroundFolded,
       ],
     );
     const {

@@ -5,6 +5,7 @@ import {
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   getMainChatTaskMetaFromLabels,
   isMainChatAgent,
+  isMainChatTaskQuietLabels,
   isMainChatWorkspaceDirectory,
   type MainChatTaskMode,
 } from "@getpaseo/protocol/main-chat";
@@ -184,7 +185,11 @@ function summarizeFleetActivity(
         needsYouAgentKeys.add(agentKey);
       } else if (running) {
         runningCount += 1;
-      } else if (agent.requiresAttention || agent.status === "error") {
+      } else if (
+        agent.status === "error" ||
+        (agent.requiresAttention &&
+          !(isMainChatTaskQuietLabels(agent.labels) && agent.attentionReason === "finished"))
+      ) {
         attentionCount += 1;
       }
     }

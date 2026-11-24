@@ -280,6 +280,10 @@ const INBOUND_PERMISSION = {
   "main_chat.dismiss_rule_suggestion.request": ["workspace.write", "hub.execute"],
   "main_chat.get_usage.request": "workspace.read",
   "main_chat.reset_usage.request": ["workspace.write", "hub.execute"],
+  "main_chat.memory_list.request": "workspace.read",
+  "main_chat.memory_read.request": "workspace.read",
+  "main_chat.memory_write.request": ["workspace.write", "hub.execute"],
+  "main_chat.memory_delete.request": ["workspace.write", "hub.execute"],
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -579,6 +583,10 @@ const OUTBOUND_PERMISSION = {
   "main_chat.dismiss_rule_suggestion.response": ["workspace.write", "hub.execute"],
   "main_chat.get_usage.response": "workspace.read",
   "main_chat.reset_usage.response": ["workspace.write", "hub.execute"],
+  "main_chat.memory_list.response": "workspace.read",
+  "main_chat.memory_read.response": "workspace.read",
+  "main_chat.memory_write.response": ["workspace.write", "hub.execute"],
+  "main_chat.memory_delete.response": ["workspace.write", "hub.execute"],
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

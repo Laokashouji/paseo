@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@getpaseo/protocol/agent-message";
+import type { MainChatBackgroundTurnKind } from "@getpaseo/protocol/main-chat";
 import type {
   AgentProvider,
   AgentTimelineItem,
@@ -848,6 +849,7 @@ export interface TurnSummaryItem {
   backgroundMeta?: {
     label: string | null;
     running: boolean;
+    kind?: MainChatBackgroundTurnKind;
   };
 }
 
