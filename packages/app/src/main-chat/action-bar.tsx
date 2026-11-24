@@ -5,15 +5,19 @@ import {
   getMainChatTaskMetaFromLabels,
   isMainChatAgent,
 } from "@getpaseo/protocol/main-chat";
+import { router } from "expo-router";
 import equal from "fast-deep-equal";
 import {
   ArrowUpRight,
   AtSign,
+  BookOpen,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Clock,
+  CornerDownRight,
+  Lock,
   Maximize2,
   Minimize2,
   Pause,
@@ -40,6 +44,7 @@ import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
+import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import {
   buildMainChatActionBarModel,
   selectCompactDockEntries,
@@ -56,15 +61,19 @@ import { useIsCompactMainChatLayout, useOpenMainChatTaskTarget } from "./open-ta
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
+import { deriveDeliveryGateBadge } from "./task-dag-ui";
 import { useStewardAllowedServerIds } from "./use-steward-roster";
 
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
 const ThemedAtIcon = withUnistyles(AtSign);
+const ThemedBookIcon = withUnistyles(BookOpen);
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedChevronUp = withUnistyles(ChevronUp);
 const ThemedClockIcon = withUnistyles(Clock);
+const ThemedCornerDownRight = withUnistyles(CornerDownRight);
+const ThemedLockIcon = withUnistyles(Lock);
 const ThemedMaximizeIcon = withUnistyles(Maximize2);
 const ThemedMinimizeIcon = withUnistyles(Minimize2);
 const ThemedPauseIcon = withUnistyles(Pause);
@@ -355,6 +364,53 @@ const CapsuleButton = memo(function CapsuleButton({
   );
 });
 
+function resolveCompactDockStatusLabel(
+  entry: CompactDockEntry,
+  dockGateBadge: ReturnType<typeof deriveDeliveryGateBadge>,
+  t: (key: string) => string,
+): string {
+  if (entry.kind === "needsYou") {
+    return t(resolveNeedsYouKindKey(entry.item));
+  }
+  if (entry.item.dependencyState === "blocked") {
+    return t("mainChat.taskDag.blockedBadge");
+  }
+  if (entry.item.dependencyState === "ready") {
+    return t("mainChat.taskDag.readyBadge");
+  }
+  if (entry.item.allChildrenDone) {
+    return t("mainChat.taskDag.parentCloseoutReady");
+  }
+  if (dockGateBadge?.isBlocked) {
+    return `${dockGateBadge.prRef} ${t(dockGateBadge.statusKey)}`;
+  }
+  return t("mainChat.actionBar.compactDockStatusWorking");
+}
+
+function renderCompactDockLeadingIndicator(
+  entry: CompactDockEntry,
+  isFailed: boolean,
+): ReactElement {
+  if (entry.kind === "needsYou") {
+    return (
+      <View style={isFailed ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
+        <View style={isFailed ? styles.haloFailedInner : styles.haloNeedsYouInner} />
+      </View>
+    );
+  }
+  if (entry.item.dependencyState === "blocked") {
+    return <ThemedLockIcon size={12} uniProps={warningIconMapping} />;
+  }
+  if (entry.item.dependencyState === "ready") {
+    return <ThemedPlayIcon size={12} uniProps={successIconMapping} />;
+  }
+  return (
+    <View style={styles.ringWrap}>
+      <StatusRing />
+    </View>
+  );
+}
+
 const CompactStatusDockRow = memo(function CompactStatusDockRow({
   entry,
   isFirst,
@@ -384,6 +440,10 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
 
   const isNeedsYou = entry.kind === "needsYou";
   const isFailed = isNeedsYou && entry.item.kind === "task" && entry.item.isFailed;
+  const inProgressItem = entry.kind === "inProgress" ? entry.item : null;
+  const dockGateBadge = inProgressItem
+    ? deriveDeliveryGateBadge(inProgressItem.deliveryGate)
+    : null;
   const title = entry.item.title;
   const secondaryText = useMemo(() => {
     if (isCompact) return null;
@@ -391,13 +451,17 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
       const candidate = entry.item.reason ?? entry.item.hostLabel;
       return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
     }
+    if (entry.item.dependencyState === "blocked" && entry.item.blockedByTitles.length > 0) {
+      return t("mainChat.taskDag.blockedMeta", {
+        deps: entry.item.blockedByTitles.slice(0, 2).join("、"),
+      });
+    }
     const candidate = entry.item.summary ?? entry.item.workspaceLabel ?? entry.item.hostLabel;
     return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
-  }, [entry, isCompact]);
+  }, [entry, isCompact, t]);
 
-  const statusLabel = isNeedsYou
-    ? t(resolveNeedsYouKindKey(entry.item))
-    : t("mainChat.actionBar.compactDockStatusWorking");
+  const statusLabel = resolveCompactDockStatusLabel(entry, dockGateBadge, t);
+  const leadingIndicator = renderCompactDockLeadingIndicator(entry, isFailed);
 
   const rowContainerStyle = useMemo(
     () => [styles.compactDockRow, !isFirst && styles.compactDockRowDivider],
@@ -407,8 +471,12 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
     () => [
       styles.compactDockStatus,
       isNeedsYou && (isFailed ? styles.compactDockStatusFailed : styles.compactDockStatusNeedsYou),
+      !isNeedsYou && dockGateBadge?.isBlocked && styles.compactDockStatusFailed,
+      !isNeedsYou &&
+        inProgressItem?.dependencyState === "blocked" &&
+        styles.compactDockStatusNeedsYou,
     ],
-    [isFailed, isNeedsYou],
+    [dockGateBadge?.isBlocked, inProgressItem?.dependencyState, isFailed, isNeedsYou],
   );
 
   return (
@@ -424,15 +492,7 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
         accessibilityLabel={title}
         testID={`main-chat-compact-dock-trigger-${entry.kind}-${entry.item.id}`}
       >
-        {isNeedsYou ? (
-          <View style={isFailed ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
-            <View style={isFailed ? styles.haloFailedInner : styles.haloNeedsYouInner} />
-          </View>
-        ) : (
-          <View style={styles.ringWrap}>
-            <StatusRing />
-          </View>
-        )}
+        {leadingIndicator}
 
         <View style={styles.compactDockTextRun}>
           <Text style={styles.compactDockTitle} numberOfLines={1} ellipsizeMode="tail">
@@ -446,6 +506,13 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
         </View>
 
         <View style={styles.compactDockTrailing}>
+          {!isCompact && dockGateBadge && !dockGateBadge.isBlocked ? (
+            <StatusBadge
+              size="xs"
+              variant={dockGateBadge.variant}
+              label={`${dockGateBadge.prRef} ${t(dockGateBadge.statusKey)}`}
+            />
+          ) : null}
           <Text style={statusTextStyle} numberOfLines={1}>
             {statusLabel}
           </Text>
@@ -859,6 +926,12 @@ function renderTaskBucketLeadingMark(
   item: ActionBarTaskItem,
 ): ReactElement {
   if (bucket === "inProgress") {
+    if (item.dependencyState === "blocked") {
+      return <ThemedLockIcon size={13} uniProps={warningIconMapping} />;
+    }
+    if (item.dependencyState === "ready") {
+      return <ThemedPlayIcon size={13} uniProps={successIconMapping} />;
+    }
     if (item.stale48h) return <ThemedClockIcon size={13} uniProps={warningIconMapping} />;
     if (item.isLiveRunning) {
       return (
@@ -878,6 +951,52 @@ function renderTaskBucketLeadingMark(
   return <ThemedCheckIcon size={13} uniProps={successIconMapping} />;
 }
 
+const TaskBucketRowBadges = memo(function TaskBucketRowBadges({
+  item,
+}: {
+  item: ActionBarTaskItem;
+}) {
+  const { t } = useTranslation();
+  const gateBadge = deriveDeliveryGateBadge(item.deliveryGate);
+
+  return (
+    <>
+      {item.childrenTotal > 0 ? (
+        <StatusBadge
+          size="xs"
+          variant={item.allChildrenDone ? "success" : "muted"}
+          label={
+            item.allChildrenDone
+              ? t("mainChat.taskDag.parentCloseoutReady")
+              : t("mainChat.taskDag.childrenProgress", {
+                  done: item.childrenCompleted,
+                  total: item.childrenTotal,
+                })
+          }
+        />
+      ) : null}
+      {item.dependencyState === "blocked" ? (
+        <StatusBadge size="xs" variant="warning" label={t("mainChat.taskDag.blockedBadge")} />
+      ) : null}
+      {item.dependencyState === "ready" ? (
+        <StatusBadge size="xs" variant="success" label={t("mainChat.taskDag.readyBadge")} />
+      ) : null}
+      {gateBadge ? (
+        <View testID={`main-chat-action-delivery-gate-${item.id}`}>
+          <StatusBadge
+            size="xs"
+            variant={gateBadge.variant}
+            label={`${gateBadge.prRef} ${t(gateBadge.statusKey)}`}
+          />
+        </View>
+      ) : null}
+      {gateBadge?.followUpActive && !gateBadge.isMerged ? (
+        <StatusBadge size="xs" variant="muted" label={t("mainChat.deliveryGate.followUpBadge")} />
+      ) : null}
+    </>
+  );
+});
+
 const TaskBucketRowActions = memo(function TaskBucketRowActions({
   bucket,
   item,
@@ -886,6 +1005,7 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
   onDirectRoute,
   onPause,
   onResume,
+  onStartReady,
   onAccept,
   onToggleRework,
 }: {
@@ -896,6 +1016,7 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
   onDirectRoute: () => void;
   onPause: () => void;
   onResume: () => void;
+  onStartReady: () => void;
   onAccept: () => void;
   onToggleRework: () => void;
 }) {
@@ -903,7 +1024,22 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
 
   return (
     <View style={styles.taskRowActions}>
-      {bucket === "inProgress" && item.taskId ? (
+      {item.canStartReady && item.taskId ? (
+        <PressHighlight
+          onPress={onStartReady}
+          disabled={isBusy}
+          style={styles.inlineActionBtn}
+          highlightStyle={styles.rowPressed}
+          accessibilityRole="button"
+          accessibilityLabel={t("mainChat.taskDag.startReadyFullAction")}
+          testID={`main-chat-action-start-ready-${item.taskId}`}
+        >
+          <ThemedPlayIcon size={12} uniProps={successIconMapping} />
+          <Text style={styles.inlineActionLabel}>{t("mainChat.taskDag.startReadyAction")}</Text>
+        </PressHighlight>
+      ) : null}
+
+      {bucket === "inProgress" && item.taskId && !item.canStartReady ? (
         <PressHighlight
           onPress={onPause}
           disabled={isBusy}
@@ -990,6 +1126,22 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
   );
 });
 
+function resolveTaskRowDagMeta(
+  item: ActionBarTaskItem,
+  t: (key: string, params?: Record<string, unknown>) => string,
+): string | null {
+  if (item.dependencyState === "blocked" && item.blockedByTitles.length > 0) {
+    return t("mainChat.taskDag.blockedMeta", { deps: item.blockedByTitles.join("、") });
+  }
+  if (item.dependencyState === "ready") {
+    return t("mainChat.taskDag.readyMeta");
+  }
+  if (item.parentTitle) {
+    return t("mainChat.taskDag.partOfLabel", { title: item.parentTitle });
+  }
+  return null;
+}
+
 const TaskBucketRow = memo(function TaskBucketRow({
   bucket,
   item,
@@ -998,6 +1150,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
   onOpenTask,
   onDirectRoute,
   onParkTask,
+  onStartReadyTask,
   onAcceptReview,
   onSubmitRework,
 }: {
@@ -1008,6 +1161,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
   onOpenTask: (item: ActionBarTaskItem) => void;
   onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
+  onStartReadyTask: (taskId: string) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
 }) {
@@ -1031,6 +1185,9 @@ const TaskBucketRow = memo(function TaskBucketRow({
   const handleResume = useCallback(() => {
     if (item.taskId) onParkTask(item.taskId, false);
   }, [item.taskId, onParkTask]);
+  const handleStartReady = useCallback(() => {
+    if (item.taskId) onStartReadyTask(item.taskId);
+  }, [item.taskId, onStartReadyTask]);
   const handleAccept = useCallback(() => {
     if (item.taskId) onAcceptReview(item.taskId);
   }, [item.taskId, onAcceptReview]);
@@ -1044,15 +1201,22 @@ const TaskBucketRow = memo(function TaskBucketRow({
     setReworkOpen(false);
   }, [item.taskId, onSubmitRework, reworkDraft]);
 
+  const dagMetaText = resolveTaskRowDagMeta(item, t);
+
   const metaParts = [
+    dagMetaText,
     item.hostLabel,
     item.workspaceLabel,
     bucket === "parked" && item.parkedReason ? item.parkedReason : item.summary,
   ].filter(Boolean);
 
   const rowStyle = useMemo(
-    () => [styles.taskRowListItem, showTopDivider && styles.taskRowDivider],
-    [showTopDivider],
+    () => [
+      styles.taskRowListItem,
+      showTopDivider && styles.taskRowDivider,
+      item.hierarchyDepth === 1 && styles.taskRowIndented,
+    ],
+    [item.hierarchyDepth, showTopDivider],
   );
 
   return (
@@ -1067,6 +1231,11 @@ const TaskBucketRow = memo(function TaskBucketRow({
           accessibilityLabel={item.title}
           testID={`main-chat-action-task-open-${item.id}`}
         >
+          {item.hierarchyDepth === 1 ? (
+            <View style={styles.hierarchyBranchIcon} testID={`main-chat-action-child-${item.id}`}>
+              <ThemedCornerDownRight size={12} uniProps={mutedIconMapping} />
+            </View>
+          ) : null}
           {renderTaskBucketLeadingMark(bucket, item)}
 
           <View style={styles.rowTextCol}>
@@ -1074,6 +1243,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
               <Text style={styles.rowTitle} numberOfLines={1}>
                 {item.title}
               </Text>
+              <TaskBucketRowBadges item={item} />
               {item.stale48h ? (
                 <StatusBadge
                   size="xs"
@@ -1109,6 +1279,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           onDirectRoute={handleDirectRoute}
           onPause={handlePause}
           onResume={handleResume}
+          onStartReady={handleStartReady}
           onAccept={handleAccept}
           onToggleRework={handleToggleRework}
         />
@@ -1163,6 +1334,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
   onOpenTask,
   onDirectRoute,
   onParkTask,
+  onStartReadyTask,
   onAcceptReview,
   onSubmitRework,
 }: {
@@ -1174,6 +1346,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
   onOpenTask: (item: ActionBarTaskItem) => void;
   onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
+  onStartReadyTask: (taskId: string) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
 }) {
@@ -1191,6 +1364,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
           onOpenTask={onOpenTask}
           onDirectRoute={onDirectRoute}
           onParkTask={onParkTask}
+          onStartReadyTask={onStartReadyTask}
           onAcceptReview={onAcceptReview}
           onSubmitRework={onSubmitRework}
         />
@@ -1230,6 +1404,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
                   onOpenTask={onOpenTask}
                   onDirectRoute={onDirectRoute}
                   onParkTask={onParkTask}
+                  onStartReadyTask={onStartReadyTask}
                   onAcceptReview={onAcceptReview}
                   onSubmitRework={onSubmitRework}
                 />
@@ -1251,6 +1426,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   staleExpanded,
   busyTaskId,
   onToggleDrawerExpand,
+  onOpenLessons,
   onClose,
   onToggleNeedsRow,
   onToggleStale,
@@ -1258,6 +1434,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onOpenTaskItem,
   onDirectRoute,
   onParkTask,
+  onStartReadyTask,
   onAcceptReview,
   onSubmitRework,
 }: {
@@ -1270,6 +1447,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   staleExpanded: boolean;
   busyTaskId: string | null;
   onToggleDrawerExpand: () => void;
+  onOpenLessons: () => void;
   onClose: () => void;
   onToggleNeedsRow: (id: string) => void;
   onToggleStale: () => void;
@@ -1283,6 +1461,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onOpenTaskItem: (item: ActionBarTaskItem) => void;
   onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
+  onStartReadyTask: (taskId: string) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
 }) {
@@ -1304,6 +1483,23 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
       <View style={styles.drawerHeader}>
         <Text style={styles.drawerTitle}>{t(resolveActionBarPanelTitleKey(openBucket))}</Text>
         <View style={styles.drawerHeaderActions}>
+          <PressHighlight
+            onPress={onOpenLessons}
+            style={styles.inlineActionBtn}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.projectLessons.sectionTitle")}
+            testID="main-chat-action-open-lessons"
+          >
+            <ThemedBookIcon size={12} uniProps={mutedIconMapping} />
+            <Text style={styles.inlineActionLabel}>
+              {model.projectLessonsCount > 0
+                ? t("mainChat.projectLessons.entryButtonWithCount", {
+                    count: model.projectLessonsCount,
+                  })
+                : t("mainChat.projectLessons.entryButton")}
+            </Text>
+          </PressHighlight>
           <PressHighlight
             onPress={onToggleDrawerExpand}
             style={styles.smallIconButton}
@@ -1367,6 +1563,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
             onOpenTask={onOpenTaskItem}
             onDirectRoute={onDirectRoute}
             onParkTask={onParkTask}
+            onStartReadyTask={onStartReadyTask}
             onAcceptReview={onAcceptReview}
             onSubmitRework={onSubmitRework}
           />
@@ -1386,6 +1583,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
                 onOpenTask={onOpenTaskItem}
                 onDirectRoute={onDirectRoute}
                 onParkTask={onParkTask}
+                onStartReadyTask={onStartReadyTask}
                 onAcceptReview={onAcceptReview}
                 onSubmitRework={onSubmitRework}
               />
@@ -1414,6 +1612,7 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
   const overview = useMainChatOverviewStore((state) => state.overviewsByKey[overviewKey] ?? null);
   const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
+  const startReadyTask = useMainChatOverviewStore((state) => state.startReadyTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
 
   const hostLabelsByServerId = useMemo(
@@ -1450,6 +1649,7 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
     overview,
     loadOverview,
     parkTask,
+    startReadyTask,
     reviewTask,
     sessionSnapshot,
     model,
@@ -1566,10 +1766,8 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   const { t } = useTranslation();
   const toast = useToast();
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();
-  const { client, overviewKey, parkTask, reviewTask, model } = useMainChatActionBarData(
-    serverId,
-    agentId,
-  );
+  const { client, overviewKey, parkTask, startReadyTask, reviewTask, model } =
+    useMainChatActionBarData(serverId, agentId);
   const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
   const drawerExpanded = useMainChatActionBarDrawerStore((state) =>
     Boolean(state.expandedByKey[overviewKey]),
@@ -1757,6 +1955,32 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
     [agentId, busyTaskId, client, reviewTask, serverId, t, toast],
   );
 
+  const handleOpenLessons = useCallback(() => {
+    closeDrawer(overviewKey);
+    router.push(buildSettingsSectionRoute("main-chat"));
+  }, [closeDrawer, overviewKey]);
+
+  const handleStartReadyTask = useCallback(
+    (taskId: string) => {
+      if (!client || busyTaskId) return;
+      setBusyTaskId(taskId);
+      void startReadyTask(serverId, agentId, taskId, client)
+        .then(() => {
+          toast.show(t("mainChat.taskDag.startedReadyToast"), { variant: "success" });
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.actionBar.actionFailed"),
+          );
+        })
+        .finally(() => {
+          setBusyTaskId(null);
+        });
+    },
+    [agentId, busyTaskId, client, serverId, startReadyTask, t, toast],
+  );
+
   const handleToggleStale = useCallback(() => {
     setStaleExpanded((prev) => !prev);
   }, []);
@@ -1776,6 +2000,7 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
       staleExpanded={staleExpanded}
       busyTaskId={busyTaskId}
       onToggleDrawerExpand={handleToggleDrawerExpand}
+      onOpenLessons={handleOpenLessons}
       onClose={handleCloseDrawer}
       onToggleNeedsRow={handleToggleNeedsRow}
       onToggleStale={handleToggleStale}
@@ -1783,6 +2008,7 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
       onOpenTaskItem={handleOpenTaskItem}
       onDirectRoute={handleDirectRoute}
       onParkTask={handleParkTask}
+      onStartReadyTask={handleStartReadyTask}
       onAcceptReview={handleAcceptReview}
       onSubmitRework={handleSubmitRework}
     />
@@ -2317,6 +2543,16 @@ const styles = StyleSheet.create((theme) => ({
   taskRowDivider: {
     borderTopWidth: theme.borderWidth[1],
     borderTopColor: theme.colors.border,
+  },
+  taskRowIndented: {
+    paddingLeft: theme.spacing[4],
+    borderLeftWidth: 2,
+    borderLeftColor: theme.colors.border,
+    marginLeft: theme.spacing[2],
+  },
+  hierarchyBranchIcon: {
+    flexShrink: 0,
+    opacity: 0.75,
   },
   taskRowMain: {
     flexDirection: "row",

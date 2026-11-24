@@ -7,6 +7,7 @@ import {
   isMainChatEnabled,
   isMainChatLabels,
   resolveMainChatNightMode,
+  type MainChatConversationRecord,
   type MainChatNightModeStatus,
   type MainChatPatrolResult,
   type MainChatSessionTriage,
@@ -101,6 +102,12 @@ export interface MainChatSupervisorDependencies {
     conversationId: string | null,
   ) => Promise<SupervisionConversationTarget | null>;
   isLeaderConversationActive?: (conversationId: string) => boolean;
+  listLeaderConversations?: () =>
+    | Promise<MainChatConversationRecord[]>
+    | MainChatConversationRecord[];
+  isRemoteHostOffline?: (serverId: string) => boolean;
+  sweepTaskDeliveryGates?: (nowMs: number) => Promise<number>;
+  onTaskReplyPrDiscovered?: (agentId: string, replyText: string) => Promise<void> | void;
   onPatrolTick?: () => Promise<void> | void;
   onAgentEvent?: (event: AgentManagerEvent) => void;
   onTryLimitFallback?: (agent: ManagedAgent, errorMessage: string) => Promise<boolean>;
@@ -128,6 +135,9 @@ export interface MainChatSupervisorDependencies {
   normalCooldownMs?: number;
   urgentCooldownMs?: number;
   allStoppedThresholdMs?: number;
+  timedOutMultiplier?: number;
+  periodicCheckIntervalMs?: number;
+  leaderStuckThresholdMs?: number;
   supervisorIdleEscalateMs?: number;
   supervisorBusyMaxHoldMs?: number;
   permissionHardDeadlineMs?: number;
@@ -332,7 +342,6 @@ const RUNNING_AGENT_STALE_SIGNAL_KINDS = new Set<MainChatSupervisionSignal["kind
   "idle",
   "unjudged",
   "all_stopped",
-  "timed_out",
   "interrupted",
   "failed",
 ]);
@@ -340,9 +349,54 @@ const RUNNING_AGENT_STALE_SIGNAL_KINDS = new Set<MainChatSupervisionSignal["kind
 const ARCHIVED_ALLOWED_SIGNAL_KINDS = new Set<MainChatSupervisionSignal["kind"]>([
   "parent_closeout",
   "pr_merged",
+  "pr_conflict",
+  "draft_pr",
+  "pr_event",
+  "todo_ready",
+  "decision_reply",
   "orphaned",
   "failed",
+  "leader_stuck",
 ]);
+
+const PARKED_TASK_STALE_SIGNAL_KINDS = new Set<MainChatSupervisionSignal["kind"]>([
+  "review",
+  "idle",
+  "stalled",
+  "no_progress",
+  "all_stopped",
+  "timed_out",
+]);
+
+function checkDeliveryOrDagSignalValidity(
+  signal: MainChatSupervisionSignal,
+  task: MainChatTaskRecord,
+): SignalRevalidationOutcome | null {
+  if (signal.kind === "draft_pr") {
+    if (!task.deliveryGate || task.deliveryGate.prState !== "open" || !task.deliveryGate.isDraft) {
+      return { valid: false, reason: "pr_no_longer_draft" };
+    }
+  }
+  if (signal.kind === "pr_conflict") {
+    if (
+      !task.deliveryGate ||
+      task.deliveryGate.prState !== "open" ||
+      !task.deliveryGate.hasConflict
+    ) {
+      return { valid: false, reason: "pr_conflict_resolved" };
+    }
+  }
+  if (signal.kind === "todo_ready" && (task.status !== "open" || task.activeAgentId !== null)) {
+    return { valid: false, reason: "task_already_started_or_closed" };
+  }
+  if (
+    signal.kind === "parent_closeout" &&
+    (task.status === "completed" || task.status === "cancelled")
+  ) {
+    return { valid: false, reason: "parent_already_closed" };
+  }
+  return null;
+}
 
 function checkTaskBasedSignalValidity(
   signal: MainChatSupervisionSignal,
@@ -355,13 +409,7 @@ function checkTaskBasedSignalValidity(
   ) {
     return { valid: false, reason: `task_${task.status}` };
   }
-  if (
-    task.status === "parked" &&
-    (signal.kind === "review" ||
-      signal.kind === "stalled" ||
-      signal.kind === "no_progress" ||
-      signal.kind === "all_stopped")
-  ) {
+  if (task.status === "parked" && PARKED_TASK_STALE_SIGNAL_KINDS.has(signal.kind)) {
     return { valid: false, reason: "task_parked" };
   }
   if (
@@ -375,7 +423,10 @@ function checkTaskBasedSignalValidity(
   if (signal.kind === "all_stopped" && liveAgent?.lifecycle === "running") {
     return { valid: false, reason: "agent_resumed" };
   }
-  return null;
+  if (signal.kind === "orphaned" && liveAgent?.lifecycle === "running") {
+    return { valid: false, reason: "agent_recovered" };
+  }
+  return checkDeliveryOrDagSignalValidity(signal, task);
 }
 
 function checkPermissionOrDecisionSignalValidity(
@@ -1794,6 +1845,41 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     };
   }
 
+  function buildNonBlockedPostTriageSignal(
+    agentId: string,
+    triage: MainChatSessionTriage,
+  ): {
+    kind: MainChatSupervisionSignal["kind"];
+    summary: string;
+    fingerprintSeed: string;
+  } | null {
+    if (triage.phase === "done") {
+      return {
+        kind: "review",
+        summary: triage.summary,
+        fingerprintSeed: `done:${triage.summary}`.slice(0, 80),
+      };
+    }
+    if (triage.phase === "unsure") {
+      return {
+        kind: "unjudged",
+        summary: triage.summary,
+        fingerprintSeed: `unjudged:${triage.summary}`.slice(0, 80),
+      };
+    }
+    if (triage.phase === "working" || triage.phase === "blocked_external") {
+      const detail = triage.waitReason
+        ? `${triage.summary}（等待：${triage.waitReason}）`
+        : triage.summary;
+      return {
+        kind: "idle",
+        summary: `子会话已停止但尚未完工：${detail}`,
+        fingerprintSeed: `idle:${agentId}:${triage.updatedAt}`,
+      };
+    }
+    return null;
+  }
+
   function emitPostTriageSignal(input: {
     agent: ManagedAgent;
     title: string;
@@ -1828,36 +1914,20 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       return;
     }
 
-    if (triage.phase === "done") {
-      enqueueStructuredSignal({
-        kind: "review",
-        urgency: "normal",
-        taskId: route.task?.id ?? null,
-        agentId: input.agent.id,
-        serverId: deps.serverId ?? null,
-        conversationId: route.conversationId,
-        title: input.title,
-        summary: triage.summary,
-        fingerprintSeed: `done:${triage.summary}`.slice(0, 80),
-        quiet: route.quiet,
-      });
-      return;
-    }
-
-    if (triage.phase === "unsure") {
-      enqueueStructuredSignal({
-        kind: "unjudged",
-        urgency: "normal",
-        taskId: route.task?.id ?? null,
-        agentId: input.agent.id,
-        serverId: deps.serverId ?? null,
-        conversationId: route.conversationId,
-        title: input.title,
-        summary: triage.summary,
-        fingerprintSeed: `unjudged:${triage.summary}`.slice(0, 80),
-        quiet: route.quiet,
-      });
-    }
+    const mapped = buildNonBlockedPostTriageSignal(input.agent.id, triage);
+    if (!mapped) return;
+    enqueueStructuredSignal({
+      kind: mapped.kind,
+      urgency: "normal",
+      taskId: route.task?.id ?? null,
+      agentId: input.agent.id,
+      serverId: deps.serverId ?? null,
+      conversationId: route.conversationId,
+      title: input.title,
+      summary: mapped.summary,
+      fingerprintSeed: mapped.fingerprintSeed,
+      quiet: route.quiet,
+    });
   }
 
   async function settleAndTriageCompletedTurn(agentId: string): Promise<void> {
@@ -1875,6 +1945,12 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const lastReply =
       getAccumulatedAssistantReply(agentId) ||
       extractLastAssistantTextFromTimeline(deps.agentManager.getTimeline(agentId));
+
+    if (lastReply && deps.onTaskReplyPrDiscovered) {
+      await Promise.resolve(deps.onTaskReplyPrDiscovered(agentId, lastReply)).catch((error) => {
+        deps.logger.warn({ err: error, agentId }, "Task reply PR discovery hook failed");
+      });
+    }
 
     const semanticResult = await runOptionalSemanticTriage({
       live,
@@ -2171,6 +2247,258 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         summary: `关联的全部 ${candidate.agentIds.length} 个子 Agent 已停止运行超过 ${candidate.stoppedMinutes} 分钟且无后续唤醒`,
         fingerprintSeed: `all_stopped:${candidate.latestActivityMs}`,
         quiet: candidate.task.quiet !== false,
+      });
+      if (res.queued) added += 1;
+    }
+    return added;
+  }
+
+  function resolveActiveLeaderConversationId(task: MainChatTaskRecord): string | null {
+    return task.conversationId && deps.isLeaderConversationActive?.(task.conversationId)
+      ? task.conversationId
+      : null;
+  }
+
+  function buildTimedOutTaskSummary(
+    task: MainChatTaskRecord,
+    now: number,
+    multiplier: number,
+    minTimeoutMs: number,
+  ): string | null {
+    if (task.status !== "running" || !task.activeAgentId) return null;
+    if (task.serverId && task.serverId !== deps.serverId) return null;
+    const live = deps.agentManager.getAgent(task.activeAgentId);
+    if (!live || live.lifecycle !== "running") return null;
+
+    const hasExpected = typeof task.expectedMinutes === "number" && task.expectedMinutes > 0;
+    const thresholdMs = hasExpected ? task.expectedMinutes! * 60_000 * multiplier : minTimeoutMs;
+    const startedMs = Date.parse(task.createdAt);
+    if (!Number.isFinite(startedMs) || now - startedMs < thresholdMs) return null;
+
+    const elapsedMin = Math.max(1, Math.round((now - startedMs) / 60_000));
+    return hasExpected
+      ? `任务已持续运行 ${elapsedMin} 分钟，超过预期 ${task.expectedMinutes} 分钟的 ${multiplier} 倍超时阈值`
+      : `任务已持续运行 ${elapsedMin} 分钟，超过默认超时阈值（${Math.round(minTimeoutMs / 60_000)} 分钟）`;
+  }
+
+  function inspectTimedOutTasks(now: number, stalledThresholdMs: number): number {
+    const multiplier = deps.timedOutMultiplier ?? 2;
+    const minTimeoutMs = Math.max(60_000, stalledThresholdMs * 2);
+    let added = 0;
+
+    for (const task of deps.store.listTasks({ includeCompleted: false })) {
+      const timeoutDetail = buildTimedOutTaskSummary(task, now, multiplier, minTimeoutMs);
+      if (!timeoutDetail || !task.activeAgentId) continue;
+      const res = enqueueStructuredSignal({
+        kind: "timed_out",
+        urgency: "urgent",
+        taskId: task.id,
+        agentId: task.activeAgentId,
+        serverId: task.serverId ?? deps.serverId ?? null,
+        conversationId: resolveActiveLeaderConversationId(task),
+        title: task.title,
+        summary: timeoutDetail,
+        fingerprintSeed: `timed_out:${task.id}:${task.activeAgentId}`,
+        quiet: task.quiet !== false,
+      });
+      if (res.queued) added += 1;
+    }
+    return added;
+  }
+
+  async function detectOrphanReasonForTask(task: MainChatTaskRecord): Promise<string | null> {
+    if (task.status === "parked" || task.status === "completed" || task.status === "cancelled") {
+      return null;
+    }
+    if (!task.activeAgentId || pendingRetryTimers.has(task.activeAgentId)) {
+      return null;
+    }
+    if (task.serverId && task.serverId !== deps.serverId) {
+      if (deps.isRemoteHostOffline?.(task.serverId)) {
+        return `关联远端主机 ${task.hostLabel ?? task.serverId} 已离线，子会话无法自动恢复`;
+      }
+      if (deps.getRemoteAgent && !deps.getRemoteAgent(task.serverId, task.activeAgentId)) {
+        return `远端关联会话 ${task.activeAgentId} 已退出或失联`;
+      }
+      return null;
+    }
+    if (deps.agentManager.getAgent(task.activeAgentId)) {
+      return null;
+    }
+    const stored = await deps.agentStorage.get(task.activeAgentId).catch(() => null);
+    if (
+      !stored ||
+      stored.archivedAt ||
+      stored.lastStatus === "closed" ||
+      stored.lastStatus === "error"
+    ) {
+      return stored?.archivedAt
+        ? `关联子会话 ${task.activeAgentId} 已归档，任务尚未结项`
+        : `关联子会话 ${task.activeAgentId} 已离线或不再活跃`;
+    }
+    return null;
+  }
+
+  async function inspectOrphanedTasks(): Promise<number> {
+    let added = 0;
+    for (const task of deps.store.listTasks({ includeCompleted: false })) {
+      const orphanReason = await detectOrphanReasonForTask(task);
+      if (!orphanReason || !task.activeAgentId) continue;
+      const res = enqueueStructuredSignal({
+        kind: "orphaned",
+        urgency: "urgent",
+        taskId: task.id,
+        agentId: task.activeAgentId,
+        serverId: task.serverId ?? deps.serverId ?? null,
+        conversationId: resolveActiveLeaderConversationId(task),
+        title: task.title,
+        summary: orphanReason,
+        fingerprintSeed: `orphaned:${task.id}:${task.activeAgentId}:${orphanReason.slice(0, 32)}`,
+        quiet: task.quiet !== false,
+      });
+      if (res.queued) added += 1;
+    }
+    return added;
+  }
+
+  function inspectOpenDecisions(now: number, needsYouEscalateMs: number): number {
+    let added = 0;
+    for (const decision of deps.store.listDecisions()) {
+      if (decision.answeredAt !== null) continue;
+      const createdMs = Date.parse(decision.createdAt);
+      if (Number.isFinite(createdMs) && now - createdMs < needsYouEscalateMs) continue;
+      const waitedMin = Number.isFinite(createdMs)
+        ? Math.max(1, Math.round((now - createdMs) / 60_000))
+        : 0;
+      const res = enqueueStructuredSignal({
+        kind: "decide",
+        urgency: "urgent",
+        taskId: decision.taskId,
+        agentId: decision.agentId,
+        serverId: deps.serverId ?? null,
+        conversationId: null,
+        title: decision.title,
+        summary: `待拍板决策卡已等待 ${waitedMin} 分钟：${decision.question}`,
+        fingerprintSeed: `decide:${decision.id}`,
+        quiet: false,
+        escalatedToUser: true,
+      });
+      if (res.queued) added += 1;
+    }
+    return added;
+  }
+
+  function evaluateScheduledCheckCandidate(
+    task: MainChatTaskRecord,
+    now: number,
+    checkIntervalMs: number,
+  ): { summary: string; windowBucket: number } | null {
+    if (task.status !== "parked" && task.status !== "open") return null;
+    if (task.status === "open" && task.dependencyState === "blocked") return null;
+
+    const anchorIso = task.parkedAt ?? task.lastActivityAt ?? task.updatedAt;
+    const anchorMs = Date.parse(anchorIso);
+    if (!Number.isFinite(anchorMs) || now - anchorMs < checkIntervalMs) return null;
+
+    const windowBucket = Math.floor((now - anchorMs) / checkIntervalMs);
+    const elapsedMin = Math.max(1, Math.round((now - anchorMs) / 60_000));
+    const summary =
+      task.status === "parked"
+        ? `挂起任务已满 ${elapsedMin} 分钟（原因：${task.parkedReason ?? "外部等待"}），执行周期检查`
+        : `未启动任务已静默 ${elapsedMin} 分钟，请复核是否继续推进或撤回`;
+    return { summary, windowBucket };
+  }
+
+  function inspectScheduledCheckTasks(now: number): number {
+    const checkIntervalMs = deps.periodicCheckIntervalMs ?? 60 * 60 * 1000;
+    if (checkIntervalMs <= 0) return 0;
+    let added = 0;
+
+    for (const task of deps.store.listTasks({ includeCompleted: false })) {
+      const candidate = evaluateScheduledCheckCandidate(task, now, checkIntervalMs);
+      if (!candidate) continue;
+      const res = enqueueStructuredSignal({
+        kind: "check",
+        urgency: "normal",
+        taskId: task.id,
+        agentId: task.activeAgentId,
+        serverId: task.serverId ?? deps.serverId ?? null,
+        conversationId: resolveActiveLeaderConversationId(task),
+        title: task.title,
+        summary: candidate.summary,
+        fingerprintSeed: `check:${task.id}:${candidate.windowBucket}`,
+        quiet: task.quiet !== false,
+      });
+      if (res.queued) added += 1;
+    }
+    return added;
+  }
+
+  function detectStuckLeaderReason(
+    leader: {
+      id: string;
+      agentId: string;
+      lastMessageAt?: string | null;
+      updatedAt: string;
+    },
+    liveLeader: ManagedAgent | null | undefined,
+    leaderTaskCount: number,
+    pendingForLeader: number,
+    now: number,
+    thresholdMs: number,
+  ): string | null {
+    if (liveLeader?.lifecycle === "error") {
+      return `方向主管会话处于异常状态（${liveLeader.lastError?.slice(0, 80) ?? "运行出错"}）`;
+    }
+    if (leaderTaskCount === 0 && pendingForLeader === 0) {
+      return null;
+    }
+    const lastActiveMs =
+      lastActivityAtByAgent.get(leader.agentId) ??
+      liveLeader?.updatedAt.getTime() ??
+      Date.parse(leader.lastMessageAt ?? leader.updatedAt);
+    if (!Number.isFinite(lastActiveMs) || now - lastActiveMs < thresholdMs) {
+      return null;
+    }
+    const idleMin = Math.max(1, Math.round((now - lastActiveMs) / 60_000));
+    return `方向主管已 ${idleMin} 分钟无新动态，名下仍有 ${leaderTaskCount} 个未结任务与 ${pendingForLeader} 条待处理督办信号`;
+  }
+
+  async function inspectStuckLeaders(now: number, stalledThresholdMs: number): Promise<number> {
+    const leaders = (await deps.listLeaderConversations?.()) ?? [];
+    if (leaders.length === 0) return 0;
+    const thresholdMs = deps.leaderStuckThresholdMs ?? stalledThresholdMs;
+    const openTasks = deps.store.listTasks({ includeCompleted: false });
+    const dayBucket = new Date(now).toISOString().slice(0, 10);
+    let added = 0;
+
+    for (const leader of leaders) {
+      if (leader.kind !== "leader" || leader.archivedAt) continue;
+      const liveLeader = deps.agentManager.getAgent(leader.agentId);
+      const leaderTasks = openTasks.filter((task) => task.conversationId === leader.id);
+      const pendingForLeader = signalQueue.getPendingCount(leader.id);
+      const stuckReason = detectStuckLeaderReason(
+        leader,
+        liveLeader,
+        leaderTasks.length,
+        pendingForLeader,
+        now,
+        thresholdMs,
+      );
+      if (!stuckReason) continue;
+
+      const res = enqueueStructuredSignal({
+        kind: "leader_stuck",
+        urgency: "urgent",
+        taskId: leaderTasks[0]?.id ?? null,
+        agentId: leader.agentId,
+        serverId: leader.serverId ?? deps.serverId ?? null,
+        conversationId: null, // Always escalate leader_stuck to Main chat
+        title: `方向「${leader.title}」`,
+        summary: stuckReason,
+        fingerprintSeed: `leader_stuck:${leader.id}:${dayBucket}`,
+        quiet: false,
+        escalatedToUser: true,
       });
       if (res.queued) added += 1;
     }
@@ -2950,6 +3278,17 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const escalations = approvalTracker.evaluateTick(now, isApprovalSupervisorBusy);
     newSignals += handleApprovalEscalations(escalations);
     newSignals += inspectAllStoppedTasks(now);
+    newSignals += inspectTimedOutTasks(now, stalledThresholdMs);
+    newSignals += await inspectOrphanedTasks();
+    newSignals += inspectOpenDecisions(now, needsYouEscalateMs);
+    newSignals += inspectScheduledCheckTasks(now);
+    newSignals += await inspectStuckLeaders(now, stalledThresholdMs);
+    if (deps.sweepTaskDeliveryGates) {
+      newSignals += await deps.sweepTaskDeliveryGates(now).catch((error) => {
+        deps.logger.warn({ err: error }, "Delivery gate PR follow-up sweep failed");
+        return 0;
+      });
+    }
 
     for (const agent of agents) {
       const meta = {

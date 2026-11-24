@@ -24,9 +24,11 @@ import {
   isMainChatAutoCompactEnabled,
   isMainChatEnabled,
   isMainChatLabels,
+  isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   normalizeMainChatFleetScope,
   resolveMainChatCompactionConfig,
+  resolveMainChatDeliveryGatePolicy,
   resolveMainChatFleetScope,
   resolveMainChatProfile,
   type MainChatActivityEntry,
@@ -52,6 +54,8 @@ import {
   type MainChatPlanRecord,
   type MainChatPlanTaskPatch,
   type MainChatPlannedTask,
+  type MainChatProjectLesson,
+  type MainChatProjectLessonGroup,
   type MainChatReceiptCheck,
   type MainChatReworkRecord,
   type MainChatRoutineRecord,
@@ -65,6 +69,7 @@ import {
   type MainChatSupervisionSignal,
   type MainChatTaskDecisionActor,
   type MainChatTaskDecisionEntry,
+  type MainChatTaskDeliveryGate,
   type MainChatTaskIsolation,
   type MainChatTaskMode,
   type MainChatTaskReceipt,
@@ -154,6 +159,34 @@ import {
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
 import { createMainChatSupervisor } from "./supervisor.js";
 import {
+  DeliveryGateBlockedError,
+  buildDeliveryGateFromDiscoveredPrUrl,
+  buildDeliveryGateFromGitSnapshot,
+  computeDeliveryGateStatusAndBlockers,
+  diffDeliveryGateTransitions,
+  evaluateTaskDeliveryGateForAcceptance,
+  extractPrUrlFromText,
+  matchTasksForGitSnapshot,
+} from "./delivery-gate.js";
+import {
+  MainChatProjectLessonsStore,
+  type AddProjectLessonInput,
+  type AddProjectLessonResult,
+  type ProjectLessonTargetContext,
+} from "./lessons.js";
+import {
+  checkParentCloseoutCandidate,
+  cleanTaskIdList,
+  computeTaskDependencyState,
+  findNewlyReadyDownstreamTasks,
+  validateTaskDagBatch,
+} from "./task-dag.js";
+import type {
+  WorkspaceGitRuntimeSnapshot,
+  WorkspaceGitService,
+  WorkspaceGitSubscription,
+} from "../workspace-git-service.js";
+import {
   appendTaskDecision,
   applyTaskScopeUpdate,
   attachContinuationAgentToTask,
@@ -193,6 +226,10 @@ export interface CreateMainChatPlanTaskInput {
   continuesTaskId?: string;
   continuesWhy?: string;
   quiet?: boolean;
+  refId?: string;
+  partOf?: string;
+  after?: string[];
+  autoStartOnReady?: boolean;
 }
 
 export interface CreateMainChatPlanInput {
@@ -248,6 +285,7 @@ export interface MainChatAskUserInput {
   options: MainChatDecisionOption[];
   recommendedOptionId?: string;
   reason?: string;
+  escalatedFromTitle?: string;
 }
 
 export interface MainChatAnswerDecisionInput {
@@ -284,6 +322,7 @@ export interface MainChatServiceDependencies {
     ScheduleService,
     "list" | "inspect" | "create" | "pause" | "resume" | "runOnce" | "delete" | "rebindAgentTarget"
   > | null;
+  workspaceGitService?: Pick<WorkspaceGitService, "onSnapshotUpdated" | "getSnapshot"> | null;
   cacheKeepaliveCheckIntervalMs?: number;
   cacheKeepaliveRunner?: CacheKeepaliveRunner;
   logger: Logger;
@@ -299,6 +338,9 @@ export interface MainChatServiceDependencies {
   normalCooldownMs?: number;
   urgentCooldownMs?: number;
   allStoppedThresholdMs?: number;
+  timedOutMultiplier?: number;
+  periodicCheckIntervalMs?: number;
+  leaderStuckThresholdMs?: number;
   supervisorIdleEscalateMs?: number;
   supervisorBusyMaxHoldMs?: number;
   permissionHardDeadlineMs?: number;
@@ -459,11 +501,36 @@ export interface MainChatService {
     checks?: MainChatReceiptCheck[];
     nextSteps?: string[];
     note?: string;
+    bypassDeliveryGate?: boolean;
+    bypassReason?: string;
   }): Promise<{
     task: MainChatTaskRecord;
     receipt: MainChatTaskReceipt | null;
     rework: MainChatReworkRecord | null;
+    deliveryGateWarning?: string | null;
   }>;
+  // Wave 3: Project Lessons, Delivery Gate & Task DAG
+  listLessons(options?: { projectKey?: string }): Promise<{
+    groups: MainChatProjectLessonGroup[];
+    lessons: MainChatProjectLesson[];
+  }>;
+  addLesson(input: AddProjectLessonInput): Promise<AddProjectLessonResult>;
+  deleteLesson(lessonId: string): Promise<{ deleted: boolean }>;
+  startReadyTask(taskId: string): Promise<{
+    task: MainChatTaskRecord;
+    plan: MainChatPlanRecord | null;
+  }>;
+  updateTaskDependencies(input: {
+    taskId: string;
+    partOf?: string | null;
+    after?: string[];
+    autoStartOnReady?: boolean;
+  }): Promise<MainChatTaskRecord>;
+  syncTaskDeliveryGate(
+    taskId: string,
+    gatePatch: Partial<MainChatTaskDeliveryGate> & { prUrl?: string | null },
+  ): Promise<MainChatTaskRecord>;
+  handleWorkspaceGitSnapshot(snapshot: WorkspaceGitRuntimeSnapshot): Promise<number>;
   // M4 Multi-Conversation & Cross-Host Fleet contract
   getConversationManager(): MainChatConversationManager;
   getFleetBridge(): MainChatFleetBridge;
@@ -928,6 +995,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   });
 
   const clarificationProofs = createClarificationProofStore();
+  const lessonsStore = new MainChatProjectLessonsStore(deps.paseoHome, { now: getNowMs });
+  const deliveryNotifiedKeys = new Set<string>();
+  let unsubscribeGitSnapshots: WorkspaceGitSubscription | null = null;
 
   const supervisor = createMainChatSupervisor({
     agentManager: deps.agentManager,
@@ -950,6 +1020,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     isLeaderConversationActive: (conversationId) => {
       const conv = conversationManager.getConversation(conversationId);
       return Boolean(conv && conv.kind === "leader" && conv.archivedAt === null);
+    },
+    listLeaderConversations: () =>
+      conversationManager.listConversations({ includeArchived: false }),
+    isRemoteHostOffline: (serverId) => {
+      const host = fleetAggregator
+        .listAvailableRemoteHosts()
+        .find((entry) => entry.serverId === serverId);
+      return Boolean(host && (host.status === "offline" || host.status === "error"));
+    },
+    sweepTaskDeliveryGates: async (nowMs) => sweepTaskDeliveryGatesInternal(nowMs),
+    onTaskReplyPrDiscovered: async (agentId, replyText) => {
+      await discoverTaskPrFromReply(agentId, replyText);
     },
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
@@ -1007,6 +1089,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     normalCooldownMs: deps.normalCooldownMs,
     urgentCooldownMs: deps.urgentCooldownMs,
     allStoppedThresholdMs: deps.allStoppedThresholdMs,
+    timedOutMultiplier: deps.timedOutMultiplier,
+    periodicCheckIntervalMs: deps.periodicCheckIntervalMs,
+    leaderStuckThresholdMs: deps.leaderStuckThresholdMs,
     supervisorIdleEscalateMs: deps.supervisorIdleEscalateMs,
     supervisorBusyMaxHoldMs: deps.supervisorBusyMaxHoldMs,
     permissionHardDeadlineMs: deps.permissionHardDeadlineMs,
@@ -1394,6 +1479,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       conversationId: options?.conversationId?.trim() || undefined,
       includeCompleted: true,
     });
+    const allTasksById = new Map(
+      store.listTasks({ includeCompleted: true }).map((entry) => [entry.id, entry]),
+    );
     const openDecisions = store
       .listDecisions(mainAgentId)
       .filter((decision) => !decision.answeredAt);
@@ -1414,7 +1502,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       });
       const isTerminal = effectiveStatus === "completed" || effectiveStatus === "cancelled";
       if (!includeCompleted && isTerminal) continue;
-      resolved.push(effectiveStatus === task.status ? task : { ...task, status: effectiveStatus });
+      const liveDependencyState = computeTaskDependencyState(task, allTasksById);
+      if (effectiveStatus === task.status && liveDependencyState === task.dependencyState) {
+        resolved.push(task);
+      } else {
+        resolved.push({
+          ...task,
+          status: effectiveStatus,
+          dependencyState: liveDependencyState,
+        });
+      }
     }
 
     resolved.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -1537,6 +1634,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       quiet: item.quiet ?? isMainChatTasksQuiet(store.getSettings()),
       scopeRevision: continuedTask?.brief.scopeRevision ?? 1,
       taskRecordId: continuedTask?.id ?? null,
+      refId: trimOptional(item.refId),
+      partOf: trimOptional(item.partOf),
+      after: cleanTaskIdList(item.after),
+      autoStartOnReady: item.autoStartOnReady ?? false,
     };
 
     const autoStartEligible =
@@ -1840,11 +1941,37 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     await store.putTask(createdRecord);
   }
 
+  function resolveDirectionNotesForPlan(
+    conversationId: string | null | undefined,
+  ): { title: string; notes: string } | null {
+    if (!conversationId) return null;
+    const conv = conversationManager.getConversation(conversationId);
+    if (!conv?.notes?.trim()) return null;
+    return { title: conv.title, notes: conv.notes };
+  }
+
+  function buildProjectLessonsBlockForSpawn(
+    task: MainChatPlannedTask,
+    projectContext: ProjectLessonTargetContext | undefined,
+  ): string | null {
+    if (!isMainChatTaskLessonsEnabled(store.getSettings())) return null;
+    const effectiveCwd = projectContext?.cwd ?? task.cwd;
+    if (!effectiveCwd) return null;
+    const built = lessonsStore.buildDispatchBlockForProject({
+      cwd: effectiveCwd,
+      projectRoot: projectContext?.projectRoot,
+      remoteUrl: projectContext?.remoteUrl,
+      projectLabel: projectContext?.projectLabel ?? task.workspaceLabel,
+    });
+    return built.text || null;
+  }
+
   function prepareSpawnTaskPromptAndLabels(input: {
     plan: MainChatPlanRecord;
     task: MainChatPlannedTask;
     continuedTask: MainChatTaskRecord | null;
     previousAgentId: string | null;
+    projectContext?: ProjectLessonTargetContext;
   }): {
     resolvedTaskRecordId: string;
     existingRecord: MainChatTaskRecord | null;
@@ -1853,13 +1980,12 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     labels: Record<string, string>;
     title: string;
   } {
-    const { plan, task, continuedTask, previousAgentId } = input;
+    const { plan, task, continuedTask, previousAgentId, projectContext } = input;
     const resolvedTaskRecordId = continuedTask ? continuedTask.id : (task.taskRecordId ?? task.id);
     const existingRecord = continuedTask ?? store.getTask(resolvedTaskRecordId);
     const preExistingDecisions =
       existingRecord?.decisions ??
       collectPreExistingDecisionsForTask(plan.mainAgentId, resolvedTaskRecordId);
-    const activeBrief = existingRecord ? existingRecord.brief : null;
     const continuesFrom = continuedTask
       ? {
           taskId: continuedTask.id,
@@ -1868,25 +1994,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         }
       : null;
 
-    const directionConversation = plan.conversationId
-      ? conversationManager.getConversation(plan.conversationId)
-      : null;
-    const directionNotes =
-      directionConversation && directionConversation.notes?.trim()
-        ? {
-            title: directionConversation.title,
-            notes: directionConversation.notes,
-          }
-        : null;
-
     return {
       resolvedTaskRecordId,
       existingRecord,
       preExistingDecisions,
       initialPrompt: buildWorkerInitialPrompt(task, {
-        brief: activeBrief,
+        brief: existingRecord?.brief ?? null,
         decisions: preExistingDecisions,
-        directionNotes,
+        directionNotes: resolveDirectionNotesForPlan(plan.conversationId),
+        projectLessonsBlock: buildProjectLessonsBlockForSpawn(task, projectContext),
         continuesFrom,
       }),
       labels: buildTaskAgentLabels({
@@ -2006,6 +2122,461 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     };
   }
 
+  async function resolveWorkspaceCwdForTask(input: {
+    cwd?: string | null;
+    workspaceId?: string | null;
+  }): Promise<string | null> {
+    const trimmed = trimOptional(input.cwd);
+    if (trimmed) return trimmed;
+    if (input.workspaceId) {
+      const workspace = await deps.workspaceRegistry.get(input.workspaceId).catch(() => null);
+      if (workspace?.cwd?.trim()) {
+        return workspace.cwd.trim();
+      }
+    }
+    return null;
+  }
+
+  async function resolveProjectLessonContext(input: {
+    cwd?: string | null;
+    workspaceId?: string | null;
+    workspaceLabel?: string | null;
+  }): Promise<ProjectLessonTargetContext> {
+    const resolvedCwd = await resolveWorkspaceCwdForTask({
+      cwd: input.cwd,
+      workspaceId: input.workspaceId,
+    });
+    const snapshot =
+      resolvedCwd && deps.workspaceGitService
+        ? await deps.workspaceGitService.getSnapshot(resolvedCwd).catch(() => null)
+        : null;
+    return {
+      cwd: resolvedCwd ?? snapshot?.cwd ?? null,
+      projectRoot: snapshot?.git.mainRepoRoot ?? snapshot?.git.repoRoot ?? snapshot?.cwd ?? null,
+      remoteUrl: snapshot?.git.remoteUrl ?? null,
+      projectLabel: input.workspaceLabel ?? null,
+    };
+  }
+
+  function resolvePlanBatchDagLinks(tasks: MainChatPlannedTask[]): MainChatPlannedTask[] {
+    const refMap = new Map<string, string>();
+    for (const task of tasks) {
+      const targetId = task.taskRecordId ?? task.id;
+      refMap.set(task.id, targetId);
+      const refId = trimOptional(task.refId);
+      if (refId) {
+        if (refMap.has(refId)) {
+          throw new Error(`同一任务计划中存在重复的 refId：${refId}`);
+        }
+        refMap.set(refId, targetId);
+      }
+    }
+
+    const resolveRef = (raw: string | null | undefined): string | null => {
+      const trimmed = trimOptional(raw);
+      if (!trimmed) return null;
+      return refMap.get(trimmed) ?? trimmed;
+    };
+
+    const resolvedTasks = tasks.map((task) => {
+      const partOf = resolveRef(task.partOf);
+      const after = cleanTaskIdList((task.after ?? []).map((id) => resolveRef(id) ?? id));
+      return {
+        ...task,
+        partOf,
+        after,
+      };
+    });
+
+    const hasAnyDagLinks = resolvedTasks.some(
+      (task) => Boolean(task.partOf) || (task.after?.length ?? 0) > 0,
+    );
+    if (!hasAnyDagLinks) {
+      return resolvedTasks;
+    }
+
+    const existingTasks = store.listTasks({ includeCompleted: true });
+    const normalizedLinks = validateTaskDagBatch(
+      existingTasks,
+      resolvedTasks.map((task) => ({
+        id: task.taskRecordId ?? task.id,
+        partOf: task.partOf ?? null,
+        after: task.after ?? [],
+      })),
+    );
+
+    const updatedTasks: MainChatPlannedTask[] = [];
+    for (const task of resolvedTasks) {
+      const targetId = task.taskRecordId ?? task.id;
+      const normalized = normalizedLinks.get(targetId);
+      updatedTasks.push({
+        ...task,
+        partOf: normalized?.partOf ?? null,
+        after: normalized?.after ?? [],
+      });
+    }
+    return updatedTasks;
+  }
+
+  async function applyTaskDeliveryGate(
+    task: MainChatTaskRecord,
+    nextGate: MainChatTaskDeliveryGate,
+    nowIso: string,
+  ): Promise<{ task: MainChatTaskRecord; prJustMerged: boolean }> {
+    const transitions = diffDeliveryGateTransitions({
+      task,
+      previous: task.deliveryGate,
+      next: nextGate,
+      notifiedKeys: deliveryNotifiedKeys,
+      defaultServerId: deps.serverId,
+    });
+
+    const updatedTask: MainChatTaskRecord = {
+      ...task,
+      deliveryGate: nextGate,
+      updatedAt: nowIso,
+      lastActivityAt: nowIso,
+    };
+    await store.putTask(updatedTask);
+
+    let prJustMerged = false;
+    for (const transition of transitions) {
+      if (transition.prJustMerged) {
+        prJustMerged = true;
+      }
+      supervisor.enqueueSignal({
+        kind: transition.kind,
+        urgency: transition.urgency,
+        taskId: transition.taskId,
+        agentId: transition.agentId,
+        serverId: transition.serverId,
+        conversationId: transition.conversationId,
+        title: transition.title,
+        summary: transition.summary,
+        fingerprintSeed: transition.fingerprintSeed,
+        quiet: transition.quiet,
+      });
+    }
+
+    if (prJustMerged) {
+      await evaluateDagProgressAfterTaskChange(updatedTask, nowIso);
+    }
+
+    return { task: updatedTask, prJustMerged };
+  }
+
+  function isSameDeliveryGate(
+    left: MainChatTaskDeliveryGate | null | undefined,
+    right: MainChatTaskDeliveryGate | null | undefined,
+  ): boolean {
+    if (!left && !right) return true;
+    if (!left || !right) return false;
+    return (
+      left.prUrl === right.prUrl &&
+      left.prNumber === right.prNumber &&
+      left.branch === right.branch &&
+      left.prState === right.prState &&
+      left.isDraft === right.isDraft &&
+      left.hasConflict === right.hasConflict &&
+      left.ciStatus === right.ciStatus &&
+      left.ciSummary === right.ciSummary &&
+      left.reviewDecision === right.reviewDecision &&
+      left.headOid === right.headOid &&
+      left.gateStatus === right.gateStatus &&
+      left.followUpActive === right.followUpActive &&
+      left.blockingReasons.join("|") === right.blockingReasons.join("|")
+    );
+  }
+
+  async function handleWorkspaceGitSnapshotInternal(
+    snapshot: WorkspaceGitRuntimeSnapshot,
+  ): Promise<number> {
+    await store.load();
+    const candidates = matchTasksForGitSnapshot(
+      store.listTasks({ includeCompleted: true }),
+      snapshot,
+    );
+    if (candidates.length === 0) return 0;
+
+    const nowIso = new Date(getNowMs()).toISOString();
+    let updatedCount = 0;
+    for (const task of candidates) {
+      const nextGate = buildDeliveryGateFromGitSnapshot({
+        snapshot,
+        existing: task.deliveryGate,
+        nowIso,
+      });
+      if (!nextGate) continue;
+      if (isSameDeliveryGate(task.deliveryGate, nextGate)) {
+        continue;
+      }
+      await applyTaskDeliveryGate(task, nextGate, nowIso);
+      updatedCount += 1;
+    }
+
+    if (updatedCount > 0) {
+      contextSnapshots.invalidateCache();
+    }
+    return updatedCount;
+  }
+
+  async function sweepTaskDeliveryGatesInternal(_nowMs: number): Promise<number> {
+    if (!deps.workspaceGitService) return 0;
+    await store.load();
+    const cwds = new Set<string>();
+    for (const task of store.listTasks({ includeCompleted: true })) {
+      if (task.status === "cancelled") continue;
+      if (task.status !== "completed" || task.deliveryGate?.followUpActive) {
+        const cwd = await resolveWorkspaceCwdForTask({
+          cwd: task.cwd,
+          workspaceId: task.workspaceId,
+        });
+        if (cwd) {
+          cwds.add(cwd);
+        }
+      }
+    }
+    let totalUpdated = 0;
+    for (const cwd of cwds) {
+      const snapshot = await deps.workspaceGitService.getSnapshot(cwd).catch(() => null);
+      if (!snapshot) continue;
+      totalUpdated += await handleWorkspaceGitSnapshotInternal(snapshot);
+    }
+    return totalUpdated;
+  }
+
+  async function discoverTaskPrFromReply(agentId: string, replyText: string): Promise<void> {
+    const extracted = extractPrUrlFromText(replyText);
+    if (!extracted) return;
+    await store.load();
+    const linkedTask = store.findTaskByAgentId(agentId);
+    if (!linkedTask) return;
+
+    const nowIso = new Date(getNowMs()).toISOString();
+    const resolvedCwd = await resolveWorkspaceCwdForTask({
+      cwd: linkedTask.cwd,
+      workspaceId: linkedTask.workspaceId,
+    });
+    const snapshot =
+      resolvedCwd && deps.workspaceGitService
+        ? await deps.workspaceGitService.getSnapshot(resolvedCwd).catch(() => null)
+        : null;
+    const fromSnapshot = snapshot
+      ? buildDeliveryGateFromGitSnapshot({
+          snapshot,
+          existing: linkedTask.deliveryGate,
+          nowIso,
+        })
+      : null;
+    const nextGate =
+      fromSnapshot ??
+      buildDeliveryGateFromDiscoveredPrUrl({
+        prUrl: extracted.prUrl,
+        prNumber: extracted.prNumber,
+        existing: linkedTask.deliveryGate,
+        nowIso,
+      });
+    if (!isSameDeliveryGate(linkedTask.deliveryGate, nextGate)) {
+      await applyTaskDeliveryGate(linkedTask, nextGate, nowIso);
+      contextSnapshots.invalidateCache();
+    }
+  }
+
+  function buildSyntheticPlanForReadyTask(
+    existing: MainChatTaskRecord,
+    nowIso: string,
+  ): MainChatPlanRecord {
+    return {
+      id: existing.planId ?? makeId("plan"),
+      mainAgentId: existing.mainAgentId,
+      conversationId: existing.conversationId ?? null,
+      status: "started",
+      autoStarted: false,
+      summary: existing.title,
+      createdAt: existing.createdAt,
+      startedAt: nowIso,
+      cancelledAt: null,
+      withdrawnAt: null,
+      withdrawReason: null,
+      tasks: [],
+    };
+  }
+
+  function buildSyntheticPlannedTaskForReadyTask(
+    existing: MainChatTaskRecord,
+  ): MainChatPlannedTask {
+    return {
+      id: existing.id,
+      title: existing.title,
+      goal: existing.brief.goal,
+      mode: existing.mode,
+      isolation: existing.isolation,
+      serverId: existing.serverId ?? deps.serverId,
+      hostLabel: existing.hostLabel ?? null,
+      cwd: existing.cwd,
+      workspaceId: existing.workspaceId,
+      workspaceLabel: existing.workspaceLabel,
+      doneWhen: existing.brief.doneWhen,
+      outOfBounds: existing.brief.outOfBounds,
+      provider: null,
+      modeId: null,
+      thinkingOptionId: null,
+      branchName: null,
+      baseBranch: null,
+      reason: "前置依赖已满足，启动下游任务",
+      agentId: null,
+      startedAt: null,
+      startError: null,
+      expectedMinutes: existing.expectedMinutes ?? null,
+      continuesTaskId: existing.continuesTaskId ?? null,
+      continuesWhy: existing.continuesWhy ?? null,
+      quiet: existing.quiet ?? true,
+      scopeRevision: existing.brief.scopeRevision,
+      taskRecordId: existing.id,
+      refId: null,
+      partOf: existing.partOf ?? null,
+      after: existing.after ?? [],
+      autoStartOnReady: existing.autoStartOnReady ?? false,
+    };
+  }
+
+  async function startReadyTaskInternal(
+    taskId: string,
+  ): Promise<{ task: MainChatTaskRecord; plan: MainChatPlanRecord | null }> {
+    await store.load();
+    await lessonsStore.load();
+    const existing = resolveTaskRecordByRef({ taskId });
+    if (!existing) {
+      throw new Error(`找不到要启动的就绪任务：${taskId}`);
+    }
+    if (existing.status === "completed" || existing.status === "cancelled") {
+      throw new Error(`任务「${existing.title}」已结束（${existing.status}），无法启动`);
+    }
+    if (existing.activeAgentId) {
+      throw new Error(
+        `任务「${existing.title}」已有正在运行的子 Agent（${existing.activeAgentId}）`,
+      );
+    }
+
+    const allTasksById = new Map(
+      store.listTasks({ includeCompleted: true }).map((entry) => [entry.id, entry]),
+    );
+    if (computeTaskDependencyState(existing, allTasksById) === "blocked") {
+      const pendingDeps = (existing.after ?? [])
+        .map((depId) => {
+          const dep = allTasksById.get(depId);
+          return dep ? `${dep.title}（${dep.id}）` : depId;
+        })
+        .join("、");
+      throw new Error(`任务「${existing.title}」的前置依赖尚未完成：${pendingDeps}`);
+    }
+
+    const nowIso = new Date(getNowMs()).toISOString();
+    const mainAgent = await resolveMainAgentSnapshot(existing.mainAgentId);
+    const linkedPlan = existing.planId ? store.getPlan(existing.planId) : null;
+    const matchedPlannedTask = linkedPlan?.tasks.find(
+      (item) => item.taskRecordId === existing.id || item.id === existing.id,
+    );
+    const spawnedTask = await spawnSinglePlannedTask({
+      plan: linkedPlan ?? buildSyntheticPlanForReadyTask(existing, nowIso),
+      task: matchedPlannedTask ?? buildSyntheticPlannedTaskForReadyTask(existing),
+      mainAgent,
+      nowIso,
+    });
+
+    let updatedPlan: MainChatPlanRecord | null = null;
+    if (linkedPlan && matchedPlannedTask) {
+      updatedPlan = {
+        ...linkedPlan,
+        status: "started",
+        startedAt: linkedPlan.startedAt ?? nowIso,
+        tasks: linkedPlan.tasks.map((item) =>
+          item.id === matchedPlannedTask.id ? spawnedTask : item,
+        ),
+      };
+      await store.putPlan(updatedPlan);
+    }
+
+    const refreshed = store.getTask(existing.id) ?? existing;
+    contextSnapshots.invalidateCache();
+    return { task: refreshed, plan: updatedPlan };
+  }
+
+  async function evaluateDagProgressAfterTaskChange(
+    changedTask: MainChatTaskRecord,
+    nowIso: string,
+  ): Promise<void> {
+    const allTasks = store.listTasks({ includeCompleted: true });
+    const newlyReady = findNewlyReadyDownstreamTasks({
+      allTasks,
+      changedTaskId: changedTask.id,
+    });
+
+    for (const candidate of newlyReady) {
+      if (candidate.task.dependencyState !== "ready") {
+        await store.putTask({
+          ...candidate.task,
+          dependencyState: "ready",
+          updatedAt: nowIso,
+          lastActivityAt: nowIso,
+        });
+      }
+
+      if (!deliveryNotifiedKeys.has(candidate.wakeKey)) {
+        deliveryNotifiedKeys.add(candidate.wakeKey);
+        const prereqSummary = candidate.satisfiedPrerequisites
+          .map((item) => (item.prUrl ? `「${item.title}」(${item.prUrl})` : `「${item.title}」`))
+          .join("、");
+        supervisor.enqueueSignal({
+          kind: "todo_ready",
+          urgency: "normal",
+          taskId: candidate.task.id,
+          agentId: null,
+          serverId: candidate.task.serverId ?? deps.serverId,
+          conversationId: candidate.task.conversationId ?? null,
+          title: candidate.task.title,
+          summary: candidate.task.autoStartOnReady
+            ? `前置任务 ${prereqSummary} 已满足，下游任务已自动拉起执行`
+            : `前置任务 ${prereqSummary} 已满足，下游任务已解锁就绪，可一键启动`,
+          fingerprintSeed: candidate.wakeKey,
+          quiet: candidate.task.quiet !== false,
+        });
+      }
+
+      if (candidate.task.autoStartOnReady) {
+        try {
+          await startReadyTaskInternal(candidate.task.id);
+        } catch (error) {
+          logger.warn(
+            { err: error, taskId: candidate.task.id },
+            "Failed to auto-start ready downstream task",
+          );
+        }
+      }
+    }
+
+    const closeout = checkParentCloseoutCandidate({
+      allTasks: store.listTasks({ includeCompleted: true }),
+      completedChild: changedTask,
+    });
+    if (closeout && !deliveryNotifiedKeys.has(closeout.wakeKey)) {
+      deliveryNotifiedKeys.add(closeout.wakeKey);
+      const childSummary = closeout.children.map((child) => `「${child.title}」`).join("、");
+      supervisor.enqueueSignal({
+        kind: "parent_closeout",
+        urgency: "normal",
+        taskId: closeout.parent.id,
+        agentId: closeout.parent.activeAgentId,
+        serverId: closeout.parent.serverId ?? deps.serverId,
+        conversationId: closeout.parent.conversationId ?? null,
+        title: closeout.parent.title,
+        summary: `父任务下全部 ${closeout.children.length} 个子片（${childSummary}）均已验收完成，请核验整体目标并完成父任务收尾`,
+        fingerprintSeed: closeout.wakeKey,
+        quiet: closeout.parent.quiet !== false,
+      });
+    }
+  }
+
   async function spawnSinglePlannedTask(input: {
     plan: MainChatPlanRecord;
     task: MainChatPlannedTask;
@@ -2018,6 +2589,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     nowIso: string;
   }): Promise<MainChatPlannedTask> {
     const { plan, task, mainAgent, nowIso } = input;
+    await lessonsStore.load();
     const continuedTask = task.continuesTaskId ? store.getTask(task.continuesTaskId) : null;
     let stoppedPreviousAgent = false;
     try {
@@ -2036,6 +2608,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         task,
         continuedTask,
         previousAgentId,
+        projectContext: await resolveProjectLessonContext({
+          cwd: task.cwd,
+          workspaceId: task.workspaceId,
+          workspaceLabel: task.workspaceLabel,
+        }),
       });
       const dispatched = await dispatchPreparedPlannedTask({
         plan,
@@ -2096,6 +2673,74 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
   }
 
+  function collectParentIdsInPlan(tasks: readonly MainChatPlannedTask[]): Set<string> {
+    const batchTaskIds = new Set(tasks.map((item) => item.taskRecordId ?? item.id));
+    const parentIds = new Set<string>();
+    for (const item of tasks) {
+      if (item.partOf && batchTaskIds.has(item.partOf)) {
+        parentIds.add(item.partOf);
+      }
+    }
+    return parentIds;
+  }
+
+  function buildPlanTasksLookupMap(
+    plan: MainChatPlanRecord,
+    nowIso: string,
+  ): Map<string, MainChatTaskRecord> {
+    const tasksById = new Map(
+      store.listTasks({ includeCompleted: true }).map((entry) => [entry.id, entry]),
+    );
+    for (const item of plan.tasks) {
+      const recordId = item.taskRecordId ?? item.id;
+      if (tasksById.has(recordId)) continue;
+      tasksById.set(
+        recordId,
+        createTaskRecordFromPlannedTask({
+          id: recordId,
+          mainAgentId: plan.mainAgentId,
+          conversationId: plan.conversationId ?? null,
+          planId: plan.id,
+          plannedTask: item,
+          agentId: item.agentId,
+          cwd: item.cwd,
+          workspaceId: item.workspaceId,
+          serverId: item.serverId ?? deps.serverId,
+          hostLabel: item.hostLabel ?? null,
+          nowIso,
+        }),
+      );
+    }
+    return tasksById;
+  }
+
+  async function ensureDeferredPlanTaskRecord(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    resolvedId: string;
+    depState: MainChatTaskRecord["dependencyState"];
+    tasksById: Map<string, MainChatTaskRecord>;
+    nowIso: string;
+  }): Promise<void> {
+    if (store.getTask(input.resolvedId)) return;
+    const pendingRecord = createTaskRecordFromPlannedTask({
+      id: input.resolvedId,
+      mainAgentId: input.plan.mainAgentId,
+      conversationId: input.plan.conversationId ?? null,
+      planId: input.plan.id,
+      plannedTask: input.task,
+      agentId: null,
+      cwd: input.task.cwd,
+      workspaceId: input.task.workspaceId,
+      serverId: input.task.serverId ?? deps.serverId,
+      hostLabel: input.task.hostLabel ?? null,
+      dependencyState: input.depState,
+      nowIso: input.nowIso,
+    });
+    await store.putTask(pendingRecord);
+    input.tasksById.set(pendingRecord.id, pendingRecord);
+  }
+
   async function spawnTasksForPlan(
     plan: MainChatPlanRecord,
     selectedTaskIds?: ReadonlySet<string>,
@@ -2103,13 +2748,40 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     const mainAgent = await resolveMainAgentSnapshot(plan.mainAgentId);
     const updatedTasks: MainChatPlannedTask[] = [];
     const nowIso = new Date(getNowMs()).toISOString();
+    const parentIdsInPlan = collectParentIdsInPlan(plan.tasks);
+    const tasksById = buildPlanTasksLookupMap(plan, nowIso);
 
     for (const task of plan.tasks) {
       if (task.agentId || (selectedTaskIds && !selectedTaskIds.has(task.id))) {
         updatedTasks.push(task);
         continue;
       }
-      updatedTasks.push(await spawnSinglePlannedTask({ plan, task, mainAgent, nowIso }));
+
+      const resolvedId = task.taskRecordId ?? task.id;
+      const depState = computeTaskDependencyState({ after: task.after ?? [] }, tasksById);
+      const isParentContainer =
+        parentIdsInPlan.has(resolvedId) &&
+        !(selectedTaskIds && selectedTaskIds.size === 1 && selectedTaskIds.has(task.id));
+
+      if (depState === "blocked" || isParentContainer) {
+        await ensureDeferredPlanTaskRecord({
+          plan,
+          task,
+          resolvedId,
+          depState,
+          tasksById,
+          nowIso,
+        });
+        updatedTasks.push({ ...task, taskRecordId: resolvedId });
+        continue;
+      }
+
+      const spawned = await spawnSinglePlannedTask({ plan, task, mainAgent, nowIso });
+      const persisted = spawned.taskRecordId ? store.getTask(spawned.taskRecordId) : null;
+      if (persisted) {
+        tasksById.set(persisted.id, persisted);
+      }
+      updatedTasks.push(spawned);
     }
 
     const updatedPlan: MainChatPlanRecord = {
@@ -2122,10 +2794,161 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return updatedPlan;
   }
 
+  async function resolveLatestDeliveryGateForReview(
+    existing: MainChatTaskRecord,
+    input: { summary?: string | null; note?: string | null },
+    nowIso: string,
+  ): Promise<MainChatTaskDeliveryGate | null> {
+    let latestGate = existing.deliveryGate ?? null;
+    const resolvedReviewCwd = await resolveWorkspaceCwdForTask({
+      cwd: existing.cwd,
+      workspaceId: existing.workspaceId,
+    });
+    if (resolvedReviewCwd && deps.workspaceGitService) {
+      const snapshot = await deps.workspaceGitService
+        .getSnapshot(resolvedReviewCwd)
+        .catch(() => null);
+      if (snapshot && matchTasksForGitSnapshot([existing], snapshot).length > 0) {
+        const fromSnapshot = buildDeliveryGateFromGitSnapshot({
+          snapshot,
+          existing: latestGate,
+          nowIso,
+        });
+        if (fromSnapshot) {
+          latestGate = fromSnapshot;
+        }
+      }
+    }
+    if (!latestGate) {
+      const discoveredPr = extractPrUrlFromText(input.summary) ?? extractPrUrlFromText(input.note);
+      if (discoveredPr) {
+        latestGate = buildDeliveryGateFromDiscoveredPrUrl({
+          prUrl: discoveredPr.prUrl,
+          prNumber: discoveredPr.prNumber,
+          existing: null,
+          nowIso,
+        });
+      }
+    }
+    return latestGate;
+  }
+
+  async function enforceAcceptanceDeliveryGate(
+    existing: MainChatTaskRecord,
+    latestGate: MainChatTaskDeliveryGate | null,
+    input: { bypassDeliveryGate?: boolean; bypassReason?: string | null },
+    nowIso: string,
+  ): Promise<{ gate: MainChatTaskDeliveryGate | null; warning: string | null }> {
+    const deliveryPolicy = resolveMainChatDeliveryGatePolicy(store.getSettings());
+    const gateEval = evaluateTaskDeliveryGateForAcceptance({
+      task: existing,
+      policy: deliveryPolicy,
+      gate: latestGate,
+    });
+    if (!gateEval?.blocksAcceptance) {
+      return { gate: gateEval?.gate ?? latestGate, warning: gateEval?.warning ?? null };
+    }
+
+    if (!isSameDeliveryGate(existing.deliveryGate, gateEval.gate)) {
+      await applyTaskDeliveryGate(existing, gateEval.gate, nowIso);
+    }
+    if (!input.bypassDeliveryGate) {
+      throw new DeliveryGateBlockedError(
+        existing.id,
+        gateEval.gate,
+        `${gateEval.warning}。请先处理 PR 阻塞项后再验收；若经人工确认确需放行，请显式传入 bypassDeliveryGate=true 并说明 bypassReason。`,
+      );
+    }
+    const bypassReason = trimOptional(input.bypassReason);
+    if (!bypassReason) {
+      throw new Error("绕过交付门禁（bypassDeliveryGate）时必须提供 bypassReason 说明原因");
+    }
+    return {
+      gate: gateEval.gate,
+      warning: `${gateEval.warning}（已人工豁免：${bypassReason}）`,
+    };
+  }
+
+  async function distillAcceptanceLessonsSafe(
+    completedTask: MainChatTaskRecord,
+    input: { checks?: MainChatReceiptCheck[]; note?: string | null },
+    receipt: MainChatTaskReceipt,
+  ): Promise<void> {
+    if (!isMainChatTaskLessonsEnabled(store.getSettings())) return;
+    try {
+      await lessonsStore.recordFromTaskFriction({
+        task: completedTask,
+        trigger: "accept",
+        checks: input.checks,
+        nextSteps: receipt.nextSteps,
+        note: trimOptional(input.note),
+        summary: receipt.summary,
+        projectContext: await resolveProjectLessonContext({
+          cwd: completedTask.cwd,
+          workspaceId: completedTask.workspaceId,
+          workspaceLabel: completedTask.workspaceLabel,
+        }),
+      });
+    } catch (error) {
+      logger.warn({ err: error, taskId: completedTask.id }, "Failed to distill acceptance lessons");
+    }
+  }
+
+  function mergeDeliveryGatePatch(
+    prev: MainChatTaskDeliveryGate | null | undefined,
+    gatePatch: Partial<MainChatTaskDeliveryGate>,
+    nowIso: string,
+  ): MainChatTaskDeliveryGate {
+    const pick = <K extends keyof MainChatTaskDeliveryGate>(
+      key: K,
+      fallback: MainChatTaskDeliveryGate[K],
+    ): MainChatTaskDeliveryGate[K] => {
+      if (gatePatch[key] !== undefined) return gatePatch[key] as MainChatTaskDeliveryGate[K];
+      if (prev && prev[key] !== undefined) return prev[key];
+      return fallback;
+    };
+
+    const prUrl = pick("prUrl", null);
+    const prState = pick("prState", prUrl ? "open" : null);
+    const isDraft = pick("isDraft", false);
+    const hasConflict = pick("hasConflict", false);
+    const ciStatus = pick("ciStatus", "unknown");
+    const ciSummary = pick("ciSummary", null);
+    const reviewDecision = pick("reviewDecision", null);
+    const computed = computeDeliveryGateStatusAndBlockers({
+      prUrl,
+      prState,
+      isDraft,
+      hasConflict,
+      ciStatus,
+      ciSummary,
+      reviewDecision,
+    });
+
+    return {
+      prUrl,
+      prNumber: pick("prNumber", null),
+      branch: pick("branch", null),
+      prState,
+      isDraft,
+      hasConflict,
+      ciStatus,
+      ciSummary,
+      reviewDecision,
+      headOid: pick("headOid", null),
+      gateStatus: computed.gateStatus,
+      blockingReasons: computed.blockingReasons,
+      followUpActive: gatePatch.followUpActive ?? prState === "open",
+      lastCheckedAt: nowIso,
+      mergedAt: prState === "merged" ? (gatePatch.mergedAt ?? prev?.mergedAt ?? nowIso) : null,
+    };
+  }
+
   async function syncTaskRecordCompleted(
     task: MainChatTaskRecord,
     receipt: MainChatTaskReceipt,
     nowIso: string,
+    deliveryGateOverride?: MainChatTaskDeliveryGate | null,
   ): Promise<MainChatTaskRecord> {
     const startIso = resolveTaskStartIso(task);
     const { actualMinutes, sampleMinutes } = computeTaskDurationMinutes(startIso, nowIso);
@@ -2149,6 +2972,20 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       completedAt: nowIso,
     });
 
+    let effectiveGate =
+      deliveryGateOverride !== undefined ? deliveryGateOverride : task.deliveryGate;
+    if (!effectiveGate) {
+      const extractedPr = extractPrUrlFromText(receipt.summary);
+      if (extractedPr) {
+        effectiveGate = buildDeliveryGateFromDiscoveredPrUrl({
+          prUrl: extractedPr.prUrl,
+          prNumber: extractedPr.prNumber,
+          existing: null,
+          nowIso,
+        });
+      }
+    }
+
     const completedTask: MainChatTaskRecord = {
       ...task,
       status: "completed",
@@ -2157,10 +2994,12 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       parkedAt: null,
       parkedReason: null,
       latestReceipt: receipt,
+      deliveryGate: effectiveGate ?? null,
       updatedAt: nowIso,
       lastActivityAt: nowIso,
     };
     await store.putTask(completedTask);
+    await evaluateDagProgressAfterTaskChange(completedTask, nowIso);
     return completedTask;
   }
 
@@ -2257,6 +3096,25 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         lastActivityAt: nowIso,
       };
       await store.putTask(updatedTask);
+    }
+
+    const lessonTarget = updatedTask ?? input.taskRecord;
+    if (lessonTarget && isMainChatTaskLessonsEnabled(store.getSettings())) {
+      try {
+        await lessonsStore.recordFromTaskFriction({
+          task: lessonTarget,
+          trigger: "rework",
+          gaps: input.gaps,
+          note: input.note,
+          projectContext: await resolveProjectLessonContext({
+            cwd: lessonTarget.cwd,
+            workspaceId: lessonTarget.workspaceId,
+            workspaceLabel: lessonTarget.workspaceLabel,
+          }),
+        });
+      } catch (error) {
+        logger.warn({ err: error, taskId: lessonTarget.id }, "Failed to distill rework lessons");
+      }
     }
 
     const rework: MainChatReworkRecord = {
@@ -3606,6 +4464,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         },
       });
     }
+    if (!unsubscribeGitSnapshots && deps.workspaceGitService) {
+      unsubscribeGitSnapshots = deps.workspaceGitService.onSnapshotUpdated((snapshot) => {
+        void handleWorkspaceGitSnapshotInternal(snapshot).catch((error) => {
+          logger.warn({ err: error }, "Failed to handle workspace git snapshot for delivery gate");
+        });
+      });
+    }
     turnQueue.start();
     supervisor.start();
     cacheKeepalive.start();
@@ -3626,6 +4491,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       clearInterval(idlePrecompactTimer);
       idlePrecompactTimer = null;
     }
+    unsubscribeGitSnapshots?.unsubscribe();
+    unsubscribeGitSnapshots = null;
     unsubscribeFleetEvents?.();
     unsubscribeFleetEvents = null;
     fleetAggregator.stop();
@@ -3670,6 +4537,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     async start() {
       serviceStarted = true;
       await store.load();
+      await lessonsStore.load();
       await conversationManager.load();
       await maybeMigrateLegacyDefaultOptIn();
       syncRuntimeEnabledState();
@@ -3928,6 +4796,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         }
       }
 
+      const validatedPlannedTasks = resolvePlanBatchDagLinks(plannedTasks);
+
       const plan: MainChatPlanRecord = {
         id: makeId("plan"),
         mainAgentId,
@@ -3940,7 +4810,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         cancelledAt: null,
         withdrawnAt: null,
         withdrawReason: null,
-        tasks: plannedTasks,
+        tasks: validatedPlannedTasks,
       };
       await store.putPlan(plan);
       await store.incrementMetric("plansCreated");
@@ -4149,6 +5019,23 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         });
       }
 
+      const escalatedFromTitle = trimOptional(input.escalatedFromTitle);
+      if (escalatedFromTitle) {
+        supervisor.enqueueSignal({
+          kind: "escalated",
+          urgency: "urgent",
+          taskId: linkedTask?.id ?? decision.taskId,
+          agentId: decision.agentId,
+          serverId: linkedTask?.serverId ?? deps.serverId,
+          conversationId: null,
+          title: decision.title,
+          summary: `方向主管「${escalatedFromTitle}」已升级待拍板项「${decision.title}」：${decision.question.slice(0, 120)}`,
+          fingerprintSeed: `escalated:${decision.id}`,
+          quiet: false,
+          escalatedToUser: true,
+        });
+      }
+
       contextSnapshots.invalidateCache();
       return decision;
     },
@@ -4175,7 +5062,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         answeredAt: nowIso,
       };
       await store.putDecision(updated);
-      await recordTaskDecisionEntry(
+      const linkedTask = await recordTaskDecisionEntry(
         {
           id: updated.id,
           taskId: updated.taskId,
@@ -4206,11 +5093,25 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         unarchive: false,
       });
 
+      supervisor.enqueueSignal({
+        kind: "decision_reply",
+        urgency: "urgent",
+        taskId: linkedTask?.id ?? updated.taskId,
+        agentId: updated.agentId,
+        serverId: linkedTask?.serverId ?? deps.serverId,
+        conversationId: linkedTask?.conversationId ?? null,
+        title: updated.title,
+        summary: `用户已回复拍板「${updated.title}」：${(updated.answer ?? input.answer).slice(0, 120)}`,
+        fingerprintSeed: `decision_reply:${updated.id}`,
+        quiet: false,
+      });
+
       return updated;
     },
 
     async getOverview(mainAgentId) {
       await store.load();
+      await lessonsStore.load();
       const resolvedMainAgentId =
         mainAgentId?.trim() || (await findExistingMainChat())?.agentId || undefined;
       const activityListing = store.listActivities({
@@ -4287,6 +5188,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           includeResolved: true,
         }),
         recentLimitFallbacks: store.listLimitFallbackEvents(12),
+        projectLessonGroups: lessonsStore.listGroups(),
       };
     },
 
@@ -4546,6 +5448,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
       const nowIso = new Date(getNowMs()).toISOString();
       if (input.verdict === "accept") {
+        const latestGate = await resolveLatestDeliveryGateForReview(existing, input, nowIso);
+        const gateOutcome = await enforceAcceptanceDeliveryGate(
+          existing,
+          latestGate,
+          input,
+          nowIso,
+        );
+
         const receipt: MainChatTaskReceipt = {
           title: existing.title,
           summary: trimOptional(input.summary) ?? `任务「${existing.title}」已通过验收`,
@@ -4557,12 +5467,19 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         };
         await store.addReceipt(receipt, existing.mainAgentId);
         await store.incrementMetric("receiptsRecorded");
-        const completedTask = await syncTaskRecordCompleted(existing, receipt, nowIso);
+        const completedTask = await syncTaskRecordCompleted(
+          existing,
+          receipt,
+          nowIso,
+          gateOutcome.gate,
+        );
+        await distillAcceptanceLessonsSafe(completedTask, input, receipt);
         contextSnapshots.invalidateCache();
         return {
           task: completedTask,
           receipt,
           rework: null,
+          deliveryGateWarning: gateOutcome.warning,
         };
       }
 
@@ -4589,6 +5506,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         task: reworkedTask ?? existing,
         receipt: null,
         rework,
+        deliveryGateWarning: null,
       };
     },
 
@@ -4607,6 +5525,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return { delivered: false, notice: "主对话尚未初始化，进度回报已跳过" };
       }
       const message = formatLeaderProgressMessage(input);
+      supervisor.enqueueSignal({
+        kind: "report",
+        urgency: input.blockedItems.length > 0 ? "urgent" : "normal",
+        taskId: null,
+        agentId: input.leaderAgentId,
+        serverId: deps.serverId,
+        conversationId: null,
+        title: input.conversationTitle,
+        summary: `方向「${input.conversationTitle}」进度汇报：${input.summary.slice(0, 120)}`,
+        fingerprintSeed: `leader_report:${input.conversationId}:${input.reportedAt}`,
+        quiet: input.blockedItems.length === 0,
+      });
       const result = await turnQueue.enqueueBackground({
         mainAgentId: existingMain.agentId,
         dedupeKey: `leader-progress:${input.conversationId}`,
@@ -5084,6 +6014,92 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         return { switched: false, reason: "agent_missing" };
       }
       return limitFallbackController.handleTurnLimitError(live, errorMessage);
+    },
+
+    async listLessons(options) {
+      await lessonsStore.load();
+      const projectKey = options?.projectKey?.trim() || undefined;
+      return {
+        groups: lessonsStore.listGroups({ projectKey }),
+        lessons: lessonsStore.listLessons({ projectKey }),
+      };
+    },
+
+    async addLesson(input) {
+      await lessonsStore.load();
+      const result = await lessonsStore.addLesson(input);
+      contextSnapshots.invalidateCache();
+      return result;
+    },
+
+    async deleteLesson(lessonId) {
+      await lessonsStore.load();
+      const result = await lessonsStore.deleteLesson(lessonId);
+      if (result.deleted) {
+        contextSnapshots.invalidateCache();
+      }
+      return { deleted: result.deleted };
+    },
+
+    async startReadyTask(taskId) {
+      return startReadyTaskInternal(taskId);
+    },
+
+    async updateTaskDependencies(input) {
+      await store.load();
+      const existing = resolveTaskRecordByRef({ taskId: input.taskId });
+      if (!existing) {
+        throw new Error(`找不到要更新依赖的任务：${input.taskId}`);
+      }
+      if (existing.status === "completed" || existing.status === "cancelled") {
+        throw new Error(`任务「${existing.title}」已结束（${existing.status}），无法修改依赖关系`);
+      }
+
+      const allTasks = store.listTasks({ includeCompleted: true });
+      const normalized = validateTaskDagBatch(allTasks, [
+        {
+          id: existing.id,
+          partOf: input.partOf !== undefined ? input.partOf : existing.partOf,
+          after: input.after !== undefined ? input.after : existing.after,
+        },
+      ]);
+      const links = normalized.get(existing.id)!;
+      const nowIso = new Date(getNowMs()).toISOString();
+      const tasksById = new Map(allTasks.map((entry) => [entry.id, entry]));
+      const nextDepState = computeTaskDependencyState({ after: links.after }, tasksById);
+
+      const updated: MainChatTaskRecord = {
+        ...existing,
+        partOf: links.partOf,
+        after: links.after,
+        dependencyState: nextDepState,
+        autoStartOnReady:
+          input.autoStartOnReady !== undefined
+            ? input.autoStartOnReady
+            : (existing.autoStartOnReady ?? false),
+        updatedAt: nowIso,
+        lastActivityAt: nowIso,
+      };
+      await store.putTask(updated);
+      contextSnapshots.invalidateCache();
+      return updated;
+    },
+
+    async syncTaskDeliveryGate(taskId, gatePatch) {
+      await store.load();
+      const existing = resolveTaskRecordByRef({ taskId });
+      if (!existing) {
+        throw new Error(`找不到对应的任务：${taskId}`);
+      }
+      const nowIso = new Date(getNowMs()).toISOString();
+      const nextGate = mergeDeliveryGatePatch(existing.deliveryGate, gatePatch, nowIso);
+      const { task } = await applyTaskDeliveryGate(existing, nextGate, nowIso);
+      contextSnapshots.invalidateCache();
+      return task;
+    },
+
+    async handleWorkspaceGitSnapshot(snapshot) {
+      return handleWorkspaceGitSnapshotInternal(snapshot);
     },
   };
 }

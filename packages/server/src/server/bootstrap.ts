@@ -1650,6 +1650,7 @@ export async function createPaseoDaemon(
     finishSubscriptions: () => finishSubscriptions,
     terminalManager,
     scheduleService,
+    workspaceGitService,
     logger,
   });
   scheduleService.setAgentScheduleExecutor((schedule, runId) =>

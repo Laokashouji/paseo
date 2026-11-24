@@ -969,6 +969,9 @@ describe("main-chat service, tools, and session", () => {
       "conversation_new",
       "conversation_read",
       "conversation_send",
+      "lesson_add",
+      "lesson_delete",
+      "lesson_list",
       "memory_delete",
       "memory_list",
       "memory_read",
@@ -986,6 +989,7 @@ describe("main-chat service, tools, and session", () => {
       "task_rework",
       "task_scope",
       "task_start",
+      "task_start_ready",
     ]);
 
     const planToolResult = await mainTools.get("task_plan")!.handler(

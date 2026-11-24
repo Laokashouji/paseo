@@ -147,7 +147,12 @@ ${manualSessionPolicy}${customGuidanceSection}
 
 ## 自助修改配置（审批卡受控）
 - 当用户希望调整主对话配置（例如压缩窗口封顶、空闲预压缩阈值、Prompt Cache 保活、夜间节能、巡检周期、限额备用模型顺序 \`limitFallbacks\` 或个人档案等）时，调用 \`settings_propose_patch\` 生成原生「配置变更审批卡」，清晰展示变更前后的对比并等待用户点击「确认应用」或「拒绝」。
-- \`settings_propose_patch\` 严格受白名单约束且**绝不静默落盘**；在用户点击确认前，请勿声称配置已经生效。${
+- \`settings_propose_patch\` 严格受白名单约束且**绝不静默落盘**；在用户点击确认前，请勿声称配置已经生效。
+
+## 项目复盘教训、交付门禁与任务拆片 DAG
+- **项目复盘教训（\`lesson_list\` / \`lesson_add\` / \`lesson_delete\`）**：任务经返工或带纠偏建议验收后会自动提炼 1–3 条避坑教训沉淀到对应项目；派发同仓库子 Agent 时会自动注入「项目历史教训」。必要时可调用工具主动查看、增补或清理过期教训。
+- **PR/MR 交付门禁与结项跟进**：验收涉及 PR/MR 的任务时，若 PR 仍为草稿、存在合并冲突或 CI 失败，\`task_review\` 门禁会拦截过早验收；已提 PR 但尚未合并的验收会自动开启持续跟进直至合并推送 \`pr_merged\`。**严禁自动合并 PR 或强推分支**。
+- **父子拆片与 DAG 依赖**：\`task_plan\` 支持为子任务设置 \`refId\`、\`partOf\`（父任务 ID）与 \`after\`（前置依赖列表），系统严格拒绝自依赖与循环依赖；未满足前置依赖的任务会先进入阻塞状态而不提前拉起，上游验收通过后会自动解锁下游并推送 \`todo_ready\`（可用 \`task_start_ready\` 一键启动），父任务下全部子片验收完成后会自动推送 \`parent_closeout\` 提醒父任务收尾。${
     memoryContext?.trim() ? `\n\n${memoryContext.trim()}` : ""
   }`;
 }
@@ -269,6 +274,7 @@ export interface BuildWorkerInitialPromptOptions {
     title?: string | null;
     notes?: string | null;
   } | null;
+  projectLessonsBlock?: string | null;
   continuesFrom?: {
     taskId: string;
     reason?: string | null;
@@ -293,6 +299,39 @@ function formatContinuationContextLines(
 function formatBulletSectionLines(heading: string, items: readonly string[]): string[] {
   if (items.length === 0) return [];
   return ["", heading, ...items.map((entry) => `- ${entry}`)];
+}
+
+function formatWorkerOptionalContextSections(
+  options: BuildWorkerInitialPromptOptions | undefined,
+): string[] {
+  const lines: string[] = [];
+
+  const decisionsSection = formatTaskDecisionsPromptSection(options?.decisions);
+  if (decisionsSection) {
+    lines.push("", decisionsSection);
+  }
+
+  const directionNotes = options?.directionNotes;
+  if (directionNotes?.notes?.trim()) {
+    const assembledNotes = assembleMainChatMemoryContext({
+      directionTitle: directionNotes.title,
+      directionNotes: directionNotes.notes,
+      budget: {
+        totalMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+        directionNotesMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
+      },
+    });
+    if (assembledNotes.text) {
+      lines.push("", assembledNotes.text);
+    }
+  }
+
+  const trimmedLessons = options?.projectLessonsBlock?.trim();
+  if (trimmedLessons) {
+    lines.push("", trimmedLessons);
+  }
+
+  return lines;
 }
 
 export function buildWorkerInitialPrompt(
@@ -328,24 +367,7 @@ export function buildWorkerInitialPrompt(
     lines.push("", "## 边界约束", "- 严格只读，不要修改仓库文件、不要提交或推送。");
   }
 
-  const decisionsSection = formatTaskDecisionsPromptSection(options?.decisions);
-  if (decisionsSection) {
-    lines.push("", decisionsSection);
-  }
-
-  if (options?.directionNotes?.notes?.trim()) {
-    const assembledNotes = assembleMainChatMemoryContext({
-      directionTitle: options.directionNotes.title,
-      directionNotes: options.directionNotes.notes,
-      budget: {
-        totalMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
-        directionNotesMaxBytes: MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
-      },
-    });
-    if (assembledNotes.text) {
-      lines.push("", assembledNotes.text);
-    }
-  }
+  lines.push(...formatWorkerOptionalContextSections(options));
 
   lines.push(
     "",

@@ -17,13 +17,16 @@ import {
   formatMainChatModelSpec,
   isMainChatAutoCompactEnabled,
   isMainChatBackgroundFolded,
+  isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   normalizeMainChatLimitFallbacks,
   resolveMainChatCacheKeepaliveConfig,
   resolveMainChatCompactionConfig,
+  resolveMainChatDeliveryGatePolicy,
   resolveMainChatLimitFallbacks,
   resolveMainChatNightMode,
   resolveMainChatProfile,
+  type MainChatDeliveryGatePolicy,
   type MainChatLimitFallbackEntry,
   type MainChatProposableSettingKey,
   type MainChatSettings,
@@ -322,6 +325,38 @@ const SETTING_KEY_HANDLERS: Record<MainChatProposableSettingKey, SettingKeyHandl
       patch.mainTasksQuiet = next;
     },
   }),
+  taskLessonsEnabled: buildBoolHandler({
+    key: "taskLessonsEnabled",
+    label: "项目复盘教训自动沉淀与注入",
+    readCurrent: (current) => isMainChatTaskLessonsEnabled(current),
+    assign: (patch, next) => {
+      patch.taskLessonsEnabled = next;
+    },
+  }),
+  deliveryGatePolicy: (rawValue, current) => {
+    if (rawValue !== "off" && rawValue !== "merged" && rawValue !== "live") {
+      throw new Error('配置项 "deliveryGatePolicy" 必须是 "off"、"merged" 或 "live"');
+    }
+    const next: MainChatDeliveryGatePolicy = rawValue;
+    const before = resolveMainChatDeliveryGatePolicy(current);
+    if (next === before) return NOOP_ENTRY;
+    const formatPolicy = (policy: MainChatDeliveryGatePolicy) => {
+      if (policy === "off") return "关闭（off）";
+      if (policy === "live") return "合并且上线实测（live）";
+      return "PR 门禁与合并跟进（merged）";
+    };
+    return {
+      change: {
+        key: "deliveryGatePolicy",
+        label: "PR/MR 交付门禁策略",
+        beforeDisplay: formatPolicy(before),
+        afterDisplay: formatPolicy(next),
+      },
+      assign: (patch) => {
+        patch.deliveryGatePolicy = next;
+      },
+    };
+  },
   "compaction.windowCapTokens": (rawValue, current) => {
     const compaction = resolveMainChatCompactionConfig(current);
     const next =

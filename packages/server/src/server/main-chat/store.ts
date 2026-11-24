@@ -33,12 +33,14 @@ import {
   isMainChatAutoCompactEnabled,
   isMainChatBackgroundFolded,
   isMainChatEnabled,
+  isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   mergeMainChatSettings,
   resolveActiveMainChatStylePresetId,
   resolveMainChatCacheKeepaliveConfig,
   resolveMainChatCompactionConfig,
   resolveMainChatCustomPresets,
+  resolveMainChatDeliveryGatePolicy,
   resolveMainChatLimitFallbacks,
   resolveMainChatNightMode,
   resolveMainChatProfile,
@@ -164,6 +166,7 @@ const PersistedMainChatStateSchema = z.object({
   tokenUsage: PersistedMainChatTokenUsageSchema.optional(),
   settingsProposals: z.record(z.string(), MainChatSettingsProposalRecordSchema).optional(),
   limitFallbackEvents: z.array(MainChatLimitFallbackEventSchema).optional(),
+  dagWakeMarkers: z.record(z.string(), z.string()).optional(),
 });
 
 interface MainChatStateFile {
@@ -194,6 +197,7 @@ interface MainChatStateFile {
   tokenUsage: PersistedMainChatTokenUsage;
   settingsProposals: Record<string, MainChatSettingsProposalRecord>;
   limitFallbackEvents: MainChatLimitFallbackEvent[];
+  dagWakeMarkers: Record<string, string>;
 }
 
 export const MAX_RETAINED_ACTIVITIES = 200;
@@ -408,6 +412,7 @@ function emptyState(): MainChatStateFile {
     tokenUsage: emptyPersistedTokenUsage(),
     settingsProposals: {},
     limitFallbackEvents: [],
+    dagWakeMarkers: {},
   };
 }
 
@@ -632,6 +637,9 @@ export interface MainChatStore {
   ): Promise<MainChatSettingsProposalRecord>;
   appendLimitFallbackEvent(event: MainChatLimitFallbackEvent): Promise<MainChatLimitFallbackEvent>;
   listLimitFallbackEvents(limit?: number): MainChatLimitFallbackEvent[];
+  hasDagWakeMarker(key: string): boolean;
+  recordDagWakeMarker(key: string, atIso?: string): Promise<boolean>;
+  clearDagWakeMarkersByPrefix(prefix: string): Promise<number>;
 }
 
 function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
@@ -822,6 +830,8 @@ function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
     limitFallbacks: resolveMainChatLimitFallbacks(raw),
     mainBackgroundFolded: isMainChatBackgroundFolded(raw),
     mainTasksQuiet: isMainChatTasksQuiet(raw),
+    taskLessonsEnabled: isMainChatTaskLessonsEnabled(raw),
+    deliveryGatePolicy: resolveMainChatDeliveryGatePolicy(raw),
     profile: resolveMainChatProfile(raw),
     activePresetId,
     customPresets,
@@ -878,6 +888,7 @@ function hydratePersistedState(
     limitFallbackEvents: (data.limitFallbackEvents ?? []).slice(
       -MAX_RETAINED_LIMIT_FALLBACK_EVENTS,
     ),
+    dagWakeMarkers: { ...data.dagWakeMarkers },
   };
 }
 
@@ -1786,6 +1797,40 @@ export function createMainChatStore(
         cloned.push({ ...entry });
       }
       return cloned;
+    },
+
+    hasDagWakeMarker(key) {
+      return Boolean(state.dagWakeMarkers[key]);
+    },
+
+    async recordDagWakeMarker(key, atIso) {
+      if (state.dagWakeMarkers[key]) return false;
+      state.dagWakeMarkers[key] = atIso ?? new Date(getNowMs()).toISOString();
+      const keys = Object.keys(state.dagWakeMarkers);
+      if (keys.length > 500) {
+        const sorted = keys.sort((left, right) =>
+          (state.dagWakeMarkers[right] ?? "").localeCompare(state.dagWakeMarkers[left] ?? ""),
+        );
+        for (const staleKey of sorted.slice(500)) {
+          delete state.dagWakeMarkers[staleKey];
+        }
+      }
+      await persist();
+      return true;
+    },
+
+    async clearDagWakeMarkersByPrefix(prefix) {
+      let removed = 0;
+      for (const key of Object.keys(state.dagWakeMarkers)) {
+        if (key.startsWith(prefix)) {
+          delete state.dagWakeMarkers[key];
+          removed += 1;
+        }
+      }
+      if (removed > 0) {
+        await persist();
+      }
+      return removed;
     },
   };
 }

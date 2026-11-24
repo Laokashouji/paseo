@@ -47,6 +47,11 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.routines_delete.request" }
   | { type: "main_chat.list_settings_proposals.request" }
   | { type: "main_chat.resolve_settings_proposal.request" }
+  | { type: "main_chat.lessons_list.request" }
+  | { type: "main_chat.lessons_add.request" }
+  | { type: "main_chat.lessons_delete.request" }
+  | { type: "main_chat.start_ready_task.request" }
+  | { type: "main_chat.update_task_dependencies.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -96,6 +101,11 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.routines_delete.request",
   "main_chat.list_settings_proposals.request",
   "main_chat.resolve_settings_proposal.request",
+  "main_chat.lessons_list.request",
+  "main_chat.lessons_add.request",
+  "main_chat.lessons_delete.request",
+  "main_chat.start_ready_task.request",
+  "main_chat.update_task_dependencies.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -328,6 +338,26 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
   "main_chat.resolve_settings_proposal.request": (msg, error) => ({
     type: "main_chat.resolve_settings_proposal.response",
     payload: { requestId: msg.requestId, proposal: null, settings: null, error },
+  }),
+  "main_chat.lessons_list.request": (msg, error) => ({
+    type: "main_chat.lessons_list.response",
+    payload: { requestId: msg.requestId, groups: [], lessons: [], error },
+  }),
+  "main_chat.lessons_add.request": (msg, error) => ({
+    type: "main_chat.lessons_add.response",
+    payload: { requestId: msg.requestId, lesson: null, deduplicated: false, error },
+  }),
+  "main_chat.lessons_delete.request": (msg, error) => ({
+    type: "main_chat.lessons_delete.response",
+    payload: { requestId: msg.requestId, lessonId: msg.lessonId, deleted: false, error },
+  }),
+  "main_chat.start_ready_task.request": (msg, error) => ({
+    type: "main_chat.start_ready_task.response",
+    payload: { requestId: msg.requestId, task: null, plan: null, error },
+  }),
+  "main_chat.update_task_dependencies.request": (msg, error) => ({
+    type: "main_chat.update_task_dependencies.response",
+    payload: { requestId: msg.requestId, task: null, error },
   }),
 };
 
@@ -907,6 +937,8 @@ async function handleTaskLedgerMessages(
       checks: msg.checks,
       nextSteps: msg.nextSteps,
       note: msg.note,
+      bypassDeliveryGate: msg.bypassDeliveryGate,
+      bypassReason: msg.bypassReason,
     });
     send({
       type: "main_chat.review_task.response",
@@ -915,6 +947,7 @@ async function handleTaskLedgerMessages(
         task: result.task,
         receipt: result.receipt,
         rework: result.rework,
+        deliveryGateWarning: result.deliveryGateWarning ?? null,
         error: null,
       },
     });
@@ -1582,6 +1615,156 @@ async function handleResolveSettingsProposal(
   }
 }
 
+async function handleLessonsList(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.lessons_list.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.listLessons({ projectKey: msg.projectKey });
+    send({
+      type: "main_chat.lessons_list.response",
+      payload: {
+        requestId: msg.requestId,
+        groups: result.groups,
+        lessons: result.lessons,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.lessons_list.response",
+      payload: { requestId: msg.requestId, groups: [], lessons: [], error: errorMessage(error) },
+    });
+  }
+}
+
+async function handleLessonsAdd(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.lessons_add.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.addLesson({
+      projectKey: msg.projectKey,
+      projectLabel: msg.projectLabel,
+      kind: msg.kind,
+      text: msg.text,
+      origin: "manual",
+      taskId: msg.taskId,
+    });
+    send({
+      type: "main_chat.lessons_add.response",
+      payload: {
+        requestId: msg.requestId,
+        lesson: result.lesson,
+        deduplicated: result.deduplicated,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.lessons_add.response",
+      payload: {
+        requestId: msg.requestId,
+        lesson: null,
+        deduplicated: false,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleLessonsDelete(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.lessons_delete.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.deleteLesson(msg.lessonId);
+    send({
+      type: "main_chat.lessons_delete.response",
+      payload: {
+        requestId: msg.requestId,
+        lessonId: msg.lessonId,
+        deleted: result.deleted,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.lessons_delete.response",
+      payload: {
+        requestId: msg.requestId,
+        lessonId: msg.lessonId,
+        deleted: false,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleStartReadyTask(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.start_ready_task.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.startReadyTask(msg.taskId);
+    send({
+      type: "main_chat.start_ready_task.response",
+      payload: {
+        requestId: msg.requestId,
+        task: result.task,
+        plan: result.plan,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.start_ready_task.response",
+      payload: {
+        requestId: msg.requestId,
+        task: null,
+        plan: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleUpdateTaskDependencies(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.update_task_dependencies.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const task = await service.updateTaskDependencies({
+      taskId: msg.taskId,
+      partOf: msg.partOf,
+      after: msg.after,
+      autoStartOnReady: msg.autoStartOnReady,
+    });
+    send({
+      type: "main_chat.update_task_dependencies.response",
+      payload: {
+        requestId: msg.requestId,
+        task,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.update_task_dependencies.response",
+      payload: {
+        requestId: msg.requestId,
+        task: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -1627,6 +1810,11 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.routines_delete.request": handleRoutinesDelete,
   "main_chat.list_settings_proposals.request": handleListSettingsProposals,
   "main_chat.resolve_settings_proposal.request": handleResolveSettingsProposal,
+  "main_chat.lessons_list.request": handleLessonsList,
+  "main_chat.lessons_add.request": handleLessonsAdd,
+  "main_chat.lessons_delete.request": handleLessonsDelete,
+  "main_chat.start_ready_task.request": handleStartReadyTask,
+  "main_chat.update_task_dependencies.request": handleUpdateTaskDependencies,
 };
 
 export async function handleMainChatSessionMessage(

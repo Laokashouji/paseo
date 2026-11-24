@@ -1,12 +1,18 @@
 import { z } from "zod";
 import {
+  MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS,
+  MAIN_CHAT_LESSON_PROJECT_LABEL_MAX_CHARS,
+  MAIN_CHAT_LESSON_TEXT_MAX_CHARS,
   MAIN_CHAT_MEMORY_PATH_MAX_CHARS,
   MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS,
   MainChatDecisionOptionSchema,
   MainChatDecisionRecordSchema,
+  MainChatLessonKindSchema,
   MainChatMemoryFileContentSchema,
   MainChatMemoryFileMetaSchema,
   MainChatPlanRecordSchema,
+  MainChatProjectLessonGroupSchema,
+  MainChatProjectLessonSchema,
   MainChatReceiptCheckSchema,
   MainChatReworkRecordSchema,
   MainChatRoutineKindSchema,
@@ -97,6 +103,34 @@ const TaskPlanItemInputSchema = z.object({
     .describe(
       "静默任务标记；未显式传入时默认继承主对话全局开关 mainTasksQuiet（减少后台过程打扰，仅在需要拍板或验收时提醒）。",
     ),
+  refId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .optional()
+    .describe(
+      "同批计划内的短引用别名（例如 parent / slice-1），可供同批任务的 partOf 或 after 引用。",
+    ),
+  partOf: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe("归属的父任务 ID（或同批父任务的 refId），仅允许单层父子拆片，禁止两层嵌套。"),
+  after: z
+    .array(z.string().trim().min(1))
+    .max(16)
+    .optional()
+    .describe(
+      "前置依赖任务 ID（或同批任务的 refId）列表；未全部验收或合并前不会提前拉起子 Agent，严禁自依赖与循环依赖。",
+    ),
+  autoStartOnReady: z
+    .boolean()
+    .optional()
+    .describe(
+      "当全部 after 前置依赖满足后是否自动拉起下游子 Agent（默认 false，解锁后发出 todo_ready 提醒一键启动）。",
+    ),
 });
 
 export function registerMainChatTools(options: {
@@ -139,6 +173,7 @@ export function registerMainChatTools(options: {
         }),
         taskId: input.taskId,
         agentId: input.agentId,
+        escalatedFromTitle: input.fromConversationTitle,
       });
     },
   });
@@ -482,11 +517,25 @@ export function registerMainChatTools(options: {
         .optional()
         .describe("verdict='accept' 时的可选下一步建议。"),
       note: z.string().trim().min(1).max(2000).optional().describe("补充说明或返工优先修复建议。"),
+      bypassDeliveryGate: z
+        .boolean()
+        .optional()
+        .describe(
+          "仅在人工确认绕过 PR 交付门禁阻塞（草稿/冲突/CI 失败）时设为 true，需同时填写 bypassReason。",
+        ),
+      bypassReason: z
+        .string()
+        .trim()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("绕过交付门禁时的具体人工确认原因。"),
     }),
     outputSchema: {
       task: MainChatTaskRecordSchema,
       receipt: MainChatTaskReceiptSchema.nullable(),
       rework: MainChatReworkRecordSchema.nullable(),
+      deliveryGateWarning: z.string().nullable().optional(),
       guidance: z.string(),
     },
     async handler(rawInput) {
@@ -498,11 +547,16 @@ export function registerMainChatTools(options: {
         checks?: Array<z.infer<typeof MainChatReceiptCheckSchema>>;
         nextSteps?: string[];
         note?: string;
+        bypassDeliveryGate?: boolean;
+        bypassReason?: string;
       };
       const outcome = await mainChatService.reviewTask(input);
+      const warningSuffix = outcome.deliveryGateWarning
+        ? `（提醒：${outcome.deliveryGateWarning}）`
+        : "";
       const guidance =
         input.verdict === "accept"
-          ? `任务「${outcome.task.title}」已验收完成并记录完成回执与耗时样本，请用一两句话向用户同步结论。`
+          ? `任务「${outcome.task.title}」已验收完成并记录完成回执与耗时样本${warningSuffix}，请用一两句话向用户同步结论。`
           : `已向子 Agent 发起第 ${outcome.rework?.round ?? 1}/${outcome.rework?.maxRounds ?? 2} 轮返工并切回运行中，等待自动通知即可。`;
       return addModelVisibleStructuredContent({
         content: [],
@@ -510,8 +564,143 @@ export function registerMainChatTools(options: {
           task: outcome.task,
           receipt: outcome.receipt,
           rework: outcome.rework,
+          deliveryGateWarning: outcome.deliveryGateWarning ?? null,
           guidance,
         }),
+      });
+    },
+  });
+
+  register({
+    name: "task_start_ready",
+    title: "Start a DAG-ready downstream task",
+    description:
+      "当任务的前置依赖（after）全部满足进入 ready 状态后调用此工具拉起对应子 Agent；若前置依赖尚未完成会被拒绝。",
+    inputSchema: z.object({
+      taskId: z.string().trim().min(1).describe("已就绪待启动的任务 ID。"),
+    }),
+    outputSchema: {
+      task: MainChatTaskRecordSchema,
+      plan: MainChatPlanRecordSchema.nullable(),
+      guidance: z.string(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as { taskId: string };
+      const outcome = await mainChatService.startReadyTask(input.taskId);
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson({
+          task: outcome.task,
+          plan: outcome.plan,
+          guidance: `已拉起就绪任务「${outcome.task.title}」的子 Agent，等待自动通知即可。`,
+        }),
+      });
+    },
+  });
+
+  register({
+    name: "lesson_list",
+    title: "List project retrospective lessons",
+    description:
+      "查看按项目/仓库规范化路径分组沉淀的复盘教训列表（派活到同一仓库时会自动按字节预算注入「项目历史教训」）。",
+    inputSchema: z.object({
+      projectKey: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS)
+        .optional()
+        .describe("可选按项目路径或规范化 projectKey 过滤。"),
+    }),
+    outputSchema: {
+      groups: z.array(MainChatProjectLessonGroupSchema),
+      lessons: z.array(MainChatProjectLessonSchema),
+    },
+    async handler(rawInput) {
+      const input = rawInput as { projectKey?: string };
+      const result = await mainChatService.listLessons({ projectKey: input.projectKey });
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson(result),
+      });
+    },
+  });
+
+  register({
+    name: "lesson_add",
+    title: "Add a project retrospective lesson",
+    description:
+      "向指定项目/仓库手动沉淀一条可复用的避坑教训（自动去重并累加命中次数，后续向同一仓库派活时会自动注入）。",
+    inputSchema: z.object({
+      projectKey: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS)
+        .describe("目标项目路径或规范化标识（例如仓库目录或 owner/repo）。"),
+      projectLabel: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_LESSON_PROJECT_LABEL_MAX_CHARS)
+        .optional()
+        .describe("可选可读项目展示名称。"),
+      kind: MainChatLessonKindSchema.describe(
+        "教训分类：repeated_mistake（重复踩坑）/ missing_context（背景缺口）/ wasted_step（无效步骤）/ improvement（改进建议）。",
+      ),
+      text: z
+        .string()
+        .trim()
+        .min(1)
+        .max(MAIN_CHAT_LESSON_TEXT_MAX_CHARS)
+        .describe("简洁具体的单条可操作避坑教训（建议 1-2 句话）。"),
+      taskId: z.string().trim().min(1).optional().describe("可选关联来源任务 ID。"),
+    }),
+    outputSchema: {
+      lesson: MainChatProjectLessonSchema.nullable(),
+      deduplicated: z.boolean(),
+      skippedRetired: z.boolean(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as {
+        projectKey: string;
+        projectLabel?: string;
+        kind: z.infer<typeof MainChatLessonKindSchema>;
+        text: string;
+        taskId?: string;
+      };
+      const result = await mainChatService.addLesson({
+        projectKey: input.projectKey,
+        projectLabel: input.projectLabel,
+        kind: input.kind,
+        text: input.text,
+        origin: "tool",
+        taskId: input.taskId,
+      });
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson(result),
+      });
+    },
+  });
+
+  register({
+    name: "lesson_delete",
+    title: "Delete a project retrospective lesson",
+    description:
+      "删除（退役）一条过时或不再适用的项目复盘教训；已删除的教训不会被后续自动提炼重复写回。",
+    inputSchema: z.object({
+      lessonId: z.string().trim().min(1).describe("要删除的教训 ID。"),
+    }),
+    outputSchema: {
+      deleted: z.boolean(),
+    },
+    async handler(rawInput) {
+      const input = rawInput as { lessonId: string };
+      const result = await mainChatService.deleteLesson(input.lessonId);
+      return addModelVisibleStructuredContent({
+        content: [],
+        structuredContent: ensureValidJson(result),
       });
     },
   });
