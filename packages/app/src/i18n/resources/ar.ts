@@ -1294,6 +1294,11 @@ export const ar: TranslationResources = {
     footer: {
       usage: "الاستخدام",
     },
+    nav: {
+      more: "المزيد",
+      moreAccessibility: "المزيد من عناصر التنقل ({{count}})",
+      resizeHandle: "تغيير ارتفاع قسم التنقل",
+    },
     help: {
       trigger: "المساعدة والدعم",
       sectionHelp: "المساعدة",

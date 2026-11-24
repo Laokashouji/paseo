@@ -1301,6 +1301,11 @@ export const ko: TranslationResources = {
     footer: {
       usage: "사용량",
     },
+    nav: {
+      more: "더 보기",
+      moreAccessibility: "추가 탐색 항목 ({{count}}개)",
+      resizeHandle: "탐색 영역 높이 조절",
+    },
     help: {
       trigger: "도움말 및 지원",
       sectionHelp: "도움말",

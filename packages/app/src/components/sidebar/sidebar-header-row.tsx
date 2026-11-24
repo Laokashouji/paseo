@@ -1,12 +1,30 @@
 import { PressHighlight as Pressable } from "@/components/ui/press-highlight";
-import { useCallback, useState, type ComponentType, type ReactNode, type Ref } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ComponentType,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { HEADER_INNER_HEIGHT, HEADER_INNER_HEIGHT_MOBILE } from "@/constants/layout";
 import { DensityIcon } from "@/components/ui/density-icon";
 import { Shortcut } from "@/components/ui/shortcut";
+import { isWeb } from "@/constants/platform";
 import { density, densityIconBox } from "@/styles/density";
 import type { ShortcutKey } from "@/utils/format-shortcut";
+
+/**
+ * Set to `true` inside the sidebar nav overflow menu so rows use popover-surface
+ * hover fills (`surface2` on `surface1`) and participate in menu keyboard navigation.
+ */
+export const SidebarHeaderRowInMenuContext = createContext(false);
+
+const MENU_ITEM_DATASET = { menuItem: "true" } as const;
 
 type SidebarHeaderRowVariant = "header" | "compact" | "inline";
 
@@ -17,6 +35,7 @@ interface SidebarHeaderRowProps {
   label: string;
   onPress: () => void;
   isActive?: boolean;
+  expanded?: boolean;
   testID?: string;
   nativeID?: string;
   accessibilityLabel?: string;
@@ -44,6 +63,7 @@ export function SidebarHeaderRow({
   label,
   onPress,
   isActive = false,
+  expanded,
   testID,
   nativeID,
   accessibilityLabel,
@@ -52,29 +72,37 @@ export function SidebarHeaderRow({
   trailing,
   rowRef,
 }: SidebarHeaderRowProps) {
+  const inMenu = useContext(SidebarHeaderRowInMenuContext);
   const [isHovered, setIsHovered] = useState(false);
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
+  const [isFocused, setIsFocused] = useState(false);
+  const handleFocus = useCallback(() => setIsFocused(true), []);
+  const handleBlur = useCallback(() => setIsFocused(false), []);
   // The button and its trailing slot are siblings, so the row owns the pressed fill for both.
   const [isPressed, setIsPressed] = useState(false);
   const handlePressIn = useCallback(() => setIsPressed(true), []);
   const handlePressOut = useCallback(() => setIsPressed(false), []);
-  const isHighlighted = isHovered || isActive;
+  const isHighlighted = isRowHighlighted({ isHovered, isActive, inMenu, isFocused });
   const iconSize = variant === "header" ? "md" : "sm";
-
-  let right = trailing ?? null;
-  if (right === null && shortcutKeys && isHovered) {
-    right = <Shortcut chord={shortcutKeys} />;
-  }
+  const accessibilityState = useMemo(
+    () => resolveRowAccessibilityState(isActive, expanded),
+    [expanded, isActive],
+  );
+  const webExpandedProp = resolveWebExpandedProp(expanded);
+  const menuButtonProps = resolveMenuButtonProps(inMenu, handleFocus, handleBlur);
+  const right = resolveTrailingContent(trailing, shortcutKeys, isHovered);
 
   return (
-    <View ref={rowRef} collapsable={false} style={getContainerStyle(variant)}>
+    <View ref={rowRef} collapsable={false} style={getContainerStyle(variant, inMenu)}>
       <View
-        style={[styles.row, isHighlighted && styles.rowHighlighted, isPressed && styles.rowPressed]}
+        style={getRowStyle(isHighlighted, isPressed, inMenu)}
         onPointerEnter={handlePointerEnter}
         onPointerLeave={handlePointerLeave}
       >
         <Pressable
+          {...webExpandedProp}
+          {...menuButtonProps}
           onPress={onPress}
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
@@ -83,9 +111,9 @@ export function SidebarHeaderRow({
           accessible
           accessibilityRole="button"
           accessibilityLabel={accessibilityLabel ?? label}
-          accessibilityState={isActive ? SELECTED_STATE : undefined}
+          accessibilityState={accessibilityState}
           aria-selected={isActive}
-          style={styles.button}
+          style={inMenu ? styles.buttonInMenu : styles.button}
         >
           {icon ? (
             <DensityIcon
@@ -134,6 +162,11 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     userSelect: "none",
   },
+  containerInMenu: {
+    paddingHorizontal: theme.spacing[1],
+    justifyContent: "center",
+    userSelect: "none",
+  },
   containerInline: {
     width: "100%",
     justifyContent: "center",
@@ -150,6 +183,10 @@ const styles = StyleSheet.create((theme) => ({
   rowHighlighted: {
     backgroundColor: theme.colors.surfaceSidebarHover,
   },
+  // Popover surfaces sit on `surface1`, where `surfaceSidebarHover` can match the background.
+  rowHighlightedInMenu: {
+    backgroundColor: theme.colors.surface2,
+  },
   // The workspace rows' pressed fill.
   rowPressed: {
     backgroundColor: theme.colors.surface2,
@@ -165,6 +202,18 @@ const styles = StyleSheet.create((theme) => ({
     // Match the project rows' inner padding so the icons align on one vertical
     // edge with the list below.
     paddingHorizontal: theme.spacing[2],
+  },
+  buttonInMenu: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    minHeight: density.tightRowHeight,
+    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    outlineWidth: 0,
+    outlineColor: "transparent",
   },
   iconSpacer: { width: densityIconBox("md"), height: densityIconBox("md") },
   iconSpacerCompact: { width: densityIconBox("sm"), height: densityIconBox("sm") },
@@ -185,7 +234,58 @@ const styles = StyleSheet.create((theme) => ({
   },
 }));
 
-function getContainerStyle(variant: SidebarHeaderRowVariant) {
+function isRowHighlighted(input: {
+  isHovered: boolean;
+  isActive: boolean;
+  inMenu: boolean;
+  isFocused: boolean;
+}): boolean {
+  return input.isHovered || input.isActive || (input.inMenu && input.isFocused);
+}
+
+function getRowStyle(isHighlighted: boolean, isPressed: boolean, inMenu: boolean) {
+  return [
+    styles.row,
+    isHighlighted && (inMenu ? styles.rowHighlightedInMenu : styles.rowHighlighted),
+    isPressed && styles.rowPressed,
+  ];
+}
+
+function resolveMenuButtonProps(inMenu: boolean, onFocus: () => void, onBlur: () => void) {
+  if (!inMenu) return null;
+  return {
+    dataSet: MENU_ITEM_DATASET,
+    onFocus,
+    onBlur,
+  } as const;
+}
+
+function resolveTrailingContent(
+  trailing: ReactNode,
+  shortcutKeys: ShortcutKey[][] | null,
+  isHovered: boolean,
+): ReactNode {
+  if (trailing !== undefined && trailing !== null) {
+    return trailing;
+  }
+  return shortcutKeys && isHovered ? <Shortcut chord={shortcutKeys} /> : null;
+}
+
+function resolveRowAccessibilityState(isActive: boolean, expanded: boolean | undefined) {
+  if (expanded !== undefined) {
+    return isActive ? { selected: true, expanded } : { expanded };
+  }
+  return isActive ? SELECTED_STATE : undefined;
+}
+
+function resolveWebExpandedProp(expanded: boolean | undefined) {
+  return isWeb && expanded !== undefined ? ({ "aria-expanded": expanded } as const) : null;
+}
+
+function getContainerStyle(variant: SidebarHeaderRowVariant, inMenu: boolean) {
+  if (inMenu && variant === "compact") {
+    return styles.containerInMenu;
+  }
   switch (variant) {
     case "header":
       return styles.container;

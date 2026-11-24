@@ -1308,6 +1308,11 @@ export const ja: TranslationResources = {
     footer: {
       usage: "使用状況",
     },
+    nav: {
+      more: "その他",
+      moreAccessibility: "その他のナビゲーション項目（{{count}}件）",
+      resizeHandle: "ナビゲーション領域の高さを調整",
+    },
     help: {
       trigger: "ヘルプとサポート",
       sectionHelp: "ヘルプ",

@@ -1320,6 +1320,11 @@ export const ptBR: TranslationResources = {
     footer: {
       usage: "Uso",
     },
+    nav: {
+      more: "Mais",
+      moreAccessibility: "Mais itens de navegação ({{count}})",
+      resizeHandle: "Redimensionar a seção de navegação",
+    },
     help: {
       trigger: "Ajuda e suporte",
       sectionHelp: "Ajuda",
