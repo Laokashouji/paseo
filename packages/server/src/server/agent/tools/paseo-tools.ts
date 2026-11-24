@@ -111,6 +111,8 @@ import { registerBrowserTools } from "../../browser-tools/tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
 import { registerMainChatTools } from "../../main-chat/tools.js";
 import type { MainChatService } from "../../main-chat/service.js";
+import { registerInteractiveCardTools } from "../../interactive-cards/mcp-tools.js";
+import type { InteractiveCardsService } from "../../interactive-cards/service.js";
 import {
   PaseoToolInputError,
   type PaseoToolCatalog,
@@ -165,6 +167,7 @@ export interface PaseoToolHostDependencies {
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
   mainChatService?: MainChatService | null;
+  interactiveCardsService?: InteractiveCardsService | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1413,6 +1416,15 @@ function createToolCatalog(
       resolveCallerAgent,
     });
   }
+
+  registerInteractiveCardTools({
+    registerTool,
+    agentManager,
+    interactiveCardsService: options.interactiveCardsService,
+    callerAgentId,
+    scope,
+    policy: options.paseoToolPolicy,
+  });
 
   registerTool(
     "list_hosts",

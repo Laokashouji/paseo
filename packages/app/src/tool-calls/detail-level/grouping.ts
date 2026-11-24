@@ -1,6 +1,7 @@
 import { isMainChatInlineCardToolName } from "@getpaseo/protocol/main-chat";
 import { isTurnTrigger, isTurnBoundary } from "@/agent-stream/turn-membership";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import { isInteractiveCardToolName } from "@getpaseo/protocol/interactive-cards";
 import type { StreamItem, ToolCallItem, ThoughtItem } from "@/types/stream";
 
 export interface ToolCallDescriptor {
@@ -78,7 +79,8 @@ export function isGroupableToolCall(
   return (
     descriptor.detail.type !== "plan" &&
     descriptor.name.trim().toLowerCase() !== "speak" &&
-    !isMainChatInlineCardToolName(descriptor.name)
+    !isMainChatInlineCardToolName(descriptor.name) &&
+    isInteractiveCardToolName(descriptor.name) !== "view_show"
   );
 }
 

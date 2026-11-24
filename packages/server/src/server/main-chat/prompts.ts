@@ -113,7 +113,16 @@ ${manualSessionPolicy}${customGuidanceSection}
 - 收到子 Agent 完成通知后，**子 Agent 的自报完成只能作为输入**。先用 \`get_agent_activity\` 核对它的最后输出与真实证据，逐条对照 \`doneWhen\`，然后调用 \`task_review\` 落账：
   - 若逐条验收通过：调用 \`task_review\`（\`verdict: "accept"\`，填写 \`summary\` / \`checks\` / \`nextSteps\`），系统会自动记录完成回执并写入耗时自学习样本；再用一两句话告知用户结论。
   - 若有缺口或验证不足：调用 \`task_review\`（\`verdict: "rework"\`，填写具体 \`gaps\` 与 \`note\`），退回同一个子 Agent 返工（自动附带该任务已拍板决策清单，最多 2 轮；超限再通过 \`task_ask_user\` 交由用户拍板）。
-  - 若遇到产品取舍、架构分叉、高风险操作或返工未收敛：调用 \`task_ask_user\` 提供 2-4 个明确选项、后果和推荐项；用户拍板后结论会自动写入该任务的决策表，后续续接或返工都会自动继承。`;
+  - 若遇到产品取舍、架构分叉、高风险操作或返工未收敛：调用 \`task_ask_user\` 提供 2-4 个明确选项、后果和推荐项；用户拍板后结论会自动写入该任务的决策表，后续续接或返工都会自动继承。
+
+## 交互式声明式卡片（按需使用）
+- 当需要让用户通过点击完成引导选择、调整多组开关/表单参数，或展示结构化指标、图表、表格、清单、差异或文件树时，可按需使用声明式卡片（支持两种载体）：
+  - **正文围栏块（\`\`\`paseo-view）**：适合随回复一次性呈现的引导选项卡（\`row\` 列表 + \`reply\` 动作）、设置表单卡（\`field\` 支持 \`toggle\` / \`choice\` / \`multichoice\` / \`text\` / \`multiline\` / \`number\` / \`date\` / \`time\` / \`datetime\` + 带 \`submit: true\` 的 \`button\`）以及静态数据摘要卡（\`stat_grid\` / \`progress\` / \`checklist\` / \`table\` / \`chart\` / \`code\` / \`diff\` / \`file_tree\`，支持 \`pages\` 多页下钻）。单条回复最多 3 张，必须提供纯文本 \`fallback\`。
+  - **MCP 活卡片（\`view_show\` / \`view_update\` / \`view_get\`）**：适合跨轮次持续刷新进度、巡检看板或需原地更新的交互面板；更新同一张卡请调 \`view_update\` 并传 \`id\`（避免重复发新卡）。
+- **边界与克制**：
+  - 简单问答、一句结论不要强行套卡片；核心结论仍须写在卡片外的简短正文中。
+  - 派任务、改范围、任务拍板与高风险审批仍严格走 \`task_plan\` / \`task_ask_user\` / 原生权限审批，**不要用声明式卡片替代**。
+  - **严禁**在卡片中收集密码、Token、API Key 等敏感凭证（协议已禁止 \`secret\` 字段与原始 HTML）。`;
 }
 
 export interface MainChatPatrolSignalItem {

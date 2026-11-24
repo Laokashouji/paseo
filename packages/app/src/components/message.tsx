@@ -10,6 +10,7 @@ import {
   AttachmentThumbnail,
 } from "@/components/attachment-pill";
 import { MarkdownRenderer } from "@/components/markdown/renderer";
+import { InteractiveCardContext } from "@/interactive-cards/context";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import {
   isRewindableMessage,
@@ -772,7 +773,10 @@ interface AssistantMessageProps {
   timestamp: number;
   workspaceRoot?: string;
   serverId?: string;
+  agentId?: string;
   client?: DaemonClient | null;
+  interactiveCards?: boolean;
+  onOpenFilePath?: (filePath: string) => void;
   spacing?: "default" | "compactTop" | "compactBottom" | "compactBoth";
   phase: MarkdownPhase;
 }
@@ -1198,7 +1202,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   timestamp: _timestamp,
   workspaceRoot,
   serverId,
+  agentId,
   client,
+  interactiveCards = true,
+  onOpenFilePath,
   spacing = "default",
   phase,
 }: AssistantMessageProps) {
@@ -1240,6 +1247,34 @@ export const AssistantMessage = memo(function AssistantMessage({
   const measureMessage = useStableEvent((event: import("react-native").LayoutChangeEvent) => {
     setAssistantMessageHeight({ markdown: revealedMessage, ...event.nativeEvent.layout });
   });
+  const isStreamingMessage =
+    phase !== "complete" || revealedMessage.length < renderedMessage.text.length;
+  const interactiveCardContextValue = useMemo(
+    () =>
+      serverId && agentId
+        ? {
+            serverId,
+            agentId,
+            client: client ?? null,
+            messageText: message,
+            streaming: isStreamingMessage,
+            interactive: interactiveCards,
+            workspaceRoot,
+            onOpenFilePath,
+          }
+        : null,
+    [
+      agentId,
+      client,
+      interactiveCards,
+      isStreamingMessage,
+      message,
+      onOpenFilePath,
+      serverId,
+      workspaceRoot,
+    ],
+  );
+
   return (
     <View
       testID="assistant-message"
@@ -1247,14 +1282,16 @@ export const AssistantMessage = memo(function AssistantMessage({
       style={assistantContainerStyle}
       onLayout={measureMessage}
     >
-      <MarkdownRenderer
-        text={revealedMessage}
-        agentCommands
-        streaming={phase !== "complete" || revealedMessage.length < renderedMessage.text.length}
-        client={client}
-        workspaceRoot={workspaceRoot}
-        serverId={serverId}
-      />
+      <InteractiveCardContext.Provider value={interactiveCardContextValue}>
+        <MarkdownRenderer
+          text={revealedMessage}
+          agentCommands
+          streaming={isStreamingMessage}
+          client={client}
+          workspaceRoot={workspaceRoot}
+          serverId={serverId}
+        />
+      </InteractiveCardContext.Provider>
       {fullMessageByteLength !== null ? (
         <Text
           testID="assistant-message-capped-notice"

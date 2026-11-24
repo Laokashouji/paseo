@@ -1,3 +1,6 @@
+import { MarkdownRenderer } from "@/components/markdown/renderer";
+import { renderInteractiveToolCard } from "@/interactive-cards/live-card";
+import { useAgentInteractiveCardsSync } from "@/interactive-cards/store";
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
 import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
@@ -434,6 +437,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       state.sessions[resolvedServerId]?.agentStreamHead?.get(agentId),
     );
     const streamHead = providedStreamHead ?? sessionStreamHead;
+    useAgentInteractiveCardsSync(resolvedServerId, agentId);
+    const isAgentArchived = useSessionStore((state) =>
+      Boolean(state.sessions[resolvedServerId]?.agents.get(agentId)?.archivedAt),
+    );
+    const cardsInteractive = !readOnly && !isAgentArchived;
     const forkAgent = useForkAgent({ serverId: resolvedServerId, toast, readOnly });
     const supportsAgentForkContextCursor = useSessionStore(
       (state) =>
@@ -452,6 +460,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
 
     const workspaceRoot = context.cwd?.trim() || "";
+    const renderLiveCardMarkdown = useCallback(
+      (content: string) => (
+        <MarkdownRenderer
+          text={content}
+          compact
+          client={client}
+          workspaceRoot={workspaceRoot}
+          serverId={resolvedServerId}
+        />
+      ),
+      [client, resolvedServerId, workspaceRoot],
+    );
     const { revealDirectory } = useFileExplorerActions({
       serverId: resolvedServerId,
       workspaceId: context.workspaceId,
@@ -822,7 +842,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                   timestamp={item.timestamp.getTime()}
                   workspaceRoot={workspaceRoot}
                   serverId={resolvedServerId}
+                  agentId={agentId}
                   client={client}
+                  interactiveCards={cardsInteractive}
+                  onOpenFilePath={handleToolCallOpenFile}
                   spacing={layoutItem.assistantSpacing}
                   phase={layoutItem.phase}
                 />
@@ -831,7 +854,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           </AssistantFileLinkResolverProvider>
         );
       },
-      [agentId, client, handleInlinePathPress, resolvedServerId, toast, workspaceRoot],
+      [
+        agentId,
+        cardsInteractive,
+        client,
+        handleInlinePathPress,
+        handleToolCallOpenFile,
+        resolvedServerId,
+        toast,
+        workspaceRoot,
+      ],
     );
 
     const renderThoughtItem = useCallback(
@@ -883,6 +915,21 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           });
           if (mainChatCard) return mainChatCard;
 
+          const interactiveLiveCard = renderInteractiveToolCard({
+            serverId: resolvedServerId,
+            agentId,
+            client,
+            interactive: cardsInteractive,
+            workspaceRoot,
+            onOpenFilePath: handleToolCallOpenFile,
+            toolName: data.name,
+            toolStatus: data.status,
+            toolInput: data.detail.type === "unknown" ? data.detail.input : null,
+            toolOutput: data.detail.type === "unknown" ? data.detail.output : null,
+            error: data.error,
+            renderMarkdown: renderLiveCardMarkdown,
+          });
+          if (interactiveLiveCard) return interactiveLiveCard;
           return (
             <ToolCallSlot
               itemId={item.id}
@@ -914,6 +961,21 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           error: data.error,
         });
         if (legacyMainChatCard) return legacyMainChatCard;
+        const legacyInteractiveCard = renderInteractiveToolCard({
+          serverId: resolvedServerId,
+          agentId,
+          client,
+          interactive: cardsInteractive,
+          workspaceRoot,
+          onOpenFilePath: handleToolCallOpenFile,
+          toolName: data.toolName,
+          toolStatus: data.status,
+          toolInput: data.arguments,
+          toolOutput: data.result,
+          error: data.error,
+          renderMarkdown: renderLiveCardMarkdown,
+        });
+        if (legacyInteractiveCard) return legacyInteractiveCard;
         return (
           <ToolCallSlot
             itemId={item.id}
@@ -929,7 +991,17 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           />
         );
       },
-      [agentId, context.cwd, resolvedServerId, setInlineDetailsExpanded, handleToolCallOpenFile],
+      [
+        agentId,
+        cardsInteractive,
+        client,
+        context.cwd,
+        handleToolCallOpenFile,
+        renderLiveCardMarkdown,
+        resolvedServerId,
+        setInlineDetailsExpanded,
+        workspaceRoot,
+      ],
     );
 
     // Read through a stable event so live group updates do not change the renderer identity

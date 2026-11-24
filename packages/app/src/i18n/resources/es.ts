@@ -1,9 +1,11 @@
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const es: TranslationResources = {
   mainChat: mergeMainChatStyleLocale(en.mainChat, "es"),
+  interactiveCards: interactiveCardsI18n.es,
   pluginCombobox: {
     searching: "Buscando…",
     empty: "Sin resultados",

@@ -1151,6 +1151,8 @@ type CorrelatedResponsePayload<TType extends CorrelatedResponseType> =
 export type AgentBackgroundWorkListPayload =
   CorrelatedResponsePayload<"agent.background_work.list.response">;
 export type AgentBackgroundWorkItem = AgentBackgroundWorkListPayload["items"][number];
+export type AgentCardsListPayload = CorrelatedResponsePayload<"agent.cards.list.response">;
+export type AgentCardsSubmitPayload = CorrelatedResponsePayload<"agent.cards.submit.response">;
 
 type PluginCatalogResponseEntry =
   CorrelatedResponsePayload<"plugin.catalog.get.response">["plugins"][number];
@@ -4207,6 +4209,70 @@ export class DaemonClient {
     // COMPAT(agentBackgroundWork): added after v0.11.0-beta.5, remove gate after 2027-04-06.
     if (this.lastServerInfoMessage?.features?.agentBackgroundWork !== true) {
       throw new Error("Update the host to see an agent's background work.");
+    }
+  }
+
+  supportsInteractiveCards(): boolean {
+    // COMPAT(interactiveCards): added in fork interactive-cards, gate UI against older daemons.
+    return this.lastServerInfoMessage?.features?.interactiveCards === true;
+  }
+
+  async listAgentCards(
+    agentId: string,
+    options: { requestId?: string; timeout?: number } = {},
+  ): Promise<AgentCardsListPayload> {
+    this.assertInteractiveCardsSupported();
+    const payload = await this.sendNamespacedCorrelatedSessionRequest<"agent.cards.list.response">({
+      requestId: options.requestId,
+      timeout: options.timeout,
+      message: { type: "agent.cards.list.request", agentId },
+    });
+    if (payload.error) throw new Error(payload.error);
+    return payload;
+  }
+
+  async submitAgentCard(
+    input: {
+      agentId: string;
+      cardKey: string;
+      actionId: string;
+      page?: string;
+      values?: Record<string, string>;
+      expectedVersion: number;
+      clientMessageId: string;
+      confirmed?: boolean;
+    },
+    options: { requestId?: string; timeout?: number } = {},
+  ): Promise<AgentCardsSubmitPayload> {
+    this.assertInteractiveCardsSupported();
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.cards.submit.response">({
+      requestId: options.requestId,
+      timeout: options.timeout ?? 30000,
+      message: {
+        type: "agent.cards.submit.request",
+        agentId: input.agentId,
+        cardKey: input.cardKey,
+        actionId: input.actionId,
+        ...(input.page ? { page: input.page } : {}),
+        ...(input.values && Object.keys(input.values).length > 0 ? { values: input.values } : {}),
+        expectedVersion: input.expectedVersion,
+        clientMessageId: input.clientMessageId,
+        ...(input.confirmed ? { confirmed: true } : {}),
+      },
+    });
+  }
+
+  observeAgentCards(
+    options: { signal?: AbortSignal } = {},
+  ): OwnedSubscription<CorrelatedResponsePayload<"session.events.set_subscription.response">> {
+    this.assertInteractiveCardsSupported();
+    return this.observeEvents(["agent.cards.update"], options);
+  }
+
+  private assertInteractiveCardsSupported(): void {
+    // COMPAT(interactiveCards): added in fork interactive-cards, gate UI against older daemons.
+    if (this.lastServerInfoMessage?.features?.interactiveCards !== true) {
+      throw new Error("Update the host to use interactive cards.");
     }
   }
 

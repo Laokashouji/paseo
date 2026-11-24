@@ -1,7 +1,9 @@
 import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const zhCN: TranslationResources = {
+  interactiveCards: interactiveCardsI18n.zhCN,
   pluginCombobox: {
     searching: "搜索中…",
     empty: "无结果",

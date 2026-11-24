@@ -1,9 +1,11 @@
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
+import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ko: TranslationResources = {
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ko"),
+  interactiveCards: interactiveCardsI18n.ko,
   pluginCombobox: {
     searching: "검색 중…",
     empty: "결과 없음",

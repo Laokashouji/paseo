@@ -21,7 +21,9 @@ import { PENDING_MARKDOWN_IMAGE } from "./source";
 import { splitStreamingMarkdown } from "./streaming";
 import { useMarkdownSource, type MarkdownImageContext } from "./images";
 
-import { MermaidFence, MermaidStreamingContext, splitMermaidFences } from "./fence/mermaid";
+import { CardMarkdownRendererContext, useInteractiveCardHost } from "@/interactive-cards/context";
+import { InteractiveInlineCardFence } from "@/interactive-cards/inline-fence";
+import { MermaidFence, MermaidStreamingContext, splitCustomFences } from "./fence/mermaid";
 
 const ThemedMarkdown = withUnistyles(EnrichedMarkdownText);
 const MD4C_FLAGS = { latexMath: false, hardSoftBreaks: true, admonitions: true };
@@ -103,11 +105,14 @@ const MarkdownPart = memo(function MarkdownPart({
   const actions = useAssistantFileLinkActions();
   const workspaceForgeShorthand = useForgeShorthand();
   const forgeShorthand = external ? null : workspaceForgeShorthand;
-  const client =
-    imageContext.client ??
-    (environment.client?.readFile
-      ? { readFile: environment.client.readFile.bind(environment.client) }
-      : undefined);
+  const client = useMemo(
+    () =>
+      imageContext.client ??
+      (environment.client?.readFile
+        ? { readFile: environment.client.readFile.bind(environment.client) }
+        : undefined),
+    [environment.client, imageContext.client],
+  );
   const { markdown, imageSources, linkRecognition, linkSource } = useMarkdownSource(
     text,
     {
@@ -148,39 +153,76 @@ const MarkdownPart = memo(function MarkdownPart({
     if (url !== PENDING_MARKDOWN_IMAGE) setImage({ type: "uri", uri: url });
   });
   const closeImage = useStableEvent(() => setImage(null));
+  const interactiveCardHost = useInteractiveCardHost();
+  const allowInteractiveCards = Boolean(
+    !external && interactiveCardHost && !interactiveCardHost.insideCard,
+  );
+  const renderNestedCardMarkdown = useMemo(
+    () => (content: string) => (
+      <MarkdownRenderer
+        text={content}
+        compact
+        client={client}
+        workspaceRoot={imageContext.workspaceRoot ?? environment.workspaceRoot}
+        serverId={imageContext.serverId ?? environment.serverId}
+      />
+    ),
+    [
+      client,
+      environment.serverId,
+      environment.workspaceRoot,
+      imageContext.serverId,
+      imageContext.workspaceRoot,
+    ],
+  );
   const segments = useMemo(
     () =>
-      isWeb ? [{ kind: "markdown", id: "0", source: markdown }] : splitMermaidFences(markdown),
-    [markdown],
+      isWeb
+        ? [{ kind: "markdown" as const, id: "0", source: markdown }]
+        : splitCustomFences(markdown, { allowInteractiveCards }),
+    [allowInteractiveCards, markdown],
   );
   return (
-    <MermaidStreamingContext.Provider value={streaming}>
-      <MarkdownBlockStack imageSources={imageSources}>
-        {segments.map((segment) =>
-          segment.kind === "mermaid" ? (
-            <MermaidFence key={`${segment.kind}:${segment.id}`} code={segment.source} />
-          ) : (
-            <ThemedMarkdown
-              key={`${segment.kind}:${segment.id}`}
-              markdown={segment.source}
-              uniProps={pickMarkdownStyle(compact, muted)}
-              flavor="github"
-              selectable={selectable}
-              md4cFlags={external ? EXTERNAL_MD4C_FLAGS : MD4C_FLAGS}
-              linkRecognition={linkRecognition}
-              enableTaskListItemToggle={false}
-              enableLinkPreview={false}
-              enableBlockContextMenu={false}
-              // JS reveal owns pacing; native fade animation is a separate experiment.
-              streamingAnimation={false}
-              onLinkPress={pressLink}
-              onImagePress={pressImage}
-              renderers={isWeb ? WEB_RENDERERS : undefined}
-            />
-          ),
-        )}
-      </MarkdownBlockStack>
-      {image ? <AttachmentLightbox source={image} onClose={closeImage} /> : null}
-    </MermaidStreamingContext.Provider>
+    <CardMarkdownRendererContext.Provider value={renderNestedCardMarkdown}>
+      <MermaidStreamingContext.Provider value={streaming}>
+        <MarkdownBlockStack imageSources={imageSources}>
+          {segments.map((segment) => {
+            if (segment.kind === "mermaid") {
+              return <MermaidFence key={`${segment.kind}:${segment.id}`} code={segment.source} />;
+            }
+            if (segment.kind === "paseo-view") {
+              return (
+                <InteractiveInlineCardFence
+                  key={`${segment.kind}:${segment.id}`}
+                  code={segment.source}
+                  blockIndex={segment.blockIndex}
+                  complete={!streaming}
+                />
+              );
+            }
+            return (
+              <ThemedMarkdown
+                key={`${segment.kind}:${segment.id}`}
+                markdown={segment.source}
+                uniProps={pickMarkdownStyle(compact, muted)}
+                flavor="github"
+                selectable={selectable}
+                md4cFlags={external ? EXTERNAL_MD4C_FLAGS : MD4C_FLAGS}
+                linkRecognition={linkRecognition}
+                enableTaskListItemToggle={false}
+                enableLinkPreview={false}
+                enableBlockContextMenu={false}
+                // JS reveal owns pacing; native fade animation is a separate experiment.
+                streamingAnimation={false}
+                onLinkPress={pressLink}
+                onImagePress={pressImage}
+                renderers={isWeb ? WEB_RENDERERS : undefined}
+              />
+            );
+          })}
+        </MarkdownBlockStack>
+        {image ? <AttachmentLightbox source={image} onClose={closeImage} /> : null}
+      </MermaidStreamingContext.Provider>
+    </CardMarkdownRendererContext.Provider>
   );
 });
