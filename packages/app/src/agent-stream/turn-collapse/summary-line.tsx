@@ -1,6 +1,7 @@
 import { memo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Radar, Summary } from "lucide-react-native";
+import { StyleSheet } from "react-native-unistyles";
 import { useDisclosureHold } from "@/agent-stream/disclosure";
 import { ExpandableBadge } from "@/components/message";
 import { useOverviewSummaryLabel } from "@/tool-calls/detail-level/overview/label";
@@ -9,7 +10,8 @@ import type { TurnSummaryItem } from "@/types/stream";
 /**
  * The row a collapsed turn leaves under its user message, styled like a tool-call group.
  * Pressing it opens the turn's rows beneath it. For Main Chat system-injected background turns,
- * renders a muted single-line summary that expands the prompt, tool calls, and reply on demand.
+ * renders a lightweight muted gray tag above the steward's conclusion that expands the original
+ * system trigger and intermediate work on demand.
  */
 export const TurnSummaryLine = memo(function TurnSummaryLine({
   item,
@@ -46,8 +48,16 @@ export const TurnSummaryLine = memo(function TurnSummaryLine({
       label={label}
       icon={isBackground ? Radar : Summary}
       isExpanded={item.expanded}
+      isLoading={isBackground && item.backgroundMeta?.running === true}
       onToggle={toggle}
       borderlessWhenExpanded
+      style={isBackground ? styles.backgroundTag : undefined}
     />
   );
 });
+
+const styles = StyleSheet.create(() => ({
+  backgroundTag: {
+    opacity: 0.72,
+  },
+}));

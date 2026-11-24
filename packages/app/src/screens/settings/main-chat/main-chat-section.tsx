@@ -1,6 +1,7 @@
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import {
   createDefaultMainChatSettings,
+  isMainChatAutoCompactEnabled,
   isMainChatEnabled,
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
@@ -515,6 +516,7 @@ interface MainChatAdvancedSettingsProps {
   onRefreshUsage: () => void;
   onResetUsage: () => void;
   onUpdateNightMode: (patch: Partial<MainChatNightModeConfig>) => void;
+  onAutoCompactToggle: (value: boolean) => void;
   onSelectModelMode: (mode: MainChatBackgroundModelMode) => void;
   onSelectProvider: (provider: string) => void;
   onSelectModel: (model: string) => void;
@@ -549,6 +551,7 @@ const MainChatAdvancedSettings = memo(function MainChatAdvancedSettings({
   onRefreshUsage,
   onResetUsage,
   onUpdateNightMode,
+  onAutoCompactToggle,
   onSelectModelMode,
   onSelectProvider,
   onSelectModel,
@@ -642,6 +645,30 @@ const MainChatAdvancedSettings = memo(function MainChatAdvancedSettings({
           disabled={saving}
           onUpdateNightMode={onUpdateNightMode}
         />
+      </SettingsSection>
+
+      <SettingsSection
+        title={t("mainChat.compaction.sectionTitle")}
+        info={t("mainChat.compaction.sectionDescription")}
+        testID="settings-main-chat-compaction"
+      >
+        <View style={settingsStyles.card}>
+          <View style={[settingsStyles.row, styles.switchRow]}>
+            <View style={styles.rowText}>
+              <Text style={settingsStyles.rowTitle}>
+                {t("mainChat.compaction.autoSwitchLabel")}
+              </Text>
+              <Text style={settingsStyles.rowHint}>{t("mainChat.compaction.autoSwitchHint")}</Text>
+            </View>
+            <Switch
+              value={isMainChatAutoCompactEnabled(settings)}
+              onValueChange={onAutoCompactToggle}
+              disabled={saving}
+              accessibilityLabel={t("mainChat.compaction.autoSwitchLabel")}
+              testID="settings-main-chat-auto-compact"
+            />
+          </View>
+        </View>
       </SettingsSection>
 
       <SettingsSection
@@ -1065,6 +1092,18 @@ export function MainChatSettingsSection(): ReactElement {
     [applyPatch],
   );
 
+  const handleAutoCompactToggle = useCallback(
+    (nextValue: boolean) => {
+      void applyPatch(
+        { autoCompactEnabled: nextValue },
+        nextValue
+          ? t("mainChat.compaction.autoEnabledToast")
+          : t("mainChat.compaction.autoDisabledToast"),
+      );
+    },
+    [applyPatch, t],
+  );
+
   const handleRefreshUsage = useCallback(() => {
     if (!selectedServerId || !client) return;
     void loadUsage(selectedServerId, client).catch((error) => {
@@ -1378,6 +1417,7 @@ export function MainChatSettingsSection(): ReactElement {
               onRefreshUsage={handleRefreshUsage}
               onResetUsage={handleResetUsage}
               onUpdateNightMode={handleUpdateNightMode}
+              onAutoCompactToggle={handleAutoCompactToggle}
               onSelectModelMode={handleSelectModelMode}
               onSelectProvider={handleSelectProvider}
               onSelectModel={handleSelectModel}

@@ -39,6 +39,7 @@ import { useMainChatPlanStore } from "./plan-store";
 import { routeStoreKey, useMainChatRouteStore } from "./route-store";
 import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
+import { renderMainChatInlineToolCard } from "./stream-card";
 import {
   TaskPanelDrawer,
   buildTaskDrawerAgentTabs,
@@ -530,10 +531,12 @@ const SHELL_CONTEXT_VALUE = {
   originTitle: "对话管理",
 } as const;
 
-const LOW_USAGE_COMPACTION: MainChatCompactionState = {
+const BELOW_80_WINDOW_COMPACTION: MainChatCompactionState = {
   status: "idle",
-  estimatedTokens: 40_000,
-  thresholdTokens: 100_000,
+  estimatedTokens: 750_000,
+  thresholdTokens: 800_000,
+  contextWindowMaxTokens: 1_000_000,
+  autoCompactEnabled: true,
   lastCompactedAt: null,
   lastError: null,
   summary: null,
@@ -591,28 +594,43 @@ describe("Main Chat M2 & M3 UI components", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders MainChatCompactionBanner on >=70% usage or failure and invokes compactMainChat", async () => {
+  it("renders MainChatCompactionBanner at >=80% real model window, exposes auto-compact toggle, and invokes compactMainChat", async () => {
     const client = makeFakeClient();
     seedSession(client);
+
+    // 750k / 1M (75% < 80%) MUST remain hidden even though it exceeds the legacy 400k cap.
+    expect(computeCompactionUsageRatio(BELOW_80_WINDOW_COMPACTION)).toBeCloseTo(0.75, 2);
+    expect(shouldShowCompactionBanner(BELOW_80_WINDOW_COMPACTION)).toBe(false);
 
     const hiddenView = renderWithProviders(
       <MainChatCompactionBanner
         serverId="srv_1"
         mainAgentId="agent_main"
-        compactionOverride={LOW_USAGE_COMPACTION}
+        compactionOverride={BELOW_80_WINDOW_COMPACTION}
       />,
     );
     expect(hiddenView.queryByTestId("main-chat-compaction-banner")).toBeNull();
     hiddenView.unmount();
 
+    // 820k / 1M (82% >= 80%) renders banner with real window limit, percentage, auto toggle, and compact button.
     const highUsage: MainChatCompactionState = {
       status: "idle",
-      estimatedTokens: 78_000,
-      thresholdTokens: 100_000,
+      estimatedTokens: 820_000,
+      thresholdTokens: 800_000,
+      contextWindowMaxTokens: 1_000_000,
+      autoCompactEnabled: true,
       lastCompactedAt: "2026-11-23T11:30:00.000Z",
       lastError: null,
       summary: null,
     };
+    const highUsageClient = makeFakeClient({
+      getMainChatOverview: vi.fn(async () => ({
+        requestId: "r_high",
+        overview: makeOverview({ compaction: highUsage }),
+        error: null,
+      })),
+    });
+    seedSession(highUsageClient);
     useMainChatOverviewStore.setState({
       overviewsByKey: {
         [overviewStoreKey("srv_1", "agent_main")]: makeOverview({ compaction: highUsage }),
@@ -623,11 +641,21 @@ describe("Main Chat M2 & M3 UI components", () => {
       <MainChatCompactionBanner serverId="srv_1" mainAgentId="agent_main" />,
     );
     expect(view.getByTestId("main-chat-compaction-banner")).toBeTruthy();
-    expect(view.getByTestId("main-chat-compaction-headline").textContent).toContain("78");
+    expect(view.getByTestId("main-chat-compaction-headline").textContent).toContain("82");
+    expect(view.getByTestId("main-chat-compaction-meta").textContent).toContain("1M");
 
+    // Toggle auto-compaction switch on the right side of the banner.
+    fireEvent.click(view.getByTestId("main-chat-compaction-auto-toggle"));
+    await waitFor(() => {
+      expect(highUsageClient.updateMainChatSettings).toHaveBeenCalledWith({
+        autoCompactEnabled: false,
+      });
+    });
+
+    // Manual compaction button remains available side by side.
     fireEvent.click(view.getByTestId("main-chat-compaction-action"));
     await waitFor(() => {
-      expect(client.compactMainChat).toHaveBeenCalledWith({
+      expect(highUsageClient.compactMainChat).toHaveBeenCalledWith({
         mainAgentId: "agent_main",
         reason: "manual",
       });
@@ -893,9 +921,6 @@ describe("Main Chat M2 & M3 UI components", () => {
   });
 
   it("renders MainChatActionBar five-state tray, expands Needs you inline without leaving, and supports park/resume/review", async () => {
-    const client = makeFakeClient();
-    seedSession(client);
-
     const decision: MainChatDecisionRecord = {
       id: "dec_inline",
       mainAgentId: "agent_main",
@@ -958,6 +983,15 @@ describe("Main Chat M2 & M3 UI components", () => {
         }),
       ],
     });
+
+    const client = makeFakeClient({
+      getMainChatOverview: vi.fn(async () => ({
+        requestId: "r2",
+        overview,
+        error: null,
+      })),
+    });
+    seedSession(client);
 
     useMainChatOverviewStore.setState({
       overviewsByKey: { [overviewStoreKey("srv_1", "agent_main")]: overview },
@@ -1269,5 +1303,225 @@ describe("Main Chat M2 & M3 UI components", () => {
       { agentId: "a_new", isActive: true, isSelected: false },
       { agentId: "a_old", isActive: false, isSelected: true },
     ]);
+  });
+
+  it("renders all 4 Main Chat inline cards from Claude { output: ... } MCP tool payloads", () => {
+    const client = makeFakeClient();
+    seedSession(client);
+
+    const openPlan = makeOpenPlan({ id: "plan_claude_ui" });
+    const planCard = renderMainChatInlineToolCard({
+      serverId: "srv_1",
+      agentId: "agent_main",
+      toolName: "mcp__paseo__task_plan",
+      toolStatus: "completed",
+      toolInput: {},
+      toolOutput: {
+        output: [{ type: "text", text: JSON.stringify({ plan: openPlan }) }],
+      },
+    });
+    expect(planCard).toBeTruthy();
+    const planView = renderWithProviders(planCard!);
+    expect(planView.getByTestId("main-chat-plan-card-plan_claude_ui")).toBeTruthy();
+    expect(planView.container.textContent).toContain("修复状态托盘");
+    expect(planView.getByTestId("main-chat-plan-start-plan_claude_ui")).toBeTruthy();
+    planView.unmount();
+
+    const decisionRecord: MainChatDecisionRecord = {
+      id: "dec_claude_ui",
+      mainAgentId: "agent_main",
+      title: "是否切换新协议",
+      question: "请确认是否同步切到新协议？",
+      agentId: "child_1",
+      planId: "plan_claude_ui",
+      taskId: "pt_1",
+      options: [
+        { id: "opt_yes", label: "切换", leadsTo: "应用新协议" },
+        { id: "opt_no", label: "保持旧版", leadsTo: "保留兼容层" },
+      ],
+      recommendedOptionId: "opt_yes",
+      reason: "需要确认接口兼容性",
+      answer: null,
+      answeredOptionId: null,
+      answeredAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    const decisionCard = renderMainChatInlineToolCard({
+      serverId: "srv_1",
+      agentId: "agent_main",
+      toolName: "mcp__paseo__task_ask_user",
+      toolStatus: "completed",
+      toolInput: {},
+      toolOutput: {
+        output: {
+          content: [{ type: "text", text: JSON.stringify({ decision: decisionRecord }) }],
+        },
+      },
+    });
+    expect(decisionCard).toBeTruthy();
+    const decisionView = renderWithProviders(decisionCard!);
+    expect(decisionView.getByTestId("main-chat-decision-card-dec_claude_ui")).toBeTruthy();
+    expect(decisionView.container.textContent).toContain("是否切换新协议");
+    decisionView.unmount();
+
+    const receiptCard = renderMainChatInlineToolCard({
+      serverId: "srv_1",
+      agentId: "agent_main",
+      toolName: "mcp__paseo__task_complete",
+      toolStatus: "completed",
+      toolInput: {},
+      toolOutput: {
+        output: {
+          structuredContent: {
+            receipt: {
+              title: "内联卡片修复验收",
+              summary: "4 类卡片均可正常渲染",
+              agentId: "child_1",
+              planId: "plan_claude_ui",
+              taskId: "task_rcpt_1",
+              checks: [{ criterion: "协议解包", met: true, evidence: "vitest green" }],
+              nextSteps: [],
+            },
+          },
+        },
+      },
+    });
+    expect(receiptCard).toBeTruthy();
+    const receiptView = renderWithProviders(receiptCard!);
+    expect(receiptView.getByTestId("main-chat-receipt-card-task_rcpt_1")).toBeTruthy();
+    expect(receiptView.container.textContent).toContain("内联卡片修复验收");
+    receiptView.unmount();
+
+    const reworkCard = renderMainChatInlineToolCard({
+      serverId: "srv_1",
+      agentId: "agent_main",
+      toolName: "mcp__paseo__task_rework",
+      toolStatus: "completed",
+      toolInput: {},
+      toolOutput: {
+        output: JSON.stringify({
+          rework: {
+            title: "补齐边界校验",
+            agentId: "child_rework_1",
+            planId: "plan_claude_ui",
+            taskId: "task_rw_1",
+            round: 1,
+            maxRounds: 2,
+            gaps: ["补充 Claude output 嵌套数组单测"],
+            note: "请复核",
+          },
+        }),
+      },
+    });
+    expect(reworkCard).toBeTruthy();
+    const reworkView = renderWithProviders(reworkCard!);
+    expect(reworkView.getByTestId("main-chat-rework-card-child_rework_1-1")).toBeTruthy();
+    expect(reworkView.container.textContent).toContain("补齐边界校验");
+    reworkView.unmount();
+  });
+
+  it("renders deduplicated rich context in NeedsYou expanded drawer, refreshes overview on drawer open & live state changes, and immediately filters stale running/archived agents", async () => {
+    const blockedChild = makeAgent({
+      id: "child_blocked_ui",
+      serverId: "srv_1",
+      workspaceId: "ws_repo",
+      cwd: "/repo/paseo-fork",
+      title: "修复主对话交互",
+      status: "idle",
+      turn: { phase: "idle", cancellationRequestId: null },
+    });
+
+    const initialOverview = makeOverview({
+      triages: [
+        {
+          agentId: "child_blocked_ui",
+          workspaceId: "ws_repo",
+          title: "修复主对话交互",
+          managedByMainChat: true,
+          phase: "blocked_user",
+          summary: "已完成 4 个模块修改并通过类型检查",
+          waitReason: "请确认是否同步更新《发布说明与变更文档清单》？",
+          suggestedAction: "查看会话并确认下一步",
+          triageSource: "rule",
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const getOverviewMock = vi.fn(async () => ({
+      requestId: "req_refresh",
+      overview: initialOverview,
+      error: null,
+    }));
+    const client = makeFakeClient({ getMainChatOverview: getOverviewMock });
+    seedSession(client, [blockedChild]);
+    useMainChatOverviewStore.setState({
+      overviewsByKey: { [overviewStoreKey("srv_1", "agent_main")]: initialOverview },
+    });
+
+    const view = renderWithProviders(<MainChatActionBar serverId="srv_1" agentId="agent_main" />);
+    expect(view.getByTestId("main-chat-action-capsule-needsYou").textContent).toContain(
+      '"count":1',
+    );
+
+    // 1. Opening drawer refreshes overview silently even though overview is already cached!
+    fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
+    await waitFor(() => {
+      expect(getOverviewMock).toHaveBeenCalledTimes(1);
+    });
+
+    // Expanded body renders full question, non-duplicate summary, suggestion, and both open/direct actions.
+    expect(
+      view.getByTestId("main-chat-action-needs-question-agent:srv_1:child_blocked_ui").textContent,
+    ).toContain("请确认是否同步更新《发布说明与变更文档清单》？");
+    expect(
+      view.getByTestId("main-chat-action-needs-summary-agent:srv_1:child_blocked_ui").textContent,
+    ).toContain("已完成 4 个模块修改并通过类型检查");
+    expect(
+      view.getByTestId("main-chat-action-needs-suggestion-agent:srv_1:child_blocked_ui")
+        .textContent,
+    ).toContain("查看会话并确认下一步");
+    expect(
+      view.getByTestId("main-chat-action-needs-task-direct-agent:srv_1:child_blocked_ui"),
+    ).toBeTruthy();
+
+    // Close and reopen drawer -> MUST silently refresh overview again (no one-shot gate).
+    fireEvent.click(view.getByTestId("main-chat-action-panel-close"));
+    fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
+    await waitFor(() => {
+      expect(getOverviewMock).toHaveBeenCalledTimes(2);
+    });
+
+    // 2. Child session starts running in its original tab -> triggers silent refresh AND immediately
+    //    removes stale blocked_user from needsYou even before overview updates!
+    await act(async () => {
+      const current = useSessionStore.getState();
+      const session = current.sessions.srv_1!;
+      const nextAgents = new Map(session.agents);
+      nextAgents.set("child_blocked_ui", {
+        ...blockedChild,
+        status: "running",
+        turn: {
+          phase: "open",
+          turnId: "t_live",
+          startedAt: new Date(),
+          cancellationRequestId: null,
+        },
+      });
+      useSessionStore.setState({
+        sessions: {
+          ...current.sessions,
+          srv_1: { ...session, agents: nextAgents },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getOverviewMock).toHaveBeenCalledTimes(3);
+    });
+    expect(view.queryByTestId("main-chat-action-capsule-needsYou")).toBeNull();
+    expect(view.getByTestId("main-chat-action-capsule-inProgress").textContent).toContain(
+      '"count":1',
+    );
   });
 });

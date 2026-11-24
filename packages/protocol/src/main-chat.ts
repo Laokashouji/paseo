@@ -15,6 +15,7 @@ export const MAIN_CHAT_TASK_GOAL_LABEL = "paseo.main-chat.goal";
 export const MAIN_CHAT_TASK_QUIET_LABEL = "paseo.main-chat.quiet";
 export const MAIN_CHAT_WORKSPACE_DIR_NAME = "main-chat";
 export const MAIN_CHAT_DEFAULT_TITLE = "对话管理";
+export const MAIN_CHAT_COMPACT_WINDOW_RATIO = 0.8;
 
 export const MainChatStyleSchema = z.enum(["conservative", "proactive"]);
 export type MainChatStyle = z.infer<typeof MainChatStyleSchema>;
@@ -164,6 +165,7 @@ export type MainChatCustomStylePreset = z.infer<typeof MainChatCustomStylePreset
 
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
+  autoCompactEnabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40),
   style: MainChatStyleSchema,
   activePresetId: z.string().trim().min(1).max(64).optional(),
@@ -190,6 +192,7 @@ export const MainChatSettingsPatchSchema = z.object({
     .optional(),
   resetStyleToDefault: z.boolean().optional(),
   enabled: z.boolean().optional(),
+  autoCompactEnabled: z.boolean().optional(),
   title: z.string().trim().min(1).max(40).optional(),
   style: MainChatStyleSchema.optional(),
   backgroundModel: MainChatBackgroundModelConfigSchema.partial().optional(),
@@ -324,6 +327,12 @@ export function isMainChatEnabled(
 ): boolean {
   if (!settings) return false;
   return settings.enabled !== false;
+}
+
+export function isMainChatAutoCompactEnabled(
+  settings: Pick<MainChatSettings, "autoCompactEnabled"> | null | undefined,
+): boolean {
+  return settings?.autoCompactEnabled !== false;
 }
 
 export function resolveMainChatNightMode(
@@ -627,6 +636,7 @@ export function createDefaultMainChatSettings(
   const preset = getMainChatStylePreset(style);
   return {
     enabled: false,
+    autoCompactEnabled: true,
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
     activePresetId: preset.style,
@@ -696,6 +706,7 @@ export function mergeMainChatSettings(
       const builtin = getMainChatStylePreset(requestedPresetId);
       base = {
         enabled: isMainChatEnabled(current),
+        autoCompactEnabled: isMainChatAutoCompactEnabled(current),
         title: current.title,
         style: builtin.style,
         activePresetId: requestedPresetId,
@@ -713,6 +724,7 @@ export function mergeMainChatSettings(
       }
       base = {
         enabled: isMainChatEnabled(current),
+        autoCompactEnabled: isMainChatAutoCompactEnabled(current),
         title: current.title,
         style: custom.baseStyle,
         activePresetId: custom.id,
@@ -733,6 +745,7 @@ export function mergeMainChatSettings(
     base = {
       ...current,
       enabled: isMainChatEnabled(current),
+      autoCompactEnabled: isMainChatAutoCompactEnabled(current),
       activePresetId: resolvedActiveId,
       customPresets: nextCustomPresets,
       nightMode: currentNightMode,
@@ -748,6 +761,7 @@ export function mergeMainChatSettings(
   const nextTitle = patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE;
   return MainChatSettingsSchema.parse({
     enabled: patch.enabled ?? base.enabled ?? true,
+    autoCompactEnabled: patch.autoCompactEnabled ?? base.autoCompactEnabled ?? true,
     title: nextTitle,
     style: patch.style ?? base.style,
     activePresetId: base.activePresetId,
@@ -1205,6 +1219,8 @@ export const MainChatCompactionStateSchema = z.object({
   status: MainChatCompactionStatusSchema,
   estimatedTokens: z.number().int().nonnegative(),
   thresholdTokens: z.number().int().positive(),
+  contextWindowMaxTokens: z.number().int().positive().nullable().optional(),
+  autoCompactEnabled: z.boolean().optional(),
   lastCompactedAt: z.string().nullable(),
   lastError: z.string().nullable(),
   summary: z.string().nullable(),
@@ -2203,48 +2219,67 @@ function tryParseJsonString(value: string): unknown {
   }
 }
 
-function unwrapArrayPayload(entries: readonly unknown[]): Record<string, unknown> | null {
+const MAX_TOOL_PAYLOAD_UNWRAP_DEPTH = 8;
+
+function unwrapArrayPayload(
+  entries: readonly unknown[],
+  depth: number,
+): Record<string, unknown> | null {
+  if (depth > MAX_TOOL_PAYLOAD_UNWRAP_DEPTH) return null;
   for (const entry of entries) {
     if (typeof entry === "object" && entry !== null) {
       const record = entry as Record<string, unknown>;
       if (typeof record.text === "string") {
-        const parsed = unwrapToolPayloadObject(record.text);
+        const parsed = unwrapToolPayloadObjectInternal(record.text, depth + 1);
         if (parsed) return parsed;
       }
     }
-    const parsed = unwrapToolPayloadObject(entry);
+    const parsed = unwrapToolPayloadObjectInternal(entry, depth + 1);
     if (parsed) return parsed;
   }
   return null;
 }
 
-/**
- * MCP tool outputs arrive differently across providers (structured object, JSON text string, or
- * `{ content: [{ type: "text", text: "..." }] }`). Unwrap all of those shapes cleanly.
- */
-export function unwrapToolPayloadObject(raw: unknown): Record<string, unknown> | null {
-  if (raw == null) return null;
+function unwrapToolPayloadObjectInternal(
+  raw: unknown,
+  depth: number,
+): Record<string, unknown> | null {
+  if (raw == null || depth > MAX_TOOL_PAYLOAD_UNWRAP_DEPTH) return null;
   if (typeof raw === "string") {
-    return unwrapToolPayloadObject(tryParseJsonString(raw));
+    return unwrapToolPayloadObjectInternal(tryParseJsonString(raw), depth + 1);
   }
   if (Array.isArray(raw)) {
-    return unwrapArrayPayload(raw);
+    return unwrapArrayPayload(raw, depth + 1);
   }
   if (typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
   if (typeof obj.structuredContent === "object" && obj.structuredContent !== null) {
-    const nested = unwrapToolPayloadObject(obj.structuredContent);
+    const nested = unwrapToolPayloadObjectInternal(obj.structuredContent, depth + 1);
     if (nested) return nested;
   }
   if (Array.isArray(obj.content)) {
-    const fromContent = unwrapArrayPayload(obj.content);
+    const fromContent = unwrapArrayPayload(obj.content, depth + 1);
     if (fromContent) return fromContent;
   }
   if (typeof obj.text === "string") {
-    const fromText = unwrapToolPayloadObject(obj.text);
+    const fromText = unwrapToolPayloadObjectInternal(obj.text, depth + 1);
     if (fromText) return fromText;
   }
+  // Claude MCP tool results wrap the actual payload inside an extra `{ output: ... }` envelope.
+  if (obj.output !== undefined && obj.output !== null) {
+    const fromOutput = unwrapToolPayloadObjectInternal(obj.output, depth + 1);
+    if (fromOutput) return fromOutput;
+  }
   return obj;
+}
+
+/**
+ * MCP tool outputs arrive differently across providers (structured object, JSON text string,
+ * `{ content: [{ type: "text", text: "..." }] }`, or Claude's `{ output: ... }` wrapper).
+ * Unwrap all of those shapes cleanly.
+ */
+export function unwrapToolPayloadObject(raw: unknown): Record<string, unknown> | null {
+  return unwrapToolPayloadObjectInternal(raw, 0);
 }
 
 export function parseTaskPlanToolOutput(output: unknown): MainChatPlanRecord | null {

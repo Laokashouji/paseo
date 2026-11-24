@@ -31,6 +31,7 @@ import { RetainedChatContent } from "./retained-chat-content";
 import { Composer } from "@/composer";
 import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { MainChatActionBar, MainChatActionBarDrawerOverlay } from "@/main-chat/action-bar";
+import { MainChatComposerEnhancements } from "@/main-chat/composer-enhancements";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1846,9 +1847,13 @@ function ActiveAgentComposer({
   );
 
   const mainChatDirectRoute = useMainChatDirectRoute({ serverId, agentId });
+  const showMainChatComposerEnhancements = paneContext.showMainChatComposerEnhancements === true;
 
   return (
     <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
+      {showMainChatComposerEnhancements ? (
+        <MainChatComposerEnhancements serverId={serverId} agentId={agentId} />
+      ) : null}
       <MainChatActionBar serverId={serverId} agentId={agentId} drawerMode="external" />
       <MainChatRouteBanner
         target={mainChatDirectRoute.target}

@@ -189,6 +189,41 @@ export function stripMainChatContextBlock(text: string): string {
   return text.replace(MAIN_CHAT_CONTEXT_PREFIX_RE, "");
 }
 
+const LEGACY_MAIN_CHAT_SYSTEM_PROMPT_MARKERS = [
+  "📋 督办 · 主动巡检唤醒：",
+  "👋 首次就绪简报：",
+  "【系统自动补答提醒】",
+  "【后台空闲预压缩检查点】",
+  "【主对话上下文压缩检查点】",
+] as const;
+
+/**
+ * Earlier builds passed `formatSystemNotificationPrompt(...)` through `sendPromptToAgent`,
+ * which double-wrapped daemon-generated Main Chat patrol/recovery/compaction prompts inside
+ * `kind="user-message"`. Match only strict `<paseo-system>` envelopes carrying one of those
+ * exact daemon prefixes so genuine human-pasted envelopes still stay user messages.
+ */
+function extractLegacyMainChatSystemEnvelopeBody(text: string): string | null {
+  if (!isSystemInjectedEnvelope(text)) return null;
+  const inner = text.slice("<paseo-system>\n".length, -"\n</paseo-system>".length);
+  const trimmed = inner.trimStart();
+  if (!LEGACY_MAIN_CHAT_SYSTEM_PROMPT_MARKERS.some((marker) => trimmed.startsWith(marker))) {
+    return null;
+  }
+  return inner;
+}
+
+function projectSystemNotificationToolCall(envelopeText: string, body: string): AgentTimelineItem {
+  return {
+    type: "tool_call",
+    callId: `paseo-system:${createHash("sha256").update(envelopeText).digest("hex")}`,
+    name: "heartbeat",
+    status: "completed",
+    error: null,
+    detail: { type: "plain_text", text: body, icon: "sparkles" },
+  };
+}
+
 function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null {
   if (item.type !== "user_message") return item;
   const cleanedText = stripMainChatContextBlock(item.text);
@@ -199,17 +234,14 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
     }
     // Schedule bodies include the run ID, keeping identity stable across replay.
     const text = cleanedText.slice("<paseo-system>\n".length, -"\n</paseo-system>".length);
-    return {
-      type: "tool_call",
-      callId: `paseo-system:${createHash("sha256").update(cleanedText).digest("hex")}`,
-      name: "heartbeat",
-      status: "completed",
-      error: null,
-      detail: { type: "plain_text", text, icon: "sparkles" },
-    };
+    return projectSystemNotificationToolCall(cleanedText, text);
   }
   const { source } = message;
   if (!source) {
+    const legacySystemBody = extractLegacyMainChatSystemEnvelopeBody(message.text);
+    if (legacySystemBody !== null) {
+      return projectSystemNotificationToolCall(message.text, legacySystemBody);
+    }
     return { ...item, text: message.text, clientMessageId: message.id };
   }
   if (source.kind === "change-request-update") {

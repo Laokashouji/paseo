@@ -1487,6 +1487,8 @@ export async function createPaseoDaemon(
     },
   });
 
+  let notifyMainChatAgentArchived: ((agentId: string) => Promise<void>) | null = null;
+
   agentManager.setAgentArchivedCallback(async (agentId) => {
     await changeRequestWatches
       .archive(agentId)
@@ -1497,6 +1499,11 @@ export async function createPaseoDaemon(
       await scheduleService.completeForAgent(agentId);
     } catch (error) {
       logger.warn({ err: error, agentId }, "Failed to complete schedules for archived agent");
+    }
+    if (notifyMainChatAgentArchived) {
+      await notifyMainChatAgentArchived(agentId).catch((error) => {
+        logger.warn({ err: error, agentId }, "Failed to clear main-chat state for archived agent");
+      });
     }
   });
   logger.info({ elapsed: elapsed() }, "Schedule service initialized");
@@ -1591,6 +1598,7 @@ export async function createPaseoDaemon(
     logger,
   });
   agentManager.setMainChatSettingsReader(() => mainChatService.getCurrentSettings());
+  notifyMainChatAgentArchived = (agentId) => mainChatService.handleAgentArchived(agentId);
 
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,

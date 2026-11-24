@@ -328,8 +328,8 @@ export const SemanticTriageOptionSchema = z.object({
 
 export const SemanticTriageOutputSchema = z.object({
   phase: z.enum(["done", "blocked_user", "blocked_external", "unsure"]),
-  summary: z.string().trim().min(1).max(120),
-  waitReason: z.string().trim().min(1).max(160).nullable(),
+  summary: z.string().trim().min(1).max(200),
+  waitReason: z.string().trim().min(1).max(280).nullable(),
   needsUserDecision: z.boolean(),
   isLowRiskTechnicalQuestion: z.boolean(),
   riskyAction: z.boolean(),
@@ -338,13 +338,119 @@ export const SemanticTriageOutputSchema = z.object({
 });
 export type SemanticTriageOutput = z.infer<typeof SemanticTriageOutputSchema>;
 
-function compactFirstSentence(text: string, maxLen = 80): string {
-  const cleaned = text
-    .replace(/```[\s\S]*?```/g, " ")
+const LIST_ITEM_PREFIX_RE = /^(?:[-*•]\s+|\d+[.)、]\s+|(?:方案|选项|option)\s*[A-Za-z0-9])/i;
+
+function stripCodeBlocks(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, "\n").replace(/\r\n/g, "\n");
+}
+
+function cleanLineForDisplay(line: string): string {
+  return line
+    .replace(/^\s*#{1,6}\s+/, "")
+    .replace(/^\s*>\s?/, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function splitCleanLines(text: string): string[] {
+  return stripCodeBlocks(text)
+    .split("\n")
+    .map(cleanLineForDisplay)
+    .filter((line) => line.length > 0 && !/^[-_=*]{3,}$/.test(line));
+}
+
+function splitSentences(text: string): string[] {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  const matches = normalized.match(/[^。！？!?]+[。！？!?]*|[。！？!?]+/g);
+  if (!matches) return [normalized];
+  return matches.map((part) => part.trim()).filter(Boolean);
+}
+
+function compactFromStart(text: string, maxLen: number): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= maxLen) return cleaned;
+  // Prefer breaking cleanly at sentence boundaries before falling back to character truncation.
+  const sentences = splitSentences(cleaned);
+  let built = "";
+  for (const sentence of sentences) {
+    const candidate = built ? `${built} ${sentence}` : sentence;
+    if (candidate.length > maxLen) break;
+    built = candidate;
+  }
+  if (built.length >= Math.floor(maxLen * 0.45)) {
+    return built;
+  }
+  return `${cleaned.slice(0, maxLen - 1)}…`;
+}
+
+function compactFirstSentence(text: string, maxLen = 120): string {
+  const lines = splitCleanLines(text);
+  const cleaned = lines.join(" ").replace(/\s+/g, " ").trim();
   if (!cleaned) return "本轮已结束";
-  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
+  return compactFromStart(cleaned, maxLen);
+}
+
+function extractTrailingSegment(text: string, maxLen = 240): string {
+  const lines = splitCleanLines(text);
+  if (lines.length === 0) return "";
+
+  // Find the last line that expresses an explicit question/confirmation; if the reply ends with
+  // bulleted options after the question, keep both the question line and its trailing options.
+  let questionLineIdx = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 8); i -= 1) {
+    if (EXPLICIT_QUESTION_PATTERN.test(lines[i]!)) {
+      questionLineIdx = i;
+      break;
+    }
+  }
+
+  let selectedLines: string[];
+  if (questionLineIdx >= 0) {
+    selectedLines = lines.slice(questionLineIdx);
+    // Include immediately preceding context/options when the trailing question line alone is short.
+    let cursor = questionLineIdx - 1;
+    while (cursor >= 0 && selectedLines.join("\n").length < 110) {
+      const prev = lines[cursor]!;
+      const nextCombined = `${prev}\n${selectedLines.join("\n")}`;
+      if (nextCombined.length > maxLen && !LIST_ITEM_PREFIX_RE.test(prev)) {
+        break;
+      }
+      selectedLines.unshift(prev);
+      cursor -= 1;
+      if (selectedLines.length >= 4) break;
+    }
+  } else {
+    selectedLines = lines.slice(-3);
+  }
+
+  const joined = selectedLines.join("\n").trim();
+  if (joined.length <= maxLen) {
+    return joined;
+  }
+
+  // Keep complete trailing sentences rather than slicing mid-word from the end.
+  const sentences = splitSentences(joined);
+  if (sentences.length > 1) {
+    const kept: string[] = [];
+    let length = 0;
+    for (let i = sentences.length - 1; i >= 0; i -= 1) {
+      const sentence = sentences[i]!;
+      const added = kept.length === 0 ? sentence.length : sentence.length + 1;
+      if (kept.length > 0 && length + added > maxLen) {
+        break;
+      }
+      kept.unshift(sentence);
+      length += added;
+    }
+    const rebuilt = kept.join(" ").trim();
+    if (rebuilt.length > 0 && rebuilt.length <= maxLen) {
+      return rebuilt;
+    }
+  }
+
+  return compactFromStart(joined, maxLen);
 }
 
 /**
@@ -368,9 +474,18 @@ export function heuristicTriageAssistantReply(replyText: string): {
       riskyAction: false,
     };
   }
-  const tail = trimmed.slice(-360);
-  const riskyAction = RISKY_ACTION_PATTERN.test(tail);
-  if (EXTERNAL_WAIT_PATTERN.test(tail) && !EXPLICIT_QUESTION_PATTERN.test(tail)) {
+
+  const lines = splitCleanLines(trimmed);
+  const trailingInspectionText =
+    lines.length > 0 ? lines.slice(-6).join("\n").slice(-600) : trimmed.slice(-600);
+  const trailingSentences = splitSentences(trailingInspectionText);
+  const lastSentence = trailingSentences.at(-1) ?? trailingInspectionText;
+  const riskyAction = RISKY_ACTION_PATTERN.test(trailingInspectionText);
+
+  if (
+    EXTERNAL_WAIT_PATTERN.test(trailingInspectionText) &&
+    !EXPLICIT_QUESTION_PATTERN.test(trailingInspectionText)
+  ) {
     return {
       phase: "blocked_external",
       summary: compactFirstSentence(trimmed),
@@ -379,11 +494,20 @@ export function heuristicTriageAssistantReply(replyText: string): {
       riskyAction,
     };
   }
-  if (EXPLICIT_QUESTION_PATTERN.test(tail) && !OPTIONAL_OFFER_TAIL_PATTERN.test(tail)) {
+
+  const hasExplicitQuestion =
+    EXPLICIT_QUESTION_PATTERN.test(lastSentence) ||
+    EXPLICIT_QUESTION_PATTERN.test(trailingInspectionText);
+  const isOptionalOfferOnly =
+    OPTIONAL_OFFER_TAIL_PATTERN.test(lastSentence) ||
+    OPTIONAL_OFFER_TAIL_PATTERN.test(trailingInspectionText);
+
+  if (hasExplicitQuestion && !isOptionalOfferOnly) {
+    const questionContext = extractTrailingSegment(trimmed, 240);
     return {
       phase: "blocked_user",
-      summary: compactFirstSentence(trimmed),
-      waitReason: compactFirstSentence(tail, 90),
+      summary: compactFirstSentence(trimmed, 120),
+      waitReason: questionContext || compactFirstSentence(trimmed, 160),
       suggestedAction: riskyAction ? "涉及高风险动作，请确认后再执行" : "查看会话并确认下一步",
       riskyAction,
     };

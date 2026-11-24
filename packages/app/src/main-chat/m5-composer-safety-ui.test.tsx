@@ -830,7 +830,12 @@ describe("M5 Composer, Approval Clarification & Standing Authorizations UI", () 
     // At most 4 chips rendered
     expect(view.getByTestId("main-chat-next-step-safe_check")).toBeTruthy();
     expect(view.getByTestId("main-chat-next-step-risky_merge")).toBeTruthy();
-    expect(view.getByTestId("main-chat-next-step-risky-badge-risky_merge")).toBeTruthy();
+    const riskyBadgeEl = view.getByTestId("main-chat-next-step-risky-badge-risky_merge");
+    expect(riskyBadgeEl).toBeTruthy();
+    // Verify riskyBadge keeps single-line nowrap & non-shrinking style so long labels never wrap it vertically.
+    const computedStyle = window.getComputedStyle(riskyBadgeEl);
+    expect(computedStyle.flexShrink).toBe("0");
+    expect(computedStyle.whiteSpace).toBe("nowrap");
     expect(view.queryByTestId("main-chat-next-step-s5_overflow")).toBeNull();
 
     // Clicking risky suggestion MUST NOT send; MUST only prefill + show caution toast

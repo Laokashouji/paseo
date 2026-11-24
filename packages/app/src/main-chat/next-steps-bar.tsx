@@ -7,6 +7,7 @@ import { ScrollView, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PressHighlight } from "@/components/ui/press-highlight";
+import { isWeb } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { useSettings } from "@/hooks/use-settings";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
@@ -161,12 +162,22 @@ const NextStepChip = memo(function NextStepChip({
       accessibilityLabel={suggestion.label}
       testID={`main-chat-next-step-${suggestion.id}`}
     >
-      {renderChipIcon({ isSending, risky: suggestion.risky, suggestionId: suggestion.id })}
-      <Text style={[styles.chipLabel, suggestion.risky && styles.chipLabelRisky]} numberOfLines={1}>
+      <View style={styles.chipIcon}>
+        {renderChipIcon({ isSending, risky: suggestion.risky, suggestionId: suggestion.id })}
+      </View>
+      <Text
+        style={[styles.chipLabel, suggestion.risky && styles.chipLabelRisky]}
+        numberOfLines={1}
+        ellipsizeMode="tail"
+      >
         {suggestion.label}
       </Text>
       {suggestion.risky ? (
-        <Text style={styles.riskyBadge} testID={`main-chat-next-step-risky-badge-${suggestion.id}`}>
+        <Text
+          style={styles.riskyBadge}
+          numberOfLines={1}
+          testID={`main-chat-next-step-risky-badge-${suggestion.id}`}
+        >
           {t("mainChat.composer.nextSteps.riskyBadge")}
         </Text>
       ) : null}
@@ -321,12 +332,19 @@ const styles = StyleSheet.create((theme) => ({
   chip: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "nowrap",
+    overflow: "hidden",
     gap: theme.spacing[1],
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1],
     borderRadius: theme.borderRadius.full,
     borderWidth: theme.borderWidth[1],
     maxWidth: 240,
+  },
+  chipIcon: {
+    flexShrink: 0,
+    alignItems: "center",
+    justifyContent: "center",
   },
   chipSafe: {
     borderColor: theme.colors.border,
@@ -344,6 +362,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
     flexShrink: 1,
+    minWidth: 0,
   },
   chipLabelRisky: {
     color: theme.colors.statusWarning,
@@ -352,5 +371,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: 10,
     fontWeight: theme.fontWeight.semibold,
     color: theme.colors.statusWarning,
+    flexShrink: 0,
+    ...(isWeb ? { whiteSpace: "nowrap" } : null),
   },
 }));

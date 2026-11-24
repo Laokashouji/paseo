@@ -45,7 +45,7 @@ export const MainChatReworkCard = memo(function MainChatReworkCard({
     const session = state.sessions[serverId];
     const agent = session?.agents.get(rework.agentId) ?? session?.agentDetails.get(rework.agentId);
     if (!agent) return false;
-    return agent.archivedAt !== null || (agent.status === "idle" && agent.turn.phase === "idle");
+    return Boolean(agent.archivedAt) || (agent.status === "idle" && agent.turn.phase === "idle");
   });
 
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();

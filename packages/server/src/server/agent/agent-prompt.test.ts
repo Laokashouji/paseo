@@ -378,3 +378,48 @@ test("schedule trigger identity survives the provider assigning a message ID", (
     projectAgentMessages({ type: "user_message", text, messageId: "provider-message" }),
   );
 });
+
+test("projects legacy double-wrapped main-chat patrol/recovery/compaction prompts back into heartbeat tool calls", () => {
+  const legacyPayloads = [
+    "📋 督办 · 主动巡检唤醒：后台督办聚拢 1 条动态",
+    "👋 首次就绪简报：你是「对话管家」",
+    "【系统自动补答提醒】请输出可见回复",
+    "【后台空闲预压缩检查点】保留上下文摘要",
+    "【主对话上下文压缩检查点】保留上下文摘要",
+  ];
+  for (const body of legacyPayloads) {
+    const inner = formatSystemNotificationPrompt(body);
+    const doubleWrapped = prepareAgentMessage(inner, undefined, "legacy-id").prompt as string;
+    expect(doubleWrapped).toContain('kind="user-message"');
+
+    const projected = projectAgentMessages({
+      type: "user_message",
+      messageId: "provider-replay",
+      text: doubleWrapped,
+    });
+    expect(projected).toEqual([
+      expect.objectContaining({
+        type: "tool_call",
+        name: "heartbeat",
+        status: "completed",
+        detail: { type: "plain_text", text: body, icon: "sparkles" },
+      }),
+    ]);
+  }
+
+  // Genuine user-pasted arbitrary `<paseo-system>` text remains a user message.
+  const humanPasted = formatSystemNotificationPrompt("user pasted custom note");
+  const wrappedHuman = prepareAgentMessage(humanPasted, undefined, "human-id").prompt as string;
+  expect(
+    projectAgentMessages({
+      type: "user_message",
+      messageId: "provider-human",
+      text: wrappedHuman,
+    })[0],
+  ).toEqual({
+    type: "user_message",
+    text: humanPasted,
+    messageId: "provider-human",
+    clientMessageId: "human-id",
+  });
+});

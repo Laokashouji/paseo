@@ -51,9 +51,65 @@ const PLACEHOLDER_EMPTY_REPLY_RE =
   /^(?:\(no content\)|no content|no response requested|no response needed|no_response|\[no_response\])[.。!！\s]*$/i;
 
 const MISSING_REPLY_RECOVERY_MARKER = "系统自动补答提醒";
-const MAX_BACKGROUND_LABEL_CHARS = 48;
+const MAX_BACKGROUND_LABEL_CHARS = 36;
+
+const LEGACY_BACKGROUND_ENVELOPE_RE = /^<paseo-system>\n([\s\S]*)\n<\/paseo-system>$/;
+const LEGACY_BACKGROUND_ENVELOPE_MARKERS = [
+  "📋 督办 · 主动巡检唤醒：",
+  "👋 首次就绪简报：",
+  "【系统自动补答提醒】",
+  "【后台空闲预压缩检查点】",
+  "【主对话上下文压缩检查点】",
+] as const;
+
+/**
+ * Recognizes legacy Main Chat system prompts that older daemons accidentally persisted as
+ * `user_message` items (either wrapped in `<paseo-system>...</paseo-system>` or carrying the
+ * exact multi-line daemon system header + system-event disclaimer).
+ */
+function extractLegacyMainChatUserMessageSystemText(text: string): string | null {
+  const trimmed = text.trim();
+  const envelopeMatch = LEGACY_BACKGROUND_ENVELOPE_RE.exec(trimmed);
+  if (envelopeMatch) {
+    const inner = envelopeMatch[1]!.trimStart();
+    if (LEGACY_BACKGROUND_ENVELOPE_MARKERS.some((marker) => inner.startsWith(marker))) {
+      return envelopeMatch[1]!;
+    }
+    return null;
+  }
+  if (
+    trimmed.startsWith("📋 督办 · 主动巡检唤醒：") &&
+    (trimmed.includes("（这是 Paseo 后台巡检事件，不是用户手打消息") ||
+      trimmed.includes("（这是 Paseo 后台督办与巡检事件，不是用户手打消息"))
+  ) {
+    return trimmed;
+  }
+  if (
+    trimmed.startsWith("👋 首次就绪简报：") &&
+    trimmed.includes("（这是 Paseo 自动触发的首次态势简报")
+  ) {
+    return trimmed;
+  }
+  if (
+    trimmed.startsWith("【系统自动补答提醒】") &&
+    trimmed.includes("上一轮你在响应用户消息时调用了工具")
+  ) {
+    return trimmed;
+  }
+  if (
+    (trimmed.startsWith("【后台空闲预压缩检查点】") ||
+      trimmed.startsWith("【主对话上下文压缩检查点】")) &&
+    trimmed.includes("以下是最新的结构化上下文交接摘要")
+  ) {
+    return trimmed;
+  }
+  return null;
+}
 
 export function isSystemBackgroundTrigger(item: StreamItem): boolean {
+  if (item.kind === "user_message") {
+    return extractLegacyMainChatUserMessageSystemText(item.text) !== null;
+  }
   if (item.kind !== "tool_call") return false;
   if (item.payload.source === "agent") {
     return (
@@ -64,6 +120,9 @@ export function isSystemBackgroundTrigger(item: StreamItem): boolean {
 }
 
 function extractSystemBackgroundText(item: StreamItem): string {
+  if (item.kind === "user_message") {
+    return extractLegacyMainChatUserMessageSystemText(item.text) ?? "";
+  }
   if (item.kind !== "tool_call") return "";
   if (item.payload.source === "agent") {
     const detail = item.payload.data.detail;
@@ -96,6 +155,38 @@ export function extractBackgroundTurnLabel(item: StreamItem): string | null {
 
 function getToolCallName(item: ToolCallItem): string {
   return item.payload.source === "agent" ? item.payload.data.name : item.payload.data.toolName;
+}
+
+function hasExplicitSilentReplyOnly(
+  bodyItems: readonly StreamItem[],
+  getGroupedCalls: CollapseTurnsInput["getGroupedCalls"],
+): boolean {
+  const assistantTexts: string[] = [];
+  for (const item of bodyItems) {
+    if (item.kind === "tool_call" || item.kind === "thought") {
+      const expanded = getGroupedCalls(item.id) ?? [item];
+      for (const call of expanded) {
+        if (call.kind === "tool_call" && isMainChatInlineCardToolName(getToolCallName(call))) {
+          return false;
+        }
+      }
+      continue;
+    }
+    if (item.kind === "assistant_message") {
+      assistantTexts.push(item.text);
+      continue;
+    }
+    if (item.kind === "plugin" && item.sourceKind === "assistant_message") {
+      return false;
+    }
+  }
+  const combined = assistantTexts
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (combined.length === 0) return false;
+  return EXPLICIT_SILENT_SENTINEL_RE.test(combined);
 }
 
 export function isSilentBackgroundTurn(
@@ -286,16 +377,26 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
 
     if (isMissingReplyRecoveryTrigger(host)) {
       // Keep the recovered assistant answer visible while suppressing the internal recovery prompt.
+      if (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) {
+        return;
+      }
       output.push(...body);
       return;
     }
 
-    if (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) {
-      // Completed silent rounds stay in the `/main/history` activity audit view, not in chat.
+    if (
+      (isClosed && isSilentBackgroundTurn(body, input.getGroupedCalls)) ||
+      hasExplicitSilentReplyOnly(body, input.getGroupedCalls)
+    ) {
+      // Silent rounds stay in the `/main/history` activity audit view and are completely hidden in chat.
       return;
     }
 
-    const tools = summarizeTurn(body, input.getGroupedCalls);
+    const replyIndex = findLastReplyIndex(body, 0, body.length);
+    const processItems = replyIndex >= 0 ? body.slice(0, replyIndex) : body;
+    const conclusionItems = replyIndex >= 0 ? body.slice(replyIndex) : [];
+
+    const tools = summarizeTurn(processItems, input.getGroupedCalls);
     const expanded = input.expandedHostIds.has(host.id);
     const summary = summaryRow(
       host,
@@ -311,8 +412,11 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       },
     );
     summaryRowsByHostId.set(host.id, summary);
-    const revealed = [host, ...(expanded ? expandCalls(body) : body)];
-    for (const item of revealed) {
+
+    // Hide the system trigger bubble and intermediate process behind the lightweight gray tag,
+    // while keeping the steward's substantive conclusion directly readable in the main chat stream.
+    const revealedProcess = [host, ...(expanded ? expandCalls(processItems) : processItems)];
+    for (const item of revealedProcess) {
       if (item !== host && staysVisibleInCollapsedBackgroundTurn(item)) continue;
       hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
       if (expanded) nestedItemIds.add(item.id);
@@ -320,7 +424,10 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
     }
     output.push(
       summary,
-      ...(expanded ? revealed : body.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
+      ...(expanded
+        ? revealedProcess
+        : processItems.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
+      ...conclusionItems,
     );
   };
 

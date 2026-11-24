@@ -160,12 +160,30 @@ export interface MainChatSupervisor {
     taskId?: string | null;
     conversationId?: string | null;
   }): { pausedDeadlineAt: string };
+  handleAgentArchived(agentId: string): Promise<void>;
   getApprovalTracker(): ApprovalInterceptionTracker;
   handleRemotePermissionRequested(event: FleetBridgePermissionRequestedEvent): void;
   handleRemotePermissionResolved(event: FleetBridgePermissionResolvedEvent): void;
   handleRemoteAgentsChanged(event: FleetBridgeAgentsChangedEvent): void;
   reconcileRemoteHostScope(): void;
 }
+
+interface AssistantTurnBuffer {
+  currentMessageId: string | null;
+  currentMessageText: string;
+  segments: string[];
+}
+
+const MAX_ASSISTANT_TURN_BUFFER_CHARS = 20_000;
+const STALE_BLOCKED_PHASES = new Set<MainChatSessionTriage["phase"]>([
+  "blocked_user",
+  "interrupted",
+  "stalled",
+  "no_progress",
+  "unsure",
+]);
+const AUTO_RESOLVED_TURN_STARTED_ANSWER = "已在原会话继续处理，该待决策项已自动结项";
+const AUTO_RESOLVED_ARCHIVED_ANSWER = "关联会话已归档，该待决策项已自动结项";
 
 interface AgentToolLoopTracker {
   lastSubstantiveAt: number;
@@ -235,6 +253,51 @@ function extractToolDetailText(detail: unknown): string | null {
 }
 
 function extractLastAssistantTextFromTimeline(items: readonly AgentTimelineItem[]): string {
+  // Walk back to the start of the latest turn so streaming chunks or multi-part replies are
+  // reconstructed completely instead of returning only the last fragment.
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.type === "user_message") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+
+  const segments: string[] = [];
+  let currentMessageId: string | null = null;
+  let currentText = "";
+
+  const flushCurrent = () => {
+    const trimmed = currentText.trim();
+    if (trimmed.length > 0) {
+      segments.push(trimmed);
+    }
+    currentMessageId = null;
+    currentText = "";
+  };
+
+  for (let i = turnStart; i < items.length; i += 1) {
+    const item = items[i];
+    if (!item) continue;
+    if (item.type === "assistant_message") {
+      const nextMessageId = item.messageId ?? null;
+      if (nextMessageId && currentMessageId && nextMessageId !== currentMessageId) {
+        flushCurrent();
+      }
+      if (!currentMessageId && nextMessageId) {
+        currentMessageId = nextMessageId;
+      }
+      currentText += item.text;
+    } else if (item.type === "tool_call") {
+      flushCurrent();
+    }
+  }
+  flushCurrent();
+
+  if (segments.length > 0) {
+    return segments.join("\n\n").slice(-MAX_ASSISTANT_TURN_BUFFER_CHARS).trim();
+  }
+
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (item && item.type === "assistant_message" && item.text.trim().length > 0) {
@@ -409,7 +472,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   const pendingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTriageTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const lastActivityAtByAgent = new Map<string, number>();
-  const lastAssistantTextByAgent = new Map<string, string>();
+  const assistantTurnBufferByAgent = new Map<string, AssistantTurnBuffer>();
   const stalledNudgedAtByAgent = new Map<string, number>();
   const permissionFirstSeenAt = new Map<string, number>();
   const pendingPermissionRequestsByKey = new Map<string, PendingPermissionMeta>();
@@ -755,7 +818,58 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     return result;
   }
 
-  function clearAgentState(agentId: string): void {
+  function appendAssistantTextChunk(agentId: string, text: string, messageId?: string): void {
+    if (text.length === 0) return;
+    let buffer = assistantTurnBufferByAgent.get(agentId);
+    if (!buffer) {
+      buffer = { currentMessageId: messageId ?? null, currentMessageText: "", segments: [] };
+      assistantTurnBufferByAgent.set(agentId, buffer);
+    }
+    if (messageId && buffer.currentMessageId && messageId !== buffer.currentMessageId) {
+      const prev = buffer.currentMessageText.trim();
+      if (prev.length > 0) {
+        buffer.segments.push(prev);
+      }
+      buffer.currentMessageText = "";
+      buffer.currentMessageId = messageId;
+    } else if (!buffer.currentMessageId && messageId) {
+      buffer.currentMessageId = messageId;
+    }
+    buffer.currentMessageText += text;
+    if (buffer.currentMessageText.length > MAX_ASSISTANT_TURN_BUFFER_CHARS) {
+      buffer.currentMessageText = buffer.currentMessageText.slice(-MAX_ASSISTANT_TURN_BUFFER_CHARS);
+    }
+  }
+
+  function sealCurrentAssistantSegment(agentId: string): void {
+    const buffer = assistantTurnBufferByAgent.get(agentId);
+    if (!buffer) return;
+    const trimmed = buffer.currentMessageText.trim();
+    if (trimmed.length > 0) {
+      buffer.segments.push(trimmed);
+      if (buffer.segments.length > 12) {
+        buffer.segments = buffer.segments.slice(-12);
+      }
+    }
+    buffer.currentMessageText = "";
+    buffer.currentMessageId = null;
+  }
+
+  function getAccumulatedAssistantReply(agentId: string): string {
+    const buffer = assistantTurnBufferByAgent.get(agentId);
+    if (!buffer) return "";
+    const parts = [...buffer.segments];
+    const tail = buffer.currentMessageText.trim();
+    if (tail.length > 0) {
+      parts.push(tail);
+    }
+    const combined = parts.join("\n\n").trim();
+    return combined.length > MAX_ASSISTANT_TURN_BUFFER_CHARS
+      ? combined.slice(-MAX_ASSISTANT_TURN_BUFFER_CHARS)
+      : combined;
+  }
+
+  function clearAgentRuntimeState(agentId: string): void {
     clearTimerMapEntry(pendingRetryTimers, agentId);
     clearTimerMapEntry(pendingTriageTimers, agentId);
     transientRetriesByAgent.delete(agentId);
@@ -764,7 +878,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     usageLimitEscalatedAgents.delete(agentId);
     usageLimitWakeAtByAgent.delete(agentId);
     lastActivityAtByAgent.delete(agentId);
-    lastAssistantTextByAgent.delete(agentId);
+    assistantTurnBufferByAgent.delete(agentId);
     stalledNudgedAtByAgent.delete(agentId);
     permissionFirstSeenAt.delete(agentId);
     toolLoopByAgent.delete(agentId);
@@ -776,8 +890,67 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         autoApprovedPermissionKeys.delete(key);
       }
     }
-    void deps.store.removeClarificationsForAgent(agentId).catch(() => undefined);
-    void deps.store.removeTriage(agentId).catch(() => undefined);
+  }
+
+  async function clearStaleNeedsYouForAgent(
+    agentId: string,
+    reason: "turn_started" | "archived",
+  ): Promise<void> {
+    const nowIso = new Date(getNowMs()).toISOString();
+    const linkedTask = deps.store.findTaskByAgentId(agentId);
+    const existingTriage = deps.store.getTriage(agentId);
+    let mutated = false;
+
+    if (reason === "archived") {
+      if (existingTriage) {
+        await deps.store.removeTriage(agentId);
+        mutated = true;
+      }
+      await deps.store.removeClarificationsForAgent(agentId);
+    } else if (existingTriage && STALE_BLOCKED_PHASES.has(existingTriage.phase)) {
+      await deps.store.removeTriage(agentId);
+      mutated = true;
+    }
+
+    const autoResolved = await deps.store.resolveOpenDecisionsForAgent(agentId, {
+      answer:
+        reason === "archived" ? AUTO_RESOLVED_ARCHIVED_ANSWER : AUTO_RESOLVED_TURN_STARTED_ANSWER,
+      answeredAt: nowIso,
+      taskId: linkedTask?.id ?? null,
+    });
+    if (autoResolved.length > 0) {
+      mutated = true;
+    }
+
+    if (reason === "turn_started" && linkedTask && linkedTask.status === "needs_you") {
+      const live = deps.agentManager.getAgent(agentId);
+      if (!live || live.pendingPermissions.size === 0) {
+        await deps.store.putTask({
+          ...linkedTask,
+          status: "running",
+          updatedAt: nowIso,
+        });
+        mutated = true;
+      }
+    }
+
+    signalQueue.removeByAgentId(agentId);
+    if (mutated) {
+      deps.contextSnapshots.invalidateCache();
+    }
+  }
+
+  async function handleAgentArchivedInternal(agentId: string): Promise<void> {
+    clearAgentRuntimeState(agentId);
+    await clearStaleNeedsYouForAgent(agentId, "archived");
+    deps.contextSnapshots.invalidateCache();
+  }
+
+  function hasTrackedStaleState(agentId: string): boolean {
+    if (deps.store.getTriage(agentId)) return true;
+    return deps.store
+      .listDecisions()
+      .some((decision) => decision.answeredAt === null && decision.agentId === agentId);
   }
 
   function resolveMainSelection(mainAgentId: string | null): {
@@ -1673,7 +1846,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const projectName = basenameOf(live.cwd);
     const managed = isManagedChildAgent(live);
     const lastReply =
-      lastAssistantTextByAgent.get(agentId)?.trim() ||
+      getAccumulatedAssistantReply(agentId) ||
       extractLastAssistantTextFromTimeline(deps.agentManager.getTimeline(agentId));
 
     const semanticResult = await runOptionalSemanticTriage({
@@ -1750,7 +1923,22 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         ) {
           armPatrolTimer();
         }
+        if (agent.pendingPermissions.size === 0 && hasTrackedStaleState(agent.id)) {
+          void clearStaleNeedsYouForAgent(agent.id, "turn_started").catch(() => undefined);
+        }
       }
+    } else if (isObservedFleetAgent(agent) && hasTrackedStaleState(agent.id)) {
+      // AgentManager emits `agent_state` without an explicit `archivedAt` field on ManagedAgent;
+      // check storage when a tracked agent leaves running so archived sessions clear immediately.
+      void deps.agentStorage
+        .get(agent.id)
+        .then((stored) => {
+          if (stored?.archivedAt) {
+            return handleAgentArchivedInternal(agent.id);
+          }
+          return undefined;
+        })
+        .catch(() => undefined);
     }
     if (agent.pendingPermissions.size === 0) {
       permissionFirstSeenAt.delete(agent.id);
@@ -1772,8 +1960,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       return;
     }
     if (event.type === "agent_removed") {
-      clearAgentState(event.agentId);
-      deps.contextSnapshots.invalidateCache();
+      void handleAgentArchivedInternal(event.agentId).catch(() => undefined);
       return;
     }
     if (event.type === "agent_state") {
@@ -1793,14 +1980,17 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     if (event.event.type === "turn_started") {
       clearTimerMapEntry(pendingTriageTimers, event.agentId);
       permissionFirstSeenAt.delete(event.agentId);
+      assistantTurnBufferByAgent.delete(event.agentId);
+      void clearStaleNeedsYouForAgent(event.agentId, "turn_started").catch(() => undefined);
       return;
     }
 
     if (event.event.type === "timeline") {
       const item = event.event.item;
-      if (item.type === "assistant_message" && item.text.trim().length > 0) {
-        lastAssistantTextByAgent.set(event.agentId, item.text.trim());
+      if (item.type === "assistant_message") {
+        appendAssistantTextChunk(event.agentId, item.text, item.messageId);
       } else if (item.type === "tool_call") {
+        sealCurrentAssistantSegment(event.agentId);
         recordToolCallForLoopDetection(
           event.agentId,
           item.name,
@@ -2677,10 +2867,29 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
   }
 
+  async function reconcileArchivedStaleState(): Promise<void> {
+    const candidateAgentIds = new Set<string>();
+    for (const triage of deps.store.listTriages()) {
+      candidateAgentIds.add(triage.agentId);
+    }
+    for (const decision of deps.store.listDecisions()) {
+      if (decision.answeredAt === null && decision.agentId) {
+        candidateAgentIds.add(decision.agentId);
+      }
+    }
+    for (const agentId of candidateAgentIds) {
+      const stored = await deps.agentStorage.get(agentId).catch(() => null);
+      if (stored?.archivedAt) {
+        await handleAgentArchivedInternal(agentId);
+      }
+    }
+  }
+
   async function scanFleetAndBuildSignals(): Promise<{
     scannedSessions: number;
     signalsFound: number;
   }> {
+    await reconcileArchivedStaleState();
     const now = getNowMs();
     const settings = deps.store.getSettings();
     const stalledThresholdMs = effectiveStalledThresholdMs();
@@ -2952,6 +3161,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         nowMs: getNowMs(),
       });
       return { pausedDeadlineAt: paused.pausedDeadlineAt };
+    },
+
+    async handleAgentArchived(agentId) {
+      await handleAgentArchivedInternal(agentId);
     },
 
     getApprovalTracker() {

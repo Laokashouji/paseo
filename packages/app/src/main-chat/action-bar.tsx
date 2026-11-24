@@ -20,7 +20,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react-native";
-import { memo, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -116,7 +116,7 @@ function buildLiveAgentSnapshot(
     hasBackgroundWork: (agent.backgroundWork?.count ?? 0) > 0,
     requiresAttention: Boolean(agent.requiresAttention),
     attentionReason: agent.attentionReason ?? null,
-    archived: agent.archivedAt !== null,
+    archived: Boolean(agent.archivedAt),
     background: Boolean(agent.background),
     isMainChat: isMainChatAgent(agent),
     managedByMainChat,
@@ -327,18 +327,40 @@ function resolveNeedsYouKindKey(item: ActionBarNeedsYouItem): string {
   }
 }
 
+function normalizeCompareText(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isRedundantText(
+  candidate: string | null | undefined,
+  existingList: readonly (string | null | undefined)[],
+): boolean {
+  const normCandidate = normalizeCompareText(candidate);
+  if (!normCandidate) return true;
+  for (const existing of existingList) {
+    const normExisting = normalizeCompareText(existing);
+    if (!normExisting) continue;
+    if (normExisting === normCandidate || normExisting.includes(normCandidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   item,
   mainServerId,
   mainAgentId,
   targetClient,
   onOpen,
+  onDirectRoute,
 }: {
   item: ActionBarNeedsYouItem;
   mainServerId: string;
   mainAgentId: string;
   targetClient: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
   onOpen: () => void;
+  onDirectRoute: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -383,19 +405,103 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   if (item.kind === "plan") {
     return <MainChatPlanCard serverId={mainServerId} agentId={mainAgentId} plan={item.plan} />;
   }
+
+  const locationParts = [item.hostLabel, item.workspaceLabel ?? item.cwd].filter(
+    (part): part is string => Boolean(part && part.trim().length > 0),
+  );
+  const locationText = locationParts.length > 0 ? locationParts.join(" · ") : null;
+  const primaryText = item.reason;
+  const showSummary = !isRedundantText(item.summary, [primaryText]);
+  const showGoal = !isRedundantText(item.goal, [primaryText, showSummary ? item.summary : null]);
+  const showSuggestedAction = !isRedundantText(item.suggestedAction, [
+    primaryText,
+    showSummary ? item.summary : null,
+  ]);
+
   return (
     <View style={styles.taskNeedsInline}>
-      {item.reason ? <Text style={styles.inlineDetailText}>{item.reason}</Text> : null}
+      {locationText ? (
+        <Text style={styles.inlineContextMeta} numberOfLines={1}>
+          {locationText}
+        </Text>
+      ) : null}
+
+      {primaryText ? (
+        <View style={styles.inlineDetailBlock}>
+          <Text style={styles.inlineDetailLabel}>
+            {t(
+              item.isFailed
+                ? "mainChat.actionBar.needsDetailFailureLabel"
+                : "mainChat.actionBar.needsDetailQuestionLabel",
+            )}
+          </Text>
+          <Text
+            style={styles.inlineDetailText}
+            testID={`main-chat-action-needs-question-${item.id}`}
+          >
+            {primaryText}
+          </Text>
+        </View>
+      ) : null}
+
+      {showSummary && item.summary ? (
+        <View style={styles.inlineDetailBlock}>
+          <Text style={styles.inlineDetailLabel}>
+            {t("mainChat.actionBar.needsDetailSummaryLabel")}
+          </Text>
+          <Text
+            style={styles.inlineSecondaryText}
+            testID={`main-chat-action-needs-summary-${item.id}`}
+          >
+            {item.summary}
+          </Text>
+        </View>
+      ) : null}
+
+      {showGoal && item.goal ? (
+        <View style={styles.inlineDetailBlock}>
+          <Text style={styles.inlineDetailLabel}>
+            {t("mainChat.actionBar.needsDetailGoalLabel")}
+          </Text>
+          <Text style={styles.inlineSecondaryText}>{item.goal}</Text>
+        </View>
+      ) : null}
+
+      {showSuggestedAction && item.suggestedAction ? (
+        <View style={styles.inlineDetailBlock}>
+          <Text style={styles.inlineDetailLabel}>
+            {t("mainChat.actionBar.needsDetailSuggestionLabel")}
+          </Text>
+          <Text
+            style={styles.inlineSuggestionText}
+            testID={`main-chat-action-needs-suggestion-${item.id}`}
+          >
+            {item.suggestedAction}
+          </Text>
+        </View>
+      ) : null}
+
       {item.agentId ? (
-        <Button
-          variant="secondary"
-          size="sm"
-          leftIcon={ThemedArrowIcon}
-          onPress={onOpen}
-          testID={`main-chat-action-needs-task-open-${item.id}`}
-        >
-          {t("mainChat.openChildAgent")}
-        </Button>
+        <View style={styles.inlineActionRow}>
+          <Button
+            variant="secondary"
+            size="sm"
+            leftIcon={ThemedArrowIcon}
+            onPress={onOpen}
+            testID={`main-chat-action-needs-task-open-${item.id}`}
+          >
+            {t("mainChat.openChildAgent")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={ThemedAtIcon}
+            onPress={onDirectRoute}
+            testID={`main-chat-action-needs-task-direct-${item.id}`}
+          >
+            {t("mainChat.board.talkDirectly")}
+          </Button>
+        </View>
       ) : null}
     </View>
   );
@@ -456,7 +562,8 @@ const NeedsYouRow = memo(function NeedsYouRow({
   const isFailedTask = item.kind === "task" && item.isFailed;
   let metaText: string | null = null;
   if (item.reason) {
-    metaText = item.hostLabel ? `${item.hostLabel} · ${item.reason}` : item.reason;
+    const compactReason = item.reason.replace(/\s+/g, " ").trim();
+    metaText = item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
   }
 
   return (
@@ -533,6 +640,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
             mainAgentId={mainAgentId}
             targetClient={targetClient}
             onOpen={handleOpen}
+            onDirectRoute={handleDirectRoute}
           />
         </View>
       ) : null}
@@ -1120,8 +1228,107 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
     loadOverview,
     parkTask,
     reviewTask,
+    sessionSnapshot,
     model,
   };
+}
+
+function useMainChatActionBarSilentRefresh(input: {
+  serverId: string;
+  agentId: string;
+  overviewKey: string;
+  openBucket: ActionBarBucketKey | null;
+  sessionSnapshot: ActionBarSessionSnapshot;
+  client: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
+  loadOverview: ReturnType<typeof useMainChatOverviewStore.getState>["loadOverview"];
+}): void {
+  const { serverId, agentId, overviewKey, openBucket, sessionSnapshot, client, loadOverview } =
+    input;
+  const overviewRefreshInFlightRef = useRef(false);
+  const overviewRefreshPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const prevLiveStateSignatureRef = useRef<string | null>(null);
+  const prevOverviewKeyRef = useRef<string>(overviewKey);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const refreshOverviewSilently = useCallback(() => {
+    if (
+      !sessionSnapshot.isMainChat ||
+      !client ||
+      typeof client.getMainChatOverview !== "function"
+    ) {
+      return;
+    }
+    if (overviewRefreshInFlightRef.current) {
+      overviewRefreshPendingRef.current = true;
+      return;
+    }
+
+    const run = () => {
+      if (!mountedRef.current) return;
+      overviewRefreshInFlightRef.current = true;
+      overviewRefreshPendingRef.current = false;
+      void loadOverview(serverId, agentId, client)
+        .catch(() => undefined)
+        .finally(() => {
+          overviewRefreshInFlightRef.current = false;
+          if (overviewRefreshPendingRef.current && mountedRef.current) {
+            overviewRefreshPendingRef.current = false;
+            run();
+          }
+        });
+    };
+
+    run();
+  }, [agentId, client, loadOverview, serverId, sessionSnapshot.isMainChat]);
+
+  // Refresh overview whenever the user opens or switches a tray drawer (no one-shot cache gate).
+  useEffect(() => {
+    if (!openBucket) return;
+    refreshOverviewSilently();
+  }, [openBucket, refreshOverviewSilently]);
+
+  // Also trigger silent overview refreshes when any observed child session's status/archive/attention
+  // or pending permission state changes so resolved items disappear in real time.
+  const liveStateSignature = useMemo(() => {
+    if (!sessionSnapshot.isMainChat) return "";
+    const agentParts = sessionSnapshot.liveAgents
+      .filter((agent) => !agent.isMainChat && !agent.background)
+      .map(
+        (agent) =>
+          `${agent.serverId}:${agent.agentId}:${agent.status}:${agent.turnPhase}:${agent.archived ? 1 : 0}:${agent.attentionReason ?? ""}`,
+      )
+      .sort()
+      .join("|");
+    const permParts = sessionSnapshot.pendingPermissions
+      .map(
+        (entry) => `${entry.serverId}:${entry.permission.agentId}:${entry.permission.request.id}`,
+      )
+      .sort()
+      .join("|");
+    return `${agentParts}#${permParts}`;
+  }, [sessionSnapshot.isMainChat, sessionSnapshot.liveAgents, sessionSnapshot.pendingPermissions]);
+
+  useEffect(() => {
+    if (prevOverviewKeyRef.current !== overviewKey) {
+      prevOverviewKeyRef.current = overviewKey;
+      prevLiveStateSignatureRef.current = null;
+    }
+    if (!sessionSnapshot.isMainChat) return;
+    if (prevLiveStateSignatureRef.current === null) {
+      prevLiveStateSignatureRef.current = liveStateSignature;
+      return;
+    }
+    if (prevLiveStateSignatureRef.current === liveStateSignature) return;
+    prevLiveStateSignatureRef.current = liveStateSignature;
+    refreshOverviewSilently();
+  }, [liveStateSignature, overviewKey, refreshOverviewSilently, sessionSnapshot.isMainChat]);
 }
 
 const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerContent({
@@ -1136,8 +1343,10 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   const { t } = useTranslation();
   const toast = useToast();
   const openMainChatTaskTarget = useOpenMainChatTaskTarget();
-  const { client, overviewKey, overview, loadOverview, parkTask, reviewTask, model } =
-    useMainChatActionBarData(serverId, agentId);
+  const { client, overviewKey, parkTask, reviewTask, model } = useMainChatActionBarData(
+    serverId,
+    agentId,
+  );
   const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
   const drawerExpanded = useMainChatActionBarDrawerStore((state) =>
     Boolean(state.expandedByKey[overviewKey]),
@@ -1155,13 +1364,6 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
       setExpandedNeedsIds((prev) => (prev.has(onlyId) ? prev : new Set([onlyId])));
     }
   }, [model, openBucket]);
-
-  useEffect(() => {
-    if (overview || !client || typeof client.getMainChatOverview !== "function") {
-      return;
-    }
-    void loadOverview(serverId, agentId, client).catch(() => undefined);
-  }, [agentId, client, loadOverview, overview, serverId]);
 
   useEffect(() => {
     if (!model) return;
@@ -1396,12 +1598,25 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   agentId,
   drawerMode = "floating",
 }: MainChatActionBarProps): ReactElement | null {
-  const { overviewKey, model } = useMainChatActionBarData(serverId, agentId);
+  const { client, overviewKey, loadOverview, sessionSnapshot, model } = useMainChatActionBarData(
+    serverId,
+    agentId,
+  );
   const openBucket = useMainChatActionBarDrawerStore(
     (state) => state.openBucketByKey[overviewKey] ?? null,
   );
   const toggleBucket = useMainChatActionBarDrawerStore((state) => state.toggleBucket);
   const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
+
+  useMainChatActionBarSilentRefresh({
+    serverId,
+    agentId,
+    overviewKey,
+    openBucket,
+    sessionSnapshot,
+    client,
+    loadOverview,
+  });
 
   useEffect(() => {
     if (!model || !openBucket) return;
@@ -1623,11 +1838,41 @@ const styles = StyleSheet.create((theme) => ({
   },
   taskNeedsInline: {
     gap: theme.spacing[2],
-    alignItems: "flex-start",
+    alignItems: "stretch",
+  },
+  inlineContextMeta: {
+    fontSize: 11,
+    color: theme.colors.foregroundMuted,
+  },
+  inlineDetailBlock: {
+    gap: theme.spacing[0.5],
+  },
+  inlineDetailLabel: {
+    fontSize: 11,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
   },
   inlineDetailText: {
     fontSize: theme.fontSize.sm,
+    lineHeight: 20,
     color: theme.colors.foreground,
+  },
+  inlineSecondaryText: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: 19,
+    color: theme.colors.foregroundMuted,
+  },
+  inlineSuggestionText: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: 19,
+    color: theme.colors.statusWarning,
+  },
+  inlineActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: theme.spacing[1.5],
+    paddingTop: theme.spacing[0.5],
   },
   taskRowCard: {
     borderWidth: theme.borderWidth[1],

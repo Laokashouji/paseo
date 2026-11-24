@@ -496,7 +496,23 @@ describe("M2 background turn collapse & silent turn suppression", () => {
         text: "[SILENT]",
         timestamp: at,
       },
-      // Turn 2: Non-silent background wakeup -> collapsed to a single compact row
+      // Turn 1b: Legacy mis-wrapped patrol user_message ending with [SILENT] -> completely suppressed
+      {
+        kind: "user_message",
+        id: "legacy_bg_silent",
+        turnId: "turn_1b",
+        text: "<paseo-system>\n📋 督办 · 主动巡检唤醒：后台督办聚拢 1 条动态\n</paseo-system>",
+        timestamp: at,
+      },
+      {
+        kind: "assistant_message",
+        id: "msg_legacy_silent",
+        turnId: "turn_1b",
+        text: "[SILENT]",
+        timestamp: at,
+      },
+      // Turn 2: Non-silent background wakeup -> hides system trigger & tools behind lightweight gray tag,
+      // while keeping the steward's substantive conclusion directly readable in the main chat stream.
       makeHeartbeat("bg_report", "【后台巡检唤醒】发现 1 个异常会话", "turn_2"),
       makeShell("tool_2", "turn_2"),
       {
@@ -527,7 +543,11 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       collapseBackgroundTurns: true,
     });
 
-    expect(folded.tail.map((item) => item.id)).toEqual(["turn-summary:bg_report", "msg_recovered"]);
+    expect(folded.tail.map((item) => item.id)).toEqual([
+      "turn-summary:bg_report",
+      "msg_report",
+      "msg_recovered",
+    ]);
     const bgSummary = folded.summaryRowsByHostId.get("bg_report");
     expect(bgSummary?.variant).toBe("background");
     expect(bgSummary?.backgroundMeta).toEqual({
@@ -535,7 +555,8 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       running: false,
     });
 
-    // Expanding bg_report reveals prompt, tools, and reply inside the indent rail.
+    // Expanding bg_report reveals the hidden system trigger & intermediate tools inside the indent rail,
+    // while keeping msg_report directly visible once (not nested/duplicated).
     const expanded = collapseTurns({
       tail,
       isLatestTurnOpen: false,
@@ -552,6 +573,146 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       "msg_report",
       "msg_recovered",
     ]);
-    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2", "msg_report"]);
+    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2"]);
+  });
+});
+
+describe("ActionBarModel stale live-session filtering & rich task context", () => {
+  it("filters stale open decisions, blocked_user triages, and needs_you tasks when liveAgents are running or archived", () => {
+    const now = Date.parse("2026-11-24T12:00:00.000Z");
+    const overview: MainChatOverview = {
+      plans: [],
+      decisions: [
+        {
+          id: "dec_running",
+          mainAgentId: "agent_main",
+          title: "旧决策（已在原会话继续）",
+          question: "请选择方案 A 或 B？",
+          agentId: "child_running",
+          planId: null,
+          taskId: "task_running_now",
+          options: [{ id: "a", label: "A", leadsTo: "执行 A" }],
+          recommendedOptionId: "a",
+          reason: null,
+          answer: null,
+          answeredOptionId: null,
+          answeredAt: null,
+          createdAt: "2026-11-24T11:00:00.000Z",
+        },
+        {
+          id: "dec_archived",
+          mainAgentId: "agent_main",
+          title: "旧决策（原会话已归档）",
+          question: "是否继续？",
+          agentId: "child_archived",
+          planId: null,
+          taskId: null,
+          options: [{ id: "yes", label: "继续", leadsTo: "执行" }],
+          recommendedOptionId: "yes",
+          reason: null,
+          answer: null,
+          answeredOptionId: null,
+          answeredAt: null,
+          createdAt: "2026-11-24T11:01:00.000Z",
+        },
+      ],
+      tasks: [
+        makeTask({
+          id: "task_running_now",
+          title: "已在原会话继续的任务",
+          status: "needs_you",
+          activeAgentId: "child_running",
+          agentIds: ["child_running"],
+        }),
+      ],
+      triages: [
+        {
+          agentId: "child_running",
+          workspaceId: "ws_1",
+          title: "已在原会话继续",
+          managedByMainChat: true,
+          phase: "blocked_user",
+          summary: "之前在等待回复",
+          waitReason: "请选择方案 A 或 B？",
+          suggestedAction: "查看会话并确认下一步",
+          triageSource: "rule",
+          updatedAt: "2026-11-24T11:00:00.000Z",
+        },
+        {
+          agentId: "child_blocked",
+          workspaceId: "ws_1",
+          title: "仍在等待拍板",
+          managedByMainChat: true,
+          phase: "blocked_user",
+          summary: "已完成后端接口分析与性能压测",
+          waitReason: "请确认是否同步更新《发布说明与变更文档清单》？",
+          suggestedAction: "查看会话并确认下一步",
+          triageSource: "rule",
+          updatedAt: "2026-11-24T11:50:00.000Z",
+        },
+      ],
+      autoStartRules: [],
+      permissionRules: [],
+      metrics: {
+        autoContinued: 0,
+        plansCreated: 0,
+        plansAutoStarted: 0,
+        plansStarted: 0,
+        plansCancelled: 0,
+        receiptsRecorded: 0,
+        interrupts: 0,
+        supervisorHeld: 0,
+        reworkCount: 0,
+        stalledNudges: 0,
+        usageLimitRetries: 0,
+      },
+    };
+
+    const model = buildMainChatActionBarModel({
+      serverId: "srv_1",
+      mainAgentId: "agent_main",
+      overview,
+      liveAgents: [
+        makeLiveAgent({
+          agentId: "child_running",
+          status: "running",
+          turnPhase: "open",
+        }),
+        makeLiveAgent({
+          agentId: "child_archived",
+          status: "idle",
+          archived: true,
+        }),
+        makeLiveAgent({
+          agentId: "child_blocked",
+          status: "idle",
+          turnPhase: "idle",
+          cwd: "/repo/paseo-fork",
+        }),
+      ],
+      pendingPermissions: [],
+      hostLabelsByServerId: { srv_1: "DevBox" },
+      nowMs: now,
+    });
+
+    // Only child_blocked remains in needsYou; running & archived stale items are immediately filtered out.
+    expect(model.needsYou).toHaveLength(1);
+    const blockedItem = model.needsYou[0]!;
+    expect(blockedItem.kind).toBe("task");
+    if (blockedItem.kind === "task") {
+      expect(blockedItem.agentId).toBe("child_blocked");
+      expect(blockedItem.reason).toBe("请确认是否同步更新《发布说明与变更文档清单》？");
+      expect(blockedItem.summary).toBe("已完成后端接口分析与性能压测");
+      expect(blockedItem.suggestedAction).toBe("查看会话并确认下一步");
+      expect(blockedItem.cwd).toBe("/repo/paseo-fork");
+    }
+
+    // child_running moved cleanly into inProgress.active!
+    expect(model.inProgress.active.some((item) => item.agentId === "child_running")).toBe(true);
+    expect(
+      [...model.needsYou, ...model.inProgress.all, ...model.completed24h].some(
+        (item) => item.agentId === "child_archived",
+      ),
+    ).toBe(false);
   });
 });

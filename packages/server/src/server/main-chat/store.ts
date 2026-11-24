@@ -28,6 +28,7 @@ import {
   createDefaultMainChatSettings,
   createEmptyMainChatTokenUsageBySource,
   createEmptyMainChatTokenUsageCounters,
+  isMainChatAutoCompactEnabled,
   isMainChatEnabled,
   mergeMainChatSettings,
   resolveActiveMainChatStylePresetId,
@@ -507,6 +508,10 @@ export interface MainChatStore {
   getDecision(decisionId: string): MainChatDecisionRecord | null;
   listDecisions(mainAgentId?: string): MainChatDecisionRecord[];
   putDecision(decision: MainChatDecisionRecord): Promise<void>;
+  resolveOpenDecisionsForAgent(
+    agentId: string,
+    input: { answer: string; answeredAt?: string; taskId?: string | null },
+  ): Promise<MainChatDecisionRecord[]>;
   addReceipt(
     receipt: MainChatTaskReceipt,
     mainAgentId?: string | null,
@@ -783,6 +788,7 @@ function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
   return {
     ...raw,
     enabled: isMainChatEnabled(raw),
+    autoCompactEnabled: isMainChatAutoCompactEnabled(raw),
     activePresetId,
     customPresets,
     backgroundModel: { ...raw.backgroundModel },
@@ -1044,6 +1050,29 @@ export function createMainChatStore(
     async putDecision(decision) {
       state.decisions[decision.id] = decision;
       await persist();
+    },
+
+    async resolveOpenDecisionsForAgent(agentId, input) {
+      const answeredAt = input.answeredAt ?? new Date(getNowMs()).toISOString();
+      const resolved: MainChatDecisionRecord[] = [];
+      for (const decision of Object.values(state.decisions)) {
+        if (decision.answeredAt !== null) continue;
+        const matchesAgent = decision.agentId === agentId;
+        const matchesTaskOnly =
+          decision.agentId === null && Boolean(input.taskId) && decision.taskId === input.taskId;
+        if (!matchesAgent && !matchesTaskOnly) continue;
+        const updated: MainChatDecisionRecord = {
+          ...decision,
+          answer: input.answer,
+          answeredAt,
+        };
+        state.decisions[decision.id] = updated;
+        resolved.push(updated);
+      }
+      if (resolved.length > 0) {
+        await persist();
+      }
+      return resolved;
     },
 
     async addReceipt(receipt, mainAgentId = null) {

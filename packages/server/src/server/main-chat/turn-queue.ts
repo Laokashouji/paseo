@@ -7,7 +7,7 @@ import {
 import type { AgentManager, AgentManagerEvent } from "../agent/agent-manager.js";
 import type { AgentProvider, AgentUsage } from "../agent/agent-sdk-types.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
-import { sendPromptToAgent } from "../agent/agent-prompt.js";
+import { sendPreparedPromptToAgent } from "../agent/agent-prompt.js";
 import {
   buildMissingReplyRecoveryPrompt,
   isSilentBackgroundReply,
@@ -369,7 +369,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     state.activeTurn = recoveryTurn;
 
     try {
-      const dispatch = await sendPromptToAgent({
+      const dispatch = await sendPreparedPromptToAgent({
         agentId: mainAgentId,
         prompt: formatSystemNotificationPrompt(buildMissingReplyRecoveryPrompt()),
         agentManager: deps.agentManager,
@@ -527,7 +527,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     await persistUpdateActivity(activityId, { status: "running" });
 
     try {
-      const dispatch = await sendPromptToAgent({
+      const dispatch = await sendPreparedPromptToAgent({
         agentId: mainAgentId,
         prompt: formatSystemNotificationPrompt(prompt),
         agentManager: deps.agentManager,
