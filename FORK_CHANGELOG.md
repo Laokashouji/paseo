@@ -2,6 +2,12 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.527 - 2026-11-25
+
+- **主对话项目级复盘教训自动沉淀与注入**：「设置 → 对话管理」新增「项目经验库」面板（支持按规范化项目/仓库路径分组浏览、手动添加与二次确认删除，任务板顶部同步提供「经验库」快捷入口）；子任务在经历返工（`auto_rework`）或带纠偏建议验收（`auto_review`）时，服务端按规范化项目路径自动提炼 1–3 条避坑教训（支持 `repeated_mistake` / `missing_context` / `wasted_step` / `improvement` 四类），按归一化键去重累加命中次数与来源任务（默认 90 天新鲜度与退隐防复发），向同一项目派活时按确定性预算（最多 5 条、每类最多 2 条、上限 `1800` 字节）自动注入「项目历史教训」上下文；新增 3 个 MCP 工具（`lesson_list` / `lesson_add` / `lesson_delete`）、3 个 WebSocket RPC（`main_chat.lessons_list` / `lessons_add` / `lessons_delete`）与可自助提议开关 `taskLessonsEnabled`（默认开启）。
+- **全量 26 类督办信号真实接线与 PR/MR 交付门禁及结项跟进**：完成主对话督办引擎全部 26 类 `MainChatSupervisionSignalKind` 信号的真实触发、防陈旧复验与去重接线（补齐 `pr_merged` / `pr_conflict` / `draft_pr` / `pr_event` / `todo_ready` / `parent_closeout` / `decision_reply` / `idle` / `timed_out` / `orphaned` / `check` / `leader_stuck` 等）；新增只读 PR/MR 交付门禁（支持 `off` / `merged` / `live` 三档 `deliveryGatePolicy`，默认 `merged` 且支持自助配置提议），自动检测关联 PR/MR 的草稿（Draft）、合并冲突（CONFLICTING）与 CI 检查失败状态，存在未消除阻塞项时阻断静默验收（仅允许人工显式填写 `bypassDeliveryGate` + `bypassReason` 绕过，绝不自动合并或强推）；任务结项后持续跟进 PR 状态直至合并触发 `pr_merged`，并在任务抽屉与顶部动作条原生展示交付门禁状态与操作。
+- **任务父子拆片 DAG 依赖与自动解锁下游**：任务计划与台账新增 `partOf`（单层父子拆片）、`after`（前置依赖列表）、`refId`（批内短引用别名）、`dependencyState`（`none` / `blocked` / `ready`）与 `autoStartOnReady` 字段，服务端写入前原子校验自依赖、缺失目标、多层父子嵌套、跨父依赖、父子死锁与成环依赖；前置任务验收完成或关联 PR 合并后自动重算并解锁下游任务（默认发出 `todo_ready` 信号并在任务抽屉/动作条提供一键「启动就绪任务」，启用 `autoStartOnReady` 时自动拉起子 Agent），全部子片验收完成后自动触发 `parent_closeout` 提醒收尾父任务；新增 `task_start_ready` MCP 工具与 2 个 WebSocket RPC（`main_chat.start_ready_task` / `main_chat.update_task_dependencies`）。
+
 ## 0.17.526 - 2026-11-25
 
 - **主对话上下文压缩窗口封顶、Prompt Cache 定时保活与空闲 `/compact` 单行折叠修复**：「设置 → 对话管理」新增「上下文压缩与缓存保活」面板，支持配置压缩窗口封顶（默认 `400k tokens`，支持 `100k–10000k` 自定义或「不封顶」跟随模型窗口，空闲达到有效窗口 80% 触发后台静默预压缩）、空闲预压缩等待分钟数（默认 `10` 分钟，`1–240` 分钟可调），以及覆盖主对话与常驻方向主管的 Prompt Cache 定时保活策略（默认每 `55` 分钟刷新一次、单段空闲上限 `24` 次，夜间休眠或用户活跃时自动让路）；同步修复空闲预压缩 `/compact` 轮次的折叠渲染，稳定收敛为单行紧凑摘要条（点击原地展开），避免裸 `/compact` 或静默回复直接暴露。
