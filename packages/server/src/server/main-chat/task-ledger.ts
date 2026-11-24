@@ -7,6 +7,7 @@ import type {
   MainChatTaskBrief,
   MainChatTaskDecisionActor,
   MainChatTaskDecisionEntry,
+  MainChatTaskDependencyState,
   MainChatTaskMode,
   MainChatTaskRecord,
   MainChatTaskStatus,
@@ -78,6 +79,10 @@ export interface CreateTaskRecordFromPlanInput {
   workspaceId: string | null;
   serverId?: string | null;
   hostLabel?: string | null;
+  partOf?: string | null;
+  after?: readonly string[];
+  dependencyState?: MainChatTaskDependencyState;
+  autoStartOnReady?: boolean;
   nowIso: string;
 }
 
@@ -300,6 +305,29 @@ export function buildScopeRevisionNoticePrompt(
   return lines.join("\n");
 }
 
+function resolvePlannedTaskInitialStatus(
+  agentId: string | null,
+  startError: string | null | undefined,
+): MainChatTaskStatus {
+  if (agentId) return "running";
+  return startError ? "failed" : "open";
+}
+
+function resolvePlannedTaskDagFields(input: CreateTaskRecordFromPlanInput): {
+  partOf: string | null;
+  after: string[];
+  dependencyState: MainChatTaskRecord["dependencyState"];
+  autoStartOnReady: boolean;
+} {
+  const after = normalizeStringList(input.after ?? input.plannedTask.after);
+  return {
+    partOf: normalizeOptionalString(input.partOf ?? input.plannedTask.partOf),
+    after,
+    dependencyState: input.dependencyState ?? (after.length > 0 ? "blocked" : "none"),
+    autoStartOnReady: input.autoStartOnReady ?? input.plannedTask.autoStartOnReady ?? false,
+  };
+}
+
 export function createTaskRecordFromPlannedTask(
   input: CreateTaskRecordFromPlanInput,
 ): MainChatTaskRecord {
@@ -313,13 +341,8 @@ export function createTaskRecordFromPlannedTask(
     scopeRevision: plannedTask.scopeRevision ?? 1,
     nowIso,
   });
-
-  let status: MainChatTaskStatus = "open";
-  if (agentId) {
-    status = "running";
-  } else if (plannedTask.startError) {
-    status = "failed";
-  }
+  const status = resolvePlannedTaskInitialStatus(agentId, plannedTask.startError);
+  const dagFields = resolvePlannedTaskDagFields(input);
 
   return {
     id: input.id,
@@ -353,6 +376,8 @@ export function createTaskRecordFromPlannedTask(
     decisions: [],
     latestReceipt: null,
     reworkCount: 0,
+    ...dagFields,
+    deliveryGate: null,
   };
 }
 

@@ -466,6 +466,15 @@ const PlannedTaskBadges = memo(function PlannedTaskBadges({
       {task.continuesTaskId ? (
         <StatusBadge size="xs" variant="warning" label={t("mainChat.planCard.continuesBadge")} />
       ) : null}
+      {task.partOf ? (
+        <StatusBadge size="xs" variant="muted" label={t("mainChat.taskDag.partOfBadge")} />
+      ) : null}
+      {task.after && task.after.length > 0 ? (
+        <StatusBadge size="xs" variant="warning" label={t("mainChat.taskDag.blockedBadge")} />
+      ) : null}
+      {task.autoStartOnReady ? (
+        <StatusBadge size="xs" variant="success" label={t("mainChat.taskDag.autoStartBadge")} />
+      ) : null}
       {canEdit && !isEditing ? (
         <PressHighlight
           onPress={onEdit}

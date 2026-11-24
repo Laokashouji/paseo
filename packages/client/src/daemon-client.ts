@@ -34,6 +34,10 @@ import type {
   MainChatGetSettingsResponsePayload,
   MainChatGetUsageResponsePayload,
   MainChatGrantStandingAuthorizationResponsePayload,
+  MainChatLessonKind,
+  MainChatLessonsAddResponsePayload,
+  MainChatLessonsDeleteResponsePayload,
+  MainChatLessonsListResponsePayload,
   MainChatListActivityResponsePayload,
   MainChatListConversationsResponsePayload,
   MainChatListPlansResponsePayload,
@@ -64,10 +68,12 @@ import type {
   MainChatSettingsPatch,
   MainChatStandingAuthorizationScope,
   MainChatStartPlanResponsePayload,
+  MainChatStartReadyTaskResponsePayload,
   MainChatTaskMode,
   MainChatTaskReviewVerdict,
   MainChatTriggerPatrolResponsePayload,
   MainChatUpdateConversationResponsePayload,
+  MainChatUpdateTaskDependenciesResponsePayload,
   MainChatUpdatePlanTaskResponsePayload,
   MainChatUpdateSettingsResponsePayload,
   MainChatUpdateTaskScopeResponsePayload,
@@ -5680,6 +5686,8 @@ export class DaemonClient {
       checks?: MainChatReceiptCheck[];
       nextSteps?: string[];
       note?: string;
+      bypassDeliveryGate?: boolean;
+      bypassReason?: string;
     },
     requestId?: string,
   ): Promise<MainChatReviewTaskResponsePayload> {
@@ -5694,6 +5702,10 @@ export class DaemonClient {
         ...(input.checks !== undefined ? { checks: input.checks } : {}),
         ...(input.nextSteps !== undefined ? { nextSteps: input.nextSteps } : {}),
         ...(input.note !== undefined ? { note: input.note } : {}),
+        ...(input.bypassDeliveryGate !== undefined
+          ? { bypassDeliveryGate: input.bypassDeliveryGate }
+          : {}),
+        ...(input.bypassReason !== undefined ? { bypassReason: input.bypassReason } : {}),
       },
       timeout: 60000,
     });
@@ -6127,6 +6139,100 @@ export class DaemonClient {
           proposalId: input.proposalId,
           decision: input.decision,
           ...(input.note !== undefined ? { note: input.note } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async listMainChatLessons(
+    options?: {
+      projectKey?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatLessonsListResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.lessons_list.response">({
+      requestId,
+      message: {
+        type: "main_chat.lessons_list.request",
+        ...(options?.projectKey !== undefined ? { projectKey: options.projectKey } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async addMainChatLesson(
+    input: {
+      projectKey: string;
+      projectLabel?: string;
+      kind: MainChatLessonKind;
+      text: string;
+      taskId?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatLessonsAddResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.lessons_add.response">({
+      requestId,
+      message: {
+        type: "main_chat.lessons_add.request",
+        projectKey: input.projectKey,
+        ...(input.projectLabel !== undefined ? { projectLabel: input.projectLabel } : {}),
+        kind: input.kind,
+        text: input.text,
+        ...(input.taskId !== undefined ? { taskId: input.taskId } : {}),
+      },
+      timeout: 30000,
+    });
+  }
+
+  async deleteMainChatLesson(
+    lessonId: string,
+    requestId?: string,
+  ): Promise<MainChatLessonsDeleteResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.lessons_delete.response">({
+      requestId,
+      message: {
+        type: "main_chat.lessons_delete.request",
+        lessonId,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async startMainChatReadyTask(
+    taskId: string,
+    requestId?: string,
+  ): Promise<MainChatStartReadyTaskResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.start_ready_task.response">({
+      requestId,
+      message: {
+        type: "main_chat.start_ready_task.request",
+        taskId,
+      },
+      timeout: 60000,
+    });
+  }
+
+  async updateMainChatTaskDependencies(
+    input: {
+      taskId: string;
+      partOf?: string | null;
+      after?: string[];
+      autoStartOnReady?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatUpdateTaskDependenciesResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.update_task_dependencies.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.update_task_dependencies.request",
+          taskId: input.taskId,
+          ...(input.partOf !== undefined ? { partOf: input.partOf } : {}),
+          ...(input.after !== undefined ? { after: input.after } : {}),
+          ...(input.autoStartOnReady !== undefined
+            ? { autoStartOnReady: input.autoStartOnReady }
+            : {}),
         },
         timeout: 30000,
       },

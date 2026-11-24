@@ -84,9 +84,28 @@ interface MainChatOverviewStoreState {
       checks?: MainChatReceiptCheck[];
       nextSteps?: string[];
       note?: string;
+      bypassDeliveryGate?: boolean;
+      bypassReason?: string;
     },
     client: DaemonClient,
   ) => Promise<MainChatReviewTaskResponsePayload>;
+  startReadyTask: (
+    serverId: string,
+    mainAgentId: string,
+    taskId: string,
+    client: DaemonClient,
+  ) => Promise<MainChatTaskRecord>;
+  updateTaskDependencies: (
+    serverId: string,
+    mainAgentId: string,
+    input: {
+      taskId: string;
+      partOf?: string | null;
+      after?: string[];
+      autoStartOnReady?: boolean;
+    },
+    client: DaemonClient,
+  ) => Promise<MainChatTaskRecord>;
   updateTaskScope: (
     serverId: string,
     mainAgentId: string,
@@ -484,6 +503,59 @@ export const useMainChatOverviewStore = create<MainChatOverviewStoreState>((set)
       };
     });
     return response;
+  },
+
+  async startReadyTask(serverId, mainAgentId, taskId, client) {
+    const response = await client.startMainChatReadyTask(taskId);
+    if (response.error || !response.task) {
+      throw new Error(response.error ?? "Failed to start ready task");
+    }
+    const updatedTask = response.task;
+    const updatedPlan = response.plan;
+    const key = overviewStoreKey(serverId, mainAgentId);
+    set((state) => {
+      const existingOverview = state.overviewsByKey[key];
+      if (!existingOverview) return state;
+      return {
+        overviewsByKey: {
+          ...state.overviewsByKey,
+          [key]: {
+            ...existingOverview,
+            tasks: replaceTaskInList(existingOverview.tasks, updatedTask),
+            ...(updatedPlan
+              ? { plans: replacePlanInList(existingOverview.plans, updatedPlan) }
+              : {}),
+          },
+        },
+      };
+    });
+    if (updatedPlan) {
+      useMainChatPlanStore.getState().upsertPlan(serverId, updatedPlan);
+    }
+    return updatedTask;
+  },
+
+  async updateTaskDependencies(serverId, mainAgentId, input, client) {
+    const response = await client.updateMainChatTaskDependencies(input);
+    if (response.error || !response.task) {
+      throw new Error(response.error ?? "Failed to update task dependencies");
+    }
+    const updated = response.task;
+    const key = overviewStoreKey(serverId, mainAgentId);
+    set((state) => {
+      const existingOverview = state.overviewsByKey[key];
+      if (!existingOverview) return state;
+      return {
+        overviewsByKey: {
+          ...state.overviewsByKey,
+          [key]: {
+            ...existingOverview,
+            tasks: replaceTaskInList(existingOverview.tasks, updated),
+          },
+        },
+      };
+    });
+    return updated;
   },
 
   async updateTaskScope(serverId, mainAgentId, input, client) {

@@ -132,6 +132,16 @@ import {
   MainChatListSettingsProposalsResponseSchema,
   MainChatResolveSettingsProposalRequestSchema,
   MainChatResolveSettingsProposalResponseSchema,
+  MainChatLessonsListRequestSchema,
+  MainChatLessonsListResponseSchema,
+  MainChatLessonsAddRequestSchema,
+  MainChatLessonsAddResponseSchema,
+  MainChatLessonsDeleteRequestSchema,
+  MainChatLessonsDeleteResponseSchema,
+  MainChatStartReadyTaskRequestSchema,
+  MainChatStartReadyTaskResponseSchema,
+  MainChatUpdateTaskDependenciesRequestSchema,
+  MainChatUpdateTaskDependenciesResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -4246,6 +4256,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatRoutinesDeleteRequestSchema,
   MainChatListSettingsProposalsRequestSchema,
   MainChatResolveSettingsProposalRequestSchema,
+  MainChatLessonsListRequestSchema,
+  MainChatLessonsAddRequestSchema,
+  MainChatLessonsDeleteRequestSchema,
+  MainChatStartReadyTaskRequestSchema,
+  MainChatUpdateTaskDependenciesRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8387,6 +8402,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatRoutinesDeleteResponseSchema,
   MainChatListSettingsProposalsResponseSchema,
   MainChatResolveSettingsProposalResponseSchema,
+  MainChatLessonsListResponseSchema,
+  MainChatLessonsAddResponseSchema,
+  MainChatLessonsDeleteResponseSchema,
+  MainChatStartReadyTaskResponseSchema,
+  MainChatUpdateTaskDependenciesResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

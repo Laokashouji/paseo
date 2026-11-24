@@ -45,6 +45,8 @@ import { useMainChatDrawerStore } from "./drawer-store";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { derivePlanTaskLiveBucket } from "./selectors";
+import { deriveDeliveryGateBadge } from "./task-dag-ui";
+import { TaskDrawerGovernanceStrip } from "./task-drawer-governance-strip";
 
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -744,41 +746,76 @@ const DrawerHeader = memo(function DrawerHeader({
 });
 
 const DrawerReviewStrip = memo(function DrawerReviewStrip({
+  matchedTask,
   isMutatingTask,
   reworkOpen,
   reworkDraft,
+  bypassOpen,
+  bypassReason,
   onAcceptReview,
+  onToggleBypass,
+  onChangeBypassReason,
+  onConfirmBypassAccept,
   onToggleRework,
   onChangeReworkDraft,
   onConfirmRework,
 }: {
+  matchedTask: MainChatTaskRecord | null;
   isMutatingTask: boolean;
   reworkOpen: boolean;
   reworkDraft: string;
+  bypassOpen: boolean;
+  bypassReason: string;
   onAcceptReview: () => void;
+  onToggleBypass: () => void;
+  onChangeBypassReason: (text: string) => void;
+  onConfirmBypassAccept: () => void;
   onToggleRework: () => void;
   onChangeReworkDraft: (text: string) => void;
   onConfirmRework: () => void;
 }) {
   const { t } = useTranslation();
+  const gateBadge = deriveDeliveryGateBadge(matchedTask?.deliveryGate);
+  const gateBlocked = Boolean(gateBadge?.isBlocked);
+
   return (
     <View style={styles.reviewStrip} testID="main-chat-task-drawer-review-bar">
+      {gateBlocked ? (
+        <View style={styles.gateBlockedBanner} testID="main-chat-task-drawer-delivery-gate-blocked">
+          <Text style={styles.gateBlockedText}>
+            {t("mainChat.deliveryGate.blockedAcceptBanner")}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.reviewStripRow}>
         <Text style={styles.reviewStripText} numberOfLines={1}>
           {t("mainChat.drawer.awaitingReviewBanner")}
         </Text>
         <View style={styles.reviewActions}>
-          <Button
-            variant="secondary"
-            size="sm"
-            leftIcon={ThemedCheckIcon}
-            loading={isMutatingTask}
-            disabled={isMutatingTask}
-            onPress={onAcceptReview}
-            testID="main-chat-task-drawer-accept"
-          >
-            {t("mainChat.actionBar.acceptAction")}
-          </Button>
+          {gateBlocked ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isMutatingTask}
+              onPress={onToggleBypass}
+              testID="main-chat-task-drawer-bypass-toggle"
+            >
+              {t("mainChat.deliveryGate.bypassToggleButton")}
+            </Button>
+          ) : (
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={ThemedCheckIcon}
+              loading={isMutatingTask}
+              disabled={isMutatingTask}
+              onPress={onAcceptReview}
+              testID="main-chat-task-drawer-accept"
+            >
+              {t("mainChat.actionBar.acceptAction")}
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -791,6 +828,29 @@ const DrawerReviewStrip = memo(function DrawerReviewStrip({
           </Button>
         </View>
       </View>
+
+      {gateBlocked && bypassOpen ? (
+        <View style={styles.reworkRow} testID="main-chat-task-drawer-bypass-form">
+          <EditingTextInput
+            initialValue={bypassReason}
+            onChangeText={onChangeBypassReason}
+            style={styles.reworkInput}
+            placeholder={t("mainChat.deliveryGate.bypassReasonPlaceholder")}
+            testID="main-chat-task-drawer-bypass-input"
+          />
+          <Button
+            variant="default"
+            size="sm"
+            loading={isMutatingTask}
+            disabled={isMutatingTask || bypassReason.trim().length === 0}
+            onPress={onConfirmBypassAccept}
+            testID="main-chat-task-drawer-bypass-submit"
+          >
+            {t("mainChat.deliveryGate.bypassConfirmButton")}
+          </Button>
+        </View>
+      ) : null}
+
       {reworkOpen ? (
         <View style={styles.reworkRow}>
           <EditingTextInput
@@ -889,12 +949,19 @@ function useTaskDrawerMutations({
   const toast = useToast();
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
+  const startReadyTask = useMainChatOverviewStore((state) => state.startReadyTask);
   const [reworkOpen, setReworkOpen] = useState(false);
   const [reworkDraft, setReworkDraft] = useState("");
+  const [bypassOpen, setBypassOpen] = useState(false);
+  const [bypassReason, setBypassReason] = useState("");
   const [isMutatingTask, setIsMutatingTask] = useState(false);
 
   const handleToggleRework = useCallback(() => {
     setReworkOpen((prev) => !prev);
+  }, []);
+
+  const handleToggleBypass = useCallback(() => {
+    setBypassOpen((prev) => !prev);
   }, []);
 
   const handleTogglePark = useCallback(() => {
@@ -1004,15 +1071,82 @@ function useTaskDrawerMutations({
     toast,
   ]);
 
+  const handleConfirmBypassAccept = useCallback(() => {
+    if (!matchedTask || !mainClient || !mainAgentId || isMutatingTask) return;
+    const trimmedReason = bypassReason.trim();
+    if (!trimmedReason) return;
+    setIsMutatingTask(true);
+    void reviewTask(
+      resolvedMainServerId,
+      mainAgentId,
+      {
+        taskId: matchedTask.id,
+        verdict: "accept",
+        bypassDeliveryGate: true,
+        bypassReason: trimmedReason,
+      },
+      mainClient,
+    )
+      .then(() => {
+        setBypassReason("");
+        setBypassOpen(false);
+        toast.show(t("mainChat.actionBar.acceptedToast"), { variant: "success" });
+        return null;
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : t("mainChat.actionBar.actionFailed"));
+      })
+      .finally(() => {
+        setIsMutatingTask(false);
+      });
+  }, [
+    bypassReason,
+    isMutatingTask,
+    mainAgentId,
+    mainClient,
+    matchedTask,
+    resolvedMainServerId,
+    reviewTask,
+    t,
+    toast,
+  ]);
+
+  const handleStartReadyTask = useCallback(
+    (taskId: string) => {
+      if (!mainClient || !mainAgentId || isMutatingTask) return;
+      setIsMutatingTask(true);
+      void startReadyTask(resolvedMainServerId, mainAgentId, taskId, mainClient)
+        .then(() => {
+          toast.show(t("mainChat.taskDag.startedReadyToast"), { variant: "success" });
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.actionBar.actionFailed"),
+          );
+        })
+        .finally(() => {
+          setIsMutatingTask(false);
+        });
+    },
+    [isMutatingTask, mainAgentId, mainClient, resolvedMainServerId, startReadyTask, t, toast],
+  );
+
   return {
     reworkOpen,
     reworkDraft,
     setReworkDraft,
+    bypassOpen,
+    bypassReason,
+    setBypassReason,
     isMutatingTask,
     handleToggleRework,
+    handleToggleBypass,
     handleTogglePark,
     handleAcceptReview,
+    handleConfirmBypassAccept,
     handleConfirmRework,
+    handleStartReadyTask,
   };
 }
 
@@ -1087,6 +1221,9 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
   const overviewKey = mainAgentId ? overviewStoreKey(resolvedMainServerId, mainAgentId) : null;
   const overviewTasks = useMainChatOverviewStore((state) =>
     overviewKey ? state.overviewsByKey[overviewKey]?.tasks : undefined,
+  );
+  const overviewProjectLessons = useMainChatOverviewStore((state) =>
+    overviewKey ? state.overviewsByKey[overviewKey]?.projectLessons : undefined,
   );
   const mainClient = useSessionStore(
     (state) => state.sessions[resolvedMainServerId]?.client ?? null,
@@ -1211,6 +1348,21 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
     ],
   );
 
+  const handleSelectRelatedTask = useCallback(
+    (related: MainChatTaskRecord) => {
+      const nextAgentId = related.activeAgentId ?? related.agentIds.at(-1);
+      if (!nextAgentId) return;
+      openDrawerTask({
+        serverId: related.serverId ?? target.serverId,
+        agentId: nextAgentId,
+        workspaceId: related.workspaceId ?? null,
+        title: related.title,
+        taskId: related.id,
+      });
+    },
+    [openDrawerTask, target.serverId],
+  );
+
   const handleToggleBrief = useCallback(() => {
     setBriefExpanded((prev) => !prev);
   }, []);
@@ -1240,13 +1392,30 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
 
       {viewData.showReviewStrip ? (
         <DrawerReviewStrip
+          matchedTask={matchedTask}
           isMutatingTask={mutations.isMutatingTask}
           reworkOpen={mutations.reworkOpen}
           reworkDraft={mutations.reworkDraft}
+          bypassOpen={mutations.bypassOpen}
+          bypassReason={mutations.bypassReason}
           onAcceptReview={mutations.handleAcceptReview}
+          onToggleBypass={mutations.handleToggleBypass}
+          onChangeBypassReason={mutations.setBypassReason}
+          onConfirmBypassAccept={mutations.handleConfirmBypassAccept}
           onToggleRework={mutations.handleToggleRework}
           onChangeReworkDraft={mutations.setReworkDraft}
           onConfirmRework={mutations.handleConfirmRework}
+        />
+      ) : null}
+
+      {matchedTask ? (
+        <TaskDrawerGovernanceStrip
+          task={matchedTask}
+          allTasks={overviewTasks}
+          projectLessons={overviewProjectLessons}
+          isMutatingTask={mutations.isMutatingTask}
+          onStartReadyTask={mutations.handleStartReadyTask}
+          onSelectRelatedTask={handleSelectRelatedTask}
         />
       ) : null}
 
@@ -1398,6 +1567,16 @@ const styles = StyleSheet.create((theme) => {
       borderBottomColor: theme.colors.border,
       backgroundColor: theme.colors.surface1,
       gap: theme.spacing[2],
+    },
+    gateBlockedBanner: {
+      paddingHorizontal: theme.spacing[3],
+      paddingVertical: theme.spacing[1.5],
+      borderRadius: theme.borderRadius.md,
+      backgroundColor: theme.colors.statusDangerTint,
+    },
+    gateBlockedText: {
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.statusDanger,
     },
     reviewStripRow: {
       flexDirection: "row",

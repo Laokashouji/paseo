@@ -60,6 +60,7 @@ import { MainChatCostControlPanel } from "./cost-control-panel";
 import { MainChatLimitFallbacksPanel } from "./limit-fallbacks-panel";
 import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
+import { MainChatProjectLessonsPanel } from "./project-lessons-panel";
 import { MainChatRoutinesPanel } from "./routines-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
@@ -1467,6 +1468,18 @@ export function MainChatSettingsSection(): ReactElement {
               settings={settings}
               disabled={saving}
               onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.projectLessons.sectionTitle")}
+            info={t("mainChat.projectLessons.sectionDescription")}
+            testID="settings-main-chat-project-lessons"
+          >
+            <MainChatProjectLessonsPanel
+              serverId={selectedServerId}
+              client={client}
+              disabled={saving}
             />
           </SettingsSection>
 

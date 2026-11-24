@@ -42,6 +42,15 @@ export const MAIN_CHAT_MEMORY_CONTEXT_TOTAL_BUDGET_BYTES = 12 * 1024;
 export const MAIN_CHAT_MEMORY_PROFILE_BUDGET_BYTES = 4096;
 export const MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES = 4096;
 export const MAIN_CHAT_MEMORY_FILES_BUDGET_BYTES = 4096;
+export const MAIN_CHAT_LESSON_TEXT_MAX_CHARS = 240;
+export const MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS = 512;
+export const MAIN_CHAT_LESSON_PROJECT_LABEL_MAX_CHARS = 120;
+export const MAIN_CHAT_LESSONS_PER_TASK_MAX = 3;
+export const MAIN_CHAT_LESSONS_INJECT_MAX_COUNT = 5;
+export const MAIN_CHAT_LESSONS_INJECT_PER_KIND_MAX = 2;
+export const MAIN_CHAT_LESSONS_INJECT_BUDGET_BYTES = 1800;
+export const MAIN_CHAT_LESSONS_FRESH_DAYS = 90;
+export const MAIN_CHAT_LESSONS_MAX_SOURCES = 5;
 
 export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "title",
@@ -49,6 +58,8 @@ export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "autoCompactEnabled",
   "mainBackgroundFolded",
   "mainTasksQuiet",
+  "taskLessonsEnabled",
+  "deliveryGatePolicy",
   "compaction.windowCapTokens",
   "compaction.idlePrecompactMinIdleMin",
   "cacheKeepalive.enabled",
@@ -368,6 +379,91 @@ export const MainChatLimitFallbackEventSchema = z.object({
 });
 export type MainChatLimitFallbackEvent = z.infer<typeof MainChatLimitFallbackEventSchema>;
 
+export const MainChatDeliveryGatePolicySchema = z.enum(["off", "merged", "live"]);
+export type MainChatDeliveryGatePolicy = z.infer<typeof MainChatDeliveryGatePolicySchema>;
+
+export const MainChatDeliveryPrStateSchema = z.enum(["open", "merged", "closed"]);
+export type MainChatDeliveryPrState = z.infer<typeof MainChatDeliveryPrStateSchema>;
+
+export const MainChatDeliveryCiStateSchema = z.enum(["unknown", "pending", "passing", "failing"]);
+export type MainChatDeliveryCiState = z.infer<typeof MainChatDeliveryCiStateSchema>;
+
+export const MainChatDeliveryGateStatusSchema = z.enum([
+  "clear",
+  "draft",
+  "conflict",
+  "ci_failed",
+  "awaiting_merge",
+  "merged",
+  "closed",
+]);
+export type MainChatDeliveryGateStatus = z.infer<typeof MainChatDeliveryGateStatusSchema>;
+
+export const MainChatTaskDeliveryGateSchema = z.object({
+  prUrl: z.string().nullable(),
+  prNumber: z.number().int().positive().nullable().optional(),
+  branch: z.string().nullable().optional(),
+  prState: MainChatDeliveryPrStateSchema.nullable(),
+  isDraft: z.boolean(),
+  hasConflict: z.boolean(),
+  ciStatus: MainChatDeliveryCiStateSchema,
+  ciSummary: z.string().nullable().optional(),
+  reviewDecision: z.string().nullable().optional(),
+  headOid: z.string().nullable().optional(),
+  gateStatus: MainChatDeliveryGateStatusSchema,
+  blockingReasons: z.array(z.string()),
+  followUpActive: z.boolean(),
+  lastCheckedAt: z.string().nullable(),
+  mergedAt: z.string().nullable().optional(),
+});
+export type MainChatTaskDeliveryGate = z.infer<typeof MainChatTaskDeliveryGateSchema>;
+
+export const MainChatTaskDependencyStateSchema = z.enum(["none", "blocked", "ready"]);
+export type MainChatTaskDependencyState = z.infer<typeof MainChatTaskDependencyStateSchema>;
+
+export const MainChatLessonKindSchema = z.enum([
+  "repeated_mistake",
+  "missing_context",
+  "wasted_step",
+  "improvement",
+]);
+export type MainChatLessonKind = z.infer<typeof MainChatLessonKindSchema>;
+
+export const MAIN_CHAT_LESSON_KINDS: readonly MainChatLessonKind[] = [
+  "repeated_mistake",
+  "missing_context",
+  "wasted_step",
+  "improvement",
+];
+
+export const MainChatLessonOriginSchema = z.enum(["auto_rework", "auto_review", "manual", "tool"]);
+export type MainChatLessonOrigin = z.infer<typeof MainChatLessonOriginSchema>;
+
+export const MainChatProjectLessonSchema = z.object({
+  id: z.string(),
+  projectKey: z.string().min(1).max(MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS),
+  projectLabel: z.string().min(1).max(MAIN_CHAT_LESSON_PROJECT_LABEL_MAX_CHARS),
+  kind: MainChatLessonKindSchema,
+  text: z.string().min(1).max(MAIN_CHAT_LESSON_TEXT_MAX_CHARS),
+  origin: MainChatLessonOriginSchema,
+  seenCount: z.number().int().positive(),
+  sourceTaskIds: z.array(z.string()),
+  firstSeenAt: z.string(),
+  lastSeenAt: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  retiredAt: z.string().nullable().optional(),
+});
+export type MainChatProjectLesson = z.infer<typeof MainChatProjectLessonSchema>;
+
+export const MainChatProjectLessonGroupSchema = z.object({
+  projectKey: z.string(),
+  projectLabel: z.string(),
+  lessonCount: z.number().int().nonnegative(),
+  lessons: z.array(MainChatProjectLessonSchema),
+});
+export type MainChatProjectLessonGroup = z.infer<typeof MainChatProjectLessonGroupSchema>;
+
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   autoCompactEnabled: z.boolean().optional(),
@@ -379,6 +475,8 @@ export const MainChatSettingsSchema = z.object({
     .optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
+  taskLessonsEnabled: z.boolean().optional(),
+  deliveryGatePolicy: MainChatDeliveryGatePolicySchema.optional(),
   profile: MainChatProfileSchema.optional(),
   title: z.string().trim().min(1).max(40),
   style: MainChatStyleSchema,
@@ -415,6 +513,8 @@ export const MainChatSettingsPatchSchema = z.object({
     .optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
+  taskLessonsEnabled: z.boolean().optional(),
+  deliveryGatePolicy: MainChatDeliveryGatePolicySchema.optional(),
   profile: MainChatProfilePatchSchema.optional(),
   title: z.string().trim().min(1).max(40).optional(),
   style: MainChatStyleSchema.optional(),
@@ -625,6 +725,18 @@ export function isMainChatTasksQuiet(
   settings: Pick<MainChatSettings, "mainTasksQuiet"> | null | undefined,
 ): boolean {
   return settings?.mainTasksQuiet !== false;
+}
+
+export function isMainChatTaskLessonsEnabled(
+  settings: Pick<MainChatSettings, "taskLessonsEnabled"> | null | undefined,
+): boolean {
+  return settings?.taskLessonsEnabled !== false;
+}
+
+export function resolveMainChatDeliveryGatePolicy(
+  settings: Pick<MainChatSettings, "deliveryGatePolicy"> | null | undefined,
+): MainChatDeliveryGatePolicy {
+  return settings?.deliveryGatePolicy ?? "merged";
 }
 
 export function createDefaultMainChatProfile(): MainChatProfile {
@@ -1113,6 +1225,8 @@ export function createDefaultMainChatSettings(
     limitFallbacks: [],
     mainBackgroundFolded: true,
     mainTasksQuiet: true,
+    taskLessonsEnabled: true,
+    deliveryGatePolicy: "merged",
     profile: createDefaultMainChatProfile(),
     title: MAIN_CHAT_DEFAULT_TITLE,
     style: preset.style,
@@ -1185,6 +1299,8 @@ function resolveMergeBaseSettings(
     limitFallbacks: currentLimitFallbacks,
     mainBackgroundFolded: isMainChatBackgroundFolded(current),
     mainTasksQuiet: isMainChatTasksQuiet(current),
+    taskLessonsEnabled: isMainChatTaskLessonsEnabled(current),
+    deliveryGatePolicy: resolveMainChatDeliveryGatePolicy(current),
     profile: currentProfile,
     customPresets: nextCustomPresets,
     nightMode: currentNightMode,
@@ -1280,6 +1396,20 @@ function mergeProfileConfig(
   });
 }
 
+function mergeMainChatToggleAndGovernanceFields(
+  base: MainChatSettings,
+  patch: MainChatSettingsPatch,
+) {
+  return {
+    enabled: patch.enabled ?? base.enabled ?? true,
+    autoCompactEnabled: patch.autoCompactEnabled ?? base.autoCompactEnabled ?? true,
+    mainBackgroundFolded: patch.mainBackgroundFolded ?? base.mainBackgroundFolded ?? true,
+    mainTasksQuiet: patch.mainTasksQuiet ?? base.mainTasksQuiet ?? true,
+    taskLessonsEnabled: patch.taskLessonsEnabled ?? base.taskLessonsEnabled ?? true,
+    deliveryGatePolicy: patch.deliveryGatePolicy ?? base.deliveryGatePolicy ?? "merged",
+  };
+}
+
 export function mergeMainChatSettings(
   current: MainChatSettings,
   patch: MainChatSettingsPatch,
@@ -1297,13 +1427,10 @@ export function mergeMainChatSettings(
       : resolveMainChatLimitFallbacks(base);
 
   return MainChatSettingsSchema.parse({
-    enabled: patch.enabled ?? base.enabled ?? true,
-    autoCompactEnabled: patch.autoCompactEnabled ?? base.autoCompactEnabled ?? true,
+    ...mergeMainChatToggleAndGovernanceFields(base, patch),
     compaction: mergeCompactionConfig(base, patch.compaction),
     cacheKeepalive: mergeCacheKeepaliveConfig(base, patch.cacheKeepalive),
     limitFallbacks: nextLimitFallbacks,
-    mainBackgroundFolded: patch.mainBackgroundFolded ?? base.mainBackgroundFolded ?? true,
-    mainTasksQuiet: patch.mainTasksQuiet ?? base.mainTasksQuiet ?? true,
     profile: mergeProfileConfig(current, base, patch.profile),
     title: patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE,
     style: patch.style ?? base.style,
@@ -1551,6 +1678,10 @@ export const MainChatPlannedTaskSchema = z.object({
   quiet: z.boolean().optional(),
   scopeRevision: z.number().int().positive().optional(),
   taskRecordId: z.string().nullable().optional(),
+  refId: z.string().nullable().optional(),
+  partOf: z.string().nullable().optional(),
+  after: z.array(z.string()).optional(),
+  autoStartOnReady: z.boolean().optional(),
 });
 export type MainChatPlannedTask = z.infer<typeof MainChatPlannedTaskSchema>;
 
@@ -1569,6 +1700,9 @@ export const MainChatPlanTaskPatchSchema = z.object({
   branchName: z.string().nullable().optional(),
   baseBranch: z.string().nullable().optional(),
   quiet: z.boolean().optional(),
+  partOf: z.string().nullable().optional(),
+  after: z.array(z.string()).optional(),
+  autoStartOnReady: z.boolean().optional(),
 });
 export type MainChatPlanTaskPatch = z.infer<typeof MainChatPlanTaskPatchSchema>;
 
@@ -1675,6 +1809,11 @@ export const MainChatTaskRecordSchema = z.object({
   decisions: z.array(MainChatTaskDecisionEntrySchema).optional(),
   latestReceipt: MainChatTaskReceiptSchema.nullable().optional(),
   reworkCount: z.number().int().nonnegative().optional(),
+  partOf: z.string().nullable().optional(),
+  after: z.array(z.string()).optional(),
+  dependencyState: MainChatTaskDependencyStateSchema.optional(),
+  autoStartOnReady: z.boolean().optional(),
+  deliveryGate: MainChatTaskDeliveryGateSchema.nullable().optional(),
 });
 export type MainChatTaskRecord = z.infer<typeof MainChatTaskRecordSchema>;
 
@@ -1818,6 +1957,7 @@ export const MainChatOverviewSchema = z.object({
   tokenUsage: MainChatTokenUsageSummarySchema.optional(),
   settingsProposals: z.array(MainChatSettingsProposalRecordSchema).optional(),
   recentLimitFallbacks: z.array(MainChatLimitFallbackEventSchema).optional(),
+  projectLessons: z.array(MainChatProjectLessonSchema).optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -2330,6 +2470,8 @@ export const MainChatReviewTaskRequestSchema = z.object({
   checks: z.array(MainChatReceiptCheckSchema).optional(),
   nextSteps: z.array(z.string()).optional(),
   note: z.string().max(2000).optional(),
+  bypassDeliveryGate: z.boolean().optional(),
+  bypassReason: z.string().max(500).optional(),
 });
 export type MainChatReviewTaskRequest = z.infer<typeof MainChatReviewTaskRequestSchema>;
 
@@ -2338,6 +2480,7 @@ export const MainChatReviewTaskResponsePayloadSchema = z.object({
   task: MainChatTaskRecordSchema.nullable(),
   receipt: MainChatTaskReceiptSchema.nullable(),
   rework: MainChatReworkRecordSchema.nullable(),
+  deliveryGateWarning: z.string().nullable().optional(),
   error: z.string().nullable(),
 });
 export type MainChatReviewTaskResponsePayload = z.infer<
@@ -2959,6 +3102,139 @@ export const MainChatResolveSettingsProposalResponseSchema = z.object({
 });
 export type MainChatResolveSettingsProposalResponse = z.infer<
   typeof MainChatResolveSettingsProposalResponseSchema
+>;
+
+// ============================================================================
+// P1-1 Project Lessons CRUD RPC Schemas
+// ============================================================================
+
+export const MainChatLessonsListRequestSchema = z.object({
+  type: z.literal("main_chat.lessons_list.request"),
+  requestId: z.string(),
+  projectKey: z.string().max(MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS).optional(),
+});
+export type MainChatLessonsListRequest = z.infer<typeof MainChatLessonsListRequestSchema>;
+
+export const MainChatLessonsListResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  groups: z.array(MainChatProjectLessonGroupSchema),
+  lessons: z.array(MainChatProjectLessonSchema),
+  error: z.string().nullable(),
+});
+export type MainChatLessonsListResponsePayload = z.infer<
+  typeof MainChatLessonsListResponsePayloadSchema
+>;
+
+export const MainChatLessonsListResponseSchema = z.object({
+  type: z.literal("main_chat.lessons_list.response"),
+  payload: MainChatLessonsListResponsePayloadSchema,
+});
+export type MainChatLessonsListResponse = z.infer<typeof MainChatLessonsListResponseSchema>;
+
+export const MainChatLessonsAddRequestSchema = z.object({
+  type: z.literal("main_chat.lessons_add.request"),
+  requestId: z.string(),
+  projectKey: z.string().min(1).max(MAIN_CHAT_LESSON_PROJECT_KEY_MAX_CHARS),
+  projectLabel: z.string().max(MAIN_CHAT_LESSON_PROJECT_LABEL_MAX_CHARS).optional(),
+  kind: MainChatLessonKindSchema,
+  text: z.string().min(1).max(MAIN_CHAT_LESSON_TEXT_MAX_CHARS),
+  taskId: z.string().optional(),
+});
+export type MainChatLessonsAddRequest = z.infer<typeof MainChatLessonsAddRequestSchema>;
+
+export const MainChatLessonsAddResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  lesson: MainChatProjectLessonSchema.nullable(),
+  deduplicated: z.boolean(),
+  error: z.string().nullable(),
+});
+export type MainChatLessonsAddResponsePayload = z.infer<
+  typeof MainChatLessonsAddResponsePayloadSchema
+>;
+
+export const MainChatLessonsAddResponseSchema = z.object({
+  type: z.literal("main_chat.lessons_add.response"),
+  payload: MainChatLessonsAddResponsePayloadSchema,
+});
+export type MainChatLessonsAddResponse = z.infer<typeof MainChatLessonsAddResponseSchema>;
+
+export const MainChatLessonsDeleteRequestSchema = z.object({
+  type: z.literal("main_chat.lessons_delete.request"),
+  requestId: z.string(),
+  lessonId: z.string().min(1),
+});
+export type MainChatLessonsDeleteRequest = z.infer<typeof MainChatLessonsDeleteRequestSchema>;
+
+export const MainChatLessonsDeleteResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  lessonId: z.string(),
+  deleted: z.boolean(),
+  error: z.string().nullable(),
+});
+export type MainChatLessonsDeleteResponsePayload = z.infer<
+  typeof MainChatLessonsDeleteResponsePayloadSchema
+>;
+
+export const MainChatLessonsDeleteResponseSchema = z.object({
+  type: z.literal("main_chat.lessons_delete.response"),
+  payload: MainChatLessonsDeleteResponsePayloadSchema,
+});
+export type MainChatLessonsDeleteResponse = z.infer<typeof MainChatLessonsDeleteResponseSchema>;
+
+// ============================================================================
+// P1-3 Task DAG Dependencies & Start Ready Task RPC Schemas
+// ============================================================================
+
+export const MainChatStartReadyTaskRequestSchema = z.object({
+  type: z.literal("main_chat.start_ready_task.request"),
+  requestId: z.string(),
+  taskId: z.string().min(1),
+});
+export type MainChatStartReadyTaskRequest = z.infer<typeof MainChatStartReadyTaskRequestSchema>;
+
+export const MainChatStartReadyTaskResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  plan: MainChatPlanRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatStartReadyTaskResponsePayload = z.infer<
+  typeof MainChatStartReadyTaskResponsePayloadSchema
+>;
+
+export const MainChatStartReadyTaskResponseSchema = z.object({
+  type: z.literal("main_chat.start_ready_task.response"),
+  payload: MainChatStartReadyTaskResponsePayloadSchema,
+});
+export type MainChatStartReadyTaskResponse = z.infer<typeof MainChatStartReadyTaskResponseSchema>;
+
+export const MainChatUpdateTaskDependenciesRequestSchema = z.object({
+  type: z.literal("main_chat.update_task_dependencies.request"),
+  requestId: z.string(),
+  taskId: z.string().min(1),
+  partOf: z.string().nullable().optional(),
+  after: z.array(z.string()).optional(),
+  autoStartOnReady: z.boolean().optional(),
+});
+export type MainChatUpdateTaskDependenciesRequest = z.infer<
+  typeof MainChatUpdateTaskDependenciesRequestSchema
+>;
+
+export const MainChatUpdateTaskDependenciesResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  task: MainChatTaskRecordSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatUpdateTaskDependenciesResponsePayload = z.infer<
+  typeof MainChatUpdateTaskDependenciesResponsePayloadSchema
+>;
+
+export const MainChatUpdateTaskDependenciesResponseSchema = z.object({
+  type: z.literal("main_chat.update_task_dependencies.response"),
+  payload: MainChatUpdateTaskDependenciesResponsePayloadSchema,
+});
+export type MainChatUpdateTaskDependenciesResponse = z.infer<
+  typeof MainChatUpdateTaskDependenciesResponseSchema
 >;
 
 export interface MainChatTaskLabelsMeta {

@@ -171,3 +171,4 @@ export const Package = StubIcon;
 export const Palette = StubIcon;
 export const Rocket = StubIcon;
 export const TestTube = StubIcon;
+export const Lock = StubIcon;

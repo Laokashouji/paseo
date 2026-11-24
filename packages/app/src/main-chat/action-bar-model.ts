@@ -3,10 +3,13 @@ import type {
   MainChatOverview,
   MainChatPlanRecord,
   MainChatSessionTriage,
+  MainChatTaskDeliveryGate,
+  MainChatTaskDependencyState,
   MainChatTaskMode,
   MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
 import type { PendingPermission } from "@/types/shared";
+import { deriveTaskDagSummary, orderBucketItemsWithHierarchy } from "./task-dag-ui";
 
 export const STALE_IN_PROGRESS_THRESHOLD_MS = 48 * 60 * 60 * 1000;
 export const COMPLETED_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -146,6 +149,16 @@ export interface ActionBarTaskItem {
   lastActivityAtMs: number;
   completedAtMs: number | null;
   parkedReason: string | null;
+  partOf: string | null;
+  parentTitle: string | null;
+  hierarchyDepth: 0 | 1;
+  childrenTotal: number;
+  childrenCompleted: number;
+  allChildrenDone: boolean;
+  dependencyState: MainChatTaskDependencyState;
+  blockedByTitles: string[];
+  canStartReady: boolean;
+  deliveryGate: MainChatTaskDeliveryGate | null;
   taskRecord: MainChatTaskRecord | null;
 }
 
@@ -173,6 +186,7 @@ export interface MainChatActionBarModel {
   parked: ActionBarTaskItem[];
   completed24h: ActionBarTaskItem[];
   counts: ActionBarCounts;
+  projectLessonsCount: number;
 }
 
 function directoryBasename(dirPath: string | null | undefined): string | null {
@@ -454,6 +468,7 @@ function buildTaskItemBase(
     parkedReason: string | null;
   },
 ): ActionBarTaskItem {
+  const dag = deriveTaskDagSummary(task, ctx.tasks);
   return {
     id: `task:${task.id}`,
     serverId: srvId,
@@ -464,6 +479,16 @@ function buildTaskItemBase(
     hostLabel: resolveTaskHostLabel(task, srvId, ctx.input.hostLabelsByServerId),
     workspaceLabel: task.workspaceLabel || directoryBasename(task.cwd),
     mode: task.mode,
+    partOf: dag.partOf,
+    parentTitle: dag.parentTitle,
+    hierarchyDepth: dag.partOf ? 1 : 0,
+    childrenTotal: dag.childrenTotal,
+    childrenCompleted: dag.childrenCompleted,
+    allChildrenDone: dag.allChildrenDone,
+    dependencyState: dag.dependencyState,
+    blockedByTitles: dag.blockedByTitles,
+    canStartReady: dag.canStartReady,
+    deliveryGate: task.deliveryGate ?? null,
     taskRecord: task,
     ...overrides,
   };
@@ -803,30 +828,41 @@ function collectParkedTasks(ctx: ActionBarBuildContext): void {
   }
 }
 
+function resolveInProgressTaskItem(
+  ctx: ActionBarBuildContext,
+  task: MainChatTaskRecord,
+): ActionBarTaskItem | null {
+  if (task.supersededByTaskId || ctx.claimedTaskIds.has(task.id)) return null;
+  const srvId = resolveTaskServerId(task, ctx.input.serverId);
+  const primaryAgentId = resolveTaskPrimaryAgentId(task);
+  if (isAgentClaimed(ctx, srvId, primaryAgentId)) return null;
+  const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
+  const isResumedNeedsYou =
+    task.status === "needs_you" && Boolean(live) && !live!.archived && isLiveAgentRunning(live);
+  if (task.status !== "running" && task.status !== "open" && !isResumedNeedsYou) return null;
+
+  const lastActivityAtMs = resolveTaskActivityMs(task, live);
+  const stale48h =
+    lastActivityAtMs > 0 && ctx.nowMs - lastActivityAtMs >= STALE_IN_PROGRESS_THRESHOLD_MS;
+  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  const dag = deriveTaskDagSummary(task, ctx.tasks);
+  const waitingOnDeps = dag.dependencyState === "blocked" || dag.dependencyState === "ready";
+  return buildTaskItemBase(ctx, task, srvId, primaryAgentId, live, {
+    summary: triage?.summary ?? task.brief.goal ?? null,
+    stale48h: waitingOnDeps ? false : stale48h,
+    isLiveRunning:
+      !waitingOnDeps && (isLiveAgentRunning(live) || (task.status === "running" && !stale48h)),
+    lastActivityAtMs,
+    completedAtMs: null,
+    parkedReason: null,
+  });
+}
+
 function collectInProgressTasks(ctx: ActionBarBuildContext): void {
   for (const task of ctx.tasks) {
-    if (task.supersededByTaskId) continue;
-    if (ctx.claimedTaskIds.has(task.id)) continue;
-    const srvId = resolveTaskServerId(task, ctx.input.serverId);
-    const primaryAgentId = resolveTaskPrimaryAgentId(task);
-    if (isAgentClaimed(ctx, srvId, primaryAgentId)) continue;
-    const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
-    const isResumedNeedsYou =
-      task.status === "needs_you" && Boolean(live) && !live!.archived && isLiveAgentRunning(live);
-    if (task.status !== "running" && task.status !== "open" && !isResumedNeedsYou) continue;
-    const lastActivityAtMs = resolveTaskActivityMs(task, live);
-    const stale48h =
-      lastActivityAtMs > 0 && ctx.nowMs - lastActivityAtMs >= STALE_IN_PROGRESS_THRESHOLD_MS;
-    const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
-    const item = buildTaskItemBase(ctx, task, srvId, primaryAgentId, live, {
-      summary: triage?.summary ?? task.brief.goal ?? null,
-      stale48h,
-      isLiveRunning: isLiveAgentRunning(live) || (task.status === "running" && !stale48h),
-      lastActivityAtMs,
-      completedAtMs: null,
-      parkedReason: null,
-    });
-    if (stale48h) ctx.inProgressStale.push(item);
+    const item = resolveInProgressTaskItem(ctx, task);
+    if (!item) continue;
+    if (item.stale48h) ctx.inProgressStale.push(item);
     else ctx.inProgressActive.push(item);
     claimTask(ctx, task);
   }
@@ -884,6 +920,16 @@ function buildFallbackAgentTaskItem(
     mode: agent.mode,
     summary: triage?.summary ?? null,
     parkedReason: null,
+    partOf: null,
+    parentTitle: null,
+    hierarchyDepth: 0,
+    childrenTotal: 0,
+    childrenCompleted: 0,
+    allChildrenDone: false,
+    dependencyState: "none",
+    blockedByTitles: [],
+    canStartReady: false,
+    deliveryGate: null,
     taskRecord: null,
     ...overrides,
   };
@@ -971,33 +1017,39 @@ export function buildMainChatActionBarModel(
   sortTasksByActivityDesc(ctx.parked);
   sortTasksByActivityDesc(ctx.completed24h);
 
-  const inProgressAll = [...ctx.inProgressActive, ...ctx.inProgressStale];
+  const orderedInProgressActive = orderBucketItemsWithHierarchy(ctx.inProgressActive);
+  const orderedInProgressStale = orderBucketItemsWithHierarchy(ctx.inProgressStale);
+  const orderedAwaitingReview = orderBucketItemsWithHierarchy(ctx.awaitingReview);
+  const orderedParked = orderBucketItemsWithHierarchy(ctx.parked);
+  const orderedCompleted24h = orderBucketItemsWithHierarchy(ctx.completed24h);
+  const inProgressAll = [...orderedInProgressActive, ...orderedInProgressStale];
 
   return {
     needsYou: ctx.needsYou,
     inProgress: {
-      active: ctx.inProgressActive,
-      stale: ctx.inProgressStale,
+      active: orderedInProgressActive,
+      stale: orderedInProgressStale,
       all: inProgressAll,
     },
-    awaitingReview: ctx.awaitingReview,
-    parked: ctx.parked,
-    completed24h: ctx.completed24h,
+    awaitingReview: orderedAwaitingReview,
+    parked: orderedParked,
+    completed24h: orderedCompleted24h,
     counts: {
       needsYou: ctx.needsYou.length,
       inProgress: inProgressAll.length,
-      inProgressActive: ctx.inProgressActive.length,
-      inProgressStale: ctx.inProgressStale.length,
-      awaitingReview: ctx.awaitingReview.length,
-      parked: ctx.parked.length,
-      completed24h: ctx.completed24h.length,
+      inProgressActive: orderedInProgressActive.length,
+      inProgressStale: orderedInProgressStale.length,
+      awaitingReview: orderedAwaitingReview.length,
+      parked: orderedParked.length,
+      completed24h: orderedCompleted24h.length,
       total:
         ctx.needsYou.length +
         inProgressAll.length +
-        ctx.awaitingReview.length +
-        ctx.parked.length +
-        ctx.completed24h.length,
+        orderedAwaitingReview.length +
+        orderedParked.length +
+        orderedCompleted24h.length,
     },
+    projectLessonsCount: input.overview?.projectLessons?.length ?? 0,
   };
 }
 
