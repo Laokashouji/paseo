@@ -18,6 +18,14 @@ import {
 
 export type MainChatErrorClass = "transient" | "usage_limit" | "user";
 
+const CANCELLED_TURN_PATTERNS = [
+  /request was aborted/i,
+  /\bturn (?:was )?(?:aborted|cancell?ed|interrupted)\b/i,
+  /\b(?:aborted|cancell?ed) by (?:the )?user\b/i,
+  /\binterrupted by (?:the )?user\b/i,
+  /^(?:aborted|cancell?ed|interrupted)\.?$/i,
+];
+
 const USER_PATTERNS = [
   /failed to authenticate/i,
   /oauth token has expired/i,
@@ -31,6 +39,16 @@ const USER_PATTERNS = [
   /model .*(not found|unavailable|does not exist)/i,
   /request was aborted/i,
 ];
+
+/**
+ * Identifies user-initiated turn cancellations / aborts so the supervisor does not treat manual
+ * stops or steers as unexpected failures or inflate user-interrupt counters.
+ */
+export function isCancelledTurnError(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  return CANCELLED_TURN_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
 
 const USAGE_LIMIT_PATTERNS = [
   /usage limit/i,

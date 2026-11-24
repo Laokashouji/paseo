@@ -32,6 +32,7 @@ import { MainChatLifecycleConfirmModal, useMainChatLifecycleActions } from "./li
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatPlanStore } from "./plan-store";
+import { routeStoreKey, useMainChatRouteStore } from "./route-store";
 import { useMainChatSettingsStore } from "./settings-store";
 import { MainChatShellProvider } from "./shell-context";
 import {
@@ -976,7 +977,19 @@ describe("Main Chat M2 & M3 UI components", () => {
       '"count":1',
     );
 
-    // Expand Needs you inline -> DecisionCard option clickable right inside tray!
+    // Expand Needs you inline -> @ direct route sets target and closes drawer, then reopen & answer DecisionCard!
+    useMainChatRouteStore.setState({ targetsByKey: {} });
+    fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
+    fireEvent.click(view.getByTestId("main-chat-action-direct-decision:dec_inline"));
+    expect(
+      useMainChatRouteStore.getState().targetsByKey[routeStoreKey("srv_1", "agent_main")],
+    ).toEqual({
+      targetServerId: "srv_1",
+      targetAgentId: "child_dec",
+      targetTitle: "发布渠道确认",
+    });
+    expect(view.queryByTestId("main-chat-action-panel-needsYou")).toBeNull();
+
     fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
     expect(view.getByTestId("main-chat-decision-card-dec_inline")).toBeTruthy();
     fireEvent.click(view.getByTestId("main-chat-decision-option-opt_beta"));
@@ -1018,6 +1031,26 @@ describe("Main Chat M2 & M3 UI components", () => {
         parked: false,
       });
     });
+
+    // Drawer expand/collapse toggle works cleanly
+    fireEvent.click(view.getByTestId("main-chat-action-capsule-inProgress"));
+    const expandBtn = view.getByTestId("main-chat-action-panel-expand");
+    fireEvent.click(expandBtn);
+    expect(view.getByTestId("main-chat-action-panel-inProgress")).toBeTruthy();
+    fireEvent.click(expandBtn);
+
+    // Direct @ route from TaskBucketRow sets route target and closes the drawer
+    useMainChatRouteStore.setState({ targetsByKey: {} });
+    fireEvent.click(view.getByTestId("main-chat-action-stale-toggle"));
+    fireEvent.click(view.getByTestId("main-chat-action-direct-task:task_stale"));
+    expect(
+      useMainChatRouteStore.getState().targetsByKey[routeStoreKey("srv_1", "agent_main")],
+    ).toEqual({
+      targetServerId: "srv_1",
+      targetAgentId: "child_stale",
+      targetTitle: "超 48h 搁置任务",
+    });
+    expect(view.queryByTestId("main-chat-action-panel-inProgress")).toBeNull();
   });
 
   it("renders TaskPanelDrawer with Brief strip, multi-agent switcher, status controls, and Chat/Diff/Terminal segments", async () => {

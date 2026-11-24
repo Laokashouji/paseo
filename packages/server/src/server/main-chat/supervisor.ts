@@ -56,6 +56,7 @@ import type { MainChatTurnQueue } from "./turn-queue.js";
 import {
   classifyMainChatTurnError,
   heuristicTriageAssistantReply,
+  isCancelledTurnError,
   isNoProgressToolCall,
   isSubstantiveProgressToolCall,
   parseUsageLimitWakeAt,
@@ -379,7 +380,9 @@ function resolveEscalationReasonText(reason: ApprovalEscalationEvent["reason"]):
 export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): MainChatSupervisor {
   const getNowMs = deps.now ?? (() => Date.now());
   const transientRetriesByAgent = new Map<string, number>();
+  const transientEscalatedAgents = new Set<string>();
   const usageLimitRetriedAgents = new Set<string>();
+  const usageLimitEscalatedAgents = new Set<string>();
   const usageLimitWakeAtByAgent = new Map<string, string>();
   const pendingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTriageTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -684,7 +687,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     clearTimerMapEntry(pendingRetryTimers, agentId);
     clearTimerMapEntry(pendingTriageTimers, agentId);
     transientRetriesByAgent.delete(agentId);
+    transientEscalatedAgents.delete(agentId);
     usageLimitRetriedAgents.delete(agentId);
+    usageLimitEscalatedAgents.delete(agentId);
     usageLimitWakeAtByAgent.delete(agentId);
     lastActivityAtByAgent.delete(agentId);
     lastAssistantTextByAgent.delete(agentId);
@@ -782,7 +787,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const retries = transientRetriesByAgent.get(agent.id) ?? 0;
 
     if (retries >= maxTransientRetries) {
-      void deps.store.incrementMetric("interrupts").catch(() => undefined);
+      if (!transientEscalatedAgents.has(agent.id)) {
+        transientEscalatedAgents.add(agent.id);
+        void deps.store.incrementMetric("interrupts").catch(() => undefined);
+      }
       const triage: MainChatSessionTriage = {
         agentId: agent.id,
         workspaceId: agent.workspaceId ?? null,
@@ -847,7 +855,10 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     const title = agent.config.title?.trim() || basenameOf(agent.cwd);
 
     if (usageLimitRetriedAgents.has(agent.id)) {
-      void deps.store.incrementMetric("interrupts").catch(() => undefined);
+      if (!usageLimitEscalatedAgents.has(agent.id)) {
+        usageLimitEscalatedAgents.add(agent.id);
+        void deps.store.incrementMetric("interrupts").catch(() => undefined);
+      }
       enqueueStructuredSignal({
         kind: "interrupted",
         urgency: "urgent",
@@ -1118,7 +1129,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       return;
     }
 
-    void deps.store.incrementMetric("interrupts").catch(() => undefined);
+    if (managed || redLine.blocked) {
+      void deps.store.incrementMetric("interrupts").catch(() => undefined);
+    }
     if (redLine.blocked) {
       enqueueStructuredSignal({
         kind: "needs_you",
@@ -1144,6 +1157,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
 
     const permKey = `${agent.id}:${request.id}`;
+    if (pendingPermissionRequestsByKey.has(permKey)) {
+      return;
+    }
     pendingPermissionRequestsByKey.set(permKey, {
       agentId: agent.id,
       cwd: agent.cwd,
@@ -1199,6 +1215,11 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   }
 
   function handleTurnFailed(agent: ManagedAgent, errorMessage: string): void {
+    if (isCancelledTurnError(errorMessage)) {
+      clearTimerMapEntry(pendingRetryTimers, agent.id);
+      return;
+    }
+
     const settings = deps.store.getSettings();
     const managed = isManagedChildAgent(agent);
     const route = resolveTaskRouteForAgent(agent);
@@ -1215,7 +1236,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       return;
     }
 
-    if (!route.quiet || errorClass === "user") {
+    if (managed && (!route.quiet || errorClass === "user")) {
       void deps.store.incrementMetric("interrupts").catch(() => undefined);
     }
     void deps.store.incrementMetric("triageRuleCount").catch(() => undefined);
@@ -1662,6 +1683,12 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     if (agent.pendingPermissions.size === 0) {
       permissionFirstSeenAt.delete(agent.id);
       approvalTracker.resolveAllForAgent(agent.id);
+      for (const [key, entry] of pendingPermissionRequestsByKey) {
+        if (entry.agentId === agent.id) {
+          pendingPermissionRequestsByKey.delete(key);
+          autoApprovedPermissionKeys.delete(key);
+        }
+      }
     }
   }
 
@@ -1715,7 +1742,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     if (event.event.type === "turn_completed") {
       clearTimerMapEntry(pendingRetryTimers, event.agentId);
       transientRetriesByAgent.delete(event.agentId);
+      transientEscalatedAgents.delete(event.agentId);
       usageLimitRetriedAgents.delete(event.agentId);
+      usageLimitEscalatedAgents.delete(event.agentId);
       usageLimitWakeAtByAgent.delete(event.agentId);
       toolLoopByAgent.delete(event.agentId);
       deps.contextSnapshots.invalidateCache();

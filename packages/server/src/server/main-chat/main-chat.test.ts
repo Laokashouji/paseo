@@ -35,6 +35,7 @@ import { createMainChatStore } from "./store.js";
 import { registerMainChatTools } from "./tools.js";
 import {
   classifyMainChatTurnError,
+  isCancelledTurnError,
   isNoProgressToolCall,
   isSimilarDelegatedQuestion,
   parseUsageLimitResetDelayMs,
@@ -67,6 +68,11 @@ describe("main-chat triage", () => {
     );
     expect(classifyMainChatTurnError("fetch failed: ECONNRESET")).toBe("transient");
     expect(classifyMainChatTurnError("Unknown custom error")).toBe("user");
+    expect(isCancelledTurnError("Request was aborted")).toBe(true);
+    expect(isCancelledTurnError("Turn was cancelled")).toBe(true);
+    expect(isCancelledTurnError("Interrupted by user")).toBe(true);
+    expect(isCancelledTurnError("401 Unauthorized")).toBe(false);
+    expect(isCancelledTurnError("HTTP 503 upstream overloaded")).toBe(false);
   });
 
   it("parses usage-limit reset countdowns and extracts safe permission rule keys", () => {
@@ -574,6 +580,139 @@ describe("main-chat service, tools, and session", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(sentPrompts.length).toBe(initialPromptsCount + 1);
     expect(service.getMetrics().autoContinued).toBe(1);
+
+    service.stop();
+  });
+
+  it("deduplicates interrupts, ignores cancelled turns, and excludes routine manual session prompts", async () => {
+    const { service, agentManager } = makeHarness({
+      transientRetryDelayMs: 10,
+      maxTransientAutoRetries: 1,
+    });
+    await service.start();
+    const { agentId: mainAgentId } = await service.ensureMainChat();
+
+    const manual = await agentManager.createAgent(
+      { provider: "claude", cwd: repoDir, title: "手动会话" },
+      "manual_interrupt_test",
+      { workspaceId: "ws_manual" },
+    );
+
+    // 1. Routine interactive permission prompt on an unmanaged manual session does not inflate interrupts
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "permission_requested",
+        provider: "claude",
+        request: {
+          id: "perm_manual_routine",
+          kind: "tool",
+          name: "Bash",
+          input: { command: "ls -la" },
+        } as unknown as AgentPermissionRequest,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getMetrics().interrupts).toBe(0);
+
+    // 2. Duplicate permission_requested with the same request id is ignored (no double triage/interrupt)
+    const triageBeforeDup = service.getMetrics().triageRuleCount;
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "permission_requested",
+        provider: "claude",
+        request: {
+          id: "perm_manual_routine",
+          kind: "tool",
+          name: "Bash",
+          input: { command: "ls -la" },
+        } as unknown as AgentPermissionRequest,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getMetrics().triageRuleCount).toBe(triageBeforeDup);
+    expect(service.getMetrics().interrupts).toBe(0);
+
+    // 3. Red-line permission prompt on a manual session DOES count once, and duplicate emit is deduplicated
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "permission_requested",
+        provider: "claude",
+        request: {
+          id: "perm_manual_redline",
+          kind: "tool",
+          name: "Bash",
+          input: { command: "git push --force origin main" },
+        } as unknown as AgentPermissionRequest,
+      },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: {
+        type: "permission_requested",
+        provider: "claude",
+        request: {
+          id: "perm_manual_redline",
+          kind: "tool",
+          name: "Bash",
+          input: { command: "git push --force origin main" },
+        } as unknown as AgentPermissionRequest,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getMetrics().interrupts).toBe(1);
+
+    // 4. User-cancelled / aborted turn does not increment interrupts or mark blocked_user
+    const plan = await service.createPlan(mainAgentId, {
+      tasks: [
+        {
+          title: "受管任务",
+          goal: "排查问题",
+          mode: "readonly",
+          cwd: repoDir,
+          doneWhen: ["完成排查"],
+        },
+      ],
+    });
+    const childId = plan.tasks[0]!.agentId!;
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "turn_failed", provider: "claude", error: "Request was aborted" },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: manual.id,
+      event: { type: "turn_failed", provider: "claude", error: "401 Unauthorized" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getMetrics().interrupts).toBe(1);
+
+    // 5. Exhausted transient retries only increment interrupts ONCE per failure burst
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "turn_failed", provider: "claude", error: "503 upstream overloaded" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "turn_failed", provider: "claude", error: "503 upstream overloaded" },
+    });
+    subscriber?.({
+      type: "agent_stream",
+      agentId: childId,
+      event: { type: "turn_failed", provider: "claude", error: "503 upstream overloaded" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getMetrics().interrupts).toBe(2);
 
     service.stop();
   });

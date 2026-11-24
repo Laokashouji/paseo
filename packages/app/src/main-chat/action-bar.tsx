@@ -8,10 +8,13 @@ import {
 import equal from "fast-deep-equal";
 import {
   ArrowUpRight,
+  AtSign,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   RotateCcw,
@@ -46,12 +49,16 @@ import { MainChatDecisionCard } from "./decision-card";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
+import { useMainChatRouteStore } from "./route-store";
 
 const ThemedArrowIcon = withUnistyles(ArrowUpRight);
+const ThemedAtIcon = withUnistyles(AtSign);
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedClockIcon = withUnistyles(Clock);
+const ThemedMaximizeIcon = withUnistyles(Maximize2);
+const ThemedMinimizeIcon = withUnistyles(Minimize2);
 const ThemedPauseIcon = withUnistyles(Pause);
 const ThemedPlayIcon = withUnistyles(Play);
 const ThemedReworkIcon = withUnistyles(RotateCcw);
@@ -338,6 +345,12 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   );
 });
 
+interface ActionBarDirectTarget {
+  serverId: string;
+  agentId: string;
+  title: string;
+}
+
 const NeedsYouRow = memo(function NeedsYouRow({
   item,
   mainServerId,
@@ -345,6 +358,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
   expanded,
   onToggleExpand,
   onOpenTask,
+  onDirectRoute,
 }: {
   item: ActionBarNeedsYouItem;
   mainServerId: string;
@@ -358,6 +372,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
     title?: string | null;
     taskId?: string | null;
   }) => void;
+  onDirectRoute: (target: ActionBarDirectTarget) => void;
 }) {
   const { t } = useTranslation();
   const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
@@ -372,6 +387,14 @@ const NeedsYouRow = memo(function NeedsYouRow({
       taskId: item.taskId,
     });
   }, [item.agentId, item.serverId, item.taskId, item.title, item.workspaceId, onOpenTask]);
+  const handleDirectRoute = useCallback(() => {
+    if (!item.agentId) return;
+    onDirectRoute({
+      serverId: item.serverId,
+      agentId: item.agentId,
+      title: item.title,
+    });
+  }, [item.agentId, item.serverId, item.title, onDirectRoute]);
 
   const kindLabel = t(resolveNeedsYouKindKey(item));
   const isFailedTask = item.kind === "task" && item.isFailed;
@@ -420,16 +443,29 @@ const NeedsYouRow = memo(function NeedsYouRow({
         </PressHighlight>
 
         {item.agentId ? (
-          <PressHighlight
-            onPress={handleOpen}
-            style={styles.smallIconButton}
-            highlightStyle={styles.rowPressed}
-            accessibilityRole="button"
-            accessibilityLabel={t("mainChat.openChildAgent")}
-            testID={`main-chat-action-needs-open-${item.id}`}
-          >
-            <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
-          </PressHighlight>
+          <View style={styles.taskRowActions}>
+            <PressHighlight
+              onPress={handleDirectRoute}
+              style={styles.inlineActionBtn}
+              highlightStyle={styles.rowPressed}
+              accessibilityRole="button"
+              accessibilityLabel={t("mainChat.board.talkDirectly")}
+              testID={`main-chat-action-direct-${item.id}`}
+            >
+              <ThemedAtIcon size={12} uniProps={mutedIconMapping} />
+              <Text style={styles.inlineActionLabel}>{t("mainChat.board.talkDirectly")}</Text>
+            </PressHighlight>
+            <PressHighlight
+              onPress={handleOpen}
+              style={styles.smallIconButton}
+              highlightStyle={styles.rowPressed}
+              accessibilityRole="button"
+              accessibilityLabel={t("mainChat.openChildAgent")}
+              testID={`main-chat-action-needs-open-${item.id}`}
+            >
+              <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
+            </PressHighlight>
+          </View>
         ) : null}
       </View>
 
@@ -477,6 +513,7 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
   item,
   isBusy,
   onOpen,
+  onDirectRoute,
   onPause,
   onResume,
   onAccept,
@@ -486,6 +523,7 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
   item: ActionBarTaskItem;
   isBusy: boolean;
   onOpen: () => void;
+  onDirectRoute: () => void;
   onPause: () => void;
   onResume: () => void;
   onAccept: () => void;
@@ -555,15 +593,28 @@ const TaskBucketRowActions = memo(function TaskBucketRowActions({
       ) : null}
 
       {item.agentId ? (
-        <PressHighlight
-          onPress={onOpen}
-          style={styles.smallIconButton}
-          highlightStyle={styles.rowPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.openChildAgent")}
-        >
-          <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
-        </PressHighlight>
+        <>
+          <PressHighlight
+            onPress={onDirectRoute}
+            style={styles.inlineActionBtn}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.board.talkDirectly")}
+            testID={`main-chat-action-direct-${item.id}`}
+          >
+            <ThemedAtIcon size={12} uniProps={mutedIconMapping} />
+            <Text style={styles.inlineActionLabel}>{t("mainChat.board.talkDirectly")}</Text>
+          </PressHighlight>
+          <PressHighlight
+            onPress={onOpen}
+            style={styles.smallIconButton}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("mainChat.openChildAgent")}
+          >
+            <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
+          </PressHighlight>
+        </>
       ) : null}
     </View>
   );
@@ -574,6 +625,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
   item,
   busyTaskId,
   onOpenTask,
+  onDirectRoute,
   onParkTask,
   onAcceptReview,
   onSubmitRework,
@@ -582,6 +634,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
   item: ActionBarTaskItem;
   busyTaskId: string | null;
   onOpenTask: (item: ActionBarTaskItem) => void;
+  onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
@@ -592,6 +645,14 @@ const TaskBucketRow = memo(function TaskBucketRow({
 
   const isBusy = item.taskId !== null && busyTaskId === item.taskId;
   const handleOpen = useCallback(() => onOpenTask(item), [item, onOpenTask]);
+  const handleDirectRoute = useCallback(() => {
+    if (!item.agentId) return;
+    onDirectRoute({
+      serverId: item.serverId,
+      agentId: item.agentId,
+      title: item.title,
+    });
+  }, [item.agentId, item.serverId, item.title, onDirectRoute]);
   const handlePause = useCallback(() => {
     if (item.taskId) onParkTask(item.taskId, true);
   }, [item.taskId, onParkTask]);
@@ -668,6 +729,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           item={item}
           isBusy={isBusy}
           onOpen={handleOpen}
+          onDirectRoute={handleDirectRoute}
           onPause={handlePause}
           onResume={handleResume}
           onAccept={handleAccept}
@@ -722,6 +784,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
   busyTaskId,
   onToggleStale,
   onOpenTask,
+  onDirectRoute,
   onParkTask,
   onAcceptReview,
   onSubmitRework,
@@ -732,6 +795,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
   busyTaskId: string | null;
   onToggleStale: () => void;
   onOpenTask: (item: ActionBarTaskItem) => void;
+  onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
@@ -747,6 +811,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
           item={item}
           busyTaskId={busyTaskId}
           onOpenTask={onOpenTask}
+          onDirectRoute={onDirectRoute}
           onParkTask={onParkTask}
           onAcceptReview={onAcceptReview}
           onSubmitRework={onSubmitRework}
@@ -781,6 +846,7 @@ const InProgressBucketContent = memo(function InProgressBucketContent({
                   item={item}
                   busyTaskId={busyTaskId}
                   onOpenTask={onOpenTask}
+                  onDirectRoute={onDirectRoute}
                   onParkTask={onParkTask}
                   onAcceptReview={onAcceptReview}
                   onSubmitRework={onSubmitRework}
@@ -798,14 +864,17 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   model,
   serverId,
   agentId,
+  drawerExpanded,
   expandedNeedsIds,
   staleExpanded,
   busyTaskId,
+  onToggleDrawerExpand,
   onClose,
   onToggleNeedsRow,
   onToggleStale,
   onOpenTarget,
   onOpenTaskItem,
+  onDirectRoute,
   onParkTask,
   onAcceptReview,
   onSubmitRework,
@@ -814,9 +883,11 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   model: ReturnType<typeof buildMainChatActionBarModel>;
   serverId: string;
   agentId: string;
+  drawerExpanded: boolean;
   expandedNeedsIds: ReadonlySet<string>;
   staleExpanded: boolean;
   busyTaskId: string | null;
+  onToggleDrawerExpand: () => void;
   onClose: () => void;
   onToggleNeedsRow: (id: string) => void;
   onToggleStale: () => void;
@@ -828,6 +899,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
     taskId?: string | null;
   }) => void;
   onOpenTaskItem: (item: ActionBarTaskItem) => void;
+  onDirectRoute: (target: ActionBarDirectTarget) => void;
   onParkTask: (taskId: string, parked: boolean) => void;
   onAcceptReview: (taskId: string) => void;
   onSubmitRework: (taskId: string, gapText: string) => void;
@@ -843,23 +915,44 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   }
 
   return (
-    <View style={styles.drawer} testID={`main-chat-action-panel-${openBucket}`}>
+    <View
+      style={drawerExpanded ? styles.drawerExpanded : styles.drawer}
+      testID={`main-chat-action-panel-${openBucket}`}
+    >
       <View style={styles.drawerHeader}>
         <Text style={styles.drawerTitle}>{t(resolveActionBarPanelTitleKey(openBucket))}</Text>
-        <PressHighlight
-          onPress={onClose}
-          style={styles.smallIconButton}
-          highlightStyle={styles.rowPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("common.actions.close")}
-          testID="main-chat-action-panel-close"
-        >
-          <ThemedXIcon size={14} uniProps={mutedIconMapping} />
-        </PressHighlight>
+        <View style={styles.drawerHeaderActions}>
+          <PressHighlight
+            onPress={onToggleDrawerExpand}
+            style={styles.smallIconButton}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={
+              drawerExpanded ? t("turnSummary.showLess") : t("turnSummary.showMore")
+            }
+            testID="main-chat-action-panel-expand"
+          >
+            {drawerExpanded ? (
+              <ThemedMinimizeIcon size={13} uniProps={mutedIconMapping} />
+            ) : (
+              <ThemedMaximizeIcon size={13} uniProps={mutedIconMapping} />
+            )}
+          </PressHighlight>
+          <PressHighlight
+            onPress={onClose}
+            style={styles.smallIconButton}
+            highlightStyle={styles.rowPressed}
+            accessibilityRole="button"
+            accessibilityLabel={t("common.actions.close")}
+            testID="main-chat-action-panel-close"
+          >
+            <ThemedXIcon size={14} uniProps={mutedIconMapping} />
+          </PressHighlight>
+        </View>
       </View>
 
       <ScrollView
-        style={styles.drawerScroll}
+        style={drawerExpanded ? styles.drawerScrollExpanded : styles.drawerScroll}
         contentContainerStyle={styles.drawerScrollContent}
         keyboardShouldPersistTaps="handled"
       >
@@ -873,6 +966,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
                 expanded={expandedNeedsIds.has(item.id)}
                 onToggleExpand={onToggleNeedsRow}
                 onOpenTask={onOpenTarget}
+                onDirectRoute={onDirectRoute}
               />
             ))
           : null}
@@ -885,6 +979,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
             busyTaskId={busyTaskId}
             onToggleStale={onToggleStale}
             onOpenTask={onOpenTaskItem}
+            onDirectRoute={onDirectRoute}
             onParkTask={onParkTask}
             onAcceptReview={onAcceptReview}
             onSubmitRework={onSubmitRework}
@@ -902,6 +997,7 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
                 item={item}
                 busyTaskId={busyTaskId}
                 onOpenTask={onOpenTaskItem}
+                onDirectRoute={onDirectRoute}
                 onParkTask={onParkTask}
                 onAcceptReview={onAcceptReview}
                 onSubmitRework={onSubmitRework}
@@ -940,13 +1036,23 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const overviewKey = overviewStoreKey(serverId, agentId);
   const overview = useMainChatOverviewStore((state) => state.overviewsByKey[overviewKey] ?? null);
+  const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const parkTask = useMainChatOverviewStore((state) => state.parkTask);
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
+  const setRouteTarget = useMainChatRouteStore((state) => state.setTarget);
 
   const [openBucket, setOpenBucket] = useState<ActionBarBucketKey | null>(null);
+  const [drawerExpanded, setDrawerExpanded] = useState(false);
   const [expandedNeedsIds, setExpandedNeedsIds] = useState<ReadonlySet<string>>(() => new Set());
   const [staleExpanded, setStaleExpanded] = useState(false);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openBucket || overview || !client || typeof client.getMainChatOverview !== "function") {
+      return;
+    }
+    void loadOverview(serverId, agentId, client).catch(() => undefined);
+  }, [agentId, client, loadOverview, openBucket, overview, serverId]);
 
   const hostLabelsByServerId = useMemo(
     () => Object.fromEntries(hosts.map((host) => [host.serverId, host.label])),
@@ -998,7 +1104,25 @@ export const MainChatActionBar = memo(function MainChatActionBar({
 
   const handleCloseDrawer = useCallback(() => {
     setOpenBucket(null);
+    setDrawerExpanded(false);
   }, []);
+
+  const handleToggleDrawerExpand = useCallback(() => {
+    setDrawerExpanded((prev) => !prev);
+  }, []);
+
+  const handleDirectRoute = useCallback(
+    (target: ActionBarDirectTarget) => {
+      setRouteTarget(serverId, agentId, {
+        targetServerId: target.serverId,
+        targetAgentId: target.agentId,
+        targetTitle: target.title,
+      });
+      setOpenBucket(null);
+      setDrawerExpanded(false);
+    },
+    [agentId, serverId, setRouteTarget],
+  );
 
   const handleToggleNeedsRow = useCallback((id: string) => {
     setExpandedNeedsIds((prev) => {
@@ -1134,14 +1258,17 @@ export const MainChatActionBar = memo(function MainChatActionBar({
             model={model}
             serverId={serverId}
             agentId={agentId}
+            drawerExpanded={drawerExpanded}
             expandedNeedsIds={expandedNeedsIds}
             staleExpanded={staleExpanded}
             busyTaskId={busyTaskId}
+            onToggleDrawerExpand={handleToggleDrawerExpand}
             onClose={handleCloseDrawer}
             onToggleNeedsRow={handleToggleNeedsRow}
             onToggleStale={handleToggleStale}
             onOpenTarget={handleOpenTarget}
             onOpenTaskItem={handleOpenTaskItem}
+            onDirectRoute={handleDirectRoute}
             onParkTask={handleParkTask}
             onAcceptReview={handleAcceptReview}
             onSubmitRework={handleSubmitRework}
@@ -1228,6 +1355,14 @@ const styles = StyleSheet.create((theme) => ({
     overflow: "hidden",
     maxHeight: 360,
   },
+  drawerExpanded: {
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    borderRadius: theme.borderRadius.xl,
+    backgroundColor: theme.colors.surface1,
+    overflow: "hidden",
+    maxHeight: 540,
+  },
   drawerHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1238,6 +1373,11 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomColor: theme.colors.border,
     backgroundColor: theme.colors.surface0,
   },
+  drawerHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
   drawerTitle: {
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.semibold,
@@ -1245,6 +1385,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   drawerScroll: {
     maxHeight: 316,
+  },
+  drawerScrollExpanded: {
+    maxHeight: 496,
   },
   drawerScrollContent: {
     padding: theme.spacing[2],
