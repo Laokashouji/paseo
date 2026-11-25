@@ -139,7 +139,14 @@ describe("ios-asc-api.mjs", () => {
             { id: "bid_exact", attributes: { identifier: "com.laokashouji.paseo" } },
           ],
         }),
-      "GET /v1/bundleIds/bid_exact/bundleIdCapabilities": () => respond(200, { data: [] }),
+      "GET /v1/bundleIds/bid_exact/bundleIdCapabilities": (_body, query) => {
+        assert.equal(
+          query,
+          "",
+          "bundleIdCapabilities endpoint does not allow query params like limit",
+        );
+        return respond(200, { data: [] });
+      },
       "POST /v1/bundleIdCapabilities": () => respond(201, { data: { id: "cap_push" } }),
       "GET /v1/certificates": () =>
         respond(200, {
@@ -190,7 +197,7 @@ describe("ios-asc-api.mjs", () => {
 
       const handler = routeTable[`${method} ${url.pathname}`];
       if (handler) {
-        return handler(body);
+        return handler(body, url.searchParams.toString());
       }
       return respond(404, {
         errors: [{ detail: `Unhandled mock route ${method} ${url.pathname}` }],
