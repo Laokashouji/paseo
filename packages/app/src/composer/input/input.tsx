@@ -17,6 +17,7 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 import {
+  Fragment,
   useState,
   useRef,
   useCallback,
@@ -73,6 +74,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
@@ -135,6 +138,9 @@ export interface AttachmentMenuItem {
   onSelect: () => void;
   disabled?: boolean;
   icon?: React.ReactElement | null;
+  testID?: string;
+  dividerBefore?: boolean;
+  sectionLabel?: string;
 }
 
 export interface ComposerInputSnapshot {
@@ -301,15 +307,18 @@ function AttachmentMenuList({ items }: { items: AttachmentMenuItem[] }) {
   return (
     <>
       {items.map((item) => (
-        <DropdownMenuItem
-          key={item.id}
-          testID={`message-input-attachment-menu-item-${item.id}`}
-          disabled={item.disabled}
-          onSelect={item.onSelect}
-          leading={item.icon ?? null}
-        >
-          {item.label}
-        </DropdownMenuItem>
+        <Fragment key={item.id}>
+          {item.dividerBefore ? <DropdownMenuSeparator /> : null}
+          {item.sectionLabel ? <DropdownMenuLabel>{item.sectionLabel}</DropdownMenuLabel> : null}
+          <DropdownMenuItem
+            testID={item.testID ?? `message-input-attachment-menu-item-${item.id}`}
+            disabled={item.disabled}
+            onSelect={item.onSelect}
+            leading={item.icon ?? null}
+          >
+            {item.label}
+          </DropdownMenuItem>
+        </Fragment>
       ))}
     </>
   );

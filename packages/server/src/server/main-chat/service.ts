@@ -1878,6 +1878,108 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return null;
   }
 
+  async function resolveCurrentAgentTitle(agentId: string): Promise<string | null> {
+    const stored = await deps.agentStorage.get(agentId);
+    const storedTitle = stored?.title?.trim();
+    if (storedTitle) {
+      return storedTitle;
+    }
+    const live = deps.agentManager.getAgent(agentId);
+    return live?.config?.title?.trim() || null;
+  }
+
+  async function resolveMainChatWorkspaceRecord(
+    mainWorkspaceId: string | null,
+  ): Promise<PersistedWorkspaceRecord | null> {
+    if (mainWorkspaceId) {
+      return deps.workspaceRegistry.get(mainWorkspaceId);
+    }
+    const resolvedHome = path.resolve(path.join(deps.paseoHome, MAIN_CHAT_WORKSPACE_DIR_NAME));
+    const workspaces = await deps.workspaceRegistry.listActive();
+    return workspaces.find((workspace) => path.resolve(workspace.cwd) === resolvedHome) ?? null;
+  }
+
+  async function syncMainChatWorkspaceTitle(
+    mainWorkspaceId: string | null,
+    desiredTitle: string,
+    force: boolean,
+  ): Promise<void> {
+    if (!deps.workspaceRegistry.update) return;
+    const targetWorkspace = await resolveMainChatWorkspaceRecord(mainWorkspaceId);
+    if (!targetWorkspace) return;
+    if (!force && targetWorkspace.title?.trim() === desiredTitle) return;
+
+    try {
+      const updatedWorkspace = await deps.workspaceRegistry.update(
+        targetWorkspace.workspaceId,
+        (record) => {
+          if (!force && record.title?.trim() === desiredTitle) {
+            return record;
+          }
+          return {
+            ...record,
+            title: desiredTitle,
+            updatedAt: new Date().toISOString(),
+          };
+        },
+      );
+      if (updatedWorkspace && deps.emitWorkspaceUpdates) {
+        await deps.emitWorkspaceUpdates([targetWorkspace.workspaceId]);
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, workspaceId: targetWorkspace.workspaceId },
+        "Failed to sync steward title to workspace record",
+      );
+    }
+  }
+
+  async function syncMainChatTitlesToSettings(
+    target?: Pick<EnsureMainChatResult, "agentId" | "workspaceId"> | null,
+    options?: { force?: boolean },
+  ): Promise<void> {
+    const desiredTitle = store.getSettings().title?.trim();
+    if (!desiredTitle) return;
+
+    const force = options?.force === true;
+    const existing = target ?? (await findExistingMainChat());
+
+    if (existing) {
+      const currentAgentTitle = await resolveCurrentAgentTitle(existing.agentId);
+      if (force || currentAgentTitle !== desiredTitle) {
+        try {
+          await deps.agentManager.updateAgentMetadata(existing.agentId, {
+            title: desiredTitle,
+          });
+        } catch (error) {
+          logger.warn(
+            { err: error, agentId: existing.agentId },
+            "Failed to sync steward title to agent metadata",
+          );
+        }
+      }
+    }
+
+    await syncMainChatWorkspaceTitle(existing?.workspaceId ?? null, desiredTitle, force);
+
+    if (existing) {
+      try {
+        await conversationManager.load();
+        await conversationManager.ensureMainConversationRecord({
+          agentId: existing.agentId,
+          workspaceId: existing.workspaceId,
+          title: desiredTitle,
+          serverId: deps.serverId,
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error, agentId: existing.agentId },
+          "Failed to sync steward title to conversation record",
+        );
+      }
+    }
+  }
+
   async function ensureMainChatInternal(
     input?: EnsureMainChatInput,
   ): Promise<EnsureMainChatResult> {
@@ -1887,13 +1989,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
     const existing = await findExistingMainChat();
     if (existing) {
-      await conversationManager.load();
-      await conversationManager.ensureMainConversationRecord({
-        agentId: existing.agentId,
-        workspaceId: existing.workspaceId,
-        title: store.getSettings().title,
-        serverId: deps.serverId,
-      });
+      await syncMainChatTitlesToSettings(existing);
       return existing;
     }
 
@@ -1950,17 +2046,15 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         });
     }
 
-    await conversationManager.load();
-    await conversationManager.ensureMainConversationRecord({
+    const createdTarget = {
       agentId: snapshot.id,
       workspaceId: snapshot.workspaceId ?? workspace.workspaceId,
-      title: stewardTitle,
-      serverId: deps.serverId,
-    });
+    };
+    await syncMainChatTitlesToSettings(createdTarget);
 
     return {
-      agentId: snapshot.id,
-      workspaceId: snapshot.workspaceId ?? workspace.workspaceId,
+      agentId: createdTarget.agentId,
+      workspaceId: createdTarget.workspaceId,
       created: true,
     };
   }
@@ -5838,6 +5932,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       await lessonsStore.load();
       await conversationManager.load();
       await maybeMigrateLegacyDefaultOptIn();
+      await syncMainChatTitlesToSettings();
       syncRuntimeEnabledState();
       await feishuBridge.syncInitialActiveState();
     },
@@ -5920,40 +6015,16 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
 
       const existing = await findExistingMainChat();
-      if (!existing) return updated;
+      if (!existing) {
+        if (updated.title !== previous.title || patch.title !== undefined) {
+          await syncMainChatTitlesToSettings(null, { force: true });
+        }
+        return updated;
+      }
 
       contextSnapshots.resetDelta(existing.agentId);
       if (updated.title !== previous.title || patch.title !== undefined) {
-        try {
-          await deps.agentManager.updateAgentMetadata(existing.agentId, {
-            title: updated.title,
-          });
-        } catch (error) {
-          logger.warn(
-            { err: error, agentId: existing.agentId },
-            "Failed to sync steward title to agent metadata",
-          );
-        }
-        if (deps.workspaceRegistry.update) {
-          try {
-            const updatedWorkspace = await deps.workspaceRegistry.update(
-              existing.workspaceId,
-              (record) => ({
-                ...record,
-                title: updated.title,
-                updatedAt: new Date().toISOString(),
-              }),
-            );
-            if (updatedWorkspace && deps.emitWorkspaceUpdates) {
-              await deps.emitWorkspaceUpdates([existing.workspaceId]);
-            }
-          } catch (error) {
-            logger.warn(
-              { err: error, workspaceId: existing.workspaceId },
-              "Failed to sync steward title to workspace record",
-            );
-          }
-        }
+        await syncMainChatTitlesToSettings(existing, { force: true });
       }
       return updated;
     },

@@ -69,38 +69,152 @@ function stableHash(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
-function canonicalizeDetailForHash(detail: unknown): string {
+const TOOL_OUTPUT_ONLY_KEYS = new Set([
+  "output",
+  "result",
+  "stdout",
+  "stderr",
+  "filePaths",
+  "webResults",
+  "annotations",
+  "numFiles",
+  "numMatches",
+  "durationMs",
+  "durationSeconds",
+  "truncated",
+  "exitCode",
+  "code",
+  "codeText",
+  "bytes",
+  "log",
+  "actions",
+  "unifiedDiff",
+  "status",
+  "error",
+  "timestamp",
+  "atMs",
+  "icon",
+]);
+
+const DETAIL_META_ONLY_KEYS = new Set(["type", "toolName"]);
+
+const ARGUMENT_TEXT_KEYS = [
+  "command",
+  "cmd",
+  "filePath",
+  "file_path",
+  "path",
+  "target_file",
+  "pattern",
+  "query",
+  "glob",
+  "regex",
+  "url",
+  "uri",
+  "description",
+  "text",
+] as const;
+
+function tryParseJsonRecord(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+const NESTED_ARG_CONTAINER_KEYS = new Set(["input", "arguments", "args", "params"]);
+
+function shouldSkipArgKey(key: string, detailType: string, depth: number): boolean {
+  if (TOOL_OUTPUT_ONLY_KEYS.has(key)) return true;
+  if (key === "content" && (detailType === "read" || detailType === "search")) return true;
+  return depth === 0 && DETAIL_META_ONLY_KEYS.has(key);
+}
+
+function normalizeArgRecord(record: Record<string, unknown>, depth: number): unknown {
+  const detailType = typeof record.type === "string" ? record.type.toLowerCase() : "";
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (shouldSkipArgKey(key, detailType, depth)) continue;
+    const raw = NESTED_ARG_CONTAINER_KEYS.has(key) ? tryParseJsonRecord(record[key]) : record[key];
+    const norm = normalizeArgValue(raw, depth + 1);
+    if (norm !== undefined) {
+      out[key] = norm;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeArgValue(value: unknown, depth = 0): unknown {
+  if (depth > 5) return "[max-depth]";
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    return trimmed.length > 2000 ? `${trimmed.slice(0, 1000)}…${trimmed.slice(-500)}` : trimmed;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, 50)
+      .map((item) => normalizeArgValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+    return items.length > 0 ? items : undefined;
+  }
+  if (typeof value === "object") {
+    return normalizeArgRecord(value as Record<string, unknown>, depth);
+  }
+  return String(value);
+}
+
+export function canonicalizeDetailForHash(detail: unknown): string {
   if (detail === null || detail === undefined) return "";
-  if (typeof detail === "string") return detail.trim().slice(0, 500);
-  if (typeof detail !== "object") return String(detail);
-  const record = detail as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const normalized: Record<string, unknown> = {};
-  for (const key of keys) {
-    if (key === "output" || key === "result" || key === "stdout" || key === "stderr") continue;
-    normalized[key] = record[key];
-  }
+  const parsed = tryParseJsonRecord(detail);
+  const normalized = normalizeArgValue(parsed, 0);
+  if (normalized === undefined) return "";
+  if (typeof normalized === "string") return normalized;
   try {
-    return JSON.stringify(normalized).slice(0, 800);
+    return JSON.stringify(normalized);
   } catch {
-    return String(detail).slice(0, 500);
+    return String(detail).slice(0, 1000);
   }
+}
+
+function extractTextFromArgRecord(record: Record<string, unknown>): string {
+  for (const key of ARGUMENT_TEXT_KEYS) {
+    const val = record[key];
+    if (typeof val === "string" && val.trim().length > 0) {
+      return val.trim();
+    }
+  }
+  return "";
 }
 
 function extractDetailText(detail: unknown): string {
   if (!detail) return "";
-  if (typeof detail === "string") return detail;
-  if (typeof detail !== "object") return "";
-  const record = detail as Record<string, unknown>;
-  if (typeof record.command === "string") return record.command;
-  if (typeof record.path === "string") return record.path;
-  if (typeof record.file_path === "string") return record.file_path;
-  if (typeof record.text === "string") return record.text;
-  if (record.input && typeof record.input === "object") {
-    const inner = record.input as Record<string, unknown>;
-    if (typeof inner.command === "string") return inner.command;
-    if (typeof inner.file_path === "string") return inner.file_path;
-    if (typeof inner.path === "string") return inner.path;
+  const parsed = tryParseJsonRecord(detail);
+  if (typeof parsed === "string") return parsed.trim();
+  if (typeof parsed !== "object" || parsed === null) return "";
+  const record = parsed as Record<string, unknown>;
+  const direct = extractTextFromArgRecord(record);
+  if (direct) return direct;
+  for (const nestedKey of ["input", "arguments", "args", "params"] as const) {
+    const nested = tryParseJsonRecord(record[nestedKey]);
+    if (typeof nested === "string" && nested.trim().length > 0) {
+      return nested.trim();
+    }
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const fromNested = extractTextFromArgRecord(nested as Record<string, unknown>);
+      if (fromNested) return fromNested;
+    }
   }
   return "";
 }
@@ -312,6 +426,8 @@ function sameCallSignature(
   left: PersistedZeroTokenToolEntry,
   right: PersistedZeroTokenToolEntry,
 ): boolean {
+  // Missing / unpopulated tool arguments must never match as identical-parameter repeats.
+  if (!left.inputHash || !right.inputHash) return false;
   return left.tool === right.tool && left.inputHash === right.inputHash;
 }
 
@@ -548,12 +664,15 @@ export function createZeroTokenRuleWindowManager(
       const existing = win.calls[existingIdx]!;
       win.calls[existingIdx] = {
         ...existing,
+        tool: entry.tool && entry.tool !== "tool" ? entry.tool : existing.tool,
+        inputHash: entry.inputHash || existing.inputHash,
         isError: existing.isError || entry.isError,
         errorExcerpt: entry.errorExcerpt ?? existing.errorExcerpt,
         errorSig: entry.errorSig ?? existing.errorSig,
         isWrite: existing.isWrite || entry.isWrite,
         isVerify: existing.isVerify || entry.isVerify,
         isRead: existing.isRead || entry.isRead,
+        isPolling: entry.inputHash ? entry.isPolling : existing.isPolling || entry.isPolling,
       };
       return;
     }
@@ -575,7 +694,8 @@ export function createZeroTokenRuleWindowManager(
       windows.set(agentId, win);
 
       const detailText = extractDetailText(event.detail);
-      const inputHash = stableHash(canonicalizeDetailForHash(event.detail) || detailText);
+      const canonicalInput = canonicalizeDetailForHash(event.detail) || detailText;
+      const inputHash = canonicalInput ? stableHash(canonicalInput) : "";
       const action = classifyToolAction(event.toolName, detailText);
       const isError = event.status === "failed" || Boolean(event.error);
       const errorExcerpt = isError ? extractErrorExcerpt(event.error) : null;

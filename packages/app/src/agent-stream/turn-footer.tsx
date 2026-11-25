@@ -33,6 +33,11 @@ export type AssistantTurnForkHandler = (input: {
   target: AssistantForkTarget;
   boundary: AssistantTurnForkBoundary;
 }) => Promise<void> | void;
+export type AssistantTurnQuoteHandler = (input: {
+  text: string;
+  sourceItemId?: string;
+  ts?: number;
+}) => void;
 /**
  * Fork handler for the turn that is still streaming. It deliberately takes no
  * boundary: `selectForkContextRows` projects the entire timeline when neither
@@ -54,6 +59,7 @@ export const TurnFooter = memo(function TurnFooter({
   supportsNativeFork = false,
   onForkAssistantTurn,
   onForkInFlightTurn,
+  onQuoteAssistantTurn,
 }: {
   isRunning: boolean;
   inFlightTurnStartedAt: Date | null;
@@ -63,6 +69,7 @@ export const TurnFooter = memo(function TurnFooter({
   supportsNativeFork?: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
   onForkInFlightTurn?: InFlightTurnForkHandler;
+  onQuoteAssistantTurn?: AssistantTurnQuoteHandler;
 }) {
   if (isRunning) {
     return (
@@ -86,6 +93,7 @@ export const TurnFooter = memo(function TurnFooter({
       supportsTimelineCursor={supportsTimelineCursor}
       supportsNativeFork={supportsNativeFork}
       onForkAssistantTurn={onForkAssistantTurn}
+      onQuoteAssistantTurn={onQuoteAssistantTurn}
     />
   );
 });
@@ -98,6 +106,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
   supportsTimelineCursor,
   supportsNativeFork = false,
   onForkAssistantTurn,
+  onQuoteAssistantTurn,
 }: {
   strategy: TurnContentStrategy;
   items: StreamItem[];
@@ -106,6 +115,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
   supportsTimelineCursor: boolean;
   supportsNativeFork?: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  onQuoteAssistantTurn?: AssistantTurnQuoteHandler;
 }) {
   return (
     <TurnFooterRow>
@@ -117,6 +127,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
         supportsTimelineCursor={supportsTimelineCursor}
         supportsNativeFork={supportsNativeFork}
         onForkAssistantTurn={onForkAssistantTurn}
+        onQuoteAssistantTurn={onQuoteAssistantTurn}
       />
     </TurnFooterRow>
   );
@@ -174,6 +185,7 @@ function CompletedTurnFooter({
   supportsTimelineCursor,
   supportsNativeFork = false,
   onForkAssistantTurn,
+  onQuoteAssistantTurn,
 }: {
   strategy: TurnContentStrategy;
   items: StreamItem[];
@@ -182,6 +194,7 @@ function CompletedTurnFooter({
   supportsTimelineCursor: boolean;
   supportsNativeFork?: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  onQuoteAssistantTurn?: AssistantTurnQuoteHandler;
 }) {
   const getContent = useCallback(
     () =>
@@ -206,14 +219,29 @@ function CompletedTurnFooter({
     },
     [boundary, onForkAssistantTurn],
   );
+  const isAssistantMessageStart = items[startIndex]?.kind === "assistant_message";
+  const sourceItemId = items[startIndex]?.id;
+  const completedAtMs = timing?.completedAt?.getTime() ?? items[startIndex]?.timestamp.getTime();
+  const handleQuote = useCallback(() => {
+    if (!onQuoteAssistantTurn) return;
+    const text = getContent().trim();
+    if (!text) return;
+    onQuoteAssistantTurn({
+      text,
+      sourceItemId,
+      ts: completedAtMs,
+    });
+  }, [completedAtMs, getContent, onQuoteAssistantTurn, sourceItemId]);
+
   return (
     <View style={stylesheet.turnFooterSlot}>
       <AssistantTurnFooter
-        getContent={items[startIndex]?.kind === "assistant_message" ? getContent : undefined}
+        getContent={isAssistantMessageStart ? getContent : undefined}
         completedAt={timing?.completedAt}
         durationMs={timing?.durationMs}
         onFork={boundary && onForkAssistantTurn ? handleFork : undefined}
         supportsNativeFork={supportsNativeFork}
+        onQuote={isAssistantMessageStart && onQuoteAssistantTurn ? handleQuote : undefined}
       />
     </View>
   );

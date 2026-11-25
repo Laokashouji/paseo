@@ -490,28 +490,21 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       </View>,
     );
 
-    const enhancementsEl = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-composer-enhancements"]',
-    );
     const actionBarEl = host.querySelector<HTMLElement>('[data-testid="main-chat-action-bar"]');
     const composerAnchorEl = host.querySelector<HTMLElement>('[data-testid="composer-anchor-box"]');
-    const compactDockBefore = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-compact-dock"]',
-    );
-    expect(enhancementsEl).toBeTruthy();
+    expect(host.querySelector('[data-testid="main-chat-composer-enhancements"]')).toBeNull();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
     expect(actionBarEl).toBeTruthy();
     expect(composerAnchorEl).toBeTruthy();
-    expect(compactDockBefore).toBeTruthy();
 
-    const enhRectBefore = enhancementsEl!.getBoundingClientRect();
     const barRectBefore = actionBarEl!.getBoundingClientRect();
     const composerRectBefore = composerAnchorEl!.getBoundingClientRect();
-    expect(enhRectBefore.bottom).toBeLessThanOrEqual(barRectBefore.top + 1);
+    expect(barRectBefore.bottom).toBeLessThanOrEqual(composerRectBefore.top + 1);
 
     // Open NeedsYou drawer and confirm:
-    // 1) Compact dock hides to avoid duplication with the drawer
-    // 2) Composer top stays anchored with 0px shift
-    // 3) Floating overlay drawer renders cleanly above MainChatComposerEnhancements without overlap
+    // 1) Composer top stays anchored with 0px shift
+    // 2) Floating overlay drawer renders cleanly above MainChatActionBar without overlap
+    // 3) Structured Persona Ask Card renders question, detail, custom input, and Open entry
     const needsCapsule = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-capsule-needsYou"]',
     );
@@ -520,25 +513,23 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       needsCapsule!.click();
     });
 
-    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
     const drawerEl = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-panel-needsYou"]',
     );
     expect(drawerEl).toBeTruthy();
-    const enhRectAfter = enhancementsEl!.getBoundingClientRect();
     const composerRectAfter = composerAnchorEl!.getBoundingClientRect();
     const drawerRect = drawerEl!.getBoundingClientRect();
     expect(Math.abs(composerRectAfter.top - composerRectBefore.top)).toBeLessThanOrEqual(1);
-    expect(drawerRect.bottom).toBeLessThanOrEqual(enhRectAfter.top + 1);
+    expect(drawerRect.bottom).toBeLessThanOrEqual(barRectBefore.top + 1);
 
     const questionEl = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-action-needs-question-agent:srv_1:child_browser_1"]',
+      '[data-testid="main-chat-needs-ask-question-agent:srv_1:child_browser_1"]',
     );
-    const summaryEl = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-action-needs-summary-agent:srv_1:child_browser_1"]',
+    const detailEl = host.querySelector<HTMLElement>(
+      '[data-testid="main-chat-needs-ask-detail-agent:srv_1:child_browser_1"]',
     );
     expect(questionEl?.textContent).toContain("请确认是否同步更新《发布说明与变更文档清单》？");
-    expect(summaryEl?.textContent).toContain("已完成前后端 4 处模块改造与单测");
+    expect(detailEl?.textContent).toContain("已完成前后端 4 处模块改造与单测");
   });
 
   it("renders MainChatCompactionBanner with real 1M window usage and side-by-side auto-compact toggle & compact button", () => {
@@ -780,13 +771,8 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       host.querySelector<HTMLElement>('[data-testid="main-chat-queue-panel"]'),
       composerRect,
     );
-    const plusButton = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-composer-attach-trigger"]',
-    );
-    expect(plusButton).toBeTruthy();
-    expect(
-      Math.abs(plusButton!.getBoundingClientRect().left - composerRect.left),
-    ).toBeLessThanOrEqual(1);
+    // Standalone floating + strip above the dock is gone (moved into Composer toolbar)
+    expect(host.querySelector('[data-testid="main-chat-composer-attach-trigger"]')).toBeNull();
 
     expectAlignedToComposer(
       "MainChatActionBar inner",
@@ -864,13 +850,7 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       host.querySelector<HTMLElement>('[data-testid="main-chat-queue-panel"]'),
       composerRect,
     );
-    const plusButton = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-composer-attach-trigger"]',
-    );
-    expect(plusButton).toBeTruthy();
-    expect(
-      Math.abs(plusButton!.getBoundingClientRect().left - composerRect.left),
-    ).toBeLessThanOrEqual(1);
+    expect(host.querySelector('[data-testid="main-chat-composer-attach-trigger"]')).toBeNull();
 
     expectAlignedToComposer(
       "Narrow MainChatActionBar inner",
@@ -1627,31 +1607,16 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     const composerEl = host.querySelector<HTMLElement>(
       '[data-testid="simulated-composer-content"]',
     );
-    const compactDockEl = host.querySelector<HTMLElement>('[data-testid="main-chat-compact-dock"]');
     const actionBarInnerEl = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-bar-inner"]',
     );
     expect(composerEl).toBeTruthy();
-    expect(compactDockEl).toBeTruthy();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
     expect(actionBarInnerEl).toBeTruthy();
 
     const composerRectBefore = composerEl!.getBoundingClientRect();
-    const compactDockRect = compactDockEl!.getBoundingClientRect();
-    // Wide screen compact dock: max 2 rows, total height <= 96px, single-line no wrapping
-    const dockRows = compactDockEl!.querySelectorAll<HTMLElement>(
-      '[data-testid^="main-chat-compact-dock-row-"]',
-    );
-    expect(dockRows.length).toBe(2);
-    expect(compactDockRect.height).toBeLessThanOrEqual(96);
-    for (const row of Array.from(dockRows)) {
-      expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(42);
-    }
-    // Priority: permission row comes before decision row (both before inProgress)
-    expect(dockRows[0]!.getAttribute("data-testid")).toContain("needsYou");
-    expect(dockRows[1]!.getAttribute("data-testid")).toContain("needsYou");
 
     // Pixel-level left/right alignment <= 1px against Composer
-    expectAlignedToComposer("Wide CompactStatusDock", compactDockEl, composerRectBefore);
     expectAlignedToComposer("Wide ActionBar inner", actionBarInnerEl, composerRectBefore);
 
     // Screenshot 1: wide message session links + 2-row compact dock
@@ -1790,32 +1755,13 @@ describe("Main Chat UX polish browser layout & style verification", () => {
       });
     }
 
-    // Escape closes the drawer on Web and restores compact dock
+    // Escape closes the drawer on Web while keeping clean capsule bar (no CompactStatusDock)
     act(() => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     });
     await waitForLayoutFrame();
     expect(host.querySelector('[data-testid="main-chat-action-panel-inProgress"]')).toBeNull();
-    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeTruthy();
-
-    // One-click dismiss collapses compact dock while keeping capsules, and restore brings it back
-    const dismissBtn = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-compact-dock-dismiss"]',
-    )!;
-    act(() => {
-      dismissBtn.click();
-    });
-    await waitForLayoutFrame();
     expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
-    const restoreBtn = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-compact-dock-restore"]',
-    );
-    expect(restoreBtn).toBeTruthy();
-    act(() => {
-      restoreBtn!.click();
-    });
-    await waitForLayoutFrame();
-    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeTruthy();
 
     // Empty state: MainChatActionBar collapses to 0px height (unmounts cleanly)
     seedMainChatSession(makeOverview(), []);
@@ -1825,7 +1771,7 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
   });
 
-  it("verifies narrow 390x844 1-row compact dock <=48px, alignment <=1px, Composer 0px shift, and full-page navigation with CameFrom", async () => {
+  it("verifies narrow 390x844 clean capsule dock, alignment <=1px, Composer 0px shift, and full-page navigation with CameFrom", async () => {
     await page.viewport(390, 844);
     host.style.width = "390px";
     host.style.padding = "0px";
@@ -1843,24 +1789,12 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     const composerEl = host.querySelector<HTMLElement>(
       '[data-testid="simulated-composer-content"]',
     )!;
-    const compactDockEl = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-compact-dock"]',
-    )!;
     const actionBarInnerEl = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-bar-inner"]',
     )!;
-    expect(compactDockEl).toBeTruthy();
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
 
     const composerRectBefore = composerEl.getBoundingClientRect();
-    const dockRect = compactDockEl.getBoundingClientRect();
-    const dockRows = compactDockEl.querySelectorAll<HTMLElement>(
-      '[data-testid^="main-chat-compact-dock-row-"]',
-    );
-    // Narrow screen: max 1 row, total height <= 48px
-    expect(dockRows.length).toBe(1);
-    expect(dockRect.height).toBeLessThanOrEqual(48);
-
-    expectAlignedToComposer("Narrow 390 CompactStatusDock", compactDockEl, composerRectBefore);
     expectAlignedToComposer("Narrow 390 ActionBar inner", actionBarInnerEl, composerRectBefore);
 
     // Screenshot 4: narrow 390x844 1-row compact dock state

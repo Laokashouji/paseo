@@ -176,4 +176,6 @@ export const TestTube = StubIcon;
 export const Lock = StubIcon;
 export const Bell = StubIcon;
 export const BellOff = StubIcon;
+export const MessageSquareQuote = StubIcon;
 export const Repeat = StubIcon;
+export const Reply = StubIcon;

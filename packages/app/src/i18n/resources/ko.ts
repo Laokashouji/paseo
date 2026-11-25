@@ -1,9 +1,11 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ko: TranslationResources = {
+  chatQuotes: chatQuotesLocales.ko,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ko"),
   interactiveCards: interactiveCardsI18n.ko,
   pluginCombobox: {
@@ -355,6 +357,7 @@ export const ko: TranslationResources = {
       copyCode: "코드 복사",
       copyTurn: "턴 복사",
       copyMessage: "메시지 복사",
+      quoteMessage: quoteMessageActionLocales.ko,
       forkMenu: "여기에서 채팅 분기",
       forkInNewTab: "새 탭으로 분기",
       forkInNewWorkspace: "새 워크스페이스로 분기",

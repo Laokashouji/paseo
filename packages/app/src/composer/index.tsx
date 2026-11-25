@@ -31,6 +31,15 @@ import {
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
+import {
+  ChatQuoteTray,
+  composeMessageWithQuotes,
+  EMPTY_DRAFT_QUOTES,
+  selectDraftQuotes,
+  selectQuoteFocusRequest,
+  useChatQuoteStore,
+} from "@/chat-quotes";
+import { buildDraftStoreKey } from "@/stores/draft-keys";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import {
   controlSizingForLayout,
@@ -1016,6 +1025,8 @@ interface ComposerProps {
   agentId: string;
   serverId: string;
   workspaceId?: string | null;
+  /** Optional explicit draft key for quote/comment stack isolation; defaults to agent draft key. */
+  draftKey?: string;
   isPaneFocused: boolean;
   onSubmitMessage?: (payload: MessagePayload) => Promise<void>;
   onClientSlashCommand?: (command: ClientSlashCommand, args: string) => Promise<void>;
@@ -1077,6 +1088,8 @@ interface ComposerProps {
   submitLabel?: string;
   /** Overrides the mode's default placeholder, for text only the caller can build. */
   placeholder?: string;
+  /** Optional extra items appended into the composer toolbar's `+` attachment menu (e.g. Main Chat references & queue). */
+  extraAttachmentMenuItems?: readonly AttachmentMenuItem[];
   /**
    * The host that also lays out the dock and chrome shares this session so its
    * fullscreen state and the composer's agree. Defaults to the tab's session for
@@ -1351,6 +1364,7 @@ function ComposerContentImpl({
   agentId,
   serverId,
   workspaceId,
+  draftKey: explicitDraftKey,
   onSubmitMessage,
   onClientSlashCommand,
   hasExternalContent = false,
@@ -1389,6 +1403,7 @@ function ComposerContentImpl({
   readOnly = false,
   submitLabel,
   placeholder,
+  extraAttachmentMenuItems,
 }: ComposerContentProps) {
   const mode = resolveComposerInputMode(inputMode);
   const { t } = useTranslation();
@@ -1417,6 +1432,18 @@ function ComposerContentImpl({
   const queuedMessages = queuedMessagesRaw ?? EMPTY_ARRAY;
 
   const setQueuedMessages = useSessionStore((state) => state.setQueuedMessages);
+
+  const quoteDraftKey = useMemo(
+    () => explicitDraftKey ?? buildDraftStoreKey({ serverId, agentId }),
+    [agentId, explicitDraftKey, serverId],
+  );
+  const draftQuotes = useChatQuoteStore((state) =>
+    inputMode === "chat" ? selectDraftQuotes(state, quoteDraftKey) : EMPTY_DRAFT_QUOTES,
+  );
+  const quoteFocusRequestId = useChatQuoteStore((state) =>
+    inputMode === "chat" ? selectQuoteFocusRequest(state, quoteDraftKey) : 0,
+  );
+  const effectiveHasExternalContent = hasExternalContent || draftQuotes.length > 0;
 
   const isCompactFormFactor = useIsCompactFormFactor();
   const isCompactLayout = resolveCompactLayout(isCompactLayoutOverride, isCompactFormFactor);
@@ -1748,6 +1775,22 @@ function ComposerContentImpl({
     onFocusInput?.(focusInput);
   }, [focusInput, onFocusInput]);
 
+  const prevQuoteFocusRef = useRef({
+    draftKey: quoteDraftKey,
+    requestId: quoteFocusRequestId,
+  });
+  useEffect(() => {
+    const prev = prevQuoteFocusRef.current;
+    prevQuoteFocusRef.current = { draftKey: quoteDraftKey, requestId: quoteFocusRequestId };
+    if (
+      inputMode === "chat" &&
+      prev.draftKey === quoteDraftKey &&
+      quoteFocusRequestId > prev.requestId
+    ) {
+      focusInput();
+    }
+  }, [focusInput, inputMode, quoteDraftKey, quoteFocusRequestId]);
+
   const submitMessage = useCallback(
     async (text: string, submitAttachments: ComposerAttachment[]) => {
       onMessageSent?.();
@@ -1871,22 +1914,34 @@ function ComposerContentImpl({
       outgoingAttachments: ComposerAttachment[],
       forceSend?: boolean,
     ) => {
+      const activeQuotes =
+        inputMode === "chat" ? [...useChatQuoteStore.getState().getQuotes(quoteDraftKey)] : [];
+      const composedMessage =
+        activeQuotes.length > 0
+          ? composeMessageWithQuotes(outgoingMessage, activeQuotes)
+          : outgoingMessage;
+      const shouldClearOnSubmit = submitBehavior !== "preserve-and-lock";
+      const canSubmit = Boolean(sendAgentMessageRef.current || onSubmitMessageRef.current);
+      if (activeQuotes.length > 0 && canSubmit && shouldClearOnSubmit) {
+        useChatQuoteStore.getState().clearQuotes(quoteDraftKey);
+      }
+
       const result = await submitAgentInput({
-        message: outgoingMessage,
+        message: composedMessage,
         attachments: outgoingAttachments,
-        hasExternalContent,
+        hasExternalContent: effectiveHasExternalContent,
         allowEmptySubmit,
         forceSend,
         submitBehavior,
         isAgentRunning,
         // Parent-managed submits are still valid submit paths even when the
         // transport is disconnected, because the parent decides the failure mode.
-        canSubmit: Boolean(sendAgentMessageRef.current || onSubmitMessageRef.current),
+        canSubmit,
         queueMessage: ({ message: queuedText, attachments: queuedAttachments }) => {
           queueMessage(queuedText, queuedAttachments);
         },
         submitMessage: async ({ message: submitText, attachments: submitAttachments }) => {
-          if (submitBehavior !== "preserve-and-lock") {
+          if (shouldClearOnSubmit) {
             beginSubmit(submitAttachments);
           }
           await submitMessage(submitText, submitAttachments);
@@ -1903,6 +1958,16 @@ function ComposerContentImpl({
         },
         failedToSendMessage: t("composer.errors.failedToSend"),
       });
+
+      if (activeQuotes.length > 0 && shouldClearOnSubmit) {
+        if (result === "failed") {
+          replaceUserInput(outgoingMessage.trim());
+          useChatQuoteStore.getState().restoreQuotes(quoteDraftKey, activeQuotes);
+        } else if (result === "noop") {
+          useChatQuoteStore.getState().restoreQuotes(quoteDraftKey, activeQuotes);
+        }
+      }
+
       completeSubmit({
         result,
         outgoingAttachments,
@@ -1913,9 +1978,11 @@ function ComposerContentImpl({
       beginSubmit,
       clearDraft,
       completeSubmit,
-      hasExternalContent,
+      effectiveHasExternalContent,
+      inputMode,
       isAgentRunning,
       queueMessage,
+      quoteDraftKey,
       setSelectedAttachments,
       replaceUserInput,
       submitBehavior,
@@ -1927,9 +1994,11 @@ function ComposerContentImpl({
   const handleSubmit = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
+      const hasQuotedItems =
+        inputMode === "chat" && useChatQuoteStore.getState().getQuotes(quoteDraftKey).length > 0;
       const clientSlashInvocation = resolveClientSlashCommandInvocation({
         text: payload.text,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
       });
       if (
         clientSlashInvocation &&
@@ -1939,14 +2008,14 @@ function ComposerContentImpl({
       }
       const pluginSlashCommand = resolvePluginClientSlashCommand({
         text: payload.text,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
         commands: pluginClientSlashCommands,
       });
       if (pluginSlashCommand && runPluginClientSlashCommand(pluginSlashCommand)) return;
       const expandedPrompt = expandPromptTemplateSubmissionText({
         text: payload.text,
         templates: promptTemplates,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
       });
 
       if (blurOnSubmit) {
@@ -1958,7 +2027,9 @@ function ComposerContentImpl({
       attachments,
       blurOnSubmit,
       buildOutgoingAttachments,
+      inputMode,
       promptTemplates,
+      quoteDraftKey,
       runClientSlashCommand,
       pluginClientSlashCommands,
       runPluginClientSlashCommand,
@@ -2189,9 +2260,12 @@ function ComposerContentImpl({
   const handleQueue = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
+      const activeQuotes =
+        inputMode === "chat" ? [...useChatQuoteStore.getState().getQuotes(quoteDraftKey)] : [];
+      const hasQuotedItems = activeQuotes.length > 0;
       const clientSlashInvocation = resolveClientSlashCommandInvocation({
         text: payload.text,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
       });
       if (
         clientSlashInvocation &&
@@ -2201,23 +2275,31 @@ function ComposerContentImpl({
       }
       const pluginSlashCommand = resolvePluginClientSlashCommand({
         text: payload.text,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
         commands: pluginClientSlashCommands,
       });
       if (pluginSlashCommand && runPluginClientSlashCommand(pluginSlashCommand)) return;
       const expandedPrompt = expandPromptTemplateSubmissionText({
         text: payload.text,
         templates: promptTemplates,
-        hasAttachments: outgoingAttachments.length > 0,
+        hasAttachments: outgoingAttachments.length > 0 || hasQuotedItems,
       });
-      queueMessage(expandedPrompt.text, outgoingAttachments);
+      const composedMessage = hasQuotedItems
+        ? composeMessageWithQuotes(expandedPrompt.text, activeQuotes)
+        : expandedPrompt.text;
+      queueMessage(composedMessage, outgoingAttachments);
+      if (hasQuotedItems) {
+        useChatQuoteStore.getState().clearQuotes(quoteDraftKey);
+      }
     },
     [
       attachments,
       buildOutgoingAttachments,
+      inputMode,
       pluginClientSlashCommands,
       promptTemplates,
       queueMessage,
+      quoteDraftKey,
       runClientSlashCommand,
       runPluginClientSlashCommand,
     ],
@@ -2440,9 +2522,11 @@ function ComposerContentImpl({
           void handlePickFile();
         },
       },
+      ...(extraAttachmentMenuItems ?? []),
     );
     return items;
   }, [
+    extraAttachmentMenuItems,
     forgePresentation,
     handlePasteImage,
     handlePickFile,
@@ -2631,7 +2715,8 @@ function ComposerContentImpl({
       serverId,
       agentId,
       draft: commandDraft,
-      canExecuteClientSlashCommand: buildOutgoingAttachments(attachments).length === 0,
+      canExecuteClientSlashCommand:
+        buildOutgoingAttachments(attachments).length === 0 && draftQuotes.length === 0,
       onClientSlashCommand: handleAutocompleteClientSlashCommand,
       pluginClientSlashCommands,
     }),
@@ -2642,6 +2727,7 @@ function ComposerContentImpl({
       commandDraft,
       buildOutgoingAttachments,
       attachments,
+      draftQuotes.length,
       handleAutocompleteClientSlashCommand,
       pluginClientSlashCommands,
     ],
@@ -2706,6 +2792,9 @@ function ComposerContentImpl({
           <View style={inputAreaContentStyle}>
             {isFullscreen ? null : queueList}
             {!isFullscreen && sendErrorNode}
+            {!isFullscreen && inputMode === "chat" ? (
+              <ChatQuoteTray draftKey={quoteDraftKey} onRequestComposerFocus={focusInput} />
+            ) : null}
 
             <ComposerAutocompleteBinding
               text={textSource}
@@ -2733,7 +2822,7 @@ function ComposerContentImpl({
                   value={textSource.getSnapshot()}
                   onChangeText={setUserInput}
                   onSubmit={handleSubmit}
-                  hasExternalContent={hasExternalContent}
+                  hasExternalContent={effectiveHasExternalContent}
                   allowEmptySubmit={allowEmptySubmit}
                   submitButtonAccessibilityLabel={submitButtonAccessibilityLabel}
                   submitButtonTestID={submitButtonTestID}

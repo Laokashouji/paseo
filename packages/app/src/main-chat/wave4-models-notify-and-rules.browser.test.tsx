@@ -760,13 +760,9 @@ describe("Wave 4 (P1-4 / P1-5 / P1-6) real Chromium visual & layout verification
     );
     await waitForLayoutFrame();
 
-    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeTruthy();
-    expect(
-      host.querySelector('[data-testid="main-chat-compact-dock-retry-task_w4_failed"]'),
-    ).toBeTruthy();
-    expect(
-      host.querySelector('[data-testid="main-chat-compact-dock-rule-badge-task:task_w4_failed"]'),
-    ).toBeTruthy();
+    // CompactStatusDock is intentionally removed; only clean status capsules remain above the composer
+    expect(host.querySelector('[data-testid="main-chat-compact-dock"]')).toBeNull();
+    expect(host.querySelector('[data-testid="main-chat-action-capsule-needsYou"]')).toBeTruthy();
 
     const composerBaseline = host
       .querySelector<HTMLElement>('[data-testid="wave4-composer-baseline"]')!

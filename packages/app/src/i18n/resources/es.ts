@@ -1,9 +1,11 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 import { interactiveCardsI18n } from "./interactive-cards";
 
 export const es: TranslationResources = {
+  chatQuotes: chatQuotesLocales.es,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "es"),
   interactiveCards: interactiveCardsI18n.es,
   pluginCombobox: {
@@ -359,6 +361,7 @@ export const es: TranslationResources = {
       copyCode: "Copiar código",
       copyTurn: "Copiar turno",
       copyMessage: "Copiar mensaje",
+      quoteMessage: quoteMessageActionLocales.es,
       forkMenu: "Bifurcar mensaje",
       forkInNewTab: "Bifurcar en una pestaña nueva",
       forkInNewWorkspace: "Bifurcar en un espacio de trabajo nuevo",

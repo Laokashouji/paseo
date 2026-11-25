@@ -700,11 +700,7 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       collapseBackgroundTurns: true,
     });
 
-    expect(folded.tail.map((item) => item.id)).toEqual([
-      "turn-summary:bg_report",
-      "msg_report",
-      "msg_recovered",
-    ]);
+    expect(folded.tail.map((item) => item.id)).toEqual(["turn-summary:bg_report", "msg_recovered"]);
     const bgSummary = folded.summaryRowsByHostId.get("bg_report");
     expect(bgSummary?.variant).toBe("background");
     expect(bgSummary?.backgroundMeta).toEqual({
@@ -712,8 +708,8 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       running: false,
     });
 
-    // Expanding bg_report reveals the hidden system trigger & intermediate tools inside the indent rail,
-    // while keeping msg_report directly visible once (not nested/duplicated).
+    // Expanding bg_report reveals the hidden system trigger, intermediate tools, AND assistant reply
+    // in place inside the indent rail.
     const expanded = collapseTurns({
       tail,
       isLatestTurnOpen: false,
@@ -730,7 +726,7 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       "msg_report",
       "msg_recovered",
     ]);
-    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2"]);
+    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2", "msg_report"]);
   });
 });
 

@@ -392,6 +392,7 @@ describe("main-chat service, tools, and session", () => {
       }),
     } as unknown as FinishSubscriptions;
 
+    const emitWorkspaceUpdates = vi.fn(async (_workspaceIds: Iterable<string>) => undefined);
     const service = createMainChatService({
       paseoHome: tempDir,
       serverId: "srv_test",
@@ -401,6 +402,7 @@ describe("main-chat service, tools, and session", () => {
       workspaceRegistry,
       createDirectoryWorkspace: async (cwd, title, _projectId, context) =>
         createWorkspaceRecord(cwd, title, context?.background === true),
+      emitWorkspaceUpdates,
       finishSubscriptions: () => finishSubscriptions,
       logger: createTestLogger(),
       transientRetryDelayMs: harnessOptions.transientRetryDelayMs ?? 20,
@@ -425,7 +427,7 @@ describe("main-chat service, tools, and session", () => {
       await service.updateSettings({ enabled: true });
     };
 
-    return { service, agentManager, createWorkspaceRecord };
+    return { service, rawStart, agentManager, emitWorkspaceUpdates, createWorkspaceRecord };
   }
 
   beforeEach(async () => {
@@ -450,6 +452,81 @@ describe("main-chat service, tools, and session", () => {
     expect(second.created).toBe(false);
     expect(second.agentId).toBe(first.agentId);
     expect(second.workspaceId).toBe(first.workspaceId);
+
+    service.stop();
+  });
+
+  it("auto-syncs drifted legacy main-chat agent and workspace titles to settings.title on start()", async () => {
+    const { service, rawStart, agentManager, emitWorkspaceUpdates, createWorkspaceRecord } =
+      makeHarness();
+    const mainDir = path.join(tempDir, "main-chat");
+    await mkdir(mainDir, { recursive: true });
+    const legacyWorkspace = createWorkspaceRecord(mainDir, "主对话");
+    storedAgents.set("agent_legacy_main", {
+      id: "agent_legacy_main",
+      provider: "claude",
+      cwd: mainDir,
+      workspaceId: legacyWorkspace.workspaceId,
+      createdAt: "2026-11-20T00:00:00.000Z",
+      updatedAt: "2026-11-20T00:00:00.000Z",
+      title: "主对话",
+      labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
+      lastStatus: "idle",
+      lastModeId: "default",
+      config: { model: "claude-sonnet-5-5", modeId: "default", thinkingOptionId: null },
+      background: false,
+    } as unknown as StoredAgentRecord);
+
+    await rawStart();
+
+    expect(agentManager.updateAgentMetadata).toHaveBeenCalledWith("agent_legacy_main", {
+      title: "对话管理",
+    });
+    expect(storedAgents.get("agent_legacy_main")?.title).toBe("对话管理");
+    expect(workspaces.get(legacyWorkspace.workspaceId)?.title).toBe("对话管理");
+    expect(emitWorkspaceUpdates).toHaveBeenCalledWith([legacyWorkspace.workspaceId]);
+
+    const conversations = await service.listConversations();
+    const rootMain = conversations.find((record) => record.kind === "main");
+    expect(rootMain?.title).toBe("对话管理");
+
+    service.stop();
+  });
+
+  it("auto-syncs drifted main-chat agent and workspace titles on ensureMainChat() and avoids redundant writes once aligned", async () => {
+    const { service, agentManager, emitWorkspaceUpdates } = makeHarness();
+    await service.start();
+    const ensured = await service.ensureMainChat();
+    await service.updateSettings({ title: "总控工作台" });
+
+    // Simulate underlying metadata drifting back to a legacy title
+    const stored = storedAgents.get(ensured.agentId) as
+      | (StoredAgentRecord & { title?: string | null })
+      | undefined;
+    if (stored) stored.title = "主对话";
+    const ws = workspaces.get(ensured.workspaceId);
+    if (ws) workspaces.set(ensured.workspaceId, { ...ws, title: "主对话" });
+
+    vi.mocked(agentManager.updateAgentMetadata).mockClear();
+    emitWorkspaceUpdates.mockClear();
+
+    const ensuredAgain = await service.ensureMainChat();
+    expect(ensuredAgain.created).toBe(false);
+    expect(agentManager.updateAgentMetadata).toHaveBeenCalledTimes(1);
+    expect(agentManager.updateAgentMetadata).toHaveBeenCalledWith(ensured.agentId, {
+      title: "总控工作台",
+    });
+    expect(storedAgents.get(ensured.agentId)?.title).toBe("总控工作台");
+    expect(workspaces.get(ensured.workspaceId)?.title).toBe("总控工作台");
+    expect(emitWorkspaceUpdates).toHaveBeenCalledWith([ensured.workspaceId]);
+
+    // Subsequent ensureMainChat() should be a no-op once titles are already aligned
+    vi.mocked(agentManager.updateAgentMetadata).mockClear();
+    emitWorkspaceUpdates.mockClear();
+
+    await service.ensureMainChat();
+    expect(agentManager.updateAgentMetadata).not.toHaveBeenCalled();
+    expect(emitWorkspaceUpdates).not.toHaveBeenCalled();
 
     service.stop();
   });

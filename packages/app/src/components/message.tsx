@@ -40,6 +40,8 @@ import type { AgentMessage } from "@getpaseo/protocol/agent-message";
 import type { AgentCapabilityFlags, ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import MaskedView from "@react-native-masked-view/masked-view";
+import { extractQuoteableUserBody, MessageQuoteStack, splitMessageQuotes } from "@/chat-quotes";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Check,
   CheckSquare,
@@ -50,6 +52,7 @@ import {
   Info,
   MicVocal,
   Plus,
+  Reply,
   Scissors,
   TriangleAlertIcon,
   XCircle,
@@ -114,6 +117,7 @@ interface UserMessageProps {
   isLastInGroup?: boolean;
   isPending?: boolean;
   disableOuterSpacing?: boolean;
+  onQuote?: (input: { text: string; itemId: string; timestamp: number }) => void;
 }
 
 const MessageOuterSpacingContext = createContext(false);
@@ -354,6 +358,12 @@ const userMessageStylesheet = StyleSheet.create((theme) => ({
     marginTop: 0,
     marginRight: -theme.spacing[1],
   },
+  quoteButton: {
+    alignSelf: "center",
+    padding: theme.spacing[1],
+    paddingTop: theme.spacing[1],
+    marginTop: 0,
+  },
   trailingRow: {
     alignSelf: "flex-end",
     flexDirection: "row",
@@ -410,6 +420,7 @@ export const UserMessage = memo(function UserMessage({
   isLastInGroup = true,
   isPending = false,
   disableOuterSpacing,
+  onQuote,
 }: UserMessageProps) {
   const isCompact = useIsCompactFormFactor();
   const { t } = useTranslation();
@@ -421,6 +432,9 @@ export const UserMessage = memo(function UserMessage({
     [lightboxMetadata],
   );
   const resolvedDisableOuterSpacing = useDisableOuterSpacing(disableOuterSpacing);
+  const parsedMessage = useMemo(() => splitMessageQuotes(message), [message]);
+  const hasParsedQuotes = parsedMessage.quotes.length > 0;
+  const hasBodyText = parsedMessage.body.length > 0;
   const hasText = message.trim().length > 0;
   const hasImages = images.length > 0;
   const hasAttachments = attachments.length > 0;
@@ -434,6 +448,21 @@ export const UserMessage = memo(function UserMessage({
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
   const getMessageContent = useCallback(() => message, [message]);
+  const handleQuote = useCallback(() => {
+    if (!onQuote) return;
+    const text = extractQuoteableUserBody(message);
+    if (!text) return;
+    onQuote({ text, itemId, timestamp });
+  }, [itemId, message, onQuote, timestamp]);
+  const userMessageTextDataSet = useMemo(
+    () => ({
+      ...MESSAGE_TEXT_DATASET,
+      quoteRole: "user",
+      quoteItemId: itemId,
+      quoteTs: String(timestamp),
+    }),
+    [itemId, timestamp],
+  );
   const handleRewind = useCallback(
     (input: { mode: RewindMode; rewoundText: string }) => {
       return rewindMutation.rewindAgent(input);
@@ -516,10 +545,16 @@ export const UserMessage = memo(function UserMessage({
                 })}
               </View>
             ) : null}
-            {hasText ? (
-              <View dataSet={MESSAGE_TEXT_DATASET} style={userMessageStylesheet.markdownContainer}>
+            {hasParsedQuotes ? (
+              <MessageQuoteStack quotes={parsedMessage.quotes} hasBodyBelow={hasBodyText} />
+            ) : null}
+            {hasBodyText ? (
+              <View
+                dataSet={userMessageTextDataSet}
+                style={userMessageStylesheet.markdownContainer}
+              >
                 <MarkdownRenderer
-                  text={message}
+                  text={parsedMessage.body}
                   client={client}
                   workspaceRoot={workspaceRoot}
                   serverId={serverId}
@@ -545,6 +580,13 @@ export const UserMessage = memo(function UserMessage({
                 onRewind={handleRewind}
               />
             ) : null}
+            {onQuote ? (
+              <TurnQuoteButton
+                onQuote={handleQuote}
+                containerStyle={userMessageStylesheet.quoteButton}
+                testID="user-message-quote-button"
+              />
+            ) : null}
             <TurnCopyButton
               getContent={getMessageContent}
               containerStyle={userMessageStylesheet.copyButton}
@@ -564,6 +606,7 @@ interface AssistantTurnFooterProps {
   durationMs?: number | null;
   onFork?: (target: AssistantForkTarget) => Promise<void> | void;
   supportsNativeFork?: boolean;
+  onQuote?: () => void;
 }
 
 const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
@@ -588,6 +631,12 @@ const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
     marginTop: 0,
     marginLeft: -theme.spacing[1],
   },
+  quoteButton: {
+    alignSelf: "center",
+    padding: theme.spacing[1],
+    paddingTop: theme.spacing[1],
+    marginTop: 0,
+  },
   labelButton: {
     flex: 1,
     minHeight: 24,
@@ -611,6 +660,42 @@ const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
 
 const TIMESTAMP_REVEAL_MS = 3000;
 
+function AssistantTurnFooterActions({
+  getContent,
+  onQuote,
+  onFork,
+  supportsNativeFork,
+}: {
+  getContent?: () => string;
+  onQuote?: () => void;
+  onFork?: (target: AssistantForkTarget) => Promise<void> | void;
+  supportsNativeFork: boolean;
+}) {
+  if (!(getContent || onQuote || onFork)) {
+    return null;
+  }
+  return (
+    <View style={assistantTurnFooterStylesheet.actions}>
+      {getContent ? (
+        <TurnCopyButton
+          getContent={getContent}
+          containerStyle={assistantTurnFooterStylesheet.copyButton}
+        />
+      ) : null}
+      {onQuote ? (
+        <TurnQuoteButton
+          onQuote={onQuote}
+          containerStyle={assistantTurnFooterStylesheet.quoteButton}
+          testID="assistant-message-quote-button"
+        />
+      ) : null}
+      {onFork ? (
+        <AssistantForkMenu onFork={onFork} supportsNativeFork={supportsNativeFork} />
+      ) : null}
+    </View>
+  );
+}
+
 /**
  * Footer rendered next to the copy button at the end of an assistant turn.
  * Shows the turn duration and swaps to the end timestamp when both are known.
@@ -622,6 +707,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
   durationMs,
   onFork,
   supportsNativeFork = false,
+  onQuote,
 }: AssistantTurnFooterProps) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
@@ -670,23 +756,15 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
     },
     [onFork],
   );
-  const canFork = Boolean(onFork);
 
   return (
     <View style={assistantTurnFooterStylesheet.container}>
-      {getContent || canFork ? (
-        <View style={assistantTurnFooterStylesheet.actions}>
-          {getContent ? (
-            <TurnCopyButton
-              getContent={getContent}
-              containerStyle={assistantTurnFooterStylesheet.copyButton}
-            />
-          ) : null}
-          {canFork ? (
-            <AssistantForkMenu onFork={handleFork} supportsNativeFork={supportsNativeFork} />
-          ) : null}
-        </View>
-      ) : null}
+      <AssistantTurnFooterActions
+        getContent={getContent}
+        onQuote={onQuote}
+        onFork={onFork ? handleFork : undefined}
+        supportsNativeFork={supportsNativeFork}
+      />
       {primaryLabel ? (
         <Pressable
           style={assistantTurnFooterStylesheet.labelButton}
@@ -768,6 +846,7 @@ export const LiveElapsed = memo(function LiveElapsed({
 
 interface AssistantMessageProps {
   renderFullContent?: boolean;
+  itemId?: string;
   occurrenceKey: string;
   message: string;
   timestamp: number;
@@ -924,6 +1003,65 @@ export const TurnCopyButton = memo(function TurnCopyButton({
     </Pressable>
   );
 });
+
+interface TurnQuoteButtonProps {
+  onQuote: () => void;
+  containerStyle?: StyleProp<ViewStyle>;
+  accessibilityLabel?: string;
+  testID?: string;
+}
+
+export const TurnQuoteButton = memo(function TurnQuoteButton({
+  onQuote,
+  containerStyle,
+  accessibilityLabel,
+  testID,
+}: TurnQuoteButtonProps) {
+  const { t } = useTranslation();
+  const label = accessibilityLabel ?? t("message.actions.quoteMessage");
+  const pressableStyle = useMemo(
+    () => [turnCopyButtonStylesheet.container, containerStyle],
+    [containerStyle],
+  );
+  const tooltipContent = useMemo(
+    () => (
+      <TooltipContent side="top" align="center" offset={8}>
+        <Text style={turnQuoteTooltipStylesheet.text}>{label}</Text>
+      </TooltipContent>
+    ),
+    [label],
+  );
+
+  return (
+    <Tooltip delayDuration={250} enabledOnDesktop enabledOnMobile={false}>
+      <TooltipTrigger asChild>
+        <Pressable
+          onPress={onQuote}
+          style={pressableStyle}
+          accessibilityRole="button"
+          accessibilityLabel={label}
+          testID={testID}
+        >
+          {({ hovered }) => {
+            const iconColor = hovered
+              ? turnCopyButtonStylesheet.iconHoveredColor.color
+              : turnCopyButtonStylesheet.iconColor.color;
+            return <Reply size={ICON_SIZE.sm} color={iconColor} />;
+          }}
+        </Pressable>
+      </TooltipTrigger>
+      {tooltipContent}
+    </Tooltip>
+  );
+});
+
+const turnQuoteTooltipStylesheet = StyleSheet.create((theme) => ({
+  text: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontFamily: theme.fontFamily.ui,
+  },
+}));
 
 const expandableBadgeStylesheet = StyleSheet.create((theme) => ({
   container: {
@@ -1197,9 +1335,10 @@ function NativeShimmerPeakSvg({ gradientId }: { gradientId: string }) {
 
 export const AssistantMessage = memo(function AssistantMessage({
   renderFullContent = false,
+  itemId,
   occurrenceKey,
   message,
-  timestamp: _timestamp,
+  timestamp,
   workspaceRoot,
   serverId,
   agentId,
@@ -1232,17 +1371,21 @@ export const AssistantMessage = memo(function AssistantMessage({
     ],
     [spacing],
   );
-  const revealDataSet = useMemo(
-    () =>
-      isRenderProfileEnabled()
-        ? {
-            ...MESSAGE_TEXT_DATASET,
-            revealKey: occurrenceKey,
-            revealLength: String(revealedMessage.length),
-          }
-        : MESSAGE_TEXT_DATASET,
-    [occurrenceKey, revealedMessage.length],
-  );
+  const revealDataSet = useMemo(() => {
+    const base: Record<string, string> = {
+      ...MESSAGE_TEXT_DATASET,
+      quoteRole: "assistant",
+      quoteTs: String(timestamp),
+    };
+    if (itemId) {
+      base.quoteItemId = itemId;
+    }
+    if (isRenderProfileEnabled()) {
+      base.revealKey = occurrenceKey;
+      base.revealLength = String(revealedMessage.length);
+    }
+    return base;
+  }, [itemId, occurrenceKey, revealedMessage.length, timestamp]);
 
   const measureMessage = useStableEvent((event: import("react-native").LayoutChangeEvent) => {
     setAssistantMessageHeight({ markdown: revealedMessage, ...event.nativeEvent.layout });

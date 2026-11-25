@@ -5,7 +5,14 @@ import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
 import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
-import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { MAIN_CHAT_CONVERSATION_ID_LABEL, isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import {
+  MessageSelectionPopoverSurface,
+  useChatQuoteStore,
+  type SelectionQuotePayload,
+} from "@/chat-quotes";
+import { usePaneHost } from "@/panels/pane-context";
+import { buildDraftStoreKey } from "@/stores/draft-keys";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -97,6 +104,7 @@ import {
   TurnFooter,
   TURN_FOOTER_BOTTOM_SPACING,
   type AssistantTurnForkHandler,
+  type AssistantTurnQuoteHandler,
   type InFlightTurnForkHandler,
   type TurnContentStrategy,
 } from "./turn-footer";
@@ -212,6 +220,7 @@ function renderStreamItemWithTurnFooter(input: {
   supportsTimelineCursor: boolean;
   supportsNativeFork: boolean;
   onForkAssistantTurn?: AssistantTurnForkHandler;
+  onQuoteAssistantTurn?: AssistantTurnQuoteHandler;
 }): ReactNode {
   if (!input.content) {
     return null;
@@ -227,6 +236,7 @@ function renderStreamItemWithTurnFooter(input: {
       supportsTimelineCursor={input.supportsTimelineCursor}
       supportsNativeFork={input.supportsNativeFork}
       onForkAssistantTurn={input.onForkAssistantTurn}
+      onQuoteAssistantTurn={input.onQuoteAssistantTurn}
     />
   ) : null;
   const content = (
@@ -376,6 +386,84 @@ function ScrollToBottomButton({
       </Animated.View>
     </View>
   );
+}
+
+function useStreamQuoteAndMainChatContext(input: {
+  serverId: string;
+  agentId: string;
+  workspaceId?: string;
+  readOnly: boolean;
+}) {
+  const { serverId, agentId, workspaceId, readOnly } = input;
+  const paneHost = usePaneHost();
+  const isMainChatContext = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    return isMainChatAgent(current);
+  });
+  const isMainChatConversation = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    if (!current) return false;
+    return (
+      isMainChatAgent(current) ||
+      typeof current.labels?.[MAIN_CHAT_CONVERSATION_ID_LABEL] === "string"
+    );
+  });
+  const hideForkActions =
+    readOnly ||
+    isMainChatContext ||
+    isMainChatConversation ||
+    (paneHost === "main" && !workspaceId);
+  const quoteDraftKey = useMemo(
+    () => buildDraftStoreKey({ serverId, agentId }),
+    [agentId, serverId],
+  );
+  const handleQuoteUserMessage = useStableEvent(
+    (payload: { text: string; itemId: string; timestamp: number }) => {
+      useChatQuoteStore.getState().addQuote({
+        draftKey: quoteDraftKey,
+        text: payload.text,
+        role: "user",
+        ts: payload.timestamp,
+        sourceItemId: payload.itemId,
+      });
+    },
+  );
+  const handleQuoteAssistantTurn: AssistantTurnQuoteHandler = useStableEvent((payload) => {
+    useChatQuoteStore.getState().addQuote({
+      draftKey: quoteDraftKey,
+      text: payload.text,
+      role: "assistant",
+      ts: payload.ts,
+      sourceItemId: payload.sourceItemId,
+    });
+  });
+  const handleCommentSelection = useStableEvent((payload: SelectionQuotePayload) => {
+    useChatQuoteStore.getState().addComment({
+      draftKey: quoteDraftKey,
+      text: payload.text,
+      role: payload.role,
+      ts: payload.ts,
+      sourceItemId: payload.sourceItemId,
+    });
+  });
+  const handleQuoteSelection = useStableEvent((payload: SelectionQuotePayload) => {
+    useChatQuoteStore.getState().addQuote({
+      draftKey: quoteDraftKey,
+      text: payload.text,
+      role: payload.role,
+      ts: payload.ts,
+    });
+  });
+  return {
+    isMainChatContext,
+    hideForkActions,
+    handleQuoteUserMessage,
+    handleQuoteAssistantTurn,
+    handleCommentSelection,
+    handleQuoteSelection,
+  };
 }
 
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
@@ -584,10 +672,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const effectiveTurnPresentation = useRetainedValue(turnPresentation, isActive);
     const isTurnActive = effectiveTurnPresentation.isActive;
     const presentStream = useMemo(() => createStreamPresentation(), []);
-    const isMainChatContext = useSessionStore((state) => {
-      const session = state.sessions[resolvedServerId];
-      const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-      return isMainChatAgent(current);
+    const {
+      isMainChatContext,
+      hideForkActions,
+      handleQuoteUserMessage,
+      handleQuoteAssistantTurn,
+      handleCommentSelection,
+      handleQuoteSelection,
+    } = useStreamQuoteAndMainChatContext({
+      serverId: resolvedServerId,
+      agentId,
+      workspaceId: context.workspaceId,
+      readOnly,
     });
     const mainBackgroundFolded = useMainChatSettingsStore(
       (state) => state.settingsByServerId[resolvedServerId]?.mainBackgroundFolded !== false,
@@ -812,6 +908,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                 item.clientMessageId !== undefined &&
                 pendingClientMessageIds.has(item.clientMessageId)
               }
+              onQuote={readOnly ? undefined : handleQuoteUserMessage}
             />
           </AssistantFileLinkResolverProvider>
         );
@@ -821,7 +918,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         agentId,
         client,
         handleInlinePathPress,
+        handleQuoteUserMessage,
         pendingClientMessageIds,
+        readOnly,
         resolvedServerId,
         toast,
         workspaceRoot,
@@ -842,6 +941,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               {(renderFullContent) => (
                 <AssistantMessage
                   renderFullContent={renderFullContent}
+                  itemId={item.id}
                   occurrenceKey={createAssistantImageOccurrenceKey({ agentId, itemId: item.id })}
                   message={item.text}
                   timestamp={item.timestamp.getTime()}
@@ -1135,12 +1235,15 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           strategy: streamRenderStrategy,
           supportsTimelineCursor: supportsAgentForkContextCursor,
           supportsNativeFork: supportsAgentNativeFork,
-          onForkAssistantTurn: readOnly ? undefined : handleForkAssistantTurn,
+          onForkAssistantTurn: hideForkActions ? undefined : handleForkAssistantTurn,
+          onQuoteAssistantTurn: readOnly ? undefined : handleQuoteAssistantTurn,
         });
       },
       [
         getTurnIndent,
         handleForkAssistantTurn,
+        handleQuoteAssistantTurn,
+        hideForkActions,
         readOnly,
         renderStreamItemContent,
         streamRenderStrategy,
@@ -1174,13 +1277,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             strategy={streamRenderStrategy}
             supportsTimelineCursor={supportsAgentForkContextCursor}
             supportsNativeFork={supportsAgentNativeFork}
-            onForkAssistantTurn={readOnly ? undefined : handleForkAssistantTurn}
-            onForkInFlightTurn={readOnly ? undefined : handleForkInFlightTurn}
+            onForkAssistantTurn={hideForkActions ? undefined : handleForkAssistantTurn}
+            onForkInFlightTurn={hideForkActions ? undefined : handleForkInFlightTurn}
+            onQuoteAssistantTurn={readOnly ? undefined : handleQuoteAssistantTurn}
           />
         ) : null,
       [
         handleForkAssistantTurn,
         handleForkInFlightTurn,
+        handleQuoteAssistantTurn,
+        hideForkActions,
         readOnly,
         isTurnActive,
         baseRenderModel.turnTiming.runningStartedAt,
@@ -1342,39 +1448,45 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       >
         <ToolCallSheetProvider>
           <AssistantSelectionCopySurface style={stylesheet.container}>
-            <MessageOuterSpacingProvider disableOuterSpacing>
-              <ToolCallExpansionContext.Provider value={toolCallExpansion}>
-                <UserMessageExpansionContext.Provider value={userMessageExpansion}>
-                  {streamRenderStrategy.render({
-                    readingRowReplacements: presentation.readingRowReplacements,
-                    agentId,
-                    segments: renderModel.segments,
-                    historyRowRevision,
-                    liveHeadRowRevision: expandedToolCallGroups,
-                    boundary,
-                    renderers,
-                    listEmptyComponent,
-                    viewportRef,
-                    routeBottomAnchorRequest,
-                    isAuthoritativeHistoryReady,
-                    isInitialHistoryLoading,
-                    revealInitialHistory,
-                    onNearBottomChange: nearBottom.set,
-                    onReadingPositionChange: handleReadingPositionChange,
-                    onNearHistoryStart: loadOlder,
-                    isLoadingOlderHistory: isLoadingOlder,
-                    hasOlderHistory: hasOlder,
-                    olderHistoryProgressKey: progressKey,
-                    scrollEnabled: streamScrollEnabled,
-                    listStyle: stylesheet.list,
-                    baseListContentContainerStyle: stylesheet.listContentContainer,
-                    forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
-                    contentMaxWidth,
-                    outlineInset,
-                  })}
-                </UserMessageExpansionContext.Provider>
-              </ToolCallExpansionContext.Provider>
-            </MessageOuterSpacingProvider>
+            <MessageSelectionPopoverSurface
+              enabled={!readOnly}
+              onCommentSelection={handleCommentSelection}
+              onQuoteSelection={handleQuoteSelection}
+            >
+              <MessageOuterSpacingProvider disableOuterSpacing>
+                <ToolCallExpansionContext.Provider value={toolCallExpansion}>
+                  <UserMessageExpansionContext.Provider value={userMessageExpansion}>
+                    {streamRenderStrategy.render({
+                      readingRowReplacements: presentation.readingRowReplacements,
+                      agentId,
+                      segments: renderModel.segments,
+                      historyRowRevision,
+                      liveHeadRowRevision: expandedToolCallGroups,
+                      boundary,
+                      renderers,
+                      listEmptyComponent,
+                      viewportRef,
+                      routeBottomAnchorRequest,
+                      isAuthoritativeHistoryReady,
+                      isInitialHistoryLoading,
+                      revealInitialHistory,
+                      onNearBottomChange: nearBottom.set,
+                      onReadingPositionChange: handleReadingPositionChange,
+                      onNearHistoryStart: loadOlder,
+                      isLoadingOlderHistory: isLoadingOlder,
+                      hasOlderHistory: hasOlder,
+                      olderHistoryProgressKey: progressKey,
+                      scrollEnabled: streamScrollEnabled,
+                      listStyle: stylesheet.list,
+                      baseListContentContainerStyle: stylesheet.listContentContainer,
+                      forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
+                      contentMaxWidth,
+                      outlineInset,
+                    })}
+                  </UserMessageExpansionContext.Provider>
+                </ToolCallExpansionContext.Provider>
+              </MessageOuterSpacingProvider>
+            </MessageSelectionPopoverSurface>
             {outlineInset > 0 && chatOutline.prompts.length >= 2 ? (
               <ChatOutlineRail
                 prompts={chatOutline.prompts}

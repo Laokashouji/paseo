@@ -4,7 +4,6 @@ import {
   GitBranch,
   ListTodo,
   MessageSquare,
-  Plus,
   Server,
   Sparkles,
   X,
@@ -17,17 +16,10 @@ import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useAutocompleteCommands } from "@/agent-commands";
 import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { PressHighlight } from "@/components/ui/press-highlight";
 import { EditingTextInput } from "@/components/ui/text-input";
 import { useComposerEditingSession } from "@/composer/editing-session";
+import type { AttachmentMenuItem } from "@/composer/input/input";
 import { useToast } from "@/contexts/toast-context";
 import { useHosts } from "@/runtime/host-runtime";
 import { buildDraftStoreKey } from "@/stores/draft-keys";
@@ -42,12 +34,10 @@ import {
   type MainChatMentionItem,
   type MainChatMentionKind,
 } from "./mention-sources";
-import { MainChatNextStepsBar } from "./next-steps-bar";
 import { MainChatQueuePanel } from "./queue-panel";
-import { useStewardAllowedServerIds } from "./use-steward-roster";
 import { useMainChatQueueStore } from "./queue-store";
+import { useStewardAllowedServerIds } from "./use-steward-roster";
 
-const ThemedPlusIcon = withUnistyles(Plus);
 const ThemedServerIcon = withUnistyles(Server);
 const ThemedFolderIcon = withUnistyles(Folder);
 const ThemedRepoIcon = withUnistyles(GitBranch);
@@ -57,7 +47,6 @@ const ThemedQueueIcon = withUnistyles(ListTodo);
 const ThemedXIcon = withUnistyles(X);
 
 const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
-const foregroundIconMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const primaryIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
 const placeholderColorMapping = (theme: Theme) => ({
   placeholderTextColor: theme.colors.foregroundExtraMuted,
@@ -70,6 +59,8 @@ const repoMenuIcon = <ThemedRepoIcon size={14} uniProps={mutedIconMapping} />;
 const sessionMenuIcon = <ThemedSessionIcon size={14} uniProps={mutedIconMapping} />;
 const skillMenuIcon = <ThemedSkillIcon size={14} uniProps={mutedIconMapping} />;
 const queueMenuIcon = <ThemedQueueIcon size={14} uniProps={primaryIconMapping} />;
+
+const EMPTY_MENU_ITEMS: readonly AttachmentMenuItem[] = [];
 
 const EMPTY_PICKER_SOURCES = {
   hosts: [],
@@ -224,32 +215,41 @@ const QuickQueueBar = memo(function QuickQueueBar({
   );
 });
 
-export interface MainChatComposerEnhancementsProps {
+export interface MainChatComposerToolbarInput {
   serverId: string;
   agentId: string;
-  /** Optional hook override for unit tests to observe/intercept risky prefill or mention injection. */
+  enabled?: boolean;
+  /** Optional hook override for unit tests to observe mention injection. */
   onDraftTextInjected?: (nextText: string) => void;
-  /** Optional custom sender passed down to QueuePanel and NextStepsBar. */
+  /** Optional custom sender passed down to QueuePanel. */
   onSendMessage?: (text: string) => Promise<void>;
 }
 
+export interface MainChatComposerToolbarResult {
+  /** Context reference and queue items folded cleanly into the Composer's own `+` toolbar menu. */
+  extraAttachmentMenuItems: readonly AttachmentMenuItem[];
+  /** Active transient overlay (queued messages, inline mention picker, or quick-queue input); null at rest. */
+  overlay: ReactElement | null;
+}
+
 /**
- * Unified M5 composer enhancements mounted inside Main Chat's `ComposerEditingScope`:
- * - Visual send-queue bar (`MainChatQueuePanel`)
- * - Compact `+` context reference & queue menu (consolidating host/workspace/repo/session/skill/queue)
- * - Next-step suggestion chips (`MainChatNextStepsBar`, safe direct-send vs risky prefill-only)
+ * Consolidates Main Chat's `+` context-reference (host/workspace/repo/session/skill) and queue
+ * actions directly into the Composer's bottom-left `+` toolbar menu, eliminating the extra
+ * floating suggestion/toolbar bar above the status capsule dock.
  */
-export const MainChatComposerEnhancements = memo(function MainChatComposerEnhancements({
+export function useMainChatComposerToolbar({
   serverId,
   agentId,
+  enabled = true,
   onDraftTextInjected,
   onSendMessage,
-}: MainChatComposerEnhancementsProps): ReactElement {
+}: MainChatComposerToolbarInput): MainChatComposerToolbarResult {
   const { t } = useTranslation();
   const toast = useToast();
   const editingSession = useComposerEditingSession("chat");
   const hosts = useHosts();
   const enqueue = useMainChatQueueStore((state) => state.enqueue);
+  const queueCount = useMainChatQueueStore((state) => state.queuesByAgentId[agentId]?.length ?? 0);
 
   const [activePickerKind, setActivePickerKind] = useState<MainChatMentionKind | null>(null);
   const [quickQueueOpen, setQuickQueueOpen] = useState(false);
@@ -273,14 +273,14 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
     useSessionStore,
     useCallback(
       (state) =>
-        activePickerKind
+        enabled && activePickerKind
           ? collectMainChatMentionSources({
               sessions: state.sessions,
               excludeAgentId: agentId,
               allowedServerIds,
             })
           : EMPTY_PICKER_SOURCES,
-      [activePickerKind, agentId, allowedServerIds],
+      [activePickerKind, agentId, allowedServerIds, enabled],
     ),
     equal,
   );
@@ -288,11 +288,11 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
   const commandsQuery = useAutocompleteCommands({
     serverId,
     agentId,
-    enabled: activePickerKind === "skill" && Boolean(serverId) && Boolean(agentId),
+    enabled: enabled && activePickerKind === "skill" && Boolean(serverId) && Boolean(agentId),
   });
 
   const pickerItems = useMemo(() => {
-    if (!activePickerKind) return [];
+    if (!enabled || !activePickerKind) return [];
     const labeledHosts = pickerSources.hosts.map((host) => ({
       ...host,
       label: hostLabelsByServerId[host.serverId] ?? host.label,
@@ -319,7 +319,7 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
       limitPerCategory: 12,
       maxTotal: 12,
     });
-  }, [activePickerKind, commandsQuery.commands, hostLabelsByServerId, pickerSources]);
+  }, [activePickerKind, commandsQuery.commands, enabled, hostLabelsByServerId, pickerSources]);
 
   const applyTextToComposer = useCallback(
     (nextText: string) => {
@@ -341,13 +341,6 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
       });
     },
     [applyTextToComposer, draftKey, t, toast],
-  );
-
-  const handlePrefillRiskySuggestion = useCallback(
-    (prompt: string) => {
-      applyTextToComposer(prompt);
-    },
-    [applyTextToComposer],
   );
 
   const handleOpenHostPicker = useCallback(() => {
@@ -398,116 +391,149 @@ export const MainChatComposerEnhancements = memo(function MainChatComposerEnhanc
     setQuickQueueDraft("");
   }, []);
 
-  return (
-    <View
-      style={styles.container}
-      dataSet={CHAT_COLUMN_RAIL_DATASET}
-      testID="main-chat-composer-enhancements"
-    >
-      <View style={styles.inner} testID="main-chat-composer-enhancements-inner">
-        <MainChatQueuePanel serverId={serverId} agentId={agentId} onSendMessage={onSendMessage} />
+  const extraAttachmentMenuItems = useMemo<readonly AttachmentMenuItem[]>(() => {
+    if (!enabled) return EMPTY_MENU_ITEMS;
+    return [
+      {
+        id: "main-chat-ref-host",
+        label: t("mainChat.composer.attachMenu.refHost"),
+        icon: hostMenuIcon,
+        onSelect: handleOpenHostPicker,
+        testID: "main-chat-attach-ref-host",
+        dividerBefore: true,
+        sectionLabel: t("mainChat.composer.attachMenu.sectionReferences"),
+      },
+      {
+        id: "main-chat-ref-workspace",
+        label: t("mainChat.composer.attachMenu.refWorkspace"),
+        icon: workspaceMenuIcon,
+        onSelect: handleOpenWorkspacePicker,
+        testID: "main-chat-attach-ref-workspace",
+      },
+      {
+        id: "main-chat-ref-repo",
+        label: t("mainChat.composer.attachMenu.refRepo"),
+        icon: repoMenuIcon,
+        onSelect: handleOpenRepoPicker,
+        testID: "main-chat-attach-ref-repo",
+      },
+      {
+        id: "main-chat-ref-session",
+        label: t("mainChat.composer.attachMenu.refSession"),
+        icon: sessionMenuIcon,
+        onSelect: handleOpenSessionPicker,
+        testID: "main-chat-attach-ref-session",
+      },
+      {
+        id: "main-chat-ref-skill",
+        label: t("mainChat.composer.attachMenu.refSkill"),
+        icon: skillMenuIcon,
+        onSelect: handleOpenSkillPicker,
+        testID: "main-chat-attach-ref-skill",
+      },
+      {
+        id: "main-chat-queue-message",
+        label: t("mainChat.composer.attachMenu.queueNewMessage"),
+        icon: queueMenuIcon,
+        onSelect: handleQueueAction,
+        testID: "main-chat-attach-queue-message",
+        dividerBefore: true,
+        sectionLabel: t("mainChat.composer.attachMenu.sectionQueue"),
+      },
+    ];
+  }, [
+    enabled,
+    handleOpenHostPicker,
+    handleOpenRepoPicker,
+    handleOpenSessionPicker,
+    handleOpenSkillPicker,
+    handleOpenWorkspacePicker,
+    handleQueueAction,
+    t,
+  ]);
 
-        {activePickerKind ? (
-          <View style={styles.rail}>
-            <InlineMentionPicker
-              kind={activePickerKind}
-              items={pickerItems}
-              onSelect={handleSelectMentionItem}
-              onClose={handleClosePicker}
-            />
-          </View>
-        ) : null}
+  const hasActiveOverlay =
+    enabled && (queueCount > 0 || activePickerKind !== null || quickQueueOpen);
 
-        {quickQueueOpen ? (
-          <View style={styles.rail}>
-            <QuickQueueBar
-              value={quickQueueDraft}
-              onChange={setQuickQueueDraft}
-              onSubmit={handleSubmitQuickQueue}
-              onClose={handleCloseQuickQueue}
-            />
-          </View>
-        ) : null}
+  const overlay = useMemo<ReactElement | null>(() => {
+    if (!hasActiveOverlay) return null;
+    return (
+      <View
+        style={styles.container}
+        dataSet={CHAT_COLUMN_RAIL_DATASET}
+        testID="main-chat-composer-enhancements"
+      >
+        <View style={styles.inner} testID="main-chat-composer-enhancements-inner">
+          <MainChatQueuePanel serverId={serverId} agentId={agentId} onSendMessage={onSendMessage} />
 
-        <View style={styles.toolbarRow}>
-          <DropdownMenu compactMode="sheet">
-            <DropdownMenuTrigger
-              hitSlop={6}
-              style={styles.plusButton}
-              accessibilityRole="button"
-              accessibilityLabel={t("mainChat.composer.attachMenu.triggerLabel")}
-              testID="main-chat-composer-attach-trigger"
-            >
-              <ThemedPlusIcon size={15} uniProps={foregroundIconMapping} />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              side="top"
-              width={236}
-              sheetTitle={t("mainChat.composer.attachMenu.triggerLabel")}
-            >
-              <DropdownMenuLabel>
-                {t("mainChat.composer.attachMenu.sectionReferences")}
-              </DropdownMenuLabel>
-              <DropdownMenuItem
-                leading={hostMenuIcon}
-                onSelect={handleOpenHostPicker}
-                testID="main-chat-attach-ref-host"
-              >
-                {t("mainChat.composer.attachMenu.refHost")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                leading={workspaceMenuIcon}
-                onSelect={handleOpenWorkspacePicker}
-                testID="main-chat-attach-ref-workspace"
-              >
-                {t("mainChat.composer.attachMenu.refWorkspace")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                leading={repoMenuIcon}
-                onSelect={handleOpenRepoPicker}
-                testID="main-chat-attach-ref-repo"
-              >
-                {t("mainChat.composer.attachMenu.refRepo")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                leading={sessionMenuIcon}
-                onSelect={handleOpenSessionPicker}
-                testID="main-chat-attach-ref-session"
-              >
-                {t("mainChat.composer.attachMenu.refSession")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                leading={skillMenuIcon}
-                onSelect={handleOpenSkillPicker}
-                testID="main-chat-attach-ref-skill"
-              >
-                {t("mainChat.composer.attachMenu.refSkill")}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>
-                {t("mainChat.composer.attachMenu.sectionQueue")}
-              </DropdownMenuLabel>
-              <DropdownMenuItem
-                leading={queueMenuIcon}
-                onSelect={handleQueueAction}
-                testID="main-chat-attach-queue-message"
-              >
-                {t("mainChat.composer.attachMenu.queueNewMessage")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {activePickerKind ? (
+            <View style={styles.rail}>
+              <InlineMentionPicker
+                kind={activePickerKind}
+                items={pickerItems}
+                onSelect={handleSelectMentionItem}
+                onClose={handleClosePicker}
+              />
+            </View>
+          ) : null}
 
-          <MainChatNextStepsBar
-            serverId={serverId}
-            agentId={agentId}
-            onSendSafePrompt={onSendMessage}
-            onPrefillRiskyPrompt={handlePrefillRiskySuggestion}
-          />
+          {quickQueueOpen ? (
+            <View style={styles.rail}>
+              <QuickQueueBar
+                value={quickQueueDraft}
+                onChange={setQuickQueueDraft}
+                onSubmit={handleSubmitQuickQueue}
+                onClose={handleCloseQuickQueue}
+              />
+            </View>
+          ) : null}
         </View>
       </View>
-    </View>
-  );
+    );
+  }, [
+    activePickerKind,
+    agentId,
+    handleClosePicker,
+    handleCloseQuickQueue,
+    handleSelectMentionItem,
+    handleSubmitQuickQueue,
+    hasActiveOverlay,
+    onSendMessage,
+    pickerItems,
+    quickQueueDraft,
+    quickQueueOpen,
+    serverId,
+  ]);
+
+  return { extraAttachmentMenuItems, overlay };
+}
+
+export interface MainChatComposerEnhancementsProps {
+  serverId: string;
+  agentId: string;
+  onDraftTextInjected?: (nextText: string) => void;
+  onSendMessage?: (text: string) => Promise<void>;
+}
+
+/**
+ * Renders only transient composer overlays (queued messages) when active. Returns `null` at rest
+ * because next-step pills were removed and the `+` context/queue menu now lives inside Composer's
+ * bottom-left toolbar.
+ */
+export const MainChatComposerEnhancements = memo(function MainChatComposerEnhancements({
+  serverId,
+  agentId,
+  onDraftTextInjected,
+  onSendMessage,
+}: MainChatComposerEnhancementsProps): ReactElement | null {
+  const { overlay } = useMainChatComposerToolbar({
+    serverId,
+    agentId,
+    enabled: true,
+    onDraftTextInjected,
+    onSendMessage,
+  });
+  return overlay;
 });
 
 const styles = StyleSheet.create((theme) => ({
@@ -515,7 +541,7 @@ const styles = StyleSheet.create((theme) => ({
     width: "100%",
     alignItems: "center",
     paddingHorizontal: theme.spacing[4],
-    paddingTop: theme.spacing[1.5],
+    paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[0.5],
   },
   inner: {
@@ -525,22 +551,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   rail: {
     width: "100%",
-  },
-  toolbarRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-  },
-  plusButton: {
-    width: 28,
-    height: 28,
-    borderRadius: theme.borderRadius.full,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.borderAccent,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
   },
   controlPressed: {
     backgroundColor: theme.colors.surface2,
@@ -610,19 +620,15 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
     borderRadius: theme.borderRadius.lg,
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1.5],
   },
   quickQueueInput: {
     flex: 1,
     minWidth: 0,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    borderRadius: theme.borderRadius.md,
-    backgroundColor: theme.colors.surface0,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1],
-    fontSize: theme.fontSize.sm,
   },
 }));

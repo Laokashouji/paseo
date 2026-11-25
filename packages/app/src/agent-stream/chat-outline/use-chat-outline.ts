@@ -5,9 +5,11 @@ import { useStableEvent } from "@/hooks/use-stable-event";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelinePromptJump } from "@/timeline/timeline-sync-plan";
 import type { StreamItem } from "@/types/stream";
+import { isSystemBackgroundTrigger } from "../turn-collapse/model";
 import type { StreamViewportHandle } from "../strategy";
 import {
   createActivePromptPublisher,
+  filterChatOutlinePrompts,
   resolveActivePromptSeq,
   shouldAcceptPromptIndexEpoch,
   type ActivePromptSource,
@@ -48,11 +50,37 @@ export interface ChatOutline {
 function latestPromptSeqIn(items: StreamItem[], timelineEpoch: string | null): number {
   let latest = -1;
   for (const item of items) {
-    if (item.kind === "user_message" && item.timelineCursor?.epoch === timelineEpoch) {
+    if (
+      item.kind === "user_message" &&
+      item.timelineCursor?.epoch === timelineEpoch &&
+      !isSystemBackgroundTrigger(item)
+    ) {
       latest = Math.max(latest, item.timelineCursor.seq);
     }
   }
   return latest;
+}
+
+function collectSystemBackgroundSeqs(
+  tail: readonly StreamItem[],
+  head: readonly StreamItem[],
+  timelineEpoch: string | null,
+): Set<number> | undefined {
+  if (!timelineEpoch) return undefined;
+  let seqs: Set<number> | undefined;
+  for (const item of tail) {
+    if (item.timelineCursor?.epoch === timelineEpoch && isSystemBackgroundTrigger(item)) {
+      seqs ??= new Set();
+      seqs.add(item.timelineCursor.seq);
+    }
+  }
+  for (const item of head) {
+    if (item.timelineCursor?.epoch === timelineEpoch && isSystemBackgroundTrigger(item)) {
+      seqs ??= new Set();
+      seqs.add(item.timelineCursor.seq);
+    }
+  }
+  return seqs;
 }
 
 function findLoadedItem(
@@ -84,7 +112,16 @@ export function useChatOutline({
   // A disabled outline (every native viewport) must not pay for the timeline per delta.
   const loadedTail = enabled ? tail : NO_STREAM_ITEMS;
   const loadedHead = enabled ? (head ?? NO_STREAM_ITEMS) : NO_STREAM_ITEMS;
-  const prompts = enabled ? (index?.prompts ?? NO_PROMPTS) : NO_PROMPTS;
+  const hiddenSystemSeqs = useMemo(
+    () => collectSystemBackgroundSeqs(loadedTail, loadedHead, timelineEpoch),
+    [loadedHead, loadedTail, timelineEpoch],
+  );
+  const prompts = useMemo(() => {
+    if (!enabled || !index) {
+      return NO_PROMPTS;
+    }
+    return filterChatOutlinePrompts(index.prompts, hiddenSystemSeqs);
+  }, [enabled, hiddenSystemSeqs, index]);
 
   // The viewed timeline already owns live delivery and reconnect catch-up. Its complete
   // loaded items (including rows outside the mounted window) invalidate the prompt index.

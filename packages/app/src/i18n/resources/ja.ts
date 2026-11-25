@@ -1,9 +1,11 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ja: TranslationResources = {
+  chatQuotes: chatQuotesLocales.ja,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ja"),
   interactiveCards: interactiveCardsI18n.ja,
   pluginCombobox: {
@@ -359,6 +361,7 @@ export const ja: TranslationResources = {
       copyCode: "コードをコピー",
       copyTurn: "ターンをコピー",
       copyMessage: "メッセージをコピー",
+      quoteMessage: quoteMessageActionLocales.ja,
       forkMenu: "メッセージをフォーク",
       forkInNewTab: "新しいタブにフォーク",
       forkInNewWorkspace: "新しいワークスペースにフォーク",

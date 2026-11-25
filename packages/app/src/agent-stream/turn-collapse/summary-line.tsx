@@ -1,15 +1,7 @@
 import type { MainChatBackgroundTurnKind } from "@getpaseo/protocol/main-chat";
 import { memo, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  CornerDownLeft,
-  Radar,
-  Sparkles,
-  Summary,
-} from "lucide-react-native";
+import { ChevronDown, ChevronRight, Summary } from "lucide-react-native";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useDisclosureHold } from "@/agent-stream/disclosure";
@@ -19,10 +11,6 @@ import { useOverviewSummaryLabel } from "@/tool-calls/detail-level/overview/labe
 import type { Theme } from "@/styles/theme";
 import type { TurnSummaryItem } from "@/types/stream";
 
-const ThemedRadar = withUnistyles(Radar);
-const ThemedClock = withUnistyles(Clock);
-const ThemedCornerDownLeft = withUnistyles(CornerDownLeft);
-const ThemedSparkles = withUnistyles(Sparkles);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
 
@@ -30,49 +18,22 @@ const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMute
 const EXPANDED_ACCESSIBILITY_STATE = { expanded: true } as const;
 const COLLAPSED_ACCESSIBILITY_STATE = { expanded: false } as const;
 
-function resolveBackgroundKindLabelKey(
-  kind: MainChatBackgroundTurnKind | undefined,
-  running: boolean,
-): string {
-  if (running) return "mainChat.backgroundTurn.running";
+function resolveBackgroundTagKey(kind: MainChatBackgroundTurnKind | undefined): string {
   switch (kind) {
-    case "patrol":
-      return "mainChat.backgroundTurn.kindPatrol";
-    case "supervision":
-      return "mainChat.backgroundTurn.kindSupervision";
-    case "relay":
-      return "mainChat.backgroundTurn.kindRelay";
-    case "briefing":
-      return "mainChat.backgroundTurn.kindBriefing";
     case "compaction":
-      return "mainChat.backgroundTurn.kindCompaction";
-    case "routine":
-      return "mainChat.backgroundTurn.kindRoutine";
+      return "mainChat.backgroundTurn.compactionTag";
     case "cache_keepalive":
-      return "mainChat.backgroundTurn.kindCacheKeepalive";
+      return "mainChat.backgroundTurn.cacheKeepaliveTag";
     default:
-      return "mainChat.backgroundTurn.completed";
+      return "mainChat.backgroundTurn.supervisionTag";
   }
-}
-
-function renderBackgroundIcon(kind: MainChatBackgroundTurnKind | undefined) {
-  if (kind === "relay") {
-    return <ThemedCornerDownLeft size={14} uniProps={mutedIconMapping} />;
-  }
-  if (kind === "routine") {
-    return <ThemedClock size={14} uniProps={mutedIconMapping} />;
-  }
-  if (kind === "briefing" || kind === "compaction" || kind === "cache_keepalive") {
-    return <ThemedSparkles size={14} uniProps={mutedIconMapping} />;
-  }
-  return <ThemedRadar size={14} uniProps={mutedIconMapping} />;
 }
 
 /**
  * The row a collapsed turn leaves under its user message, styled like a tool-call group.
  * Pressing it opens the turn's rows beneath it. For Main Chat system-injected background turns,
- * renders a compact full-width rail-aligned summary bar that expands and collapses the trigger
- * and intermediate work in place.
+ * renders a quiet full-width minimalist inline row (`@督办巡检 · 已在后台处理 >`) that expands
+ * and collapses the entire background turn in place.
  */
 export const TurnSummaryLine = memo(function TurnSummaryLine({
   item,
@@ -98,14 +59,13 @@ export const TurnSummaryLine = memo(function TurnSummaryLine({
   if (isBackground) {
     const running = item.backgroundMeta?.running === true;
     const kind = item.backgroundMeta?.kind;
-    const kindBadge = t(resolveBackgroundKindLabelKey(kind, running));
-    const detailParts = [item.backgroundMeta?.label, toolsLabel].filter(
-      (part): part is string => typeof part === "string" && part.trim().length > 0,
+    const actorTag = t(resolveBackgroundTagKey(kind));
+    const statusText = t(
+      running
+        ? "mainChat.backgroundTurn.handlingInBackground"
+        : "mainChat.backgroundTurn.handledInBackground",
     );
-    const summaryText = detailParts.join(" · ");
-    const toggleLabel = item.expanded
-      ? t("mainChat.backgroundTurn.collapse")
-      : t("mainChat.backgroundTurn.expand");
+    const fullLabel = `${actorTag} · ${statusText}`;
 
     return (
       <PressHighlight
@@ -115,33 +75,24 @@ export const TurnSummaryLine = memo(function TurnSummaryLine({
           item.expanded ? EXPANDED_ACCESSIBILITY_STATE : COLLAPSED_ACCESSIBILITY_STATE
         }
         aria-expanded={item.expanded}
-        accessibilityLabel={summaryText ? `${kindBadge} · ${summaryText}` : kindBadge}
+        accessibilityLabel={fullLabel}
         onPress={toggle}
         style={barStyle}
         highlightStyle={styles.backgroundBarHighlight}
       >
         <View style={styles.backgroundLeft}>
-          <View style={styles.backgroundIconWrap}>{renderBackgroundIcon(kind)}</View>
-          <View style={styles.backgroundKindPill}>
-            <Text style={styles.backgroundKindText} numberOfLines={1}>
-              {kindBadge}
-            </Text>
-          </View>
-          {summaryText ? (
-            <Text style={styles.backgroundSummaryText} numberOfLines={1} ellipsizeMode="tail">
-              {summaryText}
-            </Text>
-          ) : null}
-        </View>
-        <View style={styles.backgroundRight}>
-          <Text style={styles.backgroundToggleText} numberOfLines={1}>
-            {toggleLabel}
+          <Text style={styles.backgroundLineText} numberOfLines={1} ellipsizeMode="tail">
+            <Text style={styles.backgroundTagText}>{actorTag}</Text>
+            {" · "}
+            <Text style={styles.backgroundStatusText}>{statusText}</Text>
           </Text>
-          {item.expanded ? (
-            <ThemedChevronDown size={14} uniProps={mutedIconMapping} />
-          ) : (
-            <ThemedChevronRight size={14} uniProps={mutedIconMapping} />
-          )}
+          <View style={styles.backgroundChevron}>
+            {item.expanded ? (
+              <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
+            ) : (
+              <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
+            )}
+          </View>
         </View>
       </PressHighlight>
     );
@@ -165,66 +116,49 @@ const styles = StyleSheet.create((theme) => ({
   backgroundBar: {
     width: "100%",
     minWidth: 0,
-    minHeight: 34,
+    minHeight: 28,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: 6,
-    borderRadius: theme.borderRadius.lg,
+    paddingHorizontal: theme.spacing[1],
+    paddingVertical: 4,
+    borderRadius: theme.borderRadius.md,
     borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface1,
+    borderColor: "transparent",
+    backgroundColor: "transparent",
   },
   backgroundBarHighlight: {
-    backgroundColor: theme.colors.surface2,
+    backgroundColor: theme.colors.surface1,
   },
   backgroundBarExpanded: {
-    borderColor: theme.colors.borderAccent,
-    backgroundColor: theme.colors.surface2,
+    paddingHorizontal: 10,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
   },
   backgroundLeft: {
     flex: 1,
     minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
+    gap: 4,
   },
-  backgroundIconWrap: {
-    flexShrink: 0,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  backgroundKindPill: {
-    flexShrink: 0,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: theme.borderRadius.sm,
-    backgroundColor: theme.colors.surface2,
-  },
-  backgroundKindText: {
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foregroundMuted,
-  },
-  backgroundSummaryText: {
-    flex: 1,
+  backgroundLineText: {
+    flexShrink: 1,
     minWidth: 0,
-    fontSize: theme.fontSize.sm,
+    fontSize: 13,
     lineHeight: 18,
     color: theme.colors.foregroundMuted,
   },
-  backgroundRight: {
-    flexShrink: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 2,
-  },
-  backgroundToggleText: {
-    fontSize: 12,
-    lineHeight: 16,
+  backgroundTagText: {
+    fontWeight: theme.fontWeight.medium,
     color: theme.colors.foregroundMuted,
+  },
+  backgroundStatusText: {
+    fontWeight: theme.fontWeight.normal,
+    color: theme.colors.foregroundExtraMuted,
+  },
+  backgroundChevron: {
+    flexShrink: 0,
+    alignItems: "center",
+    justifyContent: "center",
   },
 }));

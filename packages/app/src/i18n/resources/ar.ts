@@ -1,9 +1,11 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ar: TranslationResources = {
+  chatQuotes: chatQuotesLocales.ar,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ar"),
   interactiveCards: interactiveCardsI18n.ar,
   pluginCombobox: {
@@ -354,6 +356,7 @@ export const ar: TranslationResources = {
       copyCode: "نسخ الرمز",
       copyTurn: "نسخ بدوره",
       copyMessage: "انسخ الرسالة",
+      quoteMessage: quoteMessageActionLocales.ar,
       forkMenu: "تفريع الرسالة",
       forkInNewTab: "تفريع في تبويب جديد",
       forkInNewWorkspace: "تفريع في مساحة عمل جديدة",

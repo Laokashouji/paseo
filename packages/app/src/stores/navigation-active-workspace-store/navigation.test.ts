@@ -1,3 +1,4 @@
+import { MAIN_CHAT_ROLE_LABEL, MAIN_CHAT_ROLE_VALUE } from "@getpaseo/protocol/main-chat";
 import { describe, expect, it } from "vitest";
 import type { ActiveWorkspaceSelection } from "@/stores/last-workspace-selection";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
@@ -9,7 +10,7 @@ import {
   type NavigateToLastWorkspaceDeps,
   type NavigateToWorkspaceDeps,
 } from "./navigation";
-import type { WorkspaceDescriptor } from "@/stores/session-store";
+import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 
 interface RecordedTab {
   workspaceKey: string;
@@ -280,5 +281,71 @@ describe("workspace navigation", () => {
 
     expect(navigateToLastWorkspace(deps)).toBe(true);
     expect(navigations).toEqual(["/h/server-1/workspace/workspace-a"]);
+  });
+
+  it("redirects dedicated main-chat workspaces to /main without opening tabs or saving last workspace", () => {
+    const mainChatWorkspace = {
+      id: "ws-main",
+      workspaceDirectory: "/home/tester/.paseo/main-chat",
+      projectRootPath: "/home/tester/.paseo/main-chat",
+    } as WorkspaceDescriptor;
+    const mainChatNavigations: string[] = [];
+    const { deps, navigations, remembered, openedTabs, deferredTabs } = createFakeDeps({
+      getSessionWorkspaces: () => new Map([[mainChatWorkspace.id, mainChatWorkspace]]),
+      navigateToMainChat: (route) => mainChatNavigations.push(route),
+    });
+
+    const route = navigateToWorkspace(
+      {
+        serverId: "server-1",
+        workspaceId: "ws-main",
+        target: { kind: "agent", agentId: "agent-main" },
+      },
+      deps,
+    );
+
+    expect(route).toBe("/main?serverId=server-1");
+    expect(mainChatNavigations).toEqual(["/main?serverId=server-1"]);
+    expect(navigations).toEqual([]);
+    expect(remembered).toEqual([]);
+    expect(openedTabs).toEqual([]);
+    expect(deferredTabs).toEqual([]);
+  });
+
+  it("redirects main-chat agent targets to /main even when workspace path is non-standard", () => {
+    const workspace = {
+      id: "ws-custom",
+      workspaceDirectory: "/tmp/custom-dir",
+      projectRootPath: "/tmp/custom-dir",
+    } as WorkspaceDescriptor;
+    const mainAgent = {
+      id: "agent-main",
+      workspaceId: "ws-custom",
+      archivedAt: null,
+      background: false,
+      labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
+    } as unknown as Agent;
+    const mainChatNavigations: string[] = [];
+    const { deps, navigations, remembered, openedTabs } = createFakeDeps({
+      getSessionWorkspaces: () => new Map([[workspace.id, workspace]]),
+      getSessionAgents: () => new Map([[mainAgent.id, mainAgent]]),
+      getSessionAgent: (_serverId, agentId) => (agentId === mainAgent.id ? mainAgent : undefined),
+      navigateToMainChat: (route) => mainChatNavigations.push(route),
+    });
+
+    const route = navigateToWorkspace(
+      {
+        serverId: "server-1",
+        workspaceId: "ws-custom",
+        target: { kind: "agent", agentId: "agent-main" },
+      },
+      deps,
+    );
+
+    expect(route).toBe("/main?serverId=server-1");
+    expect(mainChatNavigations).toEqual(["/main?serverId=server-1"]);
+    expect(navigations).toEqual([]);
+    expect(remembered).toEqual([]);
+    expect(openedTabs).toEqual([]);
   });
 });

@@ -14,7 +14,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   Clock,
   CornerDownRight,
   Lock,
@@ -48,18 +47,16 @@ import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geome
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import {
   buildMainChatActionBarModel,
-  selectCompactDockEntries,
   type ActionBarBucketKey,
   type ActionBarLiveAgentSnapshot,
   type ActionBarNeedsYouItem,
   type ActionBarPendingPermissionInput,
   type ActionBarTaskItem,
-  type CompactDockEntry,
 } from "./action-bar-model";
 import { deriveTaskAdmissionBadge } from "./admission-ui";
 import { ChildPermissionWrapper } from "./child-permission-wrapper";
-import { MainChatDecisionCard } from "./decision-card";
-import { useIsCompactMainChatLayout, useOpenMainChatTaskTarget } from "./open-task-target";
+import { NeedsYouAskCard } from "./needs-you-ask-card";
+import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
@@ -73,7 +70,6 @@ const ThemedBookIcon = withUnistyles(BookOpen);
 const ThemedCheckIcon = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
-const ThemedChevronUp = withUnistyles(ChevronUp);
 const ThemedClockIcon = withUnistyles(Clock);
 const ThemedCornerDownRight = withUnistyles(CornerDownRight);
 const ThemedLockIcon = withUnistyles(Lock);
@@ -213,11 +209,18 @@ export interface MainChatActionBarProps {
   drawerMode?: "floating" | "external";
 }
 
+const EMPTY_DISMISSED_NEEDS_MAP: Readonly<Record<string, boolean>> = {};
+
+function needsYouDismissSignature(item: ActionBarNeedsYouItem): string {
+  return `${item.id}:${item.updatedAtMs}`;
+}
+
 interface MainChatActionBarDrawerStoreState {
   openBucketByKey: Record<string, ActionBarBucketKey | null>;
   expandedByKey: Record<string, boolean>;
   compactDockCollapsedByKey: Record<string, boolean>;
   focusedNeedsIdByKey: Record<string, string | null>;
+  dismissedNeedsSignaturesByKey: Record<string, Readonly<Record<string, boolean>>>;
   toggleBucket: (key: string, bucket: ActionBarBucketKey) => void;
   openBucketWithFocus: (
     key: string,
@@ -226,6 +229,7 @@ interface MainChatActionBarDrawerStoreState {
   ) => void;
   consumeFocusedNeedsId: (key: string) => void;
   setCompactDockCollapsed: (key: string, collapsed: boolean) => void;
+  dismissNeedsItem: (key: string, signature: string) => void;
   closeDrawer: (key: string) => void;
   toggleExpanded: (key: string) => void;
   reset: () => void;
@@ -236,6 +240,7 @@ export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerSto
   expandedByKey: {},
   compactDockCollapsedByKey: {},
   focusedNeedsIdByKey: {},
+  dismissedNeedsSignaturesByKey: {},
   toggleBucket(key, bucket) {
     set((state) => {
       const current = state.openBucketByKey[key] ?? null;
@@ -266,6 +271,18 @@ export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerSto
       compactDockCollapsedByKey: { ...state.compactDockCollapsedByKey, [key]: collapsed },
     }));
   },
+  dismissNeedsItem(key, signature) {
+    set((state) => {
+      const prevMap = state.dismissedNeedsSignaturesByKey[key] ?? EMPTY_DISMISSED_NEEDS_MAP;
+      if (prevMap[signature]) return state;
+      return {
+        dismissedNeedsSignaturesByKey: {
+          ...state.dismissedNeedsSignaturesByKey,
+          [key]: { ...prevMap, [signature]: true },
+        },
+      };
+    });
+  },
   closeDrawer(key) {
     set((state) => {
       if (
@@ -293,6 +310,7 @@ export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerSto
       expandedByKey: {},
       compactDockCollapsedByKey: {},
       focusedNeedsIdByKey: {},
+      dismissedNeedsSignaturesByKey: {},
     });
   },
 }));
@@ -369,314 +387,6 @@ const CapsuleButton = memo(function CapsuleButton({
   );
 });
 
-function resolveCompactDockStatusLabel(
-  entry: CompactDockEntry,
-  dockGateBadge: ReturnType<typeof deriveDeliveryGateBadge>,
-  dockAdmissionBadge: ReturnType<typeof deriveTaskAdmissionBadge>,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string {
-  if (entry.kind === "needsYou") {
-    return t(resolveNeedsYouKindKey(entry.item));
-  }
-  if (dockAdmissionBadge?.status === "queued") {
-    return t("mainChat.resourceAdmission.queuedBadge", {
-      position: dockAdmissionBadge.position ?? 1,
-    });
-  }
-  if (dockAdmissionBadge?.status === "rejected") {
-    return t("mainChat.resourceAdmission.rejectedBadge");
-  }
-  if (entry.item.dependencyState === "blocked") {
-    return t("mainChat.taskDag.blockedBadge");
-  }
-  if (entry.item.dependencyState === "ready") {
-    return t("mainChat.taskDag.readyBadge");
-  }
-  if (entry.item.allChildrenDone) {
-    return t("mainChat.taskDag.parentCloseoutReady");
-  }
-  if (dockGateBadge?.isBlocked) {
-    return `${dockGateBadge.prRef} ${t(dockGateBadge.statusKey)}`;
-  }
-  return t("mainChat.actionBar.compactDockStatusWorking");
-}
-
-function renderCompactDockLeadingIndicator(
-  entry: CompactDockEntry,
-  isFailed: boolean,
-): ReactElement {
-  if (entry.kind === "needsYou") {
-    return (
-      <View style={isFailed ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
-        <View style={isFailed ? styles.haloFailedInner : styles.haloNeedsYouInner} />
-      </View>
-    );
-  }
-  if (entry.item.admissionState?.status === "queued") {
-    return <ThemedClockIcon size={12} uniProps={warningIconMapping} />;
-  }
-  if (entry.item.dependencyState === "blocked") {
-    return <ThemedLockIcon size={12} uniProps={warningIconMapping} />;
-  }
-  if (entry.item.dependencyState === "ready") {
-    return <ThemedPlayIcon size={12} uniProps={successIconMapping} />;
-  }
-  return (
-    <View style={styles.ringWrap}>
-      <StatusRing />
-    </View>
-  );
-}
-
-function resolveDockRuleDiagnostic(entry: CompactDockEntry) {
-  if (entry.kind === "inProgress") return entry.item.ruleDiagnostic;
-  return entry.item.kind === "task" ? entry.item.ruleDiagnostic : null;
-}
-
-function resolveDockRetryTaskId(entry: CompactDockEntry): string | null {
-  if (entry.kind !== "needsYou" || entry.item.kind !== "task") return null;
-  return entry.item.canRetryWithFallback && entry.item.taskId ? entry.item.taskId : null;
-}
-
-function resolveDockRetryButtonLabel(
-  isRetrying: boolean,
-  isCompact: boolean,
-  t: (key: string) => string,
-): string {
-  if (isRetrying) return t("mainChat.modelProfiles.retryFallback.retrying");
-  if (isCompact) return t("mainChat.modelProfiles.retryFallback.buttonCompact");
-  return t("mainChat.modelProfiles.retryFallback.buttonShort");
-}
-
-const CompactStatusDockRow = memo(function CompactStatusDockRow({
-  entry,
-  isFirst,
-  isCompact,
-  hiddenCountBadge,
-  busyTaskId,
-  onPressNeedsYou,
-  onPressInProgress,
-  onRetryWithFallback,
-  onDismiss,
-}: {
-  entry: CompactDockEntry;
-  isFirst: boolean;
-  isCompact: boolean;
-  hiddenCountBadge: number;
-  busyTaskId: string | null;
-  onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
-  onPressInProgress: (item: ActionBarTaskItem) => void;
-  onRetryWithFallback?: (taskId: string) => void;
-  onDismiss: () => void;
-}) {
-  const { t } = useTranslation();
-
-  const handlePress = useCallback(() => {
-    if (entry.kind === "needsYou") {
-      onPressNeedsYou(entry.item);
-    } else {
-      onPressInProgress(entry.item);
-    }
-  }, [entry, onPressInProgress, onPressNeedsYou]);
-
-  const isNeedsYou = entry.kind === "needsYou";
-  const isFailed = isNeedsYou && entry.item.kind === "task" && entry.item.isFailed;
-  const retryTaskId = resolveDockRetryTaskId(entry);
-  const isRetrying = retryTaskId !== null && busyTaskId === retryTaskId;
-  const handleRetry = useCallback(() => {
-    if (retryTaskId && onRetryWithFallback) {
-      onRetryWithFallback(retryTaskId);
-    }
-  }, [onRetryWithFallback, retryTaskId]);
-  const inProgressItem = entry.kind === "inProgress" ? entry.item : null;
-  const dockGateBadge = inProgressItem
-    ? deriveDeliveryGateBadge(inProgressItem.deliveryGate)
-    : null;
-  const dockAdmissionBadge = inProgressItem
-    ? deriveTaskAdmissionBadge(inProgressItem.admissionState)
-    : null;
-  const dockRuleBadge = deriveZeroTokenDiagnosticBadge(resolveDockRuleDiagnostic(entry));
-  const title = entry.item.title;
-  const secondaryText = useMemo(() => {
-    if (isCompact) return null;
-    if (entry.kind === "needsYou") {
-      const candidate = entry.item.reason ?? entry.item.hostLabel;
-      return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
-    }
-    if (entry.item.admissionState?.status === "queued" && entry.item.admissionState.reason) {
-      return entry.item.admissionState.reason.replace(/\s+/g, " ").trim();
-    }
-    if (entry.item.dependencyState === "blocked" && entry.item.blockedByTitles.length > 0) {
-      return t("mainChat.taskDag.blockedMeta", {
-        deps: entry.item.blockedByTitles.slice(0, 2).join("、"),
-      });
-    }
-    const candidate = entry.item.summary ?? entry.item.workspaceLabel ?? entry.item.hostLabel;
-    return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
-  }, [entry, isCompact, t]);
-
-  const statusLabel = resolveCompactDockStatusLabel(entry, dockGateBadge, dockAdmissionBadge, t);
-  const leadingIndicator = renderCompactDockLeadingIndicator(entry, isFailed);
-  const retryLabel = resolveDockRetryButtonLabel(isRetrying, isCompact, t);
-
-  const rowContainerStyle = useMemo(
-    () => [styles.compactDockRow, !isFirst && styles.compactDockRowDivider],
-    [isFirst],
-  );
-  const statusTextStyle = useMemo(
-    () => [
-      styles.compactDockStatus,
-      isNeedsYou && (isFailed ? styles.compactDockStatusFailed : styles.compactDockStatusNeedsYou),
-      !isNeedsYou && dockGateBadge?.isBlocked && styles.compactDockStatusFailed,
-      !isNeedsYou &&
-        (inProgressItem?.dependencyState === "blocked" ||
-          dockAdmissionBadge?.status === "queued") &&
-        styles.compactDockStatusNeedsYou,
-    ],
-    [
-      dockAdmissionBadge?.status,
-      dockGateBadge?.isBlocked,
-      inProgressItem?.dependencyState,
-      isFailed,
-      isNeedsYou,
-    ],
-  );
-
-  return (
-    <View
-      style={rowContainerStyle}
-      testID={`main-chat-compact-dock-row-${entry.kind}-${entry.item.id}`}
-    >
-      <PressHighlight
-        onPress={handlePress}
-        style={styles.compactDockRowPress}
-        highlightStyle={styles.rowPressed}
-        accessibilityRole="button"
-        accessibilityLabel={title}
-        testID={`main-chat-compact-dock-trigger-${entry.kind}-${entry.item.id}`}
-      >
-        {leadingIndicator}
-
-        <View style={styles.compactDockTextRun}>
-          <Text style={styles.compactDockTitle} numberOfLines={1} ellipsizeMode="tail">
-            {title}
-          </Text>
-          {secondaryText ? (
-            <Text style={styles.compactDockMeta} numberOfLines={1} ellipsizeMode="tail">
-              {`· ${secondaryText}`}
-            </Text>
-          ) : null}
-        </View>
-
-        <View style={styles.compactDockTrailing}>
-          {dockRuleBadge ? (
-            <View testID={`main-chat-compact-dock-rule-badge-${entry.item.id}`}>
-              <StatusBadge
-                size="xs"
-                variant={dockRuleBadge.variant}
-                label={t(dockRuleBadge.labelKey)}
-              />
-            </View>
-          ) : null}
-          {!isCompact && dockGateBadge && !dockGateBadge.isBlocked ? (
-            <StatusBadge
-              size="xs"
-              variant={dockGateBadge.variant}
-              label={`${dockGateBadge.prRef} ${t(dockGateBadge.statusKey)}`}
-            />
-          ) : null}
-          {dockAdmissionBadge ? (
-            <View testID={`main-chat-compact-dock-admission-badge-${entry.item.id}`}>
-              <StatusBadge size="xs" variant={dockAdmissionBadge.variant} label={statusLabel} />
-            </View>
-          ) : (
-            <Text style={statusTextStyle} numberOfLines={1}>
-              {statusLabel}
-            </Text>
-          )}
-          {hiddenCountBadge > 0 ? (
-            <Text style={styles.compactDockMore} numberOfLines={1}>
-              {t("mainChat.actionBar.compactDockMore", { count: hiddenCountBadge })}
-            </Text>
-          ) : null}
-          <ThemedChevronRight size={13} uniProps={mutedIconMapping} />
-        </View>
-      </PressHighlight>
-
-      {retryTaskId && onRetryWithFallback ? (
-        <PressHighlight
-          onPress={handleRetry}
-          disabled={isRetrying}
-          style={styles.compactDockRetryBtn}
-          highlightStyle={styles.rowPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.modelProfiles.retryFallback.button")}
-          testID={`main-chat-compact-dock-retry-${retryTaskId}`}
-        >
-          <ThemedRefreshIcon size={11} uniProps={dangerIconMapping} />
-          <Text style={styles.compactDockRetryText} numberOfLines={1}>
-            {retryLabel}
-          </Text>
-        </PressHighlight>
-      ) : null}
-
-      {isFirst ? (
-        <PressHighlight
-          onPress={onDismiss}
-          style={styles.compactDockDismissBtn}
-          highlightStyle={styles.rowPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.actionBar.compactDockCollapse")}
-          testID="main-chat-compact-dock-dismiss"
-        >
-          <ThemedXIcon size={13} uniProps={mutedIconMapping} />
-        </PressHighlight>
-      ) : null}
-    </View>
-  );
-});
-
-const CompactStatusDock = memo(function CompactStatusDock({
-  entries,
-  hiddenCount,
-  isCompact,
-  busyTaskId,
-  onPressNeedsYou,
-  onPressInProgress,
-  onRetryWithFallback,
-  onDismiss,
-}: {
-  entries: readonly CompactDockEntry[];
-  hiddenCount: number;
-  isCompact: boolean;
-  busyTaskId: string | null;
-  onPressNeedsYou: (item: ActionBarNeedsYouItem) => void;
-  onPressInProgress: (item: ActionBarTaskItem) => void;
-  onRetryWithFallback?: (taskId: string) => void;
-  onDismiss: () => void;
-}) {
-  if (entries.length === 0) return null;
-
-  return (
-    <View style={styles.compactDockCard} testID="main-chat-compact-dock">
-      {entries.map((entry, index) => (
-        <CompactStatusDockRow
-          key={`${entry.kind}:${entry.item.id}`}
-          entry={entry}
-          isFirst={index === 0}
-          isCompact={isCompact}
-          hiddenCountBadge={index === entries.length - 1 ? hiddenCount : 0}
-          busyTaskId={busyTaskId}
-          onPressNeedsYou={onPressNeedsYou}
-          onPressInProgress={onPressInProgress}
-          onRetryWithFallback={onRetryWithFallback}
-          onDismiss={onDismiss}
-        />
-      ))}
-    </View>
-  );
-});
-
 function resolveNeedsYouKindKey(item: ActionBarNeedsYouItem): string {
   switch (item.kind) {
     case "permission":
@@ -690,26 +400,6 @@ function resolveNeedsYouKindKey(item: ActionBarNeedsYouItem): string {
   }
 }
 
-function normalizeCompareText(value: string | null | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function isRedundantText(
-  candidate: string | null | undefined,
-  existingList: readonly (string | null | undefined)[],
-): boolean {
-  const normCandidate = normalizeCompareText(candidate);
-  if (!normCandidate) return true;
-  for (const existing of existingList) {
-    const normExisting = normalizeCompareText(existing);
-    if (!normExisting) continue;
-    if (normExisting === normCandidate || normExisting.includes(normCandidate)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   item,
   mainServerId,
@@ -717,7 +407,8 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   targetClient,
   isRetrying,
   onOpen,
-  onDirectRoute,
+  onDismiss,
+  onSubmitted,
   onRetryWithFallback,
 }: {
   item: ActionBarNeedsYouItem;
@@ -726,7 +417,8 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   targetClient: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
   isRetrying: boolean;
   onOpen: () => void;
-  onDirectRoute: () => void;
+  onDismiss: (itemId: string) => void;
+  onSubmitted: (itemId: string) => void;
   onRetryWithFallback?: () => void;
 }) {
   const { t } = useTranslation();
@@ -756,183 +448,41 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
             </ChildPermissionWrapper>
           );
         })}
+        {item.agentId ? (
+          <View style={styles.permissionFooterRow}>
+            <PressHighlight
+              onPress={onOpen}
+              style={styles.inlineActionBtn}
+              highlightStyle={styles.rowPressed}
+              accessibilityRole="button"
+              accessibilityLabel={t("mainChat.actionBar.askCard.openAction")}
+              testID={`main-chat-needs-ask-open-${item.id}`}
+            >
+              <Text style={styles.inlineActionLabel}>
+                {t("mainChat.actionBar.askCard.openAction")}
+              </Text>
+              <ThemedArrowIcon size={12} uniProps={mutedIconMapping} />
+            </PressHighlight>
+          </View>
+        ) : null}
       </View>
-    );
-  }
-  if (item.kind === "decision") {
-    return (
-      <MainChatDecisionCard
-        serverId={mainServerId}
-        agentId={mainAgentId}
-        decision={item.decision}
-        defaultExpanded
-      />
     );
   }
   if (item.kind === "plan") {
     return <MainChatPlanCard serverId={mainServerId} agentId={mainAgentId} plan={item.plan} />;
   }
 
-  const locationParts = [item.hostLabel, item.workspaceLabel ?? item.cwd].filter(
-    (part): part is string => Boolean(part && part.trim().length > 0),
-  );
-  const locationText = locationParts.length > 0 ? locationParts.join(" · ") : null;
-  const primaryText = item.reason;
-  const showSummary = !isRedundantText(item.summary, [primaryText]);
-  const showGoal = !isRedundantText(item.goal, [primaryText, showSummary ? item.summary : null]);
-  const showSuggestedAction = !isRedundantText(item.suggestedAction, [
-    primaryText,
-    showSummary ? item.summary : null,
-  ]);
-
   return (
-    <View style={styles.taskNeedsInline}>
-      {locationText ? (
-        <Text style={styles.inlineContextMeta} numberOfLines={1}>
-          {locationText}
-        </Text>
-      ) : null}
-
-      {primaryText ? (
-        <View style={styles.inlineDetailBlock}>
-          <Text style={styles.inlineDetailLabel}>
-            {t(
-              item.isFailed
-                ? "mainChat.actionBar.needsDetailFailureLabel"
-                : "mainChat.actionBar.needsDetailQuestionLabel",
-            )}
-          </Text>
-          <Text
-            style={styles.inlineDetailText}
-            testID={`main-chat-action-needs-question-${item.id}`}
-          >
-            {primaryText}
-          </Text>
-        </View>
-      ) : null}
-
-      {showSummary && item.summary ? (
-        <View style={styles.inlineDetailBlock}>
-          <Text style={styles.inlineDetailLabel}>
-            {t("mainChat.actionBar.needsDetailSummaryLabel")}
-          </Text>
-          <Text
-            style={styles.inlineSecondaryText}
-            testID={`main-chat-action-needs-summary-${item.id}`}
-          >
-            {item.summary}
-          </Text>
-        </View>
-      ) : null}
-
-      {showGoal && item.goal ? (
-        <View style={styles.inlineDetailBlock}>
-          <Text style={styles.inlineDetailLabel}>
-            {t("mainChat.actionBar.needsDetailGoalLabel")}
-          </Text>
-          <Text style={styles.inlineSecondaryText}>{item.goal}</Text>
-        </View>
-      ) : null}
-
-      {showSuggestedAction && item.suggestedAction ? (
-        <View style={styles.inlineDetailBlock}>
-          <Text style={styles.inlineDetailLabel}>
-            {t("mainChat.actionBar.needsDetailSuggestionLabel")}
-          </Text>
-          <Text
-            style={styles.inlineSuggestionText}
-            testID={`main-chat-action-needs-suggestion-${item.id}`}
-          >
-            {item.suggestedAction}
-          </Text>
-        </View>
-      ) : null}
-
-      <NeedsYouTaskRuleAndActions
-        item={item}
-        isRetrying={isRetrying}
-        onOpen={onOpen}
-        onDirectRoute={onDirectRoute}
-        onRetryWithFallback={onRetryWithFallback}
-      />
-    </View>
-  );
-});
-
-const NeedsYouTaskRuleAndActions = memo(function NeedsYouTaskRuleAndActions({
-  item,
-  isRetrying,
-  onOpen,
-  onDirectRoute,
-  onRetryWithFallback,
-}: {
-  item: Extract<ActionBarNeedsYouItem, { kind: "task" }>;
-  isRetrying: boolean;
-  onOpen: () => void;
-  onDirectRoute: () => void;
-  onRetryWithFallback?: () => void;
-}) {
-  const { t } = useTranslation();
-  const showRetry = Boolean(item.canRetryWithFallback && item.taskId && onRetryWithFallback);
-  const showActionRow = Boolean(item.agentId || showRetry);
-
-  return (
-    <>
-      {item.ruleDiagnostic ? (
-        <View
-          style={styles.inlineRuleDetailBox}
-          testID={`main-chat-action-needs-rule-detail-${item.id}`}
-        >
-          <Text style={styles.inlineDetailLabel}>{t("mainChat.zeroTokenRules.sectionLabel")}</Text>
-          <Text style={styles.inlineRuleDetailText}>{item.ruleDiagnostic.summary}</Text>
-          {item.ruleDiagnostic.errorExcerpt ? (
-            <Text style={styles.inlineSecondaryText} numberOfLines={2}>
-              {`${t("mainChat.zeroTokenRules.errorExcerptLabel")}：${item.ruleDiagnostic.errorExcerpt}`}
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
-
-      {showActionRow ? (
-        <View style={styles.inlineActionRow}>
-          {showRetry && item.taskId ? (
-            <Button
-              variant="default"
-              size="sm"
-              leftIcon={ThemedRefreshIcon}
-              loading={isRetrying}
-              disabled={isRetrying}
-              onPress={onRetryWithFallback}
-              testID={`main-chat-action-needs-inline-retry-${item.taskId}`}
-            >
-              {t("mainChat.modelProfiles.retryFallback.button")}
-            </Button>
-          ) : null}
-          {item.agentId ? (
-            <>
-              <Button
-                variant="secondary"
-                size="sm"
-                leftIcon={ThemedArrowIcon}
-                onPress={onOpen}
-                testID={`main-chat-action-needs-task-open-${item.id}`}
-              >
-                {t("mainChat.openChildAgent")}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                leftIcon={ThemedAtIcon}
-                onPress={onDirectRoute}
-                testID={`main-chat-action-needs-task-direct-${item.id}`}
-              >
-                {t("mainChat.board.talkDirectly")}
-              </Button>
-            </>
-          ) : null}
-        </View>
-      ) : null}
-    </>
+    <NeedsYouAskCard
+      item={item}
+      mainServerId={mainServerId}
+      mainAgentId={mainAgentId}
+      isRetrying={isRetrying}
+      onOpen={onOpen}
+      onDismiss={onDismiss}
+      onSubmitted={onSubmitted}
+      onRetryWithFallback={onRetryWithFallback}
+    />
   );
 });
 
@@ -943,68 +493,35 @@ interface ActionBarDirectTarget {
 }
 
 const NeedsYouRowHeaderActions = memo(function NeedsYouRowHeaderActions({
-  item,
   retryTaskId,
   isRetrying,
   onRetry,
-  onDirectRoute,
-  onOpen,
 }: {
-  item: ActionBarNeedsYouItem;
   retryTaskId: string | null;
   isRetrying: boolean;
   onRetry?: () => void;
-  onDirectRoute: () => void;
-  onOpen: () => void;
 }) {
   const { t } = useTranslation();
-  if (!item.agentId && !(retryTaskId && onRetry)) return null;
+  if (!(retryTaskId && onRetry)) return null;
 
   return (
     <View style={styles.taskRowActions}>
-      {retryTaskId && onRetry ? (
-        <PressHighlight
-          onPress={onRetry}
-          disabled={isRetrying}
-          style={styles.inlineRetryBtn}
-          highlightStyle={styles.rowPressed}
-          accessibilityRole="button"
-          accessibilityLabel={t("mainChat.modelProfiles.retryFallback.button")}
-          testID={`main-chat-action-retry-fallback-${retryTaskId}`}
-        >
-          <ThemedRefreshIcon size={12} uniProps={dangerIconMapping} />
-          <Text style={styles.inlineRetryLabel}>
-            {isRetrying
-              ? t("mainChat.modelProfiles.retryFallback.retrying")
-              : t("mainChat.modelProfiles.retryFallback.buttonShort")}
-          </Text>
-        </PressHighlight>
-      ) : null}
-      {item.agentId ? (
-        <>
-          <PressHighlight
-            onPress={onDirectRoute}
-            style={styles.inlineActionBtn}
-            highlightStyle={styles.rowPressed}
-            accessibilityRole="button"
-            accessibilityLabel={t("mainChat.board.talkDirectly")}
-            testID={`main-chat-action-direct-${item.id}`}
-          >
-            <ThemedAtIcon size={12} uniProps={mutedIconMapping} />
-            <Text style={styles.inlineActionLabel}>{t("mainChat.board.talkDirectly")}</Text>
-          </PressHighlight>
-          <PressHighlight
-            onPress={onOpen}
-            style={styles.smallIconButton}
-            highlightStyle={styles.rowPressed}
-            accessibilityRole="button"
-            accessibilityLabel={t("mainChat.openChildAgent")}
-            testID={`main-chat-action-needs-open-${item.id}`}
-          >
-            <ThemedArrowIcon size={13} uniProps={mutedIconMapping} />
-          </PressHighlight>
-        </>
-      ) : null}
+      <PressHighlight
+        onPress={onRetry}
+        disabled={isRetrying}
+        style={styles.inlineRetryBtn}
+        highlightStyle={styles.rowPressed}
+        accessibilityRole="button"
+        accessibilityLabel={t("mainChat.modelProfiles.retryFallback.button")}
+        testID={`main-chat-action-retry-fallback-${retryTaskId}`}
+      >
+        <ThemedRefreshIcon size={12} uniProps={dangerIconMapping} />
+        <Text style={styles.inlineRetryLabel}>
+          {isRetrying
+            ? t("mainChat.modelProfiles.retryFallback.retrying")
+            : t("mainChat.modelProfiles.retryFallback.buttonShort")}
+        </Text>
+      </PressHighlight>
     </View>
   );
 });
@@ -1027,8 +544,9 @@ const NeedsYouRow = memo(function NeedsYouRow({
   expanded,
   busyTaskId,
   onToggleExpand,
+  onDismissNeedsItem,
+  onSubmittedNeedsItem,
   onOpenTask,
-  onDirectRoute,
   onRetryWithFallback,
 }: {
   item: ActionBarNeedsYouItem;
@@ -1037,6 +555,8 @@ const NeedsYouRow = memo(function NeedsYouRow({
   expanded: boolean;
   busyTaskId: string | null;
   onToggleExpand: (id: string) => void;
+  onDismissNeedsItem: (item: ActionBarNeedsYouItem) => void;
+  onSubmittedNeedsItem: (id: string) => void;
   onOpenTask: (target: {
     serverId: string;
     agentId: string;
@@ -1044,12 +564,14 @@ const NeedsYouRow = memo(function NeedsYouRow({
     title?: string | null;
     taskId?: string | null;
   }) => void;
-  onDirectRoute: (target: ActionBarDirectTarget) => void;
   onRetryWithFallback?: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
   const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
   const handleToggle = useCallback(() => onToggleExpand(item.id), [item.id, onToggleExpand]);
+  const handleDismiss = useCallback(() => {
+    onDismissNeedsItem(item);
+  }, [item, onDismissNeedsItem]);
   const handleOpen = useCallback(() => {
     if (!item.agentId) return;
     onOpenTask({
@@ -1060,14 +582,6 @@ const NeedsYouRow = memo(function NeedsYouRow({
       taskId: item.taskId,
     });
   }, [item.agentId, item.serverId, item.taskId, item.title, item.workspaceId, onOpenTask]);
-  const handleDirectRoute = useCallback(() => {
-    if (!item.agentId) return;
-    onDirectRoute({
-      serverId: item.serverId,
-      agentId: item.agentId,
-      title: item.title,
-    });
-  }, [item.agentId, item.serverId, item.title, onDirectRoute]);
 
   const retryTaskId = resolveNeedsYouRetryTaskId(item);
   const isRetrying = retryTaskId !== null && busyTaskId === retryTaskId;
@@ -1124,16 +638,18 @@ const NeedsYouRow = memo(function NeedsYouRow({
                 </View>
               ) : null}
             </View>
-            {metaText ? (
+            {!expanded && metaText ? (
               <Text style={styles.rowMeta} numberOfLines={1}>
                 {metaText}
               </Text>
             ) : null}
           </View>
           <View style={styles.needsTrailingStatus}>
-            <Text style={statusTextStyle} numberOfLines={1}>
-              {kindLabel}
-            </Text>
+            {!expanded ? (
+              <Text style={statusTextStyle} numberOfLines={1}>
+                {kindLabel}
+              </Text>
+            ) : null}
             {expanded ? (
               <ThemedChevronDown size={13} uniProps={mutedIconMapping} />
             ) : (
@@ -1143,12 +659,9 @@ const NeedsYouRow = memo(function NeedsYouRow({
         </PressHighlight>
 
         <NeedsYouRowHeaderActions
-          item={item}
           retryTaskId={retryTaskId}
           isRetrying={isRetrying}
           onRetry={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
-          onDirectRoute={handleDirectRoute}
-          onOpen={handleOpen}
         />
       </View>
 
@@ -1161,7 +674,8 @@ const NeedsYouRow = memo(function NeedsYouRow({
             targetClient={targetClient}
             isRetrying={isRetrying}
             onOpen={handleOpen}
-            onDirectRoute={handleDirectRoute}
+            onDismiss={handleDismiss}
+            onSubmitted={onSubmittedNeedsItem}
             onRetryWithFallback={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
           />
         </View>
@@ -1703,6 +1217,8 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onOpenLessons,
   onClose,
   onToggleNeedsRow,
+  onDismissNeedsItem,
+  onSubmittedNeedsItem,
   onToggleStale,
   onOpenTarget,
   onOpenTaskItem,
@@ -1725,6 +1241,8 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   onOpenLessons: () => void;
   onClose: () => void;
   onToggleNeedsRow: (id: string) => void;
+  onDismissNeedsItem: (item: ActionBarNeedsYouItem) => void;
+  onSubmittedNeedsItem: (id: string) => void;
   onToggleStale: () => void;
   onOpenTarget: (target: {
     serverId: string;
@@ -1824,8 +1342,9 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
                 expanded={expandedNeedsIds.has(item.id)}
                 busyTaskId={busyTaskId}
                 onToggleExpand={onToggleNeedsRow}
+                onDismissNeedsItem={onDismissNeedsItem}
+                onSubmittedNeedsItem={onSubmittedNeedsItem}
                 onOpenTask={onOpenTarget}
-                onDirectRoute={onDirectRoute}
                 onRetryWithFallback={onRetryWithFallback}
               />
             ))
@@ -1899,28 +1418,46 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
     [hosts],
   );
 
-  const model = useMemo(
-    () =>
-      sessionSnapshot.isMainChat
-        ? buildMainChatActionBarModel({
-            serverId,
-            mainAgentId: agentId,
-            overview,
-            liveAgents: sessionSnapshot.liveAgents,
-            pendingPermissions: sessionSnapshot.pendingPermissions,
-            hostLabelsByServerId,
-          })
-        : null,
-    [
-      agentId,
-      hostLabelsByServerId,
-      overview,
-      serverId,
-      sessionSnapshot.isMainChat,
-      sessionSnapshot.liveAgents,
-      sessionSnapshot.pendingPermissions,
-    ],
+  const dismissedSignatures = useMainChatActionBarDrawerStore(
+    (state) => state.dismissedNeedsSignaturesByKey[overviewKey] ?? EMPTY_DISMISSED_NEEDS_MAP,
   );
+
+  const model = useMemo(() => {
+    if (!sessionSnapshot.isMainChat) return null;
+    const raw = buildMainChatActionBarModel({
+      serverId,
+      mainAgentId: agentId,
+      overview,
+      liveAgents: sessionSnapshot.liveAgents,
+      pendingPermissions: sessionSnapshot.pendingPermissions,
+      hostLabelsByServerId,
+    });
+    const visibleNeedsYou = raw.needsYou.filter(
+      (item) => !dismissedSignatures[needsYouDismissSignature(item)],
+    );
+    if (visibleNeedsYou.length === raw.needsYou.length) {
+      return raw;
+    }
+    const delta = raw.needsYou.length - visibleNeedsYou.length;
+    return {
+      ...raw,
+      needsYou: visibleNeedsYou,
+      counts: {
+        ...raw.counts,
+        needsYou: visibleNeedsYou.length,
+        total: Math.max(0, raw.counts.total - delta),
+      },
+    };
+  }, [
+    agentId,
+    dismissedSignatures,
+    hostLabelsByServerId,
+    overview,
+    serverId,
+    sessionSnapshot.isMainChat,
+    sessionSnapshot.liveAgents,
+    sessionSnapshot.pendingPermissions,
+  ]);
 
   return {
     client,
@@ -2066,6 +1603,7 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
     (state) => state.consumeFocusedNeedsId,
   );
   const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
+  const dismissNeedsItem = useMainChatActionBarDrawerStore((state) => state.dismissNeedsItem);
   const toggleExpanded = useMainChatActionBarDrawerStore((state) => state.toggleExpanded);
 
   const [expandedNeedsIds, setExpandedNeedsIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -2130,13 +1668,25 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
   );
 
   const handleToggleNeedsRow = useCallback((id: string) => {
+    setExpandedNeedsIds((prev) => (prev.has(id) ? new Set() : new Set([id])));
+  }, []);
+
+  const handleCollapseNeedsRow = useCallback((id: string) => {
     setExpandedNeedsIds((prev) => {
+      if (!prev.has(id)) return prev;
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.delete(id);
       return next;
     });
   }, []);
+
+  const handleDismissNeedsItem = useCallback(
+    (item: ActionBarNeedsYouItem) => {
+      handleCollapseNeedsRow(item.id);
+      dismissNeedsItem(overviewKey, needsYouDismissSignature(item));
+    },
+    [dismissNeedsItem, handleCollapseNeedsRow, overviewKey],
+  );
 
   const handleOpenTarget = useCallback(
     (target: {
@@ -2318,6 +1868,8 @@ const MainChatActionBarDrawerContent = memo(function MainChatActionBarDrawerCont
       onOpenLessons={handleOpenLessons}
       onClose={handleCloseDrawer}
       onToggleNeedsRow={handleToggleNeedsRow}
+      onDismissNeedsItem={handleDismissNeedsItem}
+      onSubmittedNeedsItem={handleCollapseNeedsRow}
       onToggleStale={handleToggleStale}
       onOpenTarget={handleOpenTarget}
       onOpenTaskItem={handleOpenTaskItem}
@@ -2384,24 +1936,14 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   agentId,
   drawerMode = "floating",
 }: MainChatActionBarProps): ReactElement | null {
-  const { t } = useTranslation();
-  const toast = useToast();
-  const isCompact = useIsCompactMainChatLayout();
-  const openMainChatTaskTarget = useOpenMainChatTaskTarget();
-  const { client, overviewKey, loadOverview, retryTaskWithFallback, sessionSnapshot, model } =
-    useMainChatActionBarData(serverId, agentId);
-  const [busyDockTaskId, setBusyDockTaskId] = useState<string | null>(null);
+  const { client, overviewKey, loadOverview, sessionSnapshot, model } = useMainChatActionBarData(
+    serverId,
+    agentId,
+  );
   const openBucket = useMainChatActionBarDrawerStore(
     (state) => state.openBucketByKey[overviewKey] ?? null,
   );
-  const compactDockCollapsed = useMainChatActionBarDrawerStore((state) =>
-    Boolean(state.compactDockCollapsedByKey?.[overviewKey]),
-  );
   const toggleBucket = useMainChatActionBarDrawerStore((state) => state.toggleBucket);
-  const openBucketWithFocus = useMainChatActionBarDrawerStore((state) => state.openBucketWithFocus);
-  const setCompactDockCollapsed = useMainChatActionBarDrawerStore(
-    (state) => state.setCompactDockCollapsed,
-  );
   const closeDrawer = useMainChatActionBarDrawerStore((state) => state.closeDrawer);
 
   useMainChatActionBarSilentRefresh({
@@ -2428,72 +1970,6 @@ export const MainChatActionBar = memo(function MainChatActionBar({
     [overviewKey, toggleBucket],
   );
 
-  const handlePressDockNeedsYou = useCallback(
-    (item: ActionBarNeedsYouItem) => {
-      openBucketWithFocus(overviewKey, "needsYou", item.id);
-    },
-    [openBucketWithFocus, overviewKey],
-  );
-
-  const handlePressDockInProgress = useCallback(
-    (item: ActionBarTaskItem) => {
-      if (item.agentId) {
-        openMainChatTaskTarget({
-          serverId: item.serverId,
-          agentId: item.agentId,
-          workspaceId: item.workspaceId,
-          title: item.title,
-          taskId: item.taskId,
-        });
-        return;
-      }
-      openBucketWithFocus(overviewKey, "inProgress", null);
-    },
-    [openBucketWithFocus, openMainChatTaskTarget, overviewKey],
-  );
-
-  const handleDismissCompactDock = useCallback(() => {
-    setCompactDockCollapsed(overviewKey, true);
-  }, [overviewKey, setCompactDockCollapsed]);
-
-  const handleRestoreCompactDock = useCallback(() => {
-    setCompactDockCollapsed(overviewKey, false);
-  }, [overviewKey, setCompactDockCollapsed]);
-
-  const handleDockRetryWithFallback = useCallback(
-    (taskId: string) => {
-      if (!client || busyDockTaskId) return;
-      setBusyDockTaskId(taskId);
-      void retryTaskWithFallback(serverId, agentId, { taskId }, client)
-        .then((res) => {
-          toast.show(
-            t("mainChat.modelProfiles.retryFallback.successToast", {
-              target: res.toModelSpec ?? "",
-            }),
-            { variant: "success" },
-          );
-          return null;
-        })
-        .catch((error) => {
-          toast.error(
-            error instanceof Error
-              ? error.message
-              : t("mainChat.modelProfiles.retryFallback.failedToast"),
-          );
-        })
-        .finally(() => {
-          setBusyDockTaskId(null);
-        });
-    },
-    [agentId, busyDockTaskId, client, retryTaskWithFallback, serverId, t, toast],
-  );
-
-  const dockMaxRows = isCompact ? 1 : 2;
-  const dockSelection = useMemo(
-    () => selectCompactDockEntries(model, dockMaxRows),
-    [dockMaxRows, model],
-  );
-
   if (!model || model.counts.total === 0) {
     return null;
   }
@@ -2501,8 +1977,6 @@ export const MainChatActionBar = memo(function MainChatActionBar({
   const visibleCapsules = (
     ["needsYou", "inProgress", "awaitingReview", "parked", "completed24h"] as const
   ).filter((bucket) => model.counts[bucket] > 0);
-  const hasEligibleDock = dockSelection.entries.length > 0;
-  const showCompactDock = hasEligibleDock && !compactDockCollapsed && openBucket === null;
 
   return (
     <View style={styles.outer} dataSet={CHAT_COLUMN_RAIL_DATASET} testID="main-chat-action-bar">
@@ -2528,19 +2002,6 @@ export const MainChatActionBar = memo(function MainChatActionBar({
       ) : null}
 
       <View style={styles.inner} testID="main-chat-action-bar-inner">
-        {showCompactDock ? (
-          <CompactStatusDock
-            entries={dockSelection.entries}
-            hiddenCount={dockSelection.hiddenCount}
-            isCompact={isCompact}
-            busyTaskId={busyDockTaskId}
-            onPressNeedsYou={handlePressDockNeedsYou}
-            onPressInProgress={handlePressDockInProgress}
-            onRetryWithFallback={client ? handleDockRetryWithFallback : undefined}
-            onDismiss={handleDismissCompactDock}
-          />
-        ) : null}
-
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -2558,18 +2019,6 @@ export const MainChatActionBar = memo(function MainChatActionBar({
               onPress={handleSelectBucket}
             />
           ))}
-          {hasEligibleDock && compactDockCollapsed && openBucket === null ? (
-            <PressHighlight
-              onPress={handleRestoreCompactDock}
-              style={styles.compactDockRestoreBtn}
-              highlightStyle={styles.rowPressed}
-              accessibilityRole="button"
-              accessibilityLabel={t("mainChat.actionBar.compactDockExpand")}
-              testID="main-chat-compact-dock-restore"
-            >
-              <ThemedChevronUp size={13} uniProps={mutedIconMapping} />
-            </PressHighlight>
-          ) : null}
         </ScrollView>
       </View>
     </View>
@@ -2614,95 +2063,10 @@ const styles = StyleSheet.create((theme) => ({
     maxWidth: theme.contentMaxWidth,
     gap: theme.spacing[1.5],
   },
-  compactDockCard: {
-    width: "100%",
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.border,
-    borderRadius: theme.borderRadius.xl,
-    backgroundColor: theme.colors.surface0,
-    overflow: "hidden",
-    ...theme.shadow.sm,
-  },
-  compactDockRow: {
-    height: 38,
+  permissionFooterRow: {
     flexDirection: "row",
-    alignItems: "center",
-    paddingLeft: 10,
-    paddingRight: theme.spacing[2],
-    gap: theme.spacing[1],
-  },
-  compactDockRowDivider: {
-    borderTopWidth: theme.borderWidth[1],
-    borderTopColor: theme.colors.border,
-  },
-  compactDockRowPress: {
-    flex: 1,
-    minWidth: 0,
-    height: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    borderRadius: theme.borderRadius.md,
-  },
-  compactDockTextRun: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1.5],
-    overflow: "hidden",
-  },
-  compactDockTitle: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foreground,
-    flexShrink: 1,
-    minWidth: 0,
-  },
-  compactDockMeta: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 2,
-    minWidth: 0,
-  },
-  compactDockTrailing: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-    flexShrink: 0,
-  },
-  compactDockStatus: {
-    fontSize: 12,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foregroundMuted,
-  },
-  compactDockStatusNeedsYou: {
-    color: theme.colors.statusWarning,
-  },
-  compactDockStatusFailed: {
-    color: theme.colors.statusDanger,
-  },
-  compactDockMore: {
-    fontSize: 12,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foregroundMuted,
-  },
-  compactDockDismissBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: theme.borderRadius.full,
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  },
-  compactDockRestoreBtn: {
-    width: 28,
-    height: 30,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
+    justifyContent: "flex-end",
+    marginTop: 2,
   },
   capsuleRow: {
     flexDirection: "row",
@@ -2742,7 +2106,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.xl,
     backgroundColor: theme.colors.surface0,
     overflow: "hidden",
-    maxHeight: 380,
+    maxHeight: 480,
     ...theme.shadow.lg,
   },
   drawerExpanded: {
@@ -2751,7 +2115,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.xl,
     backgroundColor: theme.colors.surface0,
     overflow: "hidden",
-    maxHeight: 540,
+    maxHeight: 580,
     ...theme.shadow.lg,
   },
   drawerHeader: {
@@ -2774,10 +2138,10 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
   },
   drawerScroll: {
-    maxHeight: 326,
+    maxHeight: 426,
   },
   drawerScrollExpanded: {
-    maxHeight: 486,
+    maxHeight: 526,
   },
   drawerScrollContentNeeds: {
     paddingHorizontal: theme.spacing[3],

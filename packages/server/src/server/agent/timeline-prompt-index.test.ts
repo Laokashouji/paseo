@@ -51,4 +51,65 @@ describe("buildTimelinePromptIndex", () => {
     expect(result.prompts[0]?.preview).toHaveLength(120);
     expect(result.prompts[0]?.preview.endsWith("…")).toBe(true);
   });
+
+  it("filters <paseo-system> background patrol/keepalive turns and legacy patrol prompts", () => {
+    const rows: AgentTimelineRow[] = [
+      {
+        seq: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        item: {
+          type: "user_message",
+          text: '<paseo-system kind="main-chat-background" bg-kind="patrol">\n📋 督办 · 主动巡检唤醒：\n巡检内容\n</paseo-system>',
+        },
+      },
+      {
+        seq: 2,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        item: {
+          type: "user_message",
+          text: "<paseo-system>\nkeepalive heartbeat\n</paseo-system>",
+        },
+      },
+      {
+        seq: 3,
+        timestamp: "2026-01-01T00:00:02.000Z",
+        item: {
+          type: "user_message",
+          text: "📋 督办 · 主动巡检唤醒：\n（这是 Paseo 后台巡检事件，不是用户手打消息）",
+        },
+      },
+      {
+        seq: 4,
+        timestamp: "2026-01-01T00:00:03.000Z",
+        item: {
+          type: "user_message",
+          text: "Real user turn after patrol",
+        },
+      },
+      {
+        seq: 5,
+        timestamp: "2026-01-01T00:00:04.000Z",
+        item: {
+          type: "user_message",
+          text: "> Quote · Assistant · 14:30\n> Quoted line\n\nFollow-up question about deployment",
+        },
+      },
+    ];
+
+    expect(buildTimelinePromptIndex("epoch-2", rows)).toEqual({
+      epoch: "epoch-2",
+      prompts: [
+        {
+          seq: 4,
+          timestamp: "2026-01-01T00:00:03.000Z",
+          preview: "Real user turn after patrol",
+        },
+        {
+          seq: 5,
+          timestamp: "2026-01-01T00:00:04.000Z",
+          preview: "Follow-up question about deployment",
+        },
+      ],
+    });
+  });
 });

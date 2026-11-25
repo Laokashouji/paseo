@@ -3,6 +3,7 @@ import type {
   FetchAgentHistoryOptions,
   FetchAgentHistoryPageInfo,
 } from "@getpaseo/client/internal/daemon-client";
+import { isFormerMainChatLabels, isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -78,6 +79,12 @@ interface AgentHistoryBatchPage {
 
 type AgentHistoryCursorByServerId = Record<string, string | null>;
 
+function isExcludedMainChatHistoryAgent(agent: {
+  labels?: Record<string, unknown> | null;
+}): boolean {
+  return isMainChatAgent(agent) || isFormerMainChatLabels(agent.labels);
+}
+
 export async function fetchAgentHistoryPage(input: {
   client: AgentHistoryClient;
   serverId: string;
@@ -98,26 +105,28 @@ export async function fetchAgentHistoryPage(input: {
   });
   return {
     isSearchTruncated: payload.searchTruncated === true,
-    agents: Array.from(agents.values(), (agent) => ({
-      id: agent.id,
-      serverId: input.serverId,
-      serverLabel: input.serverId,
-      title: agent.title ?? null,
-      status: agent.status,
-      turn: agent.turn,
-      lastActivityAt: agent.lastActivityAt,
-      cwd: agent.cwd,
-      workspaceId: agent.workspaceId,
-      provider: agent.provider,
-      pendingPermissionCount: agent.pendingPermissions.length,
-      requiresAttention: agent.requiresAttention,
-      attentionReason: agent.attentionReason,
-      attentionTimestamp: agent.attentionTimestamp ?? null,
-      archivedAt: agent.archivedAt ?? null,
-      createdAt: agent.createdAt,
-      labels: agent.labels,
-      projectPlacement: agent.projectPlacement,
-    })),
+    agents: Array.from(agents.values())
+      .filter((agent) => !isExcludedMainChatHistoryAgent(agent))
+      .map((agent) => ({
+        id: agent.id,
+        serverId: input.serverId,
+        serverLabel: input.serverId,
+        title: agent.title ?? null,
+        status: agent.status,
+        turn: agent.turn,
+        lastActivityAt: agent.lastActivityAt,
+        cwd: agent.cwd,
+        workspaceId: agent.workspaceId,
+        provider: agent.provider,
+        pendingPermissionCount: agent.pendingPermissions.length,
+        requiresAttention: agent.requiresAttention,
+        attentionReason: agent.attentionReason,
+        attentionTimestamp: agent.attentionTimestamp ?? null,
+        archivedAt: agent.archivedAt ?? null,
+        createdAt: agent.createdAt,
+        labels: agent.labels,
+        projectPlacement: agent.projectPlacement,
+      })),
     pageInfo: payload.pageInfo,
   };
 }

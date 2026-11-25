@@ -350,13 +350,12 @@ describe("Wave 2 — turn-collapse compaction & routine background turns", () =>
       getGroupedCalls: () => undefined,
       collapseBackgroundTurns: true,
     });
-    // Silent routine is suppressed; substantive routine yields 1 summary line + 1 assistant conclusion.
-    expect(collapsed.tail).toHaveLength(2);
+    // Silent routine is suppressed; substantive routine folds the entire turn behind 1 summary row.
+    expect(collapsed.tail).toHaveLength(1);
     expect(collapsed.tail[0]?.kind).toBe("turn_summary");
     if (collapsed.tail[0]?.kind === "turn_summary") {
       expect(collapsed.tail[0].backgroundMeta?.kind).toBe("routine");
     }
-    expect(collapsed.tail[1]?.kind).toBe("assistant_message");
   });
 });
 

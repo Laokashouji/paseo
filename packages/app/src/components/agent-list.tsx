@@ -368,6 +368,7 @@ export function AgentList({
         serverId,
         agentId,
         workspaceId: agent.workspaceId,
+        labels: agent.labels,
         pin: true,
       });
     },

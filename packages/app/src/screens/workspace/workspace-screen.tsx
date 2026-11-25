@@ -198,6 +198,7 @@ import type { PaneHost } from "@/panels/panel-manifest";
 import { WorkspaceFocusProvider } from "@/workspace/focus";
 import { DiffDocumentWorkspaceCacheProvider } from "@/git/diff-document/workspace-cache";
 import { MainChatCameFromBar } from "@/main-chat/came-from-bar";
+import { selectIsMainChatWorkspaceRedirectTarget } from "@/main-chat/selectors";
 import type { NewTabSelection } from "@/workspace-tabs/new-tab";
 import {
   NewTabLauncherProvider,
@@ -219,7 +220,11 @@ import {
 import { findAdjacentPane } from "@/utils/split-navigation";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
-import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
+import {
+  buildHostRootRoute,
+  buildMainChatRoute,
+  buildSettingsHostRoute,
+} from "@/utils/host-routes";
 import { useWorkspaceTerminals } from "@/screens/workspace/terminals/use-workspace-terminals";
 import type { TerminalProfile } from "@getpaseo/protocol/messages";
 import {
@@ -439,18 +444,84 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
   // panels before any of them renders. A reader importing the registration instead would import
   // every panel, and the panels render readers.
   ensurePanelsRegistered();
+  const router = useRouter();
   const navigationFocused = useIsFocused();
+  const effectiveIsRouteFocused = isRouteFocused ?? navigationFocused;
+  const normalizedServerId = useMemo(() => trimNonEmpty(decodeSegment(serverId)) ?? "", [serverId]);
+  const normalizedWorkspaceId = useMemo(
+    () => resolveWorkspaceRouteId({ routeWorkspaceId: workspaceId }) ?? "",
+    [workspaceId],
+  );
+  const persistenceKey = useMemo(
+    () =>
+      buildWorkspaceTabPersistenceKey({
+        serverId: normalizedServerId,
+        workspaceId: normalizedWorkspaceId,
+      }),
+    [normalizedServerId, normalizedWorkspaceId],
+  );
+  const workspaceRouteAgentId = useWorkspaceLayoutStore((state) => {
+    if (!persistenceKey) return null;
+    const pending = state.pendingOpenByWorkspace[persistenceKey];
+    if (pending?.target.kind === "agent") {
+      return pending.target.agentId;
+    }
+    const layout = state.layoutByWorkspace[persistenceKey];
+    if (!layout) return null;
+    const focusedPane = layout.focusedPaneId
+      ? findPaneById(layout.root, layout.focusedPaneId)
+      : null;
+    const activeTabId = focusedPane?.focusedTabId ?? focusedPane?.tabIds[0] ?? null;
+    if (!activeTabId) return null;
+    const activeTab = collectAllTabs(layout.root).find((tab) => tab.tabId === activeTabId);
+    return activeTab?.target.kind === "agent" ? activeTab.target.agentId : null;
+  });
+  const shouldRedirectToMainChat = useSessionStore((state) =>
+    selectIsMainChatWorkspaceRedirectTarget(
+      state,
+      normalizedServerId,
+      normalizedWorkspaceId,
+      workspaceRouteAgentId,
+    ),
+  );
+  const redirectedMainChatKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!shouldRedirectToMainChat || !effectiveIsRouteFocused) {
+      redirectedMainChatKeyRef.current = null;
+      return;
+    }
+    const redirectKey = `${normalizedServerId}:${normalizedWorkspaceId}:${workspaceRouteAgentId ?? ""}`;
+    if (redirectedMainChatKeyRef.current === redirectKey) {
+      return;
+    }
+    redirectedMainChatKeyRef.current = redirectKey;
+    router.replace(buildMainChatRoute(normalizedServerId) as Href);
+  }, [
+    effectiveIsRouteFocused,
+    normalizedServerId,
+    normalizedWorkspaceId,
+    router,
+    shouldRedirectToMainChat,
+    workspaceRouteAgentId,
+  ]);
+
   useEffect(() => {
     traceInstant("paseo.workspace.mount", { serverId, workspaceId });
     return () => {
       traceInstant("paseo.workspace.unmount", { serverId, workspaceId });
     };
   }, [serverId, workspaceId]);
+
+  if (shouldRedirectToMainChat) {
+    return <View style={styles.container} testID="workspace-main-chat-redirect" />;
+  }
+
   return (
     <WorkspaceScreenContent
       serverId={serverId}
       workspaceId={workspaceId}
-      isRouteFocused={isRouteFocused ?? navigationFocused}
+      isRouteFocused={effectiveIsRouteFocused}
     />
   );
 });
