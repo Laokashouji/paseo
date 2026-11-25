@@ -2,6 +2,13 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.529 - 2026-11-25
+
+- **跨主机资源准入门禁与受压排队**：「设置 → 对话管理」新增「跨主机资源准入与受压排队」面板，支持按单机最大受管并发数（默认 6）、CPU 占用上限（默认 85%）、最小可用内存（默认 1024 MB）与受压排队策略（门禁默认保守关闭，按需开启）实时评估本机及远端多 Host 资源态势；目标主机受压或离线时将新派发任务有序写入持久化准入队列（最多 100 条），在主对话顶部动作条与任务抽屉展示受压告警、排队位次与原因，并在资源恢复后自动或手动出队派发（支持单条出队/取消与全量出队）；新增 2 个 WebSocket RPC（`main_chat.get_resource_admission` / `main_chat.drain_admission_queue`）并向 `settings_propose_patch` 开放 `resourceAdmission.*` 自助提议。
+- **无状态单轮后台督办与 MCP 工具按需加载**：新增 `statelessBackgroundSupervision` 开关（默认保守关闭），开启后常规巡检与非阻塞督办信号通过隔离的无状态单轮评估产出 `silent` / `log_only` / `escalate_main` 决策，避免后台例行信号污染主对话上下文，同时对权限审批、人工决策、任务失败与交付门禁阻断保持强制直通；新增 `onDemandToolLoading` 开关（默认保守关闭），开启后主对话默认仅挂载核心工具组（`core`），其余 6 组扩展工具（`memory` / `lessons` / `routines` / `dag` / `settings` / `conversations`）通过新增 MCP 工具 `tool_catalog` 与 `tool_load` 按需检索并动态加载，大幅降低每轮工具定义 Token 消耗；两项开关均开放 `settings_propose_patch` 自助提议。
+- **闲置子会话自动归档保守红线与 `/` 快捷提示词库**：「设置 → 对话管理」新增「闲置归档与快捷提示词库」面板；闲置子会话自动归档默认关闭，支持配置闲置阈值（默认 60 分钟）、巡检间隔（默认 15 分钟）与单次上限（默认 10 条），内建 9 道保守保护红线（绝不归档主对话、方向主管、手动会话、运行中会话、含待审批权限/未决决策/未结项任务/活跃 PR 跟进或等待回复的会话），归档前二次重检并保留最近 100 条审计记录（支持演练模式 `dryRun` 与立即巡检）；内置 5 条快捷提示词模板（`/review`、`/bugfix`、`/plan`、`/brief`、`/qa`）并支持最多 80 条自定义模板，在输入框键入 `/` 即可实时补全与填入；新增 4 个 WebSocket RPC（`main_chat.sweep_idle_subagents` / `main_chat.list_prompt_library` / `main_chat.save_prompt_template` / `main_chat.delete_prompt_template`）并向 `settings_propose_patch` 开放 `idleArchivePolicy.*` 自助提议。
+- **协议 AOT 校验器分片生成修复 Metro 打包 OOM**：改造 `packages/protocol/scripts/generate-validation-aot.mjs`，在生成前清理旧分片并将全量出站协议校验器按导出数与字节预算分片输出为 `ws-outbound.chunk-XX.aot.ts`（复用 `.gitignore` 的 `*.aot.ts` 规则，零污染 Git），通过轻量入口 `ws-outbound.aot.ts` 保持对外导出签名与运行时语义 100% 不变；每个生成的 `dist/generated/validation/ws-outbound*.aot.js` 均控制在 1.4 MB 以内，彻底根治 0.17.528 中 20 MB 单体文件导致的 CI Metro 打包堆内存溢出，`NODE_OPTIONS="--max-old-space-size=3072"` 下 `build:web` 稳定快速通过。
+
 ## 0.17.528 - 2026-11-25
 
 - **多用途模型槽位、性能档位原子切换与失败任务一键换模型重试**：「设置 → 对话管理」新增「模型槽位与性能档位」面板，支持按 5 类用途槽位（`main` 主对话、`directionLead` 子方向负责人、`subagentDefault` 子任务默认、`subagentReadonly` 只读子任务、`backgroundTriage` 后台分诊）分层绑定模型并沿继承链自动解析；内置「性能档 / 平衡档 / 经济档」并支持保存最多 12 个自定义配置组，切换时全量原子校验后一次落盘并提供一键回滚上一档位（保留最近 20 条切换审计记录）；受管子任务失败时可在主对话顶部动作条与任务抽屉一键「换模型重试」（优先按显式覆写或 `limitFallbacks` 候选模型在同一任务卡原地重启，严格仅作用于主对话受管失败任务，绝不触碰手动会话或 handoff 中断会话）；新增 2 个 WebSocket RPC（`main_chat.switch_model_profile` / `main_chat.retry_task_with_fallback`）并向 `settings_propose_patch` 开放 `modelConfig.activeProfileId` / `modelConfig.slots` 自助提议。
