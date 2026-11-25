@@ -939,6 +939,19 @@ it("keeps table cell pipes escaped in text/plain table syntax and literal in tex
   expect(content?.html).toContain("<td>Value | detail</td>");
 });
 
+it("keeps table cell <br> elements on one GFM row in text/plain and restores <br> in text/html", () => {
+  const message = mountFixture();
+  message.innerHTML =
+    "<table><thead><tr><th>Col<br>Title</th><th>Code</th></tr></thead><tbody><tr><td><strong>中文：</strong><br>1. First<br>2. Second</td><td><code>&lt;br&gt;</code></td></tr></tbody></table>";
+  const content = createAssistantSelectionClipboardContent(selectNodeContents(message));
+  expect(content?.plainText).toBe(
+    "| Col<br>Title | Code |\n| --- | --- |\n| **中文：**<br>1. First<br>2. Second | `<br>` |",
+  );
+  expect(content?.html).toContain("<th>Col<br>Title</th>");
+  expect(content?.html).toContain("<td><strong>中文：</strong><br>1. First<br>2. Second</td>");
+  expect(content?.html).toContain("<td><code>&lt;br&gt;</code></td>");
+});
+
 it("copies a workspace image path instead of its temporary display URL", () => {
   const message = mountFixture();
   const sources = JSON.stringify({ "blob:preview": "assets/chart.png" });

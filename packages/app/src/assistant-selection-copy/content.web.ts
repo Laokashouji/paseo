@@ -1,5 +1,6 @@
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
+import { TABLE_CELL_LINE_BREAK } from "@/components/markdown/html";
 import {
   createCodeClipboardContent,
   createSelectionClipboardContent,
@@ -73,6 +74,11 @@ function createTurndown(flavor: "markdown" | "plain"): TurndownService {
       const prefix = index === 0 ? "| " : " ";
       return `${prefix}${content.replace(/\|/g, "\\|")} |`;
     },
+  });
+  // Keep line breaks inside table cells on a single GFM row; rich HTML restores <br>.
+  turndown.addRule("gfmTableCellLineBreak", {
+    filter: (node) => node.nodeName === "BR" && Boolean(node.closest("th, td")),
+    replacement: () => (flavor === "plain" ? "<br>" : ` ${TABLE_CELL_LINE_BREAK} `),
   });
   // A link Paseo recognized pastes as the text the reply showed. Rich paste keeps it as a
   // link when it points to a web page, such as a forge reference.
@@ -294,7 +300,38 @@ function flattenClipboardListMarkup(html: string): string {
     list.replaceWith(replacement);
   }
 
+  restoreTableCellLineBreaks(container);
+
   return container.innerHTML;
+}
+
+const TABLE_CELL_LINE_BREAK_PATTERN = new RegExp(`[ \\t]*${TABLE_CELL_LINE_BREAK}[ \\t]*`);
+
+function restoreTableCellLineBreaks(container: HTMLElement): void {
+  for (const cell of container.querySelectorAll("th, td")) {
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    const matches: Text[] = [];
+    let current = walker.nextNode();
+    while (current) {
+      if (
+        current instanceof Text &&
+        current.data.includes(TABLE_CELL_LINE_BREAK) &&
+        !current.parentElement?.closest("code, pre")
+      ) {
+        matches.push(current);
+      }
+      current = walker.nextNode();
+    }
+    for (const node of matches) {
+      const fragment = document.createDocumentFragment();
+      const parts = node.data.split(TABLE_CELL_LINE_BREAK_PATTERN);
+      parts.forEach((part, index) => {
+        if (index > 0) fragment.append(document.createElement("br"));
+        if (part.length > 0) fragment.append(part);
+      });
+      node.replaceWith(fragment);
+    }
+  }
 }
 
 function cloneMarkdownSelection(range: Range, message: Element): Node {

@@ -6,7 +6,10 @@ import { matchCommandLink } from "@/agent-commands";
 import { createForgeShorthand } from "@/git/forge-shorthand";
 
 import { classifyAssistantFileLink } from "@/assistant-file-links";
-import { markInlineImages } from "react-native-enriched-markdown/src/web/utils";
+import {
+  markInlineImages,
+  splitTableLineBreaks,
+} from "react-native-enriched-markdown/src/web/utils";
 import type { ASTNode } from "react-native-enriched-markdown/src/web/types";
 import { QueryClient } from "@tanstack/react-query";
 import { decodeMarkdownImage, getMarkdownImageStatus } from "./image-decoding";
@@ -14,7 +17,7 @@ import { describe, expect, it } from "vitest";
 import { darkTheme, lightTheme } from "@/styles/theme";
 import { createMarkdownStyles } from "./styles";
 import { isRecognizedLink, prepareMarkdownSource, PENDING_MARKDOWN_IMAGE } from "./source";
-import { normalizeMarkdownHtml } from "./html";
+import { normalizeMarkdownHtml, TABLE_CELL_LINE_BREAK } from "./html";
 
 it("recognizes complete known commands in inline code", () => {
   const names = new Set(["code-review", "review:fast"]);
@@ -1156,5 +1159,265 @@ describe("external Markdown", () => {
     expect(external("![Demo](media/demo.png) ![Shot](https://x/a.png)").render()).toBe(
       "Demo ![Shot](https://x/a.png)",
     );
+  });
+});
+
+describe("GFM table cell HTML line breaks", () => {
+  const flags = { hardSoftBreaks: true, latexMath: false };
+
+  async function parsePreparedTable(source: string, workspaceRoot?: string) {
+    const prepared = prepareMarkdownSource(source, workspaceRoot);
+    const rendered = prepared.render();
+    const tree = await parseMarkdown(rendered, flags);
+    splitTableLineBreaks(tree);
+    return {
+      prepared,
+      rendered,
+      tree: recognizeTextLinks(
+        tree,
+        prepared.linkRecognition.text,
+        prepared.linkRecognition.inlineCode,
+      ),
+    };
+  }
+
+  function tableRows(tree: ASTNode): ASTNode[][] {
+    expect(tree.children?.map((node) => node.type)).toEqual(["Table"]);
+    const table = tree.children![0]!;
+    return (table.children ?? []).flatMap((section) =>
+      (section.children ?? [])
+        .filter((row) => row.type === "TableRow")
+        .map((row) => row.children ?? []),
+    );
+  }
+
+  it("keeps <br> variants inside GFM table headers and cells on one row and expands them to LineBreak nodes", async () => {
+    const source = [
+      "| Col<br>One | Col<br/>Two | Col<BR />Three |",
+      "| --- | --- | --- |",
+      "| a<br>b | c<br/>d<BR />e | x<br><br>y</br> |",
+    ].join("\n");
+    const { rendered, tree } = await parsePreparedTable(source);
+    expect(rendered.split("\n")).toHaveLength(3);
+    expect(rendered).toContain(TABLE_CELL_LINE_BREAK);
+    const rows = tableRows(tree);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveLength(3);
+    expect(rows[1]).toHaveLength(3);
+    expect(rows[0]![0]!.children).toEqual([
+      { type: "Text", content: "Col" },
+      { type: "LineBreak" },
+      { type: "Text", content: "One" },
+    ]);
+    expect(rows[1]![1]!.children).toEqual([
+      { type: "Text", content: "c" },
+      { type: "LineBreak" },
+      { type: "Text", content: "d" },
+      { type: "LineBreak" },
+      { type: "Text", content: "e" },
+    ]);
+    expect(rows[1]![2]!.children).toEqual([
+      { type: "Text", content: "x" },
+      { type: "LineBreak" },
+      { type: "LineBreak" },
+      { type: "Text", content: "y" },
+    ]);
+  });
+
+  it("prevents list prefixes after <br> from splitting or breaking out of a GFM table", async () => {
+    const source = [
+      "| Step | Details | Notes |",
+      "| --- | --- | --- |",
+      "| Plan | Intro<br>1. First item<br>2. Second item | - Bullet A<br>- Bullet B |",
+      "| Check | • Dot 1<br>• Dot 2 | Done |",
+    ].join("\n");
+    const { rendered, tree } = await parsePreparedTable(source);
+    expect(rendered.split("\n")).toHaveLength(4);
+    const table = tree.children![0]!;
+    expect(tree.children?.map((node) => node.type)).toEqual(["Table"]);
+    expect(table.attributes).toMatchObject({ colCount: "3", headRowCount: "1", bodyRowCount: "2" });
+    const rows = tableRows(tree);
+    expect(rows[1]![1]!.children).toEqual([
+      { type: "Text", content: "Intro" },
+      { type: "LineBreak" },
+      { type: "Text", content: "1. First item" },
+      { type: "LineBreak" },
+      { type: "Text", content: "2. Second item" },
+    ]);
+    expect(rows[1]![2]!.children).toEqual([
+      { type: "Text", content: "- Bullet A" },
+      { type: "LineBreak" },
+      { type: "Text", content: "- Bullet B" },
+    ]);
+    expect(rows[2]![1]!.children).toEqual([
+      { type: "Text", content: "• Dot 1" },
+      { type: "LineBreak" },
+      { type: "Text", content: "• Dot 2" },
+    ]);
+  });
+
+  it("keeps inline code, HTML <code>, escaped <br>, and &lt;br&gt; literal inside table cells", async () => {
+    const source = [
+      "| Syntax | Result |",
+      "| --- | --- |",
+      "| `<br>` and `<br/>` | <code>a<br>b</code> |",
+      "| \\<br> | &lt;br&gt; |",
+    ].join("\n");
+    const { rendered, tree } = await parsePreparedTable(source);
+    expect(rendered.split("\n")).toHaveLength(4);
+    expect(rendered).not.toContain(TABLE_CELL_LINE_BREAK);
+    const rows = tableRows(tree);
+    expect(rows[1]![0]!.children).toEqual([
+      { type: "Code", children: [{ type: "Text", content: "<br>" }] },
+      { type: "Text", content: " and " },
+      { type: "Code", children: [{ type: "Text", content: "<br/>" }] },
+    ]);
+    expect(rows[1]![1]!.children).toEqual([
+      { type: "Code", children: [{ type: "Text", content: "a<br>b" }] },
+    ]);
+    expect(rows[2]![0]!.children).toEqual([{ type: "Text", content: "<br>" }]);
+    expect(rows[2]![1]!.children).toEqual([{ type: "Text", content: "<br>" }]);
+  });
+
+  it("preserves emphasis, CJK punctuation flanking, block HTML, and newline entities in table cells without splitting rows", async () => {
+    const source = [
+      "| Case | Value |",
+      "| --- | --- |",
+      "| CJK bold | **中文：**<br>正文<br>**（注）** |",
+      "| Emphasis | _a_<br>_b_ and ~~x~~<br>~~y~~ and **m<br>n** |",
+      "| Block HTML | <p>First</p><p>Second</p> |",
+      "| List HTML | <ul><li>One</li><li>Two</li></ul> |",
+      "| Details | <details><summary>Title</summary>Body</details> |",
+      "| Entities | Line 1&#10;Line 2 and <code>x&#10;y</code> |",
+    ].join("\n");
+    const { rendered, tree } = await parsePreparedTable(source);
+    expect(rendered.split("\n")).toHaveLength(8);
+    const rows = tableRows(tree);
+    expect(rows).toHaveLength(7);
+    expect(rows[1]![1]!.children).toEqual([
+      { type: "Strong", children: [{ type: "Text", content: "中文：" }] },
+      { type: "LineBreak" },
+      { type: "Text", content: "正文" },
+      { type: "LineBreak" },
+      { type: "Strong", children: [{ type: "Text", content: "（注）" }] },
+    ]);
+    expect(rows[2]![1]!.children).toEqual([
+      { type: "Emphasis", children: [{ type: "Text", content: "a" }] },
+      { type: "LineBreak" },
+      { type: "Emphasis", children: [{ type: "Text", content: "b" }] },
+      { type: "Text", content: " and " },
+      { type: "Strikethrough", children: [{ type: "Text", content: "x" }] },
+      { type: "LineBreak" },
+      { type: "Strikethrough", children: [{ type: "Text", content: "y" }] },
+      { type: "Text", content: " and " },
+      {
+        type: "Strong",
+        children: [
+          { type: "Text", content: "m" },
+          { type: "LineBreak" },
+          { type: "Text", content: "n" },
+        ],
+      },
+    ]);
+    expect(rows[3]![1]!.children).toEqual([
+      { type: "Text", content: "First" },
+      { type: "LineBreak" },
+      { type: "Text", content: "Second" },
+    ]);
+    expect(rows[4]![1]!.children).toEqual([
+      { type: "Text", content: "One" },
+      { type: "LineBreak" },
+      { type: "Text", content: "Two" },
+    ]);
+    expect(rows[5]![1]!.children).toEqual([
+      { type: "Strong", children: [{ type: "Text", content: "Title" }] },
+      { type: "LineBreak" },
+      { type: "Text", content: "Body" },
+    ]);
+    expect(rows[6]![1]!.children).toEqual([
+      { type: "Text", content: "Line 1" },
+      { type: "LineBreak" },
+      { type: "Text", content: "Line 2 and " },
+      { type: "Code", children: [{ type: "Text", content: "x y" }] },
+    ]);
+  });
+
+  it("handles GFM tables after paragraphs, inside blockquotes, without outer pipes, and inside <details>", async () => {
+    const insideDetails = [
+      "<details>",
+      "<summary>Summary</summary>",
+      "| A | B |",
+      "| --- | --- |",
+      "| x<br>y | z |",
+      "</details>",
+      "After",
+    ].join("\n");
+    const detailsTree = await parseMarkdown(prepareMarkdownSource(insideDetails).render(), flags);
+    splitTableLineBreaks(detailsTree);
+    expect(detailsTree.children?.map((node) => node.type)).toEqual([
+      "Paragraph",
+      "Table",
+      "Paragraph",
+    ]);
+
+    const afterParagraph = "**Notes**\nA | B\n--- | ---\nx<br>y | z";
+    const afterTree = await parseMarkdown(prepareMarkdownSource(afterParagraph).render(), flags);
+    splitTableLineBreaks(afterTree);
+    expect(afterTree.children?.map((node) => node.type)).toEqual(["Paragraph", "Table"]);
+  });
+
+  it("recognizes file paths and URLs separately across <br> in table cells", async () => {
+    const source = [
+      "| Files | Links |",
+      "| --- | --- |",
+      "| src/a.ts<br>src/b.ts | https://a.test/x<br>https://b.test/y |",
+    ].join("\n");
+    const { prepared, tree } = await parsePreparedTable(source, "/repo");
+    const rows = tableRows(tree);
+    expect(rows[1]![0]!.children).toEqual([
+      {
+        type: "Link",
+        attributes: { url: "src/a.ts", recognizedLink: "true" },
+        children: [{ type: "Text", content: "src/a.ts" }],
+      },
+      { type: "LineBreak" },
+      {
+        type: "Link",
+        attributes: { url: "src/b.ts", recognizedLink: "true" },
+        children: [{ type: "Text", content: "src/b.ts" }],
+      },
+    ]);
+    expect(rows[1]![1]!.children).toEqual([
+      {
+        type: "Link",
+        attributes: { url: "https://a.test/x" },
+        children: [{ type: "Text", content: "https://a.test/x" }],
+      },
+      { type: "LineBreak" },
+      {
+        type: "Link",
+        attributes: { url: "https://b.test/y" },
+        children: [{ type: "Text", content: "https://b.test/y" }],
+      },
+    ]);
+    // Native regex also splits paths and URLs when U+2028 is directly adjacent.
+    expect(
+      [...`src/a.ts${TABLE_CELL_LINE_BREAK}src/b.ts`.matchAll(prepared.linkRecognition.text)].map(
+        ([text]) => text,
+      ),
+    ).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(
+      [
+        ...`https://a.test/x${TABLE_CELL_LINE_BREAK}https://b.test/y`.matchAll(
+          prepared.linkRecognition.text,
+        ),
+      ].map(([text]) => text),
+    ).toEqual(["https://a.test/x", "https://b.test/y"]);
+    expect(toNativeLinkRecognition(prepared.linkRecognition).text.isDisabled).toBe(false);
+  });
+
+  it("still converts <br> outside GFM tables to hard Markdown line breaks", () => {
+    expect(normalizeMarkdownHtml("Line 1<br>Line 2")).toBe("Line 1  \nLine 2");
+    expect(normalizeMarkdownHtml("```\na<br>b\n```")).toBe("```\na<br>b\n```");
   });
 });

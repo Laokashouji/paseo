@@ -1,7 +1,7 @@
 import { pluginOverviewUrl } from "@getpaseo/protocol/plugin-overview";
 import { classifyAssistantFileLink } from "@/assistant-file-links";
 import { ASSISTANT_FILE_EXTENSIONS } from "@/assistant-file-links/extensions";
-import { normalizeMarkdownHtml } from "./html";
+import { normalizeMarkdownHtml, TABLE_CELL_LINE_BREAK } from "./html";
 import { gfmTable } from "micromark-extension-gfm-table";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
 import type { AssistantFileLinkSource } from "@/assistant-file-links";
@@ -11,9 +11,9 @@ import type { Link, Nodes, Paragraph, PhrasingContent, Root } from "mdast";
 
 // Keep this regex in the syntax shared by JavaScript, ICU and java.util.regex.
 // The Unicode flag makes Metro expand it to escapes rejected by native engines.
-const PATH_CHARACTER = String.raw`[a-zA-Z0-9\u0080-\uFFFF_@.%+-]`;
+const PATH_CHARACTER = String.raw`[a-zA-Z0-9\u0080-\u2027\u202A-\uFFFF_@.%+-]`;
 const PATH_LETTER = String.raw`[a-zA-Z]`;
-const PATH_SEGMENT = String.raw`${PATH_CHARACTER}*[a-zA-Z0-9\u0080-\uFFFF_@%+-]`;
+const PATH_SEGMENT = String.raw`${PATH_CHARACTER}*[a-zA-Z0-9\u0080-\u2027\u202A-\uFFFF_@%+-]`;
 const LINE_SUFFIX = String.raw`(?::\d+(?::\d+)?(?:-\d+(?::\d+)?)?)?`;
 const FILE_EXTENSIONS = [...ASSISTANT_FILE_EXTENSIONS]
   .map((extension) => extension.replace(/[a-z]/g, (letter) => `[${letter}${letter.toUpperCase()}]`))
@@ -30,7 +30,7 @@ function createTextPattern(path: string, forgeReferencePattern?: string): RegExp
   const forgeReference = forgeReferencePattern ? `|${forgeReferencePattern}` : "";
   // The native adapter mistakes a literal + in lookbehind for a quantifier; use its hex escape.
   return new RegExp(
-    String.raw`(?:${BARE_URL}${forgeReference}|(?<![a-zA-Z0-9\u0080-\uFFFF_@.%\x2b~:/\\-])(?:${path}|${FILE_NAME})${LINE_SUFFIX}(?![a-zA-Z0-9\u0080-\uFFFF_@%+:/\\-]|\.${PATH_CHARACTER}))`,
+    String.raw`(?:${BARE_URL}${forgeReference}|(?<![a-zA-Z0-9\u0080-\u2027\u202A-\uFFFF_@.%\x2b~:/\\-])(?:${path}|${FILE_NAME})${LINE_SUFFIX}(?![a-zA-Z0-9\u0080-\u2027\u202A-\uFFFF_@%+:/\\-]|\.${PATH_CHARACTER}))`,
     "g",
   );
 }
@@ -39,7 +39,7 @@ function createTextPattern(path: string, forgeReferencePattern?: string): RegExp
 // Quotes and unbalanced closing parentheses end the URL. Trailing sentence punctuation stays outside.
 // CJK, fullwidth and typographic punctuation (、。，（）【】「」“”…) also ends it; CJK letters do not.
 const URL_BOUNDARY =
-  "\\u2018\\u2019\\u201C\\u201D\\u2026\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65";
+  "\\u2018\\u2019\\u201C\\u201D\\u2026\\u2028\\u2029\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65";
 const URL_CHARACTER = String.raw`[^\s<>()"'\x60${URL_BOUNDARY}]`;
 const URL_GROUP = String.raw`\(${URL_CHARACTER}*\)`;
 const BARE_URL = String.raw`https?://(?:${URL_CHARACTER}|${URL_GROUP})*(?:[^\s<>()"'\x60.,;:!?${URL_BOUNDARY}]|${URL_GROUP})`;
@@ -282,25 +282,35 @@ export function prepareMarkdownSource(
     edits.push({ start, end: labelStart, text: "" });
     edits.push({ start: labelEnd, end, text: "" });
   }
-  function visit(node: Nodes, previous?: Nodes) {
+  function separateAdjacentTable(
+    node: Nodes,
+    previous: Nodes | undefined,
+    start: number,
+    startLine: number,
+  ) {
+    if (
+      node.type !== "table" ||
+      previous?.type !== "paragraph" ||
+      previous.position?.end.line !== startLine - 1
+    ) {
+      return;
+    }
+    // MD4C only recognizes a table header on the first line of a paragraph.
+    const lineStart =
+      Math.max(source.lastIndexOf("\n", start - 1), source.lastIndexOf("\r", start - 1)) + 1;
+    const newline = source.slice(lineStart - 2, lineStart).replace(/[^\r\n]/g, "");
+    const blank = source.slice(lineStart, start).replace(/[^>]/g, " ").trimEnd();
+    const boundary = lineStart - newline.length;
+    edits.push({ start: boundary, end: lineStart, text: `${newline}${blank}${newline}` });
+  }
+  function visit(node: Nodes, previous?: Nodes, inTableCell = false) {
+    const insideTableCell = inTableCell || node.type === "tableCell";
     const position = node.position;
     if (position?.start.offset !== undefined && position.end.offset !== undefined) {
       const start = position.start.offset;
       const end = position.end.offset;
       if (node.type === "paragraph") splitStandaloneImages(node, start, end);
-      if (
-        node.type === "table" &&
-        previous?.type === "paragraph" &&
-        previous.position?.end.line === position.start.line - 1
-      ) {
-        // MD4C only recognizes a table header on the first line of a paragraph.
-        const lineStart =
-          Math.max(source.lastIndexOf("\n", start - 1), source.lastIndexOf("\r", start - 1)) + 1;
-        const newline = source.slice(lineStart - 2, lineStart).replace(/[^\r\n]/g, "");
-        const blank = source.slice(lineStart, start).replace(/[^>]/g, " ").trimEnd();
-        const boundary = lineStart - newline.length;
-        edits.push({ start: boundary, end: lineStart, text: `${newline}${blank}${newline}` });
-      }
+      separateAdjacentTable(node, previous, start, position.start.line);
       if (external) dropUnsafeDestination(node, start, end);
       if (node.type === "link") {
         const title = workspaceHoverTitle(node, source.slice(start, end), workspaceRoot);
@@ -320,17 +330,15 @@ export function prepareMarkdownSource(
         return;
       }
       if (node.type === "text") {
-        const text = source
-          .slice(start, end)
-          .replace(/(?<!\\)&(?:#(?:[xX][\da-fA-F]+|\d+)|[a-zA-Z][a-zA-Z\d]+);/g, (entity) =>
-            decodeString(entity).replace(/[!-/:-@[-`{-~]/g, "\\$&"),
-          )
-          .replace(/(?<!\\)\|\|/g, "\\|\\|");
-        if (text !== source.slice(start, end)) edits.push({ start, end, text });
+        const rawText = source.slice(start, end);
+        const text = escapeTextNode(rawText, insideTableCell);
+        if (text !== rawText) edits.push({ start, end, text });
       }
     }
     if ("children" in node)
-      node.children.forEach((child, index) => visit(child, node.children[index - 1]));
+      node.children.forEach((child, index) =>
+        visit(child, node.children[index - 1], insideTableCell),
+      );
   }
   visit(getTree());
   return {
@@ -363,6 +371,15 @@ export function prepareMarkdownSource(
       return result;
     },
   };
+}
+
+function escapeTextNode(text: string, inTableCell: boolean): string {
+  return text
+    .replace(/(?<!\\)&(?:#(?:[xX][\da-fA-F]+|\d+)|[a-zA-Z][a-zA-Z\d]+);/g, (entity) => {
+      const decoded = decodeString(entity).replace(/[!-/:-@[-`{-~]/g, "\\$&");
+      return inTableCell ? decoded.replace(/\r\n?|\n/g, ` ${TABLE_CELL_LINE_BREAK} `) : decoded;
+    })
+    .replace(/(?<!\\)\|\|/g, "\\|\\|");
 }
 
 function escapeMarkdownText(text: string): string {
