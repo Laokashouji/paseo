@@ -1,8 +1,10 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 
 export const ar: TranslationResources = {
+  chatQuotes: chatQuotesLocales.ar,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ar"),
   pluginCombobox: {
     searching: "جارٍ البحث…",
@@ -350,6 +352,7 @@ export const ar: TranslationResources = {
       copyCode: "نسخ الرمز",
       copyTurn: "نسخ بدوره",
       copyMessage: "انسخ الرسالة",
+      quoteMessage: quoteMessageActionLocales.ar,
       forkMenu: "تفريع الرسالة",
       forkInNewTab: "تفريع في تبويب جديد",
       forkInNewWorkspace: "تفريع في مساحة عمل جديدة",

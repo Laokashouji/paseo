@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   createActivePromptPublisher,
+  filterChatOutlinePrompts,
+  isHiddenSystemOutlinePromptPreview,
   shouldAcceptPromptIndexEpoch,
   promptTickMagnification,
   resolveActivePromptSeq,
@@ -68,5 +70,41 @@ describe("createActivePromptPublisher", () => {
 
     expect(notifications).toBe(2);
     expect(publisher.getActiveSeq()).toBeNull();
+  });
+});
+
+describe("filterChatOutlinePrompts", () => {
+  it("filters <paseo-system> envelopes, legacy background headers, and hidden seqs", () => {
+    const prompts: ChatOutlinePrompt[] = [
+      {
+        seq: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        preview: '<paseo-system kind="main-chat-background"> patrol',
+      },
+      {
+        seq: 2,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        preview: "<paseo-system> keepalive",
+      },
+      {
+        seq: 3,
+        timestamp: "2026-01-01T00:00:02.000Z",
+        preview: "📋 督办 · 主动巡检唤醒：后台巡检",
+      },
+      {
+        seq: 4,
+        timestamp: "2026-01-01T00:00:03.000Z",
+        preview: "Human prompt one",
+      },
+      {
+        seq: 5,
+        timestamp: "2026-01-01T00:00:04.000Z",
+        preview: "Hidden via loaded stream trigger",
+      },
+    ];
+
+    expect(isHiddenSystemOutlinePromptPreview(prompts[0]!.preview)).toBe(true);
+    expect(isHiddenSystemOutlinePromptPreview(prompts[3]!.preview)).toBe(false);
+    expect(filterChatOutlinePrompts(prompts, new Set([5]))).toEqual([prompts[3]]);
   });
 });

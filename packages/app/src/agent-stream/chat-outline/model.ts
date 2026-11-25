@@ -2,6 +2,41 @@ import type { AgentTimelinePromptIndexPayload } from "@getpaseo/client/internal/
 
 export type ChatOutlinePrompt = AgentTimelinePromptIndexPayload["prompts"][number];
 
+const SYSTEM_OUTLINE_PREFIX_RE = /^<paseo-system(?:\s|>|$)/i;
+const LEGACY_SYSTEM_OUTLINE_PREFIXES = [
+  "📋 督办 · 主动巡检唤醒：",
+  "👋 首次就绪简报：",
+  "【系统自动补答提醒】",
+  "【后台空闲预压缩检查点】",
+  "【主对话上下文压缩检查点】",
+] as const;
+
+/**
+ * Client-side safeguard filtering daemon-injected `<paseo-system>` patrol/keepalive turns
+ * out of ChatOutline even when connected to an older host daemon.
+ */
+export function isHiddenSystemOutlinePromptPreview(preview: string): boolean {
+  const trimmed = preview.trimStart();
+  if (!trimmed) {
+    return false;
+  }
+  if (SYSTEM_OUTLINE_PREFIX_RE.test(trimmed)) {
+    return true;
+  }
+  return LEGACY_SYSTEM_OUTLINE_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export function filterChatOutlinePrompts(
+  prompts: readonly ChatOutlinePrompt[],
+  hiddenSeqs?: ReadonlySet<number>,
+): ChatOutlinePrompt[] {
+  return prompts.filter(
+    (entry) =>
+      !(hiddenSeqs && hiddenSeqs.has(entry.seq)) &&
+      !isHiddenSystemOutlinePromptPreview(entry.preview),
+  );
+}
+
 export function shouldAcceptPromptIndexEpoch(timelineEpoch: string, indexEpoch: string): boolean {
   return timelineEpoch === indexEpoch;
 }

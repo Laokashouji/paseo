@@ -1,6 +1,8 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { pluginGallery } from "./plugin-gallery";
 
 export const en = {
+  chatQuotes: chatQuotesLocales.en,
   pluginCombobox: {
     searching: "Searching…",
     empty: "No results",
@@ -347,6 +349,7 @@ export const en = {
       copyCode: "Copy code",
       copyTurn: "Copy turn",
       copyMessage: "Copy message",
+      quoteMessage: quoteMessageActionLocales.en,
       forkMenu: "Fork chat from here",
       forkInNewTab: "Fork in a new tab",
       forkInNewWorkspace: "Fork in a new workspace",

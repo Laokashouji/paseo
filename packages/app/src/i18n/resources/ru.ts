@@ -1,8 +1,10 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
 
 export const ru: TranslationResources = {
+  chatQuotes: chatQuotesLocales.ru,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ru"),
   pluginCombobox: {
     searching: "Поиск…",
@@ -354,6 +356,7 @@ export const ru: TranslationResources = {
       copyCode: "Скопировать код",
       copyTurn: "Скопировать ответ",
       copyMessage: "Копировать сообщение",
+      quoteMessage: quoteMessageActionLocales.ru,
       forkMenu: "Форкнуть чат отсюда",
       forkInNewTab: "Создать форк в новой вкладке",
       forkInNewWorkspace: "Создать форк в новом рабочем пространстве",

@@ -105,6 +105,48 @@ describe("useChatOutline", () => {
     expect(result.current.prompts[0]?.seq).toBe(2);
   });
 
+  it("filters <paseo-system> patrol and keepalive turns from outline prompts", async () => {
+    runtime.listAgentTimelinePrompts.mockResolvedValue({
+      epoch: "epoch-1",
+      prompts: [
+        {
+          seq: 1,
+          timestamp: new Date(1).toISOString(),
+          preview: '<paseo-system kind="main-chat-background"> patrol',
+        },
+        {
+          seq: 2,
+          timestamp: new Date(2).toISOString(),
+          preview: "<paseo-system> keepalive",
+        },
+        {
+          seq: 3,
+          timestamp: new Date(3).toISOString(),
+          preview: "Real user turn",
+        },
+      ],
+    });
+    const viewportRef = createRef<StreamViewportHandle>();
+    const { result } = renderHook(() =>
+      useChatOutline({
+        agentId: "agent-main",
+        serverId: "server-1",
+        timelineEpoch: "epoch-1",
+        tail: [],
+        head: [],
+        enabled: true,
+        viewportRef,
+        onJumpError: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(result.current.prompts).toHaveLength(1));
+    expect(result.current.prompts[0]).toMatchObject({
+      seq: 3,
+      preview: "Real user turn",
+    });
+  });
+
   it("refreshes from viewed user messages without another stream and keeps the newest index", async () => {
     const older = deferred<{
       epoch: string;

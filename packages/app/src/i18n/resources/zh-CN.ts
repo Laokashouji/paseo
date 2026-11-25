@@ -1,7 +1,9 @@
+import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
 import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const zhCN: TranslationResources = {
+  chatQuotes: chatQuotesLocales["zh-CN"],
   pluginCombobox: {
     searching: "搜索中…",
     empty: "无结果",
@@ -348,6 +350,7 @@ export const zhCN: TranslationResources = {
       copyCode: "复制代码",
       copyTurn: "复制回合",
       copyMessage: "复制消息",
+      quoteMessage: quoteMessageActionLocales["zh-CN"],
       forkMenu: "分叉消息",
       forkInNewTab: "分叉到新标签页",
       forkInNewWorkspace: "分叉到新工作区",
