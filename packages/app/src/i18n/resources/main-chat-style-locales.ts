@@ -263,11 +263,11 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
       manageStylePresets: "Gérer les préréglages…",
     },
     toasts: {
-      switchedPresetToast: 'Basculé vers « {{name}} »',
-      stylePresetCreatedToast: 'Préréglage « {{name}} » créé et appliqué',
-      stylePresetUpdatedToast: 'Préréglage « {{name}} » mis à jour',
-      stylePresetDeletedToast: 'Préréglage « {{name}} » supprimé',
-      stylePresetRestoredToast: 'Paramètres de « {{name}} » restaurés',
+      switchedPresetToast: "Basculé vers « {{name}} »",
+      stylePresetCreatedToast: "Préréglage « {{name}} » créé et appliqué",
+      stylePresetUpdatedToast: "Préréglage « {{name}} » mis à jour",
+      stylePresetDeletedToast: "Préréglage « {{name}} » supprimé",
+      stylePresetRestoredToast: "Paramètres de « {{name}} » restaurés",
       styleResetToDefaultToast: "Réinitialisé au mode Conservateur par défaut",
     },
     master: {
@@ -331,7 +331,7 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
       compactMetaSummary:
         "Patrouille {{patrol}}s · Bloqué {{stalled}}m · Sans progrès {{noProgress}}m · Pause {{cooldown}}m · {{enabledCaps}}/{{totalCaps}} options",
       customGuidancePreview: "Consigne : {{guidance}}",
-      modifiedBanner: 'Paramètres modifiés par rapport à « {{name}} »',
+      modifiedBanner: "Paramètres modifiés par rapport à « {{name}} »",
       restorePresetAction: "Restaurer le préréglage",
       overwritePresetAction: "Mettre à jour",
       saveAsNewAction: "Enregistrer sous",
@@ -366,7 +366,7 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
         editSubmit: "Enregistrer",
       },
       deleteConfirm: {
-        title: 'Supprimer le préréglage « {{name}} » ?',
+        title: "Supprimer le préréglage « {{name}} » ?",
         description:
           "Action irréversible. S'il est actif, vos réglages courants sont conservés et rattachés au style de base intégré.",
         confirmButton: "Supprimer",
@@ -702,8 +702,7 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
         baseConservative: "Conservador (apenas avisos)",
         baseProactive: "Proativo (auto baixo risco)",
         guidanceLabel: "Orientação personalizada (opcional)",
-        guidancePlaceholder:
-          "ex.: Notifique apenas falhas ou bloqueios; resumos em até 3 linhas.",
+        guidancePlaceholder: "ex.: Notifique apenas falhas ou bloqueios; resumos em até 3 linhas.",
         advancedToggleExpand: "Personalizar intervalos e recursos",
         advancedToggleCollapse: "Ocultar parâmetros detalhados",
         intervalsHeading: "Intervalos de disparo",
@@ -725,11 +724,11 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
       manageStylePresets: "Управление пресетами…",
     },
     toasts: {
-      switchedPresetToast: 'Переключено на «{{name}}»',
-      stylePresetCreatedToast: 'Пресет «{{name}}» создан и применён',
-      stylePresetUpdatedToast: 'Пресет «{{name}}» обновлён',
-      stylePresetDeletedToast: 'Пресет «{{name}}» удалён',
-      stylePresetRestoredToast: 'Параметры «{{name}}» восстановлены',
+      switchedPresetToast: "Переключено на «{{name}}»",
+      stylePresetCreatedToast: "Пресет «{{name}}» создан и применён",
+      stylePresetUpdatedToast: "Пресет «{{name}}» обновлён",
+      stylePresetDeletedToast: "Пресет «{{name}}» удалён",
+      stylePresetRestoredToast: "Параметры «{{name}}» восстановлены",
       styleResetToDefaultToast: "Сброшено к консервативному режиму по умолчанию",
     },
     master: {
@@ -793,7 +792,7 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
       compactMetaSummary:
         "Проверка {{patrol}}с · Застой {{stalled}}м · Без прогресса {{noProgress}}м · Кулдаун {{cooldown}}м · {{enabledCaps}}/{{totalCaps}} опций",
       customGuidancePreview: "Указание: {{guidance}}",
-      modifiedBanner: 'Параметры изменены относительно «{{name}}»',
+      modifiedBanner: "Параметры изменены относительно «{{name}}»",
       restorePresetAction: "Восстановить пресет",
       overwritePresetAction: "Обновить пресет",
       saveAsNewAction: "Сохранить как новый",
@@ -828,11 +827,255 @@ const MAIN_CHAT_STYLE_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatStyleLoc
         editSubmit: "Сохранить изменения",
       },
       deleteConfirm: {
-        title: 'Удалить пресет «{{name}}»?',
+        title: "Удалить пресет «{{name}}»?",
         description:
           "Отменить действие нельзя. Если пресет активен, текущие интервалы и опции сохранятся с переходом на встроенную базу.",
         confirmButton: "Удалить",
       },
+    },
+  },
+};
+
+type AskCardResource = MainChatResource["actionBar"]["askCard"];
+
+interface MainChatParityLocaleOverride {
+  backgroundTurn: {
+    supervisionTag: string;
+    compactionTag: string;
+    cacheKeepaliveTag: string;
+    handledInBackground: string;
+    handlingInBackground: string;
+  };
+  askCard: AskCardResource;
+}
+
+const MAIN_CHAT_PARITY_LOCALE_OVERRIDES: Record<ExtraLocaleCode, MainChatParityLocaleOverride> = {
+  ar: {
+    backgroundTurn: {
+      supervisionTag: "@الإشراف",
+      compactionTag: "@الضغط",
+      cacheKeepaliveTag: "@إبقاء التخزين المؤقت",
+      handledInBackground: "تمت المعالجة في الخلفية",
+      handlingInBackground: "جارٍ المعالجة في الخلفية",
+    },
+    askCard: {
+      categoryDecision: "يتطلب قرارك",
+      categoryError: "متوقف بسبب خطأ",
+      categoryQuestion: "بانتظار ردك",
+      fallbackErrorQuestion: "واجهت هذه الجلسة مشكلة. اختر كيفية المتابعة.",
+      fallbackQuestion: "هذه الجلسة بانتظار ردك للمتابعة.",
+      optionHandledContinue: "تم الحل، تابع",
+      optionHandledContinueDesc: "استئناف الجلسة المستهدفة من حيث توقفت",
+      optionHandledContinuePrompt: "تم حل العائق. يرجى متابعة المهمة.",
+      optionRetryFallbackDesc: "إعادة المحاولة باستخدام النموذج الاحتياطي",
+      optionProceedRecommended: "المتابعة بالخيار الموصى به",
+      optionProceedRecommendedDesc: "اعتماد المقترح الحالي والمتابعة",
+      optionProceedRecommendedPrompt: "تابع وفق الخيار الذي توصي به.",
+      optionListOptions: "اعرض الخيارات أولاً",
+      optionListOptionsDesc: "طلب 2-3 خيارات واضحة مع المزايا والعيوب قبل القرار",
+      optionListOptionsPrompt: "يرجى سرد 2-3 خيارات ملموسة مع المفاضلات قبل المتابعة.",
+      optionIgnore: "تجاهل حالياً",
+      optionIgnoreDesc: "إخفاء هذا الإشعار بصمت دون إرسال أي رسالة للجلسة",
+      customInputPlaceholder: "أو اكتب ردك…",
+      submitAction: "إرسال الرد",
+      openAction: "فتح",
+      replySentToast: 'تم إرسال الرد إلى "{{title}}"',
+    },
+  },
+  es: {
+    backgroundTurn: {
+      supervisionTag: "@Supervisión",
+      compactionTag: "@Compactación",
+      cacheKeepaliveTag: "@Caché activa",
+      handledInBackground: "Atendido en segundo plano",
+      handlingInBackground: "Atendiendo en segundo plano",
+    },
+    askCard: {
+      categoryDecision: "Decisión requerida",
+      categoryError: "Bloqueado por error",
+      categoryQuestion: "Esperando respuesta",
+      fallbackErrorQuestion: "Esta sesión encontró un problema. Elige cómo continuar.",
+      fallbackQuestion: "Esta sesión espera tu respuesta para continuar.",
+      optionHandledContinue: "Resuelto, continuar",
+      optionHandledContinueDesc: "Reanudar la sesión objetivo desde donde se detuvo",
+      optionHandledContinuePrompt: "El bloqueo se resolvió. Continúa con la tarea.",
+      optionRetryFallbackDesc: "Reintentar esta tarea con el modelo alternativo configurado",
+      optionProceedRecommended: "Seguir con la opción recomendada",
+      optionProceedRecommendedDesc: "Aprobar la propuesta actual y continuar",
+      optionProceedRecommendedPrompt: "Sigue adelante con tu opción recomendada.",
+      optionListOptions: "Mostrar opciones primero",
+      optionListOptionsDesc: "Pedir 2-3 opciones concretas con pros y contras antes de decidir",
+      optionListOptionsPrompt:
+        "Enumera 2-3 opciones concretas con sus ventajas e inconvenientes antes de seguir.",
+      optionIgnore: "Ignorar por ahora",
+      optionIgnoreDesc: "Ocultar en silencio sin enviar ningún mensaje a la sesión",
+      customInputPlaceholder: "O escribe tu respuesta…",
+      submitAction: "Enviar respuesta",
+      openAction: "Abrir",
+      replySentToast: 'Respuesta enviada a "{{title}}"',
+    },
+  },
+  fr: {
+    backgroundTurn: {
+      supervisionTag: "@Supervision",
+      compactionTag: "@Compactage",
+      cacheKeepaliveTag: "@Maintien du cache",
+      handledInBackground: "Traité en arrière-plan",
+      handlingInBackground: "Traitement en arrière-plan",
+    },
+    askCard: {
+      categoryDecision: "Décision requise",
+      categoryError: "Bloqué par une erreur",
+      categoryQuestion: "En attente de réponse",
+      fallbackErrorQuestion: "Cette session a rencontré un problème. Choisissez comment continuer.",
+      fallbackQuestion: "Cette session attend votre réponse pour continuer.",
+      optionHandledContinue: "Résolu, continuer",
+      optionHandledContinueDesc: "Reprendre la session cible là où elle s'est arrêtée",
+      optionHandledContinuePrompt: "Le blocage est résolu. Veuillez poursuivre la tâche.",
+      optionRetryFallbackDesc: "Relancer cette tâche avec le modèle de secours configuré",
+      optionProceedRecommended: "Continuer avec l'option recommandée",
+      optionProceedRecommendedDesc: "Approuver la piste suggérée et continuer",
+      optionProceedRecommendedPrompt: "Poursuivez avec l'option que vous recommandez.",
+      optionListOptions: "Lister les options d'abord",
+      optionListOptionsDesc: "Demander 2 à 3 options concrètes avec compromis avant de décider",
+      optionListOptionsPrompt:
+        "Listez d'abord 2 à 3 options concrètes avec leurs compromis avant de continuer.",
+      optionIgnore: "Ignorer pour l'instant",
+      optionIgnoreDesc: "Masquer silencieusement sans envoyer de message à la session",
+      customInputPlaceholder: "Ou rédigez votre réponse…",
+      submitAction: "Envoyer la réponse",
+      openAction: "Ouvrir",
+      replySentToast: "Réponse envoyée à « {{title}} »",
+    },
+  },
+  ja: {
+    backgroundTurn: {
+      supervisionTag: "@巡回監督",
+      compactionTag: "@圧縮処理",
+      cacheKeepaliveTag: "@キャッシュ維持",
+      handledInBackground: "バックグラウンドで処理済み",
+      handlingInBackground: "バックグラウンドで処理中",
+    },
+    askCard: {
+      categoryDecision: "判断が必要",
+      categoryError: "エラーで停止中",
+      categoryQuestion: "返信待ち",
+      fallbackErrorQuestion: "このセッションで問題が発生しました。続行方法を選択してください。",
+      fallbackQuestion: "このセッションは続行のためあなたの確認を待っています。",
+      optionHandledContinue: "対応済み・続行",
+      optionHandledContinueDesc: "対象セッションを停止位置から再開します",
+      optionHandledContinuePrompt: "外部要因を解消しました。タスクを続行してください。",
+      optionRetryFallbackDesc: "設定済みの予備モデルに切り替えて再試行します",
+      optionProceedRecommended: "推奨案で続行",
+      optionProceedRecommendedDesc: "現在の提案を承認してこのまま進めます",
+      optionProceedRecommendedPrompt: "推奨案のまま進めてください。",
+      optionListOptions: "まず選択肢を提示",
+      optionListOptionsDesc: "判断前に2〜3個の具体案とトレードオフを求めます",
+      optionListOptionsPrompt: "続行前に2〜3個の具体案とメリデメを提示してください。",
+      optionIgnore: "今はスキップ",
+      optionIgnoreDesc: "セッションへ指示を送らず、この通知だけを静かに閉じます",
+      customInputPlaceholder: "または自分で入力…",
+      submitAction: "回答を送信",
+      openAction: "開く",
+      replySentToast: "「{{title}}」に回答を送信しました",
+    },
+  },
+  ko: {
+    backgroundTurn: {
+      supervisionTag: "@감독순찰",
+      compactionTag: "@컨텍스트압축",
+      cacheKeepaliveTag: "@캐시유지",
+      handledInBackground: "백그라운드에서 처리됨",
+      handlingInBackground: "백그라운드에서 처리 중",
+    },
+    askCard: {
+      categoryDecision: "결정 필요",
+      categoryError: "오류로 중단됨",
+      categoryQuestion: "답변 대기 중",
+      fallbackErrorQuestion: "이 세션에서 문제가 발생했습니다. 계속할 방법을 선택하세요.",
+      fallbackQuestion: "이 세션이 진행을 위해 답변을 기다리고 있습니다.",
+      optionHandledContinue: "해결됨, 계속 진행",
+      optionHandledContinueDesc: "중단된 지점부터 대상 세션을 이어서 실행합니다",
+      optionHandledContinuePrompt: "외부 문제가 해결되었습니다. 작업을 계속 진행해 주세요.",
+      optionRetryFallbackDesc: "구성된 예비 모델로 전환해 작업을 다시 시도합니다",
+      optionProceedRecommended: "권장안으로 계속",
+      optionProceedRecommendedDesc: "현재 제안을 승인하고 바로 진행합니다",
+      optionProceedRecommendedPrompt: "권장하신 방안대로 계속 진행해 주세요.",
+      optionListOptions: "먼저 선택지 보기",
+      optionListOptionsDesc: "결정 전 2~3개 대안과 장단점을 요청합니다",
+      optionListOptionsPrompt: "계속하기 전에 2~3개의 구체적 대안과 장단점을 정리해 주세요.",
+      optionIgnore: "일단 넘기기",
+      optionIgnoreDesc: "세션에 메시지를 보내지 않고 알림만 조용히 접습니다",
+      customInputPlaceholder: "또는 직접 입력…",
+      submitAction: "답변 보내기",
+      openAction: "열기",
+      replySentToast: '"{{title}}"에 답변을 보냈습니다',
+    },
+  },
+  "pt-BR": {
+    backgroundTurn: {
+      supervisionTag: "@Supervisão",
+      compactionTag: "@Compactação",
+      cacheKeepaliveTag: "@Cache ativo",
+      handledInBackground: "Tratado em segundo plano",
+      handlingInBackground: "Tratando em segundo plano",
+    },
+    askCard: {
+      categoryDecision: "Decisão necessária",
+      categoryError: "Bloqueado por erro",
+      categoryQuestion: "Aguardando resposta",
+      fallbackErrorQuestion: "Esta sessão encontrou um problema. Escolha como continuar.",
+      fallbackQuestion: "Esta sessão aguarda sua resposta para prosseguir.",
+      optionHandledContinue: "Resolvido, continuar",
+      optionHandledContinueDesc: "Retomar a sessão de destino de onde parou",
+      optionHandledContinuePrompt: "O bloqueio foi resolvido. Por favor, continue a tarefa.",
+      optionRetryFallbackDesc: "Tentar novamente usando o modelo alternativo configurado",
+      optionProceedRecommended: "Continuar com o recomendado",
+      optionProceedRecommendedDesc: "Aprovar a abordagem sugerida e seguir em frente",
+      optionProceedRecommendedPrompt: "Prossiga com a abordagem recomendada.",
+      optionListOptions: "Listar opções primeiro",
+      optionListOptionsDesc: "Pedir 2 a 3 opções concretas com prós e contras antes de decidir",
+      optionListOptionsPrompt:
+        "Liste primeiro 2 a 3 opções concretas com prós e contras antes de continuar.",
+      optionIgnore: "Ignorar por agora",
+      optionIgnoreDesc: "Dispensar silenciosamente sem enviar mensagem à sessão",
+      customInputPlaceholder: "Ou escreva sua resposta…",
+      submitAction: "Enviar resposta",
+      openAction: "Abrir",
+      replySentToast: 'Resposta enviada para "{{title}}"',
+    },
+  },
+  ru: {
+    backgroundTurn: {
+      supervisionTag: "@Наблюдение",
+      compactionTag: "@Сжатие",
+      cacheKeepaliveTag: "@Поддержка кэша",
+      handledInBackground: "Обработано в фоне",
+      handlingInBackground: "Обрабатывается в фоне",
+    },
+    askCard: {
+      categoryDecision: "Нужно решение",
+      categoryError: "Остановлено из-за ошибки",
+      categoryQuestion: "Ожидает ответа",
+      fallbackErrorQuestion: "В этой сессии возникла проблема. Выберите дальнейшее действие.",
+      fallbackQuestion: "Эта сессия ждёт вашего ответа для продолжения.",
+      optionHandledContinue: "Исправлено, продолжить",
+      optionHandledContinueDesc: "Возобновить целевую сессию с места остановки",
+      optionHandledContinuePrompt: "Проблема устранена. Пожалуйста, продолжите задачу.",
+      optionRetryFallbackDesc: "Повторить задачу с резервной моделью",
+      optionProceedRecommended: "Продолжить по рекомендации",
+      optionProceedRecommendedDesc: "Одобрить предложенный вариант и продолжить",
+      optionProceedRecommendedPrompt: "Продолжайте по рекомендованному варианту.",
+      optionListOptions: "Сначала показать варианты",
+      optionListOptionsDesc: "Запросить 2–3 конкретных варианта с плюсами и минусами",
+      optionListOptionsPrompt:
+        "Сначала предложите 2–3 конкретных варианта с плюсами и минусами, прежде чем продолжать.",
+      optionIgnore: "Пока пропустить",
+      optionIgnoreDesc: "Тихо скрыть карточку без отправки сообщений в сессию",
+      customInputPlaceholder: "Или напишите свой ответ…",
+      submitAction: "Отправить ответ",
+      openAction: "Открыть",
+      replySentToast: "Ответ отправлен в «{{title}}»",
     },
   },
 };
@@ -842,11 +1085,20 @@ export function mergeMainChatStyleLocale(
   locale: ExtraLocaleCode,
 ): MainChatResource {
   const override = MAIN_CHAT_STYLE_LOCALE_OVERRIDES[locale];
+  const parityOverride = MAIN_CHAT_PARITY_LOCALE_OVERRIDES[locale];
   return {
     ...base,
     actions: {
       ...base.actions,
       ...override.actions,
+    },
+    backgroundTurn: {
+      ...base.backgroundTurn,
+      ...parityOverride.backgroundTurn,
+    },
+    actionBar: {
+      ...base.actionBar,
+      askCard: parityOverride.askCard,
     },
     settings: {
       ...base.settings,

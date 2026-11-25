@@ -460,11 +460,10 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       return;
     }
 
-    const replyIndex = findLastReplyIndex(body, 0, body.length);
-    const processItems = replyIndex >= 0 ? body.slice(0, replyIndex) : body;
-    const conclusionItems = replyIndex >= 0 ? body.slice(replyIndex) : [];
-
-    const tools = summarizeTurn(processItems, input.getGroupedCalls);
+    // Fold the entire background supervision / patrol / routine turn (system trigger, intermediate
+    // tool calls, and assistant summary text) behind one minimalist inline row, while NEVER hiding
+    // interactive inline cards (plans, decisions, receipts, rework, settings proposals, compaction).
+    const tools = summarizeTurn(body, input.getGroupedCalls);
     const expanded = input.expandedHostIds.has(host.id);
     const summary = summaryRow(
       host,
@@ -482,10 +481,8 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
     );
     summaryRowsByHostId.set(host.id, summary);
 
-    // Hide the system trigger bubble and intermediate process behind the lightweight gray tag,
-    // while keeping the steward's substantive conclusion directly readable in the main chat stream.
-    const revealedProcess = [host, ...(expanded ? expandCalls(processItems) : processItems)];
-    for (const item of revealedProcess) {
+    const revealedItems = [host, ...(expanded ? expandCalls(body) : body)];
+    for (const item of revealedItems) {
       if (item !== host && staysVisibleInCollapsedBackgroundTurn(item)) continue;
       hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
       if (expanded) nestedItemIds.add(item.id);
@@ -494,9 +491,8 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
     output.push(
       summary,
       ...(expanded
-        ? revealedProcess
-        : processItems.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
-      ...conclusionItems,
+        ? revealedItems
+        : body.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
     );
   };
 

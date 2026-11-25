@@ -276,13 +276,39 @@ function extractCommandFromPermissionInput(
 function extractToolDetailText(detail: unknown): string | null {
   if (!detail || typeof detail !== "object") return null;
   const record = detail as Record<string, unknown>;
-  if (typeof record.command === "string") return record.command;
-  if (typeof record.text === "string") return record.text;
-  if (typeof record.path === "string") return record.path;
-  if (record.input && typeof record.input === "object") {
-    const inputRecord = record.input as Record<string, unknown>;
-    if (typeof inputRecord.command === "string") return inputRecord.command;
-    if (typeof inputRecord.cmd === "string") return inputRecord.cmd;
+  for (const key of [
+    "command",
+    "cmd",
+    "filePath",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "text",
+  ] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  for (const nestedKey of ["input", "arguments", "args", "params"] as const) {
+    const nested = record[nestedKey];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const inputRecord = nested as Record<string, unknown>;
+      for (const key of [
+        "command",
+        "cmd",
+        "filePath",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "text",
+      ] as const) {
+        const value = inputRecord[key];
+        if (typeof value === "string" && value.trim().length > 0) return value.trim();
+      }
+    }
   }
   return null;
 }
@@ -2052,12 +2078,15 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
 
     tracker.totalCallsSinceSubstantive += 1;
-    const signature = `${toolName.toLowerCase()}:${(detailText ?? "").trim().slice(0, 80)}`;
-    if (signature === tracker.lastToolSignature) {
+    const normalizedDetail = (detailText ?? "").trim();
+    const signature = normalizedDetail
+      ? `${toolName.toLowerCase()}:${normalizedDetail.slice(0, 120)}`
+      : null;
+    if (signature && signature === tracker.lastToolSignature) {
       tracker.repeatedSignatureCount += 1;
     } else {
       tracker.lastToolSignature = signature;
-      tracker.repeatedSignatureCount = 1;
+      tracker.repeatedSignatureCount = signature ? 1 : 0;
     }
 
     const isWaitCall =

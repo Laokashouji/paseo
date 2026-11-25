@@ -544,9 +544,7 @@ describe("P0-1 & P0-2 App Unit Tests", () => {
 
     expect(folded.tail.map((i) => i.id)).toEqual([
       "turn-summary:bg_patrol_1",
-      "msg_patrol_summary",
       "turn-summary:bg_relay_1",
-      "msg_relay_reply",
     ]);
     expect(folded.summaryRowsByHostId.get("bg_patrol_1")?.backgroundMeta).toEqual({
       label: "巡检发现 1 条待处理动态",

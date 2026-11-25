@@ -32,7 +32,7 @@ import { Composer } from "@/composer";
 import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useToast } from "@/contexts/toast-context";
 import { MainChatActionBar, MainChatActionBarDrawerOverlay } from "@/main-chat/action-bar";
-import { MainChatComposerEnhancements } from "@/main-chat/composer-enhancements";
+import { useMainChatComposerToolbar } from "@/main-chat/composer-enhancements";
 import { MainChatRouteBanner, useMainChatDirectRoute } from "@/main-chat/route-banner";
 import { AgentCommandsProvider } from "@/agent-commands";
 import {
@@ -1732,13 +1732,16 @@ function ActiveAgentComposer({
 
   const mainChatDirectRoute = useMainChatDirectRoute({ serverId, agentId });
   const showMainChatComposerEnhancements = paneContext.showMainChatComposerEnhancements === true;
+  const mainChatComposerToolbar = useMainChatComposerToolbar({
+    serverId,
+    agentId,
+    enabled: showMainChatComposerEnhancements,
+  });
 
   return (
     <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
-      {showMainChatComposerEnhancements ? (
-        <MainChatComposerEnhancements serverId={serverId} agentId={agentId} />
-      ) : null}
       <MainChatActionBar serverId={serverId} agentId={agentId} drawerMode="external" />
+      {mainChatComposerToolbar.overlay}
       <MainChatRouteBanner
         target={mainChatDirectRoute.target}
         onClear={mainChatDirectRoute.clearTarget}
@@ -1756,6 +1759,7 @@ function ActiveAgentComposer({
         attachmentScopeKeys={attachmentScopeKeys}
         onOpenWorkspaceAttachment={handleOpenWorkspaceAttachment}
         onChangeAttachments={agentInputDraft.setAttachments}
+        extraAttachmentMenuItems={mainChatComposerToolbar.extraAttachmentMenuItems}
         cwd={cwd}
         clearDraft={agentInputDraft.clear}
         editingSession={editingSession}

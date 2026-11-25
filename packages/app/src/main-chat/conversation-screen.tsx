@@ -15,7 +15,6 @@ import equal from "fast-deep-equal";
 import {
   Archive,
   ArrowLeft,
-  ArrowUpRight,
   AtSign,
   CheckCircle2,
   ChevronDown,
@@ -69,9 +68,9 @@ import {
   selectConversationRecordFromStore,
   useMainChatConversationsStore,
 } from "./conversations-store";
-import { MainChatDecisionCard } from "./decision-card";
 import { EditConversationModal } from "./directions-tree";
 import { MainChatShell } from "./main-chat-shell";
+import { NeedsYouAskCard } from "./needs-you-ask-card";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 import { MainChatPlanCard } from "./plan-card";
@@ -81,7 +80,6 @@ import { useMainChatStewardRoster, useStewardAllowedServerIds } from "./use-stew
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
-const ThemedArrowUpRight = withUnistyles(ArrowUpRight);
 const ThemedAtSign = withUnistyles(AtSign);
 const ThemedCheckCircle = withUnistyles(CheckCircle2);
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -607,27 +605,18 @@ const ConversationNeedsYouRow = memo(function ConversationNeedsYouRow({
                 );
               })
             : null}
-          {item.kind === "decision" ? (
-            <MainChatDecisionCard
-              serverId={mainServerId}
-              agentId={mainAgentId}
-              decision={item.decision}
-              defaultExpanded
+          {item.kind === "decision" || item.kind === "task" ? (
+            <NeedsYouAskCard
+              item={item}
+              mainServerId={mainServerId}
+              mainAgentId={mainAgentId}
+              onOpen={handleOpen}
+              onDismiss={handleToggle}
+              onSubmitted={handleToggle}
             />
           ) : null}
           {item.kind === "plan" ? (
             <MainChatPlanCard serverId={mainServerId} agentId={mainAgentId} plan={item.plan} />
-          ) : null}
-          {item.kind === "task" && item.agentId ? (
-            <Button
-              variant="outline"
-              size="sm"
-              leftIcon={ThemedArrowUpRight}
-              onPress={handleOpen}
-              testID={`conversation-action-needs-open-${item.id}`}
-            >
-              {item.title}
-            </Button>
           ) : null}
         </View>
       ) : null}

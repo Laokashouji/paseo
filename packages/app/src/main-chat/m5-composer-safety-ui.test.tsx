@@ -43,7 +43,7 @@ import {
   extractSkillMentionSources,
 } from "./autocomplete-tasks";
 import { ChildPermissionWrapper } from "./child-permission-wrapper";
-import { MainChatComposerEnhancements } from "./composer-enhancements";
+import { MainChatComposerEnhancements, useMainChatComposerToolbar } from "./composer-enhancements";
 import {
   appendMentionTokenToText,
   buildMainChatMentionItems,
@@ -900,6 +900,29 @@ describe("M5 Composer, Approval Clarification & Standing Authorizations UI", () 
       return null;
     }
 
+    function ToolbarHarness() {
+      const { extraAttachmentMenuItems, overlay } = useMainChatComposerToolbar({
+        serverId: "srv_1",
+        agentId: "agent_main",
+        onSendMessage,
+      });
+      return (
+        <>
+          {overlay}
+          {extraAttachmentMenuItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              data-testid={item.testID ?? item.id}
+              onClick={item.onSelect}
+            >
+              {item.label}
+            </button>
+          ))}
+        </>
+      );
+    }
+
     const view = renderWithToast(
       <ComposerEditingSessionsProvider>
         <WorkspaceComposerEditingSessionsProvider workspaceKey="ws_k" tabIds={TEST_TAB_IDS}>
@@ -910,34 +933,33 @@ describe("M5 Composer, Approval Clarification & Standing Authorizations UI", () 
               agentId="agent_main"
               onSendMessage={onSendMessage}
             />
+            <ToolbarHarness />
           </ComposerEditingScope>
         </WorkspaceComposerEditingSessionsProvider>
       </ComposerEditingSessionsProvider>,
     );
 
-    expect(view.getByTestId("main-chat-composer-attach-trigger")).toBeTruthy();
+    // At rest, no legacy next-step chips or floating strip render above the dock
+    expect(view.queryByTestId("main-chat-next-step-risky_deploy")).toBeNull();
+    expect(view.queryByTestId("main-chat-composer-enhancements")).toBeNull();
 
-    fireEvent.click(view.getByTestId("main-chat-next-step-risky_deploy"));
-    expect(onSendMessage).not.toHaveBeenCalled();
+    // Consolidated (+) composer toolbar items: enqueue current draft & inject host mention token
     const draftKey = buildDraftStoreKey({ serverId: "srv_1", agentId: "agent_main" });
-    expect(useDraftStore.getState().getDraftInput(draftKey)?.text).toBe(
-      "请执行 release 脚本发布版本",
-    );
-    expect(focusSpy).toHaveBeenCalledTimes(1);
-
-    // Unified (+) attach menu: enqueue current draft into queue and inject host mention token
-    fireEvent.click(view.getByTestId("main-chat-composer-attach-trigger"));
+    useDraftStore.getState().replaceDraftText({
+      draftKey,
+      text: "请执行 release 脚本发布版本",
+    });
     fireEvent.click(view.getByTestId("main-chat-attach-queue-message"));
     expect(useMainChatQueueStore.getState().queuesByAgentId.agent_main?.[0]?.text).toBe(
       "请执行 release 脚本发布版本",
     );
     expect(useDraftStore.getState().getDraftInput(draftKey)?.text ?? "").toBe("");
 
-    fireEvent.click(view.getByTestId("main-chat-composer-attach-trigger"));
     fireEvent.click(view.getByTestId("main-chat-attach-ref-host"));
     expect(view.getByTestId("main-chat-mention-picker-host")).toBeTruthy();
     fireEvent.click(view.getByTestId("main-chat-mention-pick-host:srv_1"));
     expect(useDraftStore.getState().getDraftInput(draftKey)?.text).toContain("[@host:");
+    expect(focusSpy).toHaveBeenCalledTimes(1);
 
     // Client fallback suggestions generate safe + risky suggestions when server returns none
     const fallbackItems = resolveMainChatNextStepSuggestions({

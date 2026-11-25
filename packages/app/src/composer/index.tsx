@@ -1026,6 +1026,8 @@ interface ComposerProps {
   submitLabel?: string;
   /** Overrides the mode's default placeholder, for text only the caller can build. */
   placeholder?: string;
+  /** Optional extra items appended into the composer toolbar's `+` attachment menu (e.g. Main Chat references & queue). */
+  extraAttachmentMenuItems?: readonly AttachmentMenuItem[];
   /**
    * The host that also lays out the dock and chrome shares this session so its
    * fullscreen state and the composer's agree. Defaults to the tab's session for
@@ -1339,6 +1341,7 @@ function ComposerContentImpl({
   readOnly = false,
   submitLabel,
   placeholder,
+  extraAttachmentMenuItems,
 }: ComposerContentProps) {
   const mode = resolveComposerInputMode(inputMode);
   const { t } = useTranslation();
@@ -2436,9 +2439,11 @@ function ComposerContentImpl({
           void handlePickFile();
         },
       },
+      ...(extraAttachmentMenuItems ?? []),
     );
     return items;
   }, [
+    extraAttachmentMenuItems,
     forgePresentation,
     handlePasteImage,
     handlePickFile,

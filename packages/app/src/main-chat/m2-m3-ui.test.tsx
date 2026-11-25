@@ -1070,22 +1070,13 @@ describe("Main Chat M2 & M3 UI components", () => {
       '"count":1',
     );
 
-    // Expand Needs you inline -> @ direct route sets target and closes drawer, then reopen & answer DecisionCard!
-    useMainChatRouteStore.setState({ targetsByKey: {} });
+    // Expand Needs you inline -> structured Ask Card selects decision option and submits answer!
     fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
-    fireEvent.click(view.getByTestId("main-chat-action-direct-decision:dec_inline"));
-    expect(
-      useMainChatRouteStore.getState().targetsByKey[routeStoreKey("srv_1", "agent_main")],
-    ).toEqual({
-      targetServerId: "srv_1",
-      targetAgentId: "child_dec",
-      targetTitle: "发布渠道确认",
-    });
-    expect(view.queryByTestId("main-chat-action-panel-needsYou")).toBeNull();
-
-    fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
-    expect(view.getByTestId("main-chat-decision-card-dec_inline")).toBeTruthy();
-    fireEvent.click(view.getByTestId("main-chat-decision-option-opt_beta"));
+    expect(view.getByTestId("main-chat-needs-ask-card-decision:dec_inline")).toBeTruthy();
+    fireEvent.click(
+      view.getByTestId("main-chat-needs-ask-option-decision:dec_inline-decision-opt:opt_beta"),
+    );
+    fireEvent.click(view.getByTestId("main-chat-needs-ask-submit-decision:dec_inline"));
     await waitFor(() => {
       expect(client.answerMainChatDecision).toHaveBeenCalledWith({
         decisionId: "dec_inline",
@@ -1525,20 +1516,19 @@ describe("Main Chat M2 & M3 UI components", () => {
       expect(getOverviewMock).toHaveBeenCalledTimes(1);
     });
 
-    // Expanded body renders full question, non-duplicate summary, suggestion, and both open/direct actions.
+    // Expanded body renders structured Persona Ask Card: category kicker, question, radio options,
+    // inline custom input, submit button, and bottom-right open link.
     expect(
-      view.getByTestId("main-chat-action-needs-question-agent:srv_1:child_blocked_ui").textContent,
+      view.getByTestId("main-chat-needs-ask-question-agent:srv_1:child_blocked_ui").textContent,
     ).toContain("请确认是否同步更新《发布说明与变更文档清单》？");
     expect(
-      view.getByTestId("main-chat-action-needs-summary-agent:srv_1:child_blocked_ui").textContent,
+      view.getByTestId("main-chat-needs-ask-detail-agent:srv_1:child_blocked_ui").textContent,
     ).toContain("已完成 4 个模块修改并通过类型检查");
+    expect(view.getByTestId("main-chat-needs-ask-input-agent:srv_1:child_blocked_ui")).toBeTruthy();
     expect(
-      view.getByTestId("main-chat-action-needs-suggestion-agent:srv_1:child_blocked_ui")
-        .textContent,
-    ).toContain("查看会话并确认下一步");
-    expect(
-      view.getByTestId("main-chat-action-needs-task-direct-agent:srv_1:child_blocked_ui"),
+      view.getByTestId("main-chat-needs-ask-submit-agent:srv_1:child_blocked_ui"),
     ).toBeTruthy();
+    expect(view.getByTestId("main-chat-needs-ask-open-agent:srv_1:child_blocked_ui")).toBeTruthy();
 
     // Close and reopen drawer -> MUST silently refresh overview again (no one-shot gate).
     fireEvent.click(view.getByTestId("main-chat-action-panel-close"));

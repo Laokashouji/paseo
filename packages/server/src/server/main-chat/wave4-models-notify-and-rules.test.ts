@@ -1062,6 +1062,139 @@ describe("Wave 4 P1-6: zero-token deterministic detectors (read_without_reply, m
     expect(detectToolLoopFromCalls(pollingCalls, nowIso)).toBeNull();
   });
 
+  it("never false-triggers tool_loop on Read of different files, Bash with different commands, Grep with different patterns, or running->completed detail hydration", () => {
+    const baseMs = Date.parse("2026-11-25T05:20:00.000Z");
+    const mgr = createZeroTokenRuleWindowManager();
+
+    // 1. Reading 6 different files with large shared content header (> 800 chars) and running->completed hydration
+    const sharedHeader = "// Copyright 2026 Paseo\n".repeat(50); // > 1100 chars before filePath if content weren't stripped
+    const files = [
+      "/repo/src/a.ts",
+      "/repo/src/b.ts",
+      "/repo/src/c.ts",
+      "/repo/src/d.ts",
+      "/repo/src/e.ts",
+      "/repo/src/f.ts",
+    ];
+    for (let i = 0; i < files.length; i += 1) {
+      const running = mgr.recordToolEvent("agent_diff_reads", {
+        callId: `read_${i}`,
+        toolName: "Read",
+        detail: { type: "unknown", input: null, output: null },
+        status: "running",
+        nowMs: baseMs + i * 1000,
+      });
+      expect(running.diagnostic).toBeNull();
+
+      const completed = mgr.recordToolEvent("agent_diff_reads", {
+        callId: `read_${i}`,
+        toolName: "Read",
+        detail: {
+          type: "read",
+          filePath: files[i]!,
+          offset: 1,
+          limit: 120,
+          content: `${sharedHeader}export const file${i} = ${i};`,
+        },
+        status: "completed",
+        nowMs: baseMs + i * 1000 + 200,
+      });
+      expect(completed.diagnostic).toBeNull();
+    }
+
+    // 2. Reading different line ranges of the SAME file must NOT trigger tool_loop
+    for (let i = 0; i < 5; i += 1) {
+      const res = mgr.recordToolEvent("agent_diff_offsets", {
+        callId: `slice_${i}`,
+        toolName: "Read",
+        detail: { type: "read", filePath: "/repo/src/large.ts", offset: i * 100 + 1, limit: 100 },
+        status: "completed",
+        nowMs: baseMs + i * 1000,
+      });
+      expect(res.diagnostic).toBeNull();
+    }
+
+    // 3. Running 5 different Bash commands (with running->completed lifecycle) must NOT trigger tool_loop
+    const commands = [
+      "git status",
+      "git diff --stat",
+      "npm run typecheck",
+      "npx vitest run a.test.ts",
+      "npx vitest run b.test.ts",
+    ];
+    for (let i = 0; i < commands.length; i += 1) {
+      const running = mgr.recordToolEvent("agent_diff_bash", {
+        callId: `bash_${i}`,
+        toolName: "Bash",
+        detail: { type: "shell", command: "" },
+        status: "running",
+        nowMs: baseMs + i * 1000,
+      });
+      expect(running.diagnostic).toBeNull();
+
+      const completed = mgr.recordToolEvent("agent_diff_bash", {
+        callId: `bash_${i}`,
+        toolName: "Bash",
+        detail: { type: "shell", command: commands[i]!, output: "ok", exitCode: 0 },
+        status: "completed",
+        nowMs: baseMs + i * 1000 + 300,
+      });
+      expect(completed.diagnostic).toBeNull();
+    }
+
+    // 4. Searching 5 different patterns must NOT trigger tool_loop
+    for (let i = 0; i < 5; i += 1) {
+      const res = mgr.recordToolEvent("agent_diff_grep", {
+        callId: `grep_${i}`,
+        toolName: "Grep",
+        detail: {
+          type: "unknown",
+          input: { pattern: `symbol_${i}`, path: "packages/app" },
+          output: null,
+        },
+        status: "completed",
+        nowMs: baseMs + i * 1000,
+      });
+      expect(res.diagnostic).toBeNull();
+    }
+
+    // 5. Missing/unpopulated detail on consecutive calls must NOT match as identical-arg repeats
+    for (let i = 0; i < 5; i += 1) {
+      const res = mgr.recordToolEvent("agent_empty_detail", {
+        callId: `empty_${i}`,
+        toolName: "Read",
+        detail: { type: "unknown", input: null, output: null },
+        status: "running",
+        nowMs: baseMs + i * 500,
+      });
+      expect(res.diagnostic).toBeNull();
+    }
+
+    // 6. Genuine repeated Read of the EXACT same file + offset still triggers exact_repeat after hydration!
+    for (let i = 0; i < 4; i += 1) {
+      mgr.recordToolEvent("agent_real_repeat", {
+        callId: `real_rep_${i}`,
+        toolName: "Read",
+        detail: { type: "unknown", input: null, output: null },
+        status: "running",
+        nowMs: baseMs + i * 1000,
+      });
+      const completed = mgr.recordToolEvent("agent_real_repeat", {
+        callId: `real_rep_${i}`,
+        toolName: "Read",
+        detail: { type: "read", filePath: "/repo/src/stuck.ts", offset: 1, limit: 80 },
+        status: "completed",
+        nowMs: baseMs + i * 1000 + 200,
+      });
+      if (i < 3) expect(completed.diagnostic).toBeNull();
+      else {
+        expect(completed.diagnostic?.kind).toBe("tool_loop");
+        expect(completed.diagnostic?.pattern).toBe("exact_repeat");
+        expect(completed.diagnostic?.repeatCount).toBe(4);
+      }
+    }
+  });
+
   it("wires zero-token tool_loop and read_without_reply into supervisor with 0 model calls and strictly obeys Conservative Mode A", async () => {
     const semanticCalls: Array<{ agentTitle: string }> = [];
     const harness = makeWave4Harness(tmpDir, repoDir, {
