@@ -47,10 +47,7 @@ function resolveAgentByKey(
   return agentsByKey.get(`${serverId}:${agentId}`) ?? null;
 }
 
-function resolveBranchRootKey(
-  agent: Agent,
-  agentsByKey: ReadonlyMap<string, Agent>,
-): string {
+function resolveBranchRootKey(agent: Agent, agentsByKey: ReadonlyMap<string, Agent>): string {
   const explicitRoot = getForkRootAgentIdFromLabels(agent.labels);
   if (explicitRoot) {
     const source = getForkedFromAddressFromLabels(agent.labels, agent.serverId);
@@ -80,11 +77,7 @@ function resolveBranchRootKey(
   }
 }
 
-export function selectBranchesForAgent(
-  state: SessionStoreSnapshot,
-  params: SelectBranchesParams,
-  pendingArchiveIds: ReadonlySet<string>,
-): BranchRow[] {
+function collectBranchAgents(state: SessionStoreSnapshot, pendingArchiveIds: ReadonlySet<string>) {
   const allAgentsByKey = new Map<string, Agent>();
   const activeAgents: Agent[] = [];
 
@@ -104,6 +97,16 @@ export function selectBranchesForAgent(
       }
     }
   }
+
+  return { allAgentsByKey, activeAgents };
+}
+
+export function selectBranchesForAgent(
+  state: SessionStoreSnapshot,
+  params: SelectBranchesParams,
+  pendingArchiveIds: ReadonlySet<string>,
+): BranchRow[] {
+  const { allAgentsByKey, activeAgents } = collectBranchAgents(state, pendingArchiveIds);
 
   const currentKey = `${params.serverId}:${params.agentId}`;
   const currentAgent = allAgentsByKey.get(currentKey);

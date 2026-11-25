@@ -197,7 +197,7 @@ function ComposerTrackPillTrigger({
         {leadingIcon ? <View style={styles.segment}>{leadingIcon}</View> : null}
         {segments.map((segment, index) => (
           <View
-            key={`${segment.bucket ?? "plain"}-${index}`}
+            key={`${segment.bucket ?? "plain"}-${segment.text}`}
             style={styles.segment}
             testID={`${testID}-segment-${index}`}
           >

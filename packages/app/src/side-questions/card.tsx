@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import {
   ArrowUp,
   Check,
@@ -15,6 +15,8 @@ import {
 } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
+import { PressHighlight } from "@/components/ui/press-highlight";
+import { EditingTextInput, type EditingTextInputHandle } from "@/components/ui/text-input";
 import { MarkdownRenderer } from "@/components/markdown/renderer";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -40,7 +42,7 @@ const ThemedRotateCw = withUnistyles(RotateCw);
 const ThemedArrowUp = withUnistyles(ArrowUp);
 const ThemedGitBranch = withUnistyles(GitBranch);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
-const ThemedTextInput = withUnistyles(TextInput, (theme: Theme) => ({
+const ThemedTextInput = withUnistyles(EditingTextInput, (theme: Theme) => ({
   placeholderTextColor: theme.colors.foregroundMuted,
 }));
 
@@ -66,7 +68,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const [followUp, setFollowUp] = useState("");
   const scrollRef = useRef<ScrollView>(null);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<EditingTextInputHandle>(null);
 
   const isOpen = thread?.displayMode === "open";
   const turnCount = thread?.turns.length ?? 0;
@@ -107,6 +109,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
   const handleSendFollowUp = useCallback(() => {
     const trimmed = followUp.trim();
     if (!trimmed || hasPending) return;
+    inputRef.current?.reset();
     setFollowUp("");
     void useSideQuestionStore.getState().askQuestion({
       serverId,
@@ -228,7 +231,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
         <View style={styles.footer}>
           <ThemedTextInput
             ref={inputRef}
-            value={followUp}
+            initialValue={followUp}
             onChangeText={setFollowUp}
             onSubmitEditing={handleSendFollowUp}
             placeholder={
@@ -241,7 +244,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
             style={styles.followUpInput}
             testID="side-question-followup-input"
           />
-          <Pressable
+          <PressHighlight
             accessibilityRole="button"
             accessibilityLabel={t("sideQuestion.sendFollowUp")}
             disabled={hasPending || followUp.trim().length === 0}
@@ -253,7 +256,7 @@ export const SideQuestionCard = memo(function SideQuestionCard({
             testID="side-question-followup-send"
           >
             <ThemedArrowUp size={14} uniProps={foregroundColorMapping} />
-          </Pressable>
+          </PressHighlight>
         </View>
       </View>
     </View>
@@ -274,14 +277,11 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     if (!turn.response) return;
-    void writeMarkdownToRichClipboard(turn.response, getDefaultMarkdownClipboardEnvironment()).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1600);
-      },
-    );
+    await writeMarkdownToRichClipboard(turn.response, getDefaultMarkdownClipboardEnvironment());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
   }, [turn.response]);
 
   const handleQuote = useCallback(() => {
@@ -319,7 +319,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
             {turn.error ?? t("sideQuestion.failed")}
           </Text>
           <View style={styles.turnActions}>
-            <Pressable
+            <PressHighlight
               accessibilityRole="button"
               onPress={handleRetryPress}
               style={styles.actionChip}
@@ -327,9 +327,9 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
             >
               <ThemedRotateCw size={12} uniProps={mutedColorMapping} />
               <Text style={styles.actionChipText}>{t("common.actions.retry")}</Text>
-            </Pressable>
+            </PressHighlight>
             {onForkToBranch ? (
-              <Pressable
+              <PressHighlight
                 accessibilityRole="button"
                 onPress={handleForkPress}
                 style={styles.actionChip}
@@ -337,7 +337,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
               >
                 <ThemedGitBranch size={12} uniProps={mutedColorMapping} />
                 <Text style={styles.actionChipText}>{t("sideQuestion.askInBranch")}</Text>
-              </Pressable>
+              </PressHighlight>
             ) : null}
           </View>
         </View>
@@ -347,7 +347,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
         <View style={styles.answerBox}>
           <MarkdownRenderer text={turn.response} compact selectable />
           <View style={styles.turnActions}>
-            <Pressable
+            <PressHighlight
               accessibilityRole="button"
               onPress={handleCopy}
               style={styles.actionChip}
@@ -361,9 +361,9 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
               <Text style={styles.actionChipText}>
                 {copied ? t("message.actions.copied") : t("sideQuestion.copyAnswer")}
               </Text>
-            </Pressable>
+            </PressHighlight>
             {onQuoteToComposer ? (
-              <Pressable
+              <PressHighlight
                 accessibilityRole="button"
                 onPress={handleQuote}
                 style={styles.actionChip}
@@ -371,10 +371,10 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
               >
                 <ThemedQuote size={12} uniProps={mutedColorMapping} />
                 <Text style={styles.actionChipText}>{t("sideQuestion.quoteResult")}</Text>
-              </Pressable>
+              </PressHighlight>
             ) : null}
             {onForkToBranch ? (
-              <Pressable
+              <PressHighlight
                 accessibilityRole="button"
                 onPress={handleForkPress}
                 style={styles.actionChip}
@@ -382,7 +382,7 @@ const SideQuestionTurnView = memo(function SideQuestionTurnView({
               >
                 <ThemedGitBranch size={12} uniProps={mutedColorMapping} />
                 <Text style={styles.actionChipText}>{t("sideQuestion.continueInBranch")}</Text>
-              </Pressable>
+              </PressHighlight>
             ) : null}
           </View>
         </View>

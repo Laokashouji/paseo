@@ -65,10 +65,8 @@ export const SideQuestionPill = memo(function SideQuestionPill({
       style={bodyStyle}
       highlightStyle={composerPillStyles.bodyActive}
     >
-      {isPending ? (
-        <ComposerTrackMark bucket="running" />
-      ) : hasError ? (
-        <ComposerTrackMark bucket="failed" />
+      {isPending || hasError ? (
+        <ComposerTrackMark bucket={isPending ? "running" : "failed"} />
       ) : (
         <ThemedSparkles
           size={13}

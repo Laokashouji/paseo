@@ -487,6 +487,91 @@ function runCreateChatAgent(input: CreateChatAgentInput): Promise<SubmitOutcome>
   return submission;
 }
 
+async function createForkWorkspaceAgent(
+  input: CreateChatAgentInput,
+  nativeForkSource: NonNullable<PendingWorkspaceDraftSetup["nativeForkSource"]>,
+  initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]>,
+  workspaceNamingAttachments: AgentAttachment[],
+  clearConsumedDraft: () => void,
+): Promise<SubmitOutcome> {
+  const { serverId } = input;
+  const { text } = input.payload;
+  const { images } = initialAgent;
+  const client = input.resolveClient();
+  const { workspace } = await input.ensureWorkspace({
+    cwd: input.payload.cwd,
+    prompt: text,
+    attachments: workspaceNamingAttachments,
+    withInitialAgent: false,
+  });
+  try {
+    const { agent: forkedSnapshot } = await client.forkAgent(nativeForkSource.sourceAgentId, {
+      workspaceId: workspace.id,
+      cwd: workspace.workspaceDirectory,
+      boundaryCursor: nativeForkSource.boundaryCursor,
+      boundaryMessageId: nativeForkSource.boundaryMessageId,
+      ...(nativeForkSource.title ? { title: nativeForkSource.title } : {}),
+    });
+    const normalized = normalizeAgentSnapshot(forkedSnapshot, serverId);
+    const hydrated = applyLegacyDaemonWorkspaceOwnership({ serverId, agent: normalized });
+    getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
+    clearConsumedDraft();
+    const nonChatHistoryAttachments = initialAgent.attachments?.filter(
+      (attachment) => !(attachment.type === "text" && attachment.contextKind === "chat_history"),
+    );
+    if (text.trim() || images?.length || nonChatHistoryAttachments?.length) {
+      void client
+        .sendAgentMessage(forkedSnapshot.id, text, {
+          messageId: initialAgent.clientMessageId,
+          images,
+          attachments: nonChatHistoryAttachments?.length ? nonChatHistoryAttachments : undefined,
+        })
+        .catch((error) => {
+          console.error(
+            "[NewWorkspaceScreen] Failed to send initial prompt to forked agent:",
+            error,
+          );
+        });
+    }
+    if (input.isStillOnCreateScreen()) {
+      navigateToWorkspace({
+        serverId,
+        workspaceId: workspace.id,
+        target: { kind: "agent", agentId: forkedSnapshot.id },
+      });
+      return "navigated";
+    }
+    return "background";
+  } catch (nativeError) {
+    console.warn(
+      "[NewWorkspaceScreen] Native workspace fork failed; falling back to summary draft:",
+      nativeError,
+    );
+    const createdAgent = await client.createAgent({
+      workspaceId: workspace.id,
+      ...initialAgent,
+      config: {
+        ...initialAgent.config,
+        provider: nativeForkSource.provider,
+        cwd: workspace.workspaceDirectory,
+      },
+    });
+    const normalized = normalizeAgentSnapshot(createdAgent, serverId);
+    const hydrated = applyLegacyDaemonWorkspaceOwnership({ serverId, agent: normalized });
+    getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
+    clearConsumedDraft();
+    if (input.isStillOnCreateScreen()) {
+      navigateToWorkspace({
+        serverId,
+        workspaceId: workspace.id,
+        target: { kind: "agent", agentId: createdAgent.id },
+      });
+      return "navigated";
+    }
+    return "background";
+  }
+}
+
 async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<SubmitOutcome> {
   const { payload, composerState, ensureWorkspace, serverId, clearDraft } = input;
   const clearConsumedDraft = captureWorkspaceDraftCleanup(input);
@@ -501,101 +586,11 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
   const attachmentSubmitFormat = resolveComposerAttachmentSubmitFormat({
     supportsForgeAttachments: input.supportsForgeSearch,
   });
-  const { attachments: reviewAttachments } = splitComposerAttachmentsForSubmit(attachments, {
-    format: attachmentSubmitFormat,
-  });
-  const workspaceNamingAttachments = getWorkspaceNamingAttachments(reviewAttachments);
   const wirePayload = splitComposerAttachmentsForSubmit(attachments, {
     format: attachmentSubmitFormat,
   });
+  const workspaceNamingAttachments = getWorkspaceNamingAttachments(wirePayload.attachments);
   const images = await encodeImages(wirePayload.images);
-  const nativeForkSource = input.forkDraftSetup?.nativeForkSource ?? null;
-  if (nativeForkSource && nativeForkSource.provider === provider) {
-    const client = input.resolveClient();
-    const { workspace } = await ensureWorkspace({
-      cwd,
-      prompt: text,
-      attachments: workspaceNamingAttachments,
-      withInitialAgent: false,
-    });
-    try {
-      const { agent: forkedSnapshot } = await client.forkAgent(nativeForkSource.sourceAgentId, {
-        workspaceId: workspace.id,
-        cwd: workspace.workspaceDirectory,
-        boundaryCursor: nativeForkSource.boundaryCursor,
-        boundaryMessageId: nativeForkSource.boundaryMessageId,
-        ...(nativeForkSource.title ? { title: nativeForkSource.title } : {}),
-      });
-      const normalized = normalizeAgentSnapshot(forkedSnapshot, serverId);
-      const hydrated = applyLegacyDaemonWorkspaceOwnership({ serverId, agent: normalized });
-      getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
-      clearConsumedDraft();
-      const nonChatHistoryAttachments = wirePayload.attachments?.filter(
-        (attachment) => !(attachment.type === "text" && attachment.contextKind === "chat_history"),
-      );
-      if (text.trim() || images?.length || nonChatHistoryAttachments?.length) {
-        void client
-          .sendAgentMessage(forkedSnapshot.id, text, {
-            messageId: `${input.draftId}:initial-message`,
-            images: images?.length ? images : undefined,
-            attachments: nonChatHistoryAttachments?.length ? nonChatHistoryAttachments : undefined,
-          })
-          .catch((error) => {
-            console.error(
-              "[NewWorkspaceScreen] Failed to send initial prompt to forked agent:",
-              error,
-            );
-          });
-      }
-      if (input.isStillOnCreateScreen()) {
-        navigateToWorkspace({
-          serverId,
-          workspaceId: workspace.id,
-          target: { kind: "agent", agentId: forkedSnapshot.id },
-        });
-        return "navigated";
-      }
-      return "background";
-    } catch (nativeError) {
-      console.warn(
-        "[NewWorkspaceScreen] Native workspace fork failed; falling back to summary draft:",
-        nativeError,
-      );
-      const createdAgent = await client.createAgent({
-        workspaceId: workspace.id,
-        config: {
-          provider,
-          cwd: workspace.workspaceDirectory,
-          modeId: composerState.effectiveModeId || undefined,
-          model: composerState.effectiveModelId || undefined,
-          thinkingOptionId: composerState.effectiveThinkingOptionId || undefined,
-          providerOptions: composerState.providerOptions,
-        },
-        ...(Object.keys(composerState.metadata).length > 0
-          ? { metadata: composerState.metadata }
-          : {}),
-        initialPrompt: text,
-        clientMessageId: `${input.draftId}:initial-message`,
-        images: images?.length ? images : undefined,
-        attachments: wirePayload.attachments?.length ? wirePayload.attachments : undefined,
-      });
-      const normalized = normalizeAgentSnapshot(createdAgent, serverId);
-      const hydrated = applyLegacyDaemonWorkspaceOwnership({ serverId, agent: normalized });
-      getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
-      clearConsumedDraft();
-      if (input.isStillOnCreateScreen()) {
-        navigateToWorkspace({
-          serverId,
-          workspaceId: workspace.id,
-          target: { kind: "agent", agentId: createdAgent.id },
-        });
-        return "navigated";
-      }
-      return "background";
-    }
-  }
-  let navigated = false;
-  let outcome: SubmitOutcome = "background";
   const initialAgent: NonNullable<CreateWorkspaceRequestOptions["agent"]> = {
     config: {
       provider,
@@ -611,6 +606,18 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
     images: images?.length ? images : undefined,
     attachments: wirePayload.attachments?.length ? wirePayload.attachments : undefined,
   };
+  const nativeForkSource = input.forkDraftSetup?.nativeForkSource ?? null;
+  if (nativeForkSource && nativeForkSource.provider === provider) {
+    return createForkWorkspaceAgent(
+      input,
+      nativeForkSource,
+      initialAgent,
+      workspaceNamingAttachments,
+      clearConsumedDraft,
+    );
+  }
+  let navigated = false;
+  let outcome: SubmitOutcome = "background";
   const execute = async (): Promise<AgentSnapshotPayload> => {
     const { agent } = await ensureWorkspace({
       cwd,

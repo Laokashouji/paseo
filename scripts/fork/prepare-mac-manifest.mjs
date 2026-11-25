@@ -32,6 +32,48 @@ function loadJsYaml() {
   );
 }
 
+function collectManifestFiles(parsedManifests, version) {
+  const files = [];
+  const seenUrls = new Set();
+  for (const { filePath, doc } of parsedManifests) {
+    if (doc.version !== version) {
+      throw new Error(`${filePath}: version mismatch (${doc.version} vs ${version})`);
+    }
+    if (!Array.isArray(doc.files) || doc.files.length === 0) {
+      throw new Error(`${filePath}: missing non-empty files array`);
+    }
+    for (const entry of doc.files) {
+      if (!entry || typeof entry.url !== "string" || !entry.url) {
+        throw new Error(`${filePath}: file entry missing url`);
+      }
+      if (typeof entry.sha512 !== "string" || !entry.sha512) {
+        throw new Error(`${filePath}: file entry "${entry.url}" missing sha512`);
+      }
+      if (typeof entry.size !== "number" || !Number.isFinite(entry.size) || entry.size <= 0) {
+        throw new Error(`${filePath}: file entry "${entry.url}" has invalid size ${entry.size}`);
+      }
+      if (!seenUrls.has(entry.url)) {
+        seenUrls.add(entry.url);
+        files.push(entry);
+      }
+    }
+  }
+
+  return files;
+}
+
+function manifestVersion({ doc, filePath }, expectedVersion) {
+  const version = typeof doc.version === "string" ? doc.version.trim() : "";
+  if (!version) {
+    throw new Error(`${filePath}: missing or invalid version`);
+  }
+  if (expectedVersion && version !== expectedVersion) {
+    throw new Error(`${filePath}: version=${version}, expected ${expectedVersion}`);
+  }
+
+  return version;
+}
+
 export function assembleMacManifest({
   inputPaths,
   outputPath,
@@ -60,41 +102,8 @@ export function assembleMacManifest({
   });
 
   const primary = parsedManifests[0].doc;
-  const version = typeof primary.version === "string" ? primary.version.trim() : "";
-  if (!version) {
-    throw new Error(`${parsedManifests[0].filePath}: missing or invalid version`);
-  }
-  if (expectedVersion && version !== expectedVersion) {
-    throw new Error(
-      `${parsedManifests[0].filePath}: version=${version}, expected ${expectedVersion}`,
-    );
-  }
-
-  const files = [];
-  const seenUrls = new Set();
-  for (const { filePath, doc } of parsedManifests) {
-    if (doc.version !== version) {
-      throw new Error(`${filePath}: version mismatch (${doc.version} vs ${version})`);
-    }
-    if (!Array.isArray(doc.files) || doc.files.length === 0) {
-      throw new Error(`${filePath}: missing non-empty files array`);
-    }
-    for (const entry of doc.files) {
-      if (!entry || typeof entry.url !== "string" || !entry.url) {
-        throw new Error(`${filePath}: file entry missing url`);
-      }
-      if (typeof entry.sha512 !== "string" || !entry.sha512) {
-        throw new Error(`${filePath}: file entry "${entry.url}" missing sha512`);
-      }
-      if (typeof entry.size !== "number" || !Number.isFinite(entry.size) || entry.size <= 0) {
-        throw new Error(`${filePath}: file entry "${entry.url}" has invalid size ${entry.size}`);
-      }
-      if (!seenUrls.has(entry.url)) {
-        seenUrls.add(entry.url);
-        files.push(entry);
-      }
-    }
-  }
+  const version = manifestVersion(parsedManifests[0], expectedVersion);
+  const files = collectManifestFiles(parsedManifests, version);
 
   const merged = {
     ...primary,

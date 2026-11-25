@@ -123,6 +123,88 @@ function buildForkDraftTabTarget(
   return setup ? { kind: "draft", draftId, setup } : { kind: "draft", draftId };
 }
 
+async function openNativeForkTab(
+  client: DaemonClient,
+  serverId: string,
+  workspaceId: string,
+  request: ForkAgentRequest,
+  canFallback: boolean,
+): Promise<boolean> {
+  const { agentId, boundary, title, initialDraftText } = request;
+  try {
+    const { agent: forkedSnapshot } = await client.forkAgent(agentId, {
+      workspaceId,
+      boundaryCursor: boundary?.boundaryCursor,
+      boundaryMessageId: boundary?.boundaryMessageId,
+      ...(title?.trim() ? { title: title.trim() } : {}),
+    });
+    const normalized = normalizeAgentSnapshot(forkedSnapshot, serverId);
+    const hydrated = applyLegacyDaemonWorkspaceOwnership({
+      serverId,
+      agent: normalized,
+    });
+    getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
+    if (initialDraftText?.trim()) {
+      useDraftStore.getState().replaceDraftText({
+        draftKey: buildDraftStoreKey({ serverId, agentId: forkedSnapshot.id }),
+        text: initialDraftText,
+      });
+    }
+    navigateToWorkspace({
+      serverId,
+      workspaceId,
+      target: { kind: "agent", agentId: forkedSnapshot.id },
+    });
+    return true;
+  } catch (nativeError) {
+    if (!canFallback) {
+      throw nativeError;
+    }
+    console.warn("[useForkAgent] Native fork failed; falling back to summary draft:", nativeError);
+    return false;
+  }
+}
+
+function openForkWorkspaceDraft(
+  request: ForkAgentRequest,
+  draftId: string,
+  draftSetup: WorkspaceDraftTabSetup | undefined,
+  serverId: string,
+  canNativeFork: boolean,
+  router: ReturnType<typeof useRouter>,
+): void {
+  const { agentId, agent, boundary, title } = request;
+  const sourceDirectory =
+    agent.projectPlacement?.checkout?.cwd?.trim() || agent.cwd.trim() || undefined;
+  if (draftSetup) {
+    useWorkspaceDraftSubmissionStore.getState().setDraftSetup({
+      draftId,
+      setup: draftSetup,
+      sourceDirectory,
+      ...(canNativeFork && agent.provider
+        ? {
+            nativeForkSource: {
+              sourceAgentId: agentId,
+              provider: agent.provider,
+              boundaryCursor: boundary?.boundaryCursor,
+              boundaryMessageId: boundary?.boundaryMessageId,
+              ...(title?.trim() ? { title: title.trim() } : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  router.push(
+    buildNewWorkspaceRoute({
+      serverId,
+      sourceDirectory,
+      displayName: agent.projectPlacement?.projectName,
+      projectId: agent.projectPlacement?.projectKey,
+      draftId,
+    }),
+  );
+}
+
 /**
  * Shared fork driver behind both turn-footer fork affordances: the completed
  * turn's footer (which supplies a boundary pinned to that turn) and the
@@ -139,153 +221,89 @@ export function useForkAgent(
   const supportsAgentForkContext = useHostFeature(serverId, "agentForkContext") && !readOnly;
   const supportsAgentNativeFork = useHostFeature(serverId, "agentNativeFork") && !readOnly;
 
-  return useStableEvent(
-    async ({
-      agentId,
-      agent,
-      workspaceId,
-      target,
-      boundary,
-      isInFlight = false,
-      title,
-      initialDraftText,
-    }) => {
-      try {
-        const trimmedInitialDraft = initialDraftText?.trim() ? initialDraftText : null;
-        const canNativeFork =
-          supportsAgentNativeFork &&
-          agent.capabilities?.supportsNativeFork === true &&
-          !isInFlight;
+  return useStableEvent(async (request) => {
+    const { agentId, agent, workspaceId, target, boundary, isInFlight, initialDraftText } = request;
+    try {
+      const trimmedInitialDraft = initialDraftText?.trim() ? initialDraftText : null;
+      const canNativeFork =
+        supportsAgentNativeFork && agent.capabilities?.supportsNativeFork === true && !isInFlight;
 
-        if (!supportsAgentForkContext && !canNativeFork) {
-          toast?.error(t("message.actions.forkUnavailable"));
-          return;
-        }
-        if (!client) {
-          throw new Error(t("workspace.terminal.hostDisconnected"));
-        }
-        const draftSetup = buildForkDraftSetup(agent);
-        const prepareForkDraft = async () => {
-          if (!supportsAgentForkContext) {
-            throw new Error(t("message.actions.forkUnavailable"));
-          }
-          const draftId = generateDraftId();
-          const payload = await client.buildAgentForkContext(agentId, boundary);
-          const attachment = buildChatHistoryAttachment({
-            draftId,
-            serverId,
-            agentId,
-            payload,
-            missingAttachmentMessage: t("message.actions.forkFailed"),
-          });
-          useWorkspaceAttachmentsStore.getState().setWorkspaceAttachments({
-            scopeKey: buildDraftWorkspaceAttachmentScopeKey(draftId),
-            attachments: [attachment],
-          });
-          return draftId;
-        };
-
-        if (target === "tab") {
-          if (!workspaceId) {
-            throw new Error(t("message.actions.forkMissingWorkspace"));
-          }
-          if (canNativeFork) {
-            try {
-              const { agent: forkedSnapshot } = await client.forkAgent(agentId, {
-                workspaceId,
-                boundaryCursor: boundary?.boundaryCursor,
-                boundaryMessageId: boundary?.boundaryMessageId,
-                ...(title?.trim() ? { title: title.trim() } : {}),
-              });
-              const normalized = normalizeAgentSnapshot(forkedSnapshot, serverId);
-              const hydrated = applyLegacyDaemonWorkspaceOwnership({
-                serverId,
-                agent: normalized,
-              });
-              getHostRuntimeStore().acceptAgentSnapshot(serverId, hydrated);
-              if (trimmedInitialDraft) {
-                useDraftStore.getState().replaceDraftText({
-                  draftKey: buildDraftStoreKey({ serverId, agentId: forkedSnapshot.id }),
-                  text: trimmedInitialDraft,
-                });
-              }
-              navigateToWorkspace({
-                serverId,
-                workspaceId,
-                target: { kind: "agent", agentId: forkedSnapshot.id },
-              });
-              return;
-            } catch (nativeError) {
-              if (!supportsAgentForkContext) {
-                throw nativeError;
-              }
-              console.warn(
-                "[useForkAgent] Native fork failed; falling back to summary draft:",
-                nativeError,
-              );
-            }
-          }
-          const draftId = await prepareForkDraft();
-          if (trimmedInitialDraft) {
-            useDraftStore.getState().replaceDraftText({
-              draftKey: buildDraftStoreKey({ serverId, agentId: "", draftId }),
-              text: trimmedInitialDraft,
-            });
-          }
-          navigateToWorkspace({
-            serverId,
-            workspaceId,
-            target: buildForkDraftTabTarget(draftSetup, draftId),
-          });
-          return;
-        }
-
-        if (target === "draft_tab") {
-          if (!workspaceId) {
-            throw new Error(t("message.actions.forkMissingWorkspace"));
-          }
-          const draftId = await prepareForkDraft();
-          navigateToWorkspace({
-            serverId,
-            workspaceId,
-            target: buildForkDraftTabTarget(draftSetup, draftId),
-          });
-          return;
-        }
-
-        const draftId = await prepareForkDraft();
-        const sourceDirectory =
-          agent.projectPlacement?.checkout?.cwd?.trim() || agent.cwd.trim() || undefined;
-        if (draftSetup) {
-          useWorkspaceDraftSubmissionStore.getState().setDraftSetup({
-            draftId,
-            setup: draftSetup,
-            sourceDirectory,
-            ...(canNativeFork && agent.provider
-              ? {
-                  nativeForkSource: {
-                    sourceAgentId: agentId,
-                    provider: agent.provider,
-                    boundaryCursor: boundary?.boundaryCursor,
-                    boundaryMessageId: boundary?.boundaryMessageId,
-                    ...(title?.trim() ? { title: title.trim() } : {}),
-                  },
-                }
-              : {}),
-          });
-        }
-        router.push(
-          buildNewWorkspaceRoute({
-            serverId,
-            sourceDirectory,
-            displayName: agent.projectPlacement?.projectName,
-            projectId: agent.projectPlacement?.projectKey,
-            draftId,
-          }),
-        );
-      } catch (error) {
-        toast?.error(toErrorMessage(error) || t("message.actions.forkFailed"));
+      if (!supportsAgentForkContext && !canNativeFork) {
+        toast?.error(t("message.actions.forkUnavailable"));
+        return;
       }
-    },
-  );
+      if (!client) {
+        throw new Error(t("workspace.terminal.hostDisconnected"));
+      }
+      const draftSetup = buildForkDraftSetup(agent);
+      const prepareForkDraft = async () => {
+        if (!supportsAgentForkContext) {
+          throw new Error(t("message.actions.forkUnavailable"));
+        }
+        const draftId = generateDraftId();
+        const payload = await client.buildAgentForkContext(agentId, boundary);
+        const attachment = buildChatHistoryAttachment({
+          draftId,
+          serverId,
+          agentId,
+          payload,
+          missingAttachmentMessage: t("message.actions.forkFailed"),
+        });
+        useWorkspaceAttachmentsStore.getState().setWorkspaceAttachments({
+          scopeKey: buildDraftWorkspaceAttachmentScopeKey(draftId),
+          attachments: [attachment],
+        });
+        return draftId;
+      };
+
+      if (target === "tab") {
+        if (!workspaceId) {
+          throw new Error(t("message.actions.forkMissingWorkspace"));
+        }
+        if (
+          canNativeFork &&
+          (await openNativeForkTab(
+            client,
+            serverId,
+            workspaceId,
+            request,
+            supportsAgentForkContext,
+          ))
+        ) {
+          return;
+        }
+        const draftId = await prepareForkDraft();
+        if (trimmedInitialDraft) {
+          useDraftStore.getState().replaceDraftText({
+            draftKey: buildDraftStoreKey({ serverId, agentId: "", draftId }),
+            text: trimmedInitialDraft,
+          });
+        }
+        navigateToWorkspace({
+          serverId,
+          workspaceId,
+          target: buildForkDraftTabTarget(draftSetup, draftId),
+        });
+        return;
+      }
+
+      if (target === "draft_tab") {
+        if (!workspaceId) {
+          throw new Error(t("message.actions.forkMissingWorkspace"));
+        }
+        const draftId = await prepareForkDraft();
+        navigateToWorkspace({
+          serverId,
+          workspaceId,
+          target: buildForkDraftTabTarget(draftSetup, draftId),
+        });
+        return;
+      }
+
+      const draftId = await prepareForkDraft();
+      openForkWorkspaceDraft(request, draftId, draftSetup, serverId, canNativeFork, router);
+    } catch (error) {
+      toast?.error(toErrorMessage(error) || t("message.actions.forkFailed"));
+    }
+  });
 }

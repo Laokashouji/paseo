@@ -20,10 +20,7 @@ import {
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import type { BranchRow } from "./select";
-import {
-  buildBranchPillPresentation,
-  buildBranchRowPresentationData,
-} from "./track-presentation";
+import { buildBranchPillPresentation, buildBranchRowPresentationData } from "./track-presentation";
 
 const ThemedGitBranch = withUnistyles(GitBranch);
 const ThemedGitBranchPlus = withUnistyles(GitBranchPlus);
@@ -173,7 +170,10 @@ function BranchesTrackRow({
   const isCompact = useIsCompactFormFactor();
   const presentation = useBranchRowPresentation(row);
   const workspaceName = useSessionStore((state) => {
-    if (!row.workspaceId || (row.address.serverId === currentServerId && row.workspaceId === currentWorkspaceId)) {
+    if (
+      !row.workspaceId ||
+      (row.address.serverId === currentServerId && row.workspaceId === currentWorkspaceId)
+    ) {
       return null;
     }
     const workspace = state.sessions[row.address.serverId]?.workspaces.get(row.workspaceId);
@@ -185,9 +185,7 @@ function BranchesTrackRow({
     );
   });
   const displayLabel =
-    presentation.titleState === "loading"
-      ? t("common.states.loading")
-      : presentation.label;
+    presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
   const handlePress = useCallback(() => {
     if (!row.isCurrent) {
       onOpenBranch(row.address);
@@ -198,14 +196,9 @@ function BranchesTrackRow({
   }, [onArchiveBranch, row.address]);
   const actionsAlwaysVisible = isNative || isCompact;
 
-  const indentStyle =
-    row.depth === 1
-      ? styles.indent1
-      : row.depth === 2
-        ? styles.indent2
-        : row.depth >= 3
-          ? styles.indent3
-          : null;
+  const indentStyle = [null, styles.indent1, styles.indent2, styles.indent3][
+    Math.min(row.depth, 3)
+  ];
 
   const renderRow = useCallback(
     ({ active }: { active: boolean }) => (

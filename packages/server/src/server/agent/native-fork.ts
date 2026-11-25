@@ -56,11 +56,18 @@ export function resolveNativeForkBoundary(input: {
   }
 
   const boundarySeq = projectedRows[boundaryIndex].seqEnd;
+  return resolveTurnAnchors(input.rows, boundarySeq);
+}
+
+function resolveTurnAnchors(
+  rows: readonly AgentTimelineRow[],
+  boundarySeq: number,
+): NativeForkBoundaryResolution {
   let nextUserRow: AgentTimelineRow | null = null;
   let currentTurnUserRow: AgentTimelineRow | null = null;
   let boundaryAssistantRow: AgentTimelineRow | null = null;
 
-  for (const row of input.rows) {
+  for (const row of rows) {
     if (row.seq <= boundarySeq) {
       if (row.item.type === "user_message") {
         currentTurnUserRow = row;
@@ -75,6 +82,14 @@ export function resolveNativeForkBoundary(input: {
     }
   }
 
+  return resolveProviderBoundary(nextUserRow, currentTurnUserRow, boundaryAssistantRow);
+}
+
+function resolveProviderBoundary(
+  nextUserRow: AgentTimelineRow | null,
+  currentTurnUserRow: AgentTimelineRow | null,
+  boundaryAssistantRow: AgentTimelineRow | null,
+): NativeForkBoundaryResolution {
   if (!nextUserRow) {
     return {};
   }

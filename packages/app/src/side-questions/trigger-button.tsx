@@ -1,4 +1,4 @@
-import { memo, useCallback, type ReactElement } from "react";
+import { memo, useCallback, useMemo, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View, type PressableStateCallbackType } from "react-native";
 import { Sparkles } from "lucide-react-native";
@@ -39,6 +39,7 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
   }, [agentId, serverId]);
 
   const isOpen = thread?.displayMode === "open";
+  const accessibilityState = useMemo(() => ({ expanded: isOpen }), [isOpen]);
   const turnCount = thread?.turns.length ?? 0;
   const isPending = thread?.turns.some((turn) => turn.status === "pending") ?? false;
   const hasError = !isPending && turnCount > 0 && thread?.turns[turnCount - 1]?.status === "error";
@@ -62,15 +63,12 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
             strokeWidth={ICON_STROKE_WIDTH}
             uniProps={active ? foregroundColorMapping : mutedColorMapping}
           />
-          {isPending ? (
+          {isPending || hasError ? (
             <View style={styles.statusCorner}>
-              <ComposerTrackMark bucket="running" />
+              <ComposerTrackMark bucket={isPending ? "running" : "failed"} />
             </View>
-          ) : hasError ? (
-            <View style={styles.statusCorner}>
-              <ComposerTrackMark bucket="failed" />
-            </View>
-          ) : turnCount > 0 && !isOpen ? (
+          ) : null}
+          {!isPending && !hasError && turnCount > 0 && !isOpen ? (
             <View style={styles.savedDot} />
           ) : null}
         </View>
@@ -90,7 +88,7 @@ export const SideQuestionTriggerButton = memo(function SideQuestionTriggerButton
         style={buttonStyle}
         accessibilityRole="button"
         accessibilityLabel={t("sideQuestion.triggerTooltip")}
-        accessibilityState={{ expanded: isOpen }}
+        accessibilityState={accessibilityState}
         testID="side-question-trigger-button"
       >
         {renderContent}

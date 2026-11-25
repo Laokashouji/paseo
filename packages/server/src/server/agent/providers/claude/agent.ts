@@ -3502,6 +3502,7 @@ class ClaudeAgentSession implements AgentSession {
       }
     }
 
+    const title = input.title?.trim() || undefined;
     const targetCwd = input.targetCwd?.trim() || this.config.cwd;
     const targetProjectFolder =
       targetCwd && targetCwd !== this.config.cwd
@@ -3518,7 +3519,7 @@ class ClaudeAgentSession implements AgentSession {
       targetProjectFolder,
       sourceCwd: this.config.cwd,
       targetCwd,
-      title: input.title?.trim() || undefined,
+      title,
     });
 
     const {
@@ -3533,7 +3534,7 @@ class ClaudeAgentSession implements AgentSession {
       metadata: {
         ...persistedConfig,
         cwd: targetCwd,
-        ...(input.title?.trim() ? { title: input.title.trim() } : {}),
+        ...(title ? { title } : {}),
       },
     };
   }

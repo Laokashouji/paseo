@@ -5,12 +5,8 @@ import { STATUS_BUCKET_ORDER, type SidebarStateBucket } from "@/utils/sidebar-ag
 import type { BranchRow } from "./select";
 
 function deriveBranchStatusBucket(row: BranchRow): SidebarStateBucket {
-  const status =
-    row.turn.phase === "open"
-      ? "running"
-      : row.status === "running"
-        ? "idle"
-        : row.status;
+  if (row.turn.phase === "open") return "running";
+  const status = row.status === "running" ? "idle" : row.status;
   if (status === "error") return "failed";
   if (isAgentRunning({ status, backgroundWork: row.backgroundWork })) return "running";
   return "done";
@@ -25,7 +21,8 @@ export interface BranchRowPresentationData {
 }
 
 export function buildBranchRowPresentationData(row: BranchRow): BranchRowPresentationData {
-  const title = typeof row.title === "string" && row.title.trim().length > 0 ? row.title.trim() : null;
+  const title =
+    typeof row.title === "string" && row.title.trim().length > 0 ? row.title.trim() : null;
   return {
     key: `branch_${row.address.serverId}_${row.id}`,
     kind: "agent",
@@ -59,19 +56,15 @@ export function buildBranchPillPresentation(
     .filter((row) => !row.isCurrent)
     .map((row) => buildBranchRowPresentationData(row).statusBucket);
 
-  const activeSegments: ComposerTrackPillSegment[] = ACTIVE_STATUS_BUCKET_ORDER.flatMap(
-    (bucket) => {
+  const activeSegments: ComposerTrackPillSegment[] =
+    ACTIVE_STATUS_BUCKET_ORDER.flatMap<ComposerTrackPillSegment>((bucket) => {
       const count = siblingBuckets.filter((candidate) => candidate === bucket).length;
       if (count <= 0) return [];
-      const text =
-        bucket === "running"
-          ? t("subagents.pillLabelWorking", { count })
-          : bucket === "failed"
-            ? t("subagents.pillLabelFailed", { count })
-            : null;
-      return text ? [{ bucket, text }] : [];
-    },
-  );
+      if (bucket === "running")
+        return [{ bucket, text: t("subagents.pillLabelWorking", { count }) }];
+      if (bucket === "failed") return [{ bucket, text: t("subagents.pillLabelFailed", { count }) }];
+      return [];
+    });
 
   const segments: ComposerTrackPillSegment[] = [
     { bucket: null, text: totalLabel },

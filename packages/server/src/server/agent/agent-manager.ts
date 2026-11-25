@@ -4185,7 +4185,7 @@ export class AgentManager {
     });
 
     const storedSource = await this.registry?.get(input.sourceAgentId);
-    const sourceTitle = storedSource?.title ?? source.config.title ?? null;
+    const sourceTitle = storedSource?.title ?? source.config.title;
     const title = resolveForkAgentTitle({
       explicitTitle: input.title,
       sourceTitle,
@@ -4288,9 +4288,7 @@ export class AgentManager {
     }
 
     if (!agent.session.capabilities.supportsSideQuestion || !agent.session.askSideQuestion) {
-      throw new Error(
-        `Provider '${agent.provider}' does not support native /btw side questions`,
-      );
+      throw new Error(`Provider '${agent.provider}' does not support native /btw side questions`);
     }
 
     this.logger.info(

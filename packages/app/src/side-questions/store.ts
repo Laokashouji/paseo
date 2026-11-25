@@ -49,7 +49,9 @@ export function buildSideQuestionThreadKey(serverId: string, agentId: string): s
   return `${serverId}:${agentId}`;
 }
 
-export function buildSideQuestionForkTitle(turn: Pick<SideQuestionTurnEntry, "question">): string | undefined {
+export function buildSideQuestionForkTitle(
+  turn: Pick<SideQuestionTurnEntry, "question">,
+): string | undefined {
   const singleLine = turn.question.replace(/\s+/g, " ").trim();
   if (!singleLine) return undefined;
   return singleLine.length > 48 ? `${singleLine.slice(0, 47).trimEnd()}…` : singleLine;
@@ -87,6 +89,18 @@ function collectCompletedHistory(
     }
   }
   return history;
+}
+
+function updateTurn(
+  turns: SideQuestionTurnEntry[],
+  id: string,
+  patch: Partial<SideQuestionTurnEntry>,
+): SideQuestionTurnEntry[] {
+  const index = turns.findIndex((turn) => turn.id === id);
+  if (index < 0) return turns;
+  const next = turns.slice();
+  next[index] = { ...turns[index], ...patch };
+  return next;
 }
 
 export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) => ({
@@ -151,9 +165,11 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
     }
 
     try {
-      const result = await client.askAgentSideQuestion(agentId, trimmed, {
-        ...(history.length > 0 ? { history } : {}),
-      });
+      const result = await client.askAgentSideQuestion(
+        agentId,
+        trimmed,
+        history.length > 0 ? { history } : {},
+      );
       set((state) => {
         const thread = state.threads[key];
         if (!thread) return state;
@@ -162,17 +178,12 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
             ...state.threads,
             [key]: {
               ...thread,
-              turns: thread.turns.map((turn) =>
-                turn.id === turnId
-                  ? {
-                      ...turn,
-                      response: result.response,
-                      model: result.model ?? null,
-                      status: "done",
-                      error: null,
-                    }
-                  : turn,
-              ),
+              turns: updateTurn(thread.turns, turnId, {
+                response: result.response,
+                model: result.model ?? null,
+                status: "done",
+                error: null,
+              }),
             },
           },
         };
@@ -187,15 +198,10 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
             ...state.threads,
             [key]: {
               ...thread,
-              turns: thread.turns.map((turn) =>
-                turn.id === turnId
-                  ? {
-                      ...turn,
-                      status: "error",
-                      error: message,
-                    }
-                  : turn,
-              ),
+              turns: updateTurn(thread.turns, turnId, {
+                status: "error",
+                error: message,
+              }),
             },
           },
         };
@@ -219,15 +225,10 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
           [key]: {
             ...current,
             displayMode: "open",
-            turns: current.turns.map((turn) =>
-              turn.id === turnId
-                ? {
-                    ...turn,
-                    status: client ? "pending" : "error",
-                    error: client ? null : disconnectedMessage,
-                  }
-                : turn,
-            ),
+            turns: updateTurn(current.turns, turnId, {
+              status: client ? "pending" : "error",
+              error: client ? null : disconnectedMessage,
+            }),
           },
         },
       };
@@ -236,9 +237,11 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
     if (!client) return;
 
     try {
-      const result = await client.askAgentSideQuestion(agentId, target.question, {
-        ...(history.length > 0 ? { history } : {}),
-      });
+      const result = await client.askAgentSideQuestion(
+        agentId,
+        target.question,
+        history.length > 0 ? { history } : {},
+      );
       set((state) => {
         const current = state.threads[key];
         if (!current) return state;
@@ -247,17 +250,12 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
             ...state.threads,
             [key]: {
               ...current,
-              turns: current.turns.map((turn) =>
-                turn.id === turnId
-                  ? {
-                      ...turn,
-                      response: result.response,
-                      model: result.model ?? null,
-                      status: "done",
-                      error: null,
-                    }
-                  : turn,
-              ),
+              turns: updateTurn(current.turns, turnId, {
+                response: result.response,
+                model: result.model ?? null,
+                status: "done",
+                error: null,
+              }),
             },
           },
         };
@@ -272,15 +270,10 @@ export const useSideQuestionStore = create<SideQuestionStoreState>((set, get) =>
             ...state.threads,
             [key]: {
               ...current,
-              turns: current.turns.map((turn) =>
-                turn.id === turnId
-                  ? {
-                      ...turn,
-                      status: "error",
-                      error: message,
-                    }
-                  : turn,
-              ),
+              turns: updateTurn(current.turns, turnId, {
+                status: "error",
+                error: message,
+              }),
             },
           },
         };
