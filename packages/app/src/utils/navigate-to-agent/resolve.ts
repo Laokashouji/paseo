@@ -1,5 +1,9 @@
-import { isMainChatLabels } from "@getpaseo/protocol/main-chat";
-import { buildHostAgentDetailRoute, buildMainChatRoute } from "@/utils/host-routes";
+import { getManagedConversationId, isMainChatLabels } from "@getpaseo/protocol/main-chat";
+import {
+  buildHostAgentDetailRoute,
+  buildMainChatConversationRoute,
+  buildMainChatRoute,
+} from "@/utils/host-routes";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-workspace-store";
 
@@ -16,6 +20,7 @@ export interface NavigateToAgentInput {
 }
 
 export interface AgentNavTarget {
+  labels?: Record<string, unknown> | null;
   agentWorkspaceId: string | null | undefined;
   isMainChatAgent?: boolean;
   isMainChatWorkspace?: boolean;
@@ -33,12 +38,16 @@ export function resolveNavigateToAgent(
   deps: NavigateToAgentDeps,
 ): string {
   const navTarget = deps.readAgentNavTarget({ serverId: input.serverId, agentId: input.agentId });
+  const conversationId = getManagedConversationId(navTarget.labels ?? input.labels);
   if (
+    conversationId ||
     isMainChatLabels(input.labels) ||
     navTarget.isMainChatAgent ||
     navTarget.isMainChatWorkspace
   ) {
-    const route = buildMainChatRoute(input.serverId);
+    const route = conversationId
+      ? buildMainChatConversationRoute(conversationId, input.serverId)
+      : buildMainChatRoute(input.serverId);
     if (deps.navigateToMainChat) {
       deps.navigateToMainChat(route);
     } else {

@@ -79,7 +79,7 @@ describe("filterChatOutlinePrompts", () => {
       {
         seq: 1,
         timestamp: "2026-01-01T00:00:00.000Z",
-        preview: '<paseo-system kind="main-chat-background"> patrol',
+        preview: '<paseo-system kind="main-chat-background"> patrol</paseo-system>',
       },
       {
         seq: 2,
@@ -94,7 +94,7 @@ describe("filterChatOutlinePrompts", () => {
       {
         seq: 4,
         timestamp: "2026-01-01T00:00:03.000Z",
-        preview: "Human prompt one",
+        preview: "【系统自动补答提醒】这个文案应该怎么翻译？",
       },
       {
         seq: 5,
@@ -105,6 +105,6 @@ describe("filterChatOutlinePrompts", () => {
 
     expect(isHiddenSystemOutlinePromptPreview(prompts[0]!.preview)).toBe(true);
     expect(isHiddenSystemOutlinePromptPreview(prompts[3]!.preview)).toBe(false);
-    expect(filterChatOutlinePrompts(prompts, new Set([5]))).toEqual([prompts[3]]);
+    expect(filterChatOutlinePrompts(prompts, new Set([5]))).toEqual(prompts.slice(1, 4));
   });
 });

@@ -3,7 +3,11 @@ import type {
   FetchAgentHistoryOptions,
   FetchAgentHistoryPageInfo,
 } from "@getpaseo/client/internal/daemon-client";
-import { isFormerMainChatLabels, isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import {
+  getManagedConversationId,
+  isFormerMainChatLabels,
+  isMainChatAgent,
+} from "@getpaseo/protocol/main-chat";
 import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -82,7 +86,11 @@ type AgentHistoryCursorByServerId = Record<string, string | null>;
 function isExcludedMainChatHistoryAgent(agent: {
   labels?: Record<string, unknown> | null;
 }): boolean {
-  return isMainChatAgent(agent) || isFormerMainChatLabels(agent.labels);
+  return (
+    !!getManagedConversationId(agent.labels) ||
+    isMainChatAgent(agent) ||
+    isFormerMainChatLabels(agent.labels)
+  );
 }
 
 export async function fetchAgentHistoryPage(input: {

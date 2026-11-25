@@ -1,13 +1,15 @@
-import { getParentAddressFromLabels } from "@getpaseo/protocol/agent-labels";
+import { buildConversationActionBarModel } from "./conversation-action-bar-model";
+export {
+  filterOverviewForConversation,
+  buildConversationActionBarModel,
+} from "./conversation-action-bar-model";
 import { isAgentRunning } from "@getpaseo/protocol/agent-state-bucket";
 import {
-  MAIN_CHAT_CONVERSATION_ID_LABEL,
-  MAIN_CHAT_TASK_RECORD_ID_LABEL,
-  getMainChatTaskMetaFromLabels,
+  MAIN_CHAT_CONVERSATION_KIND_LABEL,
+  getManagedConversationId,
   isMainChatAgent,
   type MainChatConversationKind,
   type MainChatConversationRecord,
-  type MainChatOverview,
 } from "@getpaseo/protocol/main-chat";
 import { router } from "expo-router";
 import { useIsFocused } from "expo-router/react-navigation";
@@ -35,7 +37,6 @@ import { useTranslation } from "react-i18next";
 import { ScrollView, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
-import { PermissionRequestCard } from "@/agent-stream/view";
 import { StatusRing } from "@/components/status-ring";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
@@ -53,7 +54,6 @@ import {
   buildMainChatRoute,
 } from "@/utils/host-routes";
 import {
-  buildMainChatActionBarModel,
   type ActionBarBucketKey,
   type ActionBarLiveAgentSnapshot,
   type ActionBarNeedsYouItem,
@@ -62,7 +62,6 @@ import {
   type MainChatActionBarModel,
 } from "./action-bar-model";
 import { MainChatAgentHost } from "./agent-host";
-import { ChildPermissionWrapper } from "./child-permission-wrapper";
 import {
   findConversationInRecords,
   selectConversationRecordFromStore,
@@ -70,10 +69,16 @@ import {
 } from "./conversations-store";
 import { EditConversationModal } from "./directions-tree";
 import { MainChatShell } from "./main-chat-shell";
-import { NeedsYouAskCard } from "./needs-you-ask-card";
+import { NeedsYouInlineBody } from "./action-bar";
+import {
+  selectActionBarSessionSnapshot,
+  useMainChatActionBarDrawerStore,
+  needsYouDismissSignature,
+  filterDismissedRequests,
+  EMPTY_DISMISSED_NEEDS_MAP,
+} from "./action-bar-state";
 import { useOpenMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
-import { MainChatPlanCard } from "./plan-card";
 import { useMainChatRouteStore } from "./route-store";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatStewardRoster, useStewardAllowedServerIds } from "./use-steward-roster";
@@ -136,128 +141,12 @@ interface ConversationScopedSessionData {
   pendingPermissions: ActionBarPendingPermissionInput[];
 }
 
-export interface ConversationScopedOverviewResult {
-  overview: MainChatOverview | null;
-  ownedAgentIds: Set<string>;
-}
-
-/**
- * Filters a Main Chat overview down to only the tasks, plans, decisions, and triages owned by
- * a specific direction/side conversation so leader trays never mix with root Main Chat items.
- */
-export function filterOverviewForConversation(
-  overview: MainChatOverview | null,
-  conversationId: string,
-  conversationAgentId: string,
-): ConversationScopedOverviewResult {
-  const ownedAgentIds = new Set<string>();
-  if (!overview) {
-    return { overview: null, ownedAgentIds };
-  }
-
-  const ownedTasks = (overview.tasks ?? []).filter(
-    (task) => task.conversationId === conversationId || task.mainAgentId === conversationAgentId,
-  );
-  const ownedTaskIds = new Set<string>();
-  const ownedPlanIds = new Set<string>();
-
-  for (const task of ownedTasks) {
-    ownedTaskIds.add(task.id);
-    if (task.planId) ownedPlanIds.add(task.planId);
-    for (const id of task.agentIds) ownedAgentIds.add(id);
-    if (task.activeAgentId) ownedAgentIds.add(task.activeAgentId);
-  }
-
-  const ownedPlans = overview.plans.filter(
-    (plan) => plan.mainAgentId === conversationAgentId || ownedPlanIds.has(plan.id),
-  );
-  for (const plan of ownedPlans) {
-    for (const plannedTask of plan.tasks) {
-      if (plannedTask.agentId) ownedAgentIds.add(plannedTask.agentId);
-    }
-  }
-
-  const ownedDecisions = overview.decisions.filter(
-    (decision) =>
-      decision.mainAgentId === conversationAgentId ||
-      (decision.taskId !== null && ownedTaskIds.has(decision.taskId)) ||
-      (decision.agentId !== null && ownedAgentIds.has(decision.agentId)),
-  );
-
-  const ownedTriages = (overview.triages ?? []).filter((triage) =>
-    ownedAgentIds.has(triage.agentId),
-  );
-
-  return {
-    overview: {
-      ...overview,
-      plans: ownedPlans,
-      decisions: ownedDecisions,
-      tasks: ownedTasks,
-      triages: ownedTriages,
-    },
-    ownedAgentIds,
-  };
-}
-
-export interface BuildConversationActionBarModelInput {
-  serverId: string;
-  conversationId: string;
-  conversationAgentId: string;
-  overview: MainChatOverview | null;
-  liveAgents: readonly ActionBarLiveAgentSnapshot[];
-  pendingPermissions: readonly ActionBarPendingPermissionInput[];
-  hostLabelsByServerId?: Readonly<Record<string, string>>;
-  nowMs?: number;
-}
-
-/**
- * Builds the five-state deduplicated action bar model strictly scoped to one direction/side
- * conversation.
- */
-export function buildConversationActionBarModel(
-  input: BuildConversationActionBarModelInput,
-): MainChatActionBarModel {
-  const { overview: scopedOverview, ownedAgentIds } = filterOverviewForConversation(
-    input.overview,
-    input.conversationId,
-    input.conversationAgentId,
-  );
-
-  for (const agent of input.liveAgents) {
-    if (agent.managedByMainChat && agent.agentId !== input.conversationAgentId) {
-      ownedAgentIds.add(agent.agentId);
-    }
-  }
-
-  const scopedLiveAgents = input.liveAgents.filter(
-    (agent) => agent.agentId !== input.conversationAgentId && ownedAgentIds.has(agent.agentId),
-  );
-
-  const scopedPendingPermissions = input.pendingPermissions.filter(
-    (entry) =>
-      entry.permission.agentId === input.conversationAgentId ||
-      ownedAgentIds.has(entry.permission.agentId),
-  );
-
-  return buildMainChatActionBarModel({
-    serverId: input.serverId,
-    mainAgentId: input.conversationAgentId,
-    overview: scopedOverview,
-    liveAgents: scopedLiveAgents,
-    pendingPermissions: scopedPendingPermissions,
-    hostLabelsByServerId: input.hostLabelsByServerId,
-    nowMs: input.nowMs,
-  });
-}
-
-function extractTaskRecordId(labels: Record<string, string | undefined>): string | null {
-  const raw = labels[MAIN_CHAT_TASK_RECORD_ID_LABEL];
-  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
-}
-
 type HostSessionEntry = SessionStoreState["sessions"][string];
 type SessionAgentEntry = NonNullable<ReturnType<HostSessionEntry["agents"]["get"]>>;
+
+function resolveFallbackConversationKind(agent: SessionAgentEntry) {
+  return agent.labels?.[MAIN_CHAT_CONVERSATION_KIND_LABEL] === "leader" ? "leader" : "side";
+}
 
 function toResolvedSessionAgent(serverId: string, agent: SessionAgentEntry): ResolvedConversation {
   return {
@@ -265,7 +154,7 @@ function toResolvedSessionAgent(serverId: string, agent: SessionAgentEntry): Res
     agentId: agent.id,
     workspaceId: agent.workspaceId ?? "",
     title: agent.title?.trim() || agent.id,
-    kind: isMainChatAgent(agent) ? "main" : "side",
+    kind: isMainChatAgent(agent) ? "main" : resolveFallbackConversationKind(agent),
     directionSummary: null,
     archivedAt: agent.archivedAt ? agent.archivedAt.toISOString() : null,
     isRunning:
@@ -294,102 +183,17 @@ function resolveSessionAgentFallback(
   for (const [serverId, session] of Object.entries(state.sessions)) {
     const agent = session.agents.get(trimmed) ?? session.agentDetails.get(trimmed);
     if (agent) return toResolvedSessionAgent(serverId, agent);
+    for (const candidate of session.agents.values()) {
+      if (getManagedConversationId(candidate.labels) === trimmed)
+        return toResolvedSessionAgent(serverId, candidate);
+    }
   }
   return null;
 }
 
-function isOwnedByConversation(input: {
-  agent: SessionAgentEntry;
-  hostId: string;
-  serverId: string;
-  conversationId: string;
-  conversationAgentId: string;
-}): boolean {
-  const parent = getParentAddressFromLabels(input.agent.labels, input.hostId);
-  if (parent?.serverId === input.serverId && parent.agentId === input.conversationAgentId) {
-    return true;
-  }
-  const labelConvId = input.agent.labels[MAIN_CHAT_CONVERSATION_ID_LABEL];
-  return (
-    typeof labelConvId === "string" &&
-    labelConvId === input.conversationId &&
-    input.agent.id !== input.conversationAgentId
-  );
-}
-
-function buildScopedLiveAgentSnapshot(input: {
-  agent: SessionAgentEntry;
-  hostId: string;
-  serverId: string;
-  conversationId: string;
-  conversationAgentId: string;
-}): ActionBarLiveAgentSnapshot {
-  const { agent, hostId } = input;
-  const meta = getMainChatTaskMetaFromLabels(agent.labels);
-  const running = isAgentRunning({
-    status: agent.status,
-    backgroundWork: agent.backgroundWork,
-  });
-
-  return {
-    serverId: hostId,
-    agentId: agent.id,
-    workspaceId: agent.workspaceId ?? null,
-    title: agent.title?.trim() || meta?.goal || agent.id,
-    cwd: agent.cwd || null,
-    status: running && agent.status !== "error" ? "running" : agent.status,
-    turnPhase: agent.turn.phase === "open" ? "open" : "idle",
-    hasBackgroundWork: (agent.backgroundWork?.count ?? 0) > 0,
-    requiresAttention: Boolean(agent.requiresAttention),
-    attentionReason: agent.attentionReason ?? null,
-    archived: agent.archivedAt !== null,
-    background: Boolean(agent.background),
-    isMainChat: isMainChatAgent(agent),
-    managedByMainChat: isOwnedByConversation(input),
-    mode: meta?.mode ?? null,
-    taskRecordId: extractTaskRecordId(agent.labels),
-    planId: meta?.planId ?? null,
-    updatedAtMs: agent.updatedAt.getTime(),
-    lastActivityAtMs: (agent.lastActivityAt ?? agent.updatedAt).getTime(),
-  };
-}
-
-function collectHostScopedSessionData(input: {
-  hostId: string;
-  session: HostSessionEntry;
-  serverId: string;
-  conversationId: string;
-  conversationAgentId: string;
-  liveAgents: ActionBarLiveAgentSnapshot[];
-  pendingPermissions: ActionBarPendingPermissionInput[];
-}): void {
-  const { hostId, session, serverId, conversationId, conversationAgentId } = input;
-  for (const agent of session.agents.values()) {
-    input.liveAgents.push(
-      buildScopedLiveAgentSnapshot({
-        agent,
-        hostId,
-        serverId,
-        conversationId,
-        conversationAgentId,
-      }),
-    );
-  }
-  for (const perm of session.pendingPermissions.values()) {
-    const source = session.agents.get(perm.agentId) ?? session.agentDetails.get(perm.agentId);
-    input.pendingPermissions.push({
-      serverId: hostId,
-      permission: perm,
-      sourceAgentTitle: source?.title?.trim() || perm.agentId,
-      sourceAgentCwd: source?.cwd ?? null,
-    });
-  }
-}
-
 function selectConversationScopedSessionData(
-  state: SessionStoreState,
+  state: Pick<SessionStoreState, "sessions">,
   serverId: string | null,
-  conversationId: string,
   conversationAgentId: string | null,
   allowedServerIds?: ReadonlySet<string> | null,
 ): ConversationScopedSessionData {
@@ -408,23 +212,13 @@ function selectConversationScopedSessionData(
     hostSession?.agents.get(conversationAgentId) ??
     hostSession?.agentDetails.get(conversationAgentId);
 
-  const liveAgents: ActionBarLiveAgentSnapshot[] = [];
-  const pendingPermissions: ActionBarPendingPermissionInput[] = [];
-
-  for (const [hostId, session] of Object.entries(state.sessions)) {
-    if (allowedServerIds && allowedServerIds.size > 0 && !allowedServerIds.has(hostId)) {
-      continue;
-    }
-    collectHostScopedSessionData({
-      hostId,
-      session,
-      serverId,
-      conversationId,
-      conversationAgentId,
-      liveAgents,
-      pendingPermissions,
-    });
-  }
+  const { liveAgents, pendingPermissions } = selectActionBarSessionSnapshot(
+    state,
+    serverId,
+    conversationAgentId,
+    allowedServerIds,
+    "conversation",
+  );
 
   const isRunning = Boolean(
     convAgent &&
@@ -545,19 +339,13 @@ const ConversationNeedsYouRow = memo(function ConversationNeedsYouRow({
     taskId?: string | null;
   }) => void;
 }) {
-  const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
+  const dismiss = useMainChatActionBarDrawerStore((state) => state.dismissNeedsItem);
+  const handleDismiss = useCallback(
+    (entry: ActionBarNeedsYouItem) =>
+      dismiss(overviewStoreKey(mainServerId, mainAgentId), needsYouDismissSignature(entry)),
+    [dismiss, mainAgentId, mainServerId],
+  );
   const handleToggle = useCallback(() => onToggle(item.id), [item.id, onToggle]);
-  const handleOpen = useCallback(() => {
-    if (!item.agentId) return;
-    onOpenTarget({
-      serverId: item.serverId,
-      agentId: item.agentId,
-      workspaceId: item.workspaceId,
-      title: item.title,
-      taskId: item.taskId,
-    });
-  }, [item, onOpenTarget]);
-
   return (
     <View style={styles.trayRowCard} testID={`conversation-action-needs-row-${item.id}`}>
       <PressHighlight
@@ -581,43 +369,18 @@ const ConversationNeedsYouRow = memo(function ConversationNeedsYouRow({
 
       {expanded ? (
         <View style={styles.trayRowBody}>
-          {item.kind === "permission"
-            ? item.permissions.map((perm) => {
-                const permCard = (
-                  <PermissionRequestCard key={perm.key} permission={perm} client={targetClient} />
-                );
-                if (perm.agentId === mainAgentId && item.serverId === mainServerId) {
-                  return permCard;
-                }
-                return (
-                  <ChildPermissionWrapper
-                    key={perm.key}
-                    serverId={item.serverId}
-                    mainAgentId={mainAgentId}
-                    sourceAgentId={item.agentId}
-                    sourceAgentTitle={item.title}
-                    sourceAgentCwd={item.cwd}
-                    permission={perm}
-                    client={targetClient}
-                  >
-                    {permCard}
-                  </ChildPermissionWrapper>
-                );
-              })
-            : null}
-          {item.kind === "decision" || item.kind === "task" ? (
-            <NeedsYouAskCard
-              item={item}
+          {[item, ...(item.relatedRequests ?? [])].map((request) => (
+            <NeedsYouInlineBody
+              key={request.id}
+              item={request}
               mainServerId={mainServerId}
               mainAgentId={mainAgentId}
-              onOpen={handleOpen}
-              onDismiss={handleToggle}
+              isRetrying={false}
+              onOpenTarget={onOpenTarget}
+              onDismiss={handleDismiss}
               onSubmitted={handleToggle}
             />
-          ) : null}
-          {item.kind === "plan" ? (
-            <MainChatPlanCard serverId={mainServerId} agentId={mainAgentId} plan={item.plan} />
-          ) : null}
+          ))}
         </View>
       ) : null}
     </View>
@@ -1176,6 +939,19 @@ function useConversationRecordLookup(
   };
 }
 
+function useConversationDismissals(
+  resolved: ResolvedConversation | null,
+  rootMainAgentId: string | null,
+) {
+  const key = overviewStoreKey(
+    resolved?.serverId ?? "",
+    rootMainAgentId ?? resolved?.agentId ?? "",
+  );
+  return useMainChatActionBarDrawerStore(
+    (state) => state.dismissedNeedsSignaturesByKey[key] ?? EMPTY_DISMISSED_NEEDS_MAP,
+  );
+}
+
 function useResolvedConversationData(conversationId: string, routeServerId: string | null) {
   const hosts = useHosts();
   const lastWorkspace = useLastWorkspaceSelection();
@@ -1204,20 +980,16 @@ function useResolvedConversationData(conversationId: string, routeServerId: stri
   const resolvedAgentId = matchedRecordHit?.record.agentId ?? fallbackFromSession?.agentId ?? null;
   const allowedServerIds = useStewardAllowedServerIds(resolvedServerId);
 
-  const scopedSession = useStoreWithEqualityFn(
-    useSessionStore,
-    useCallback(
-      (state) =>
-        selectConversationScopedSessionData(
-          state,
-          resolvedServerId,
-          conversationId,
-          resolvedAgentId,
-          allowedServerIds,
-        ),
-      [allowedServerIds, conversationId, resolvedAgentId, resolvedServerId],
-    ),
-    equal,
+  const sessions = useSessionStore((state) => state.sessions);
+  const scopedSession = useMemo(
+    () =>
+      selectConversationScopedSessionData(
+        { sessions },
+        resolvedServerId,
+        resolvedAgentId,
+        allowedServerIds,
+      ),
+    [sessions, resolvedServerId, resolvedAgentId, allowedServerIds],
   );
 
   const client = useSessionStore((state) =>
@@ -1251,21 +1023,26 @@ function useResolvedConversationData(conversationId: string, routeServerId: stri
     [hosts],
   );
 
+  const dismissed = useConversationDismissals(resolved, rootMainAgentId);
   const actionBarModel = useMemo(
     () =>
       resolved
-        ? buildConversationActionBarModel({
-            serverId: resolved.serverId,
-            conversationId: resolved.record?.id ?? conversationId,
-            conversationAgentId: resolved.agentId,
-            overview,
-            liveAgents: scopedSession.liveAgents,
-            pendingPermissions: scopedSession.pendingPermissions,
-            hostLabelsByServerId,
-          })
+        ? filterDismissedRequests(
+            buildConversationActionBarModel({
+              serverId: resolved.serverId,
+              conversationId: resolved.record?.id ?? conversationId,
+              conversationAgentId: resolved.agentId,
+              overview,
+              liveAgents: scopedSession.liveAgents,
+              pendingPermissions: scopedSession.pendingPermissions,
+              hostLabelsByServerId,
+            }),
+            dismissed,
+          )
         : null,
     [
       conversationId,
+      dismissed,
       hostLabelsByServerId,
       overview,
       resolved,

@@ -3568,6 +3568,7 @@ export const zhCN: TranslationResources = {
       newSessionSuccessToast: "已开启新主对话并携带交接摘要",
       newSessionFailedToast: "开启新主对话失败",
     },
+    taskDrawerResize: "调整任务抽屉宽度",
     backgroundTurn: {
       running: "后台运行中",
       completed: "后台轮次",

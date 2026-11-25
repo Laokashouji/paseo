@@ -373,7 +373,14 @@ function makeSessionState(input: {
     agents,
     workspaces,
     projects,
-    pendingPermissions: new Map(),
+    pendingPermissions: new Map(
+      [...agents.values()].flatMap((agent) =>
+        agent.pendingPermissions.map((request) => {
+          const key = agent.id + ":" + request.id;
+          return [key, { key, agentId: agent.id, request }] as const;
+        }),
+      ),
+    ),
   } as unknown as SessionState;
 }
 

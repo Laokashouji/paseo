@@ -2,7 +2,7 @@ import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { ChildPermissionWrapper } from "@/main-chat/child-permission-wrapper";
 import { renderMainChatInlineToolCard } from "@/main-chat/stream-card";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
-import { MAIN_CHAT_CONVERSATION_ID_LABEL, isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { isMainChatConversationAgent, isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import {
   MessageSelectionPopoverSurface,
   useChatQuoteStore,
@@ -394,20 +394,12 @@ function useStreamQuoteAndMainChatContext(input: {
     const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
     return isMainChatAgent(current);
   });
-  const isMainChatConversation = useSessionStore((state) => {
+  const hideForkForConversation = useSessionStore((state) => {
     const session = state.sessions[serverId];
     const current = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-    if (!current) return false;
-    return (
-      isMainChatAgent(current) ||
-      typeof current.labels?.[MAIN_CHAT_CONVERSATION_ID_LABEL] === "string"
-    );
+    return current ? isMainChatConversationAgent(current) : paneHost === "main" && !workspaceId;
   });
-  const hideForkActions =
-    readOnly ||
-    isMainChatContext ||
-    isMainChatConversation ||
-    (paneHost === "main" && !workspaceId);
+  const hideForkActions = readOnly || hideForkForConversation;
   const quoteDraftKey = useMemo(
     () => buildDraftStoreKey({ serverId, agentId }),
     [agentId, serverId],

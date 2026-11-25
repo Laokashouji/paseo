@@ -11,7 +11,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { Text, View } from "react-native";
 import { StyleSheet, UnistylesRuntime, withUnistyles } from "react-native-unistyles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { page } from "vitest/browser";
+import { useChatQuoteStore } from "@/chat-quotes/store";
+import { buildDraftStoreKey } from "@/stores/draft-keys";
+import { useMainChatQueueStore } from "./queue-store";
+import { TaskDrawerFrame } from "./task-drawer-frame";
+import { usePanelStore } from "@/stores/panel-store";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { page, userEvent } from "vitest/browser";
 import { collapseTurns } from "@/agent-stream/turn-collapse/model";
 import { TurnSummaryLine } from "@/agent-stream/turn-collapse/summary-line";
 import { CHAT_COLUMN_RAIL_DATASET, ChatColumnRailSurface } from "@/chat-rail";
@@ -51,7 +57,9 @@ const SHELL_CTX_VALUE = {
   originTitle: "主对话",
 };
 
-const SCREENSHOT_DIR = "/tmp/main-chat-persona-ux-screenshots";
+const SCREENSHOT_DIR = "/tmp/paseo532-verified";
+const DRAWER_TEST_STYLE = { display: "flex", width: 1200, height: 600 };
+const CHAT_TEST_STYLE = { flex: 1 };
 const TEST_TAB_IDS = ["tab_persona_parity"];
 
 const ThemedPlus = withUnistyles(Plus);
@@ -178,7 +186,7 @@ function makeFixtureOverview(): MainChatOverview {
         phase: "blocked_user",
         summary: "",
         waitReason:
-          "网络层的测试用哪个框架？\n1. Swift Testing（推荐）— 新代码统一用 @Test，参数化测试写起来更短\n2. XCTest — 和现有的 UI 测试保持一致",
+          "**网络层**的测试用哪个框架？\n1. Swift Testing（推荐）— 新代码统一用 @Test，参数化测试写起来更短\n2. XCTest — 和现有的 UI 测试保持一致",
         suggestedAction: null,
         triageSource: "model",
         updatedAt: "2026-11-25T09:55:00.000Z",
@@ -294,9 +302,9 @@ function makeFixtureStreamItems(): StreamItem[] {
           metadata: {
             mainChatBackground: {
               foldable: true,
-              kind: "routine",
-              trigger: "routine_tick",
-              label: "夜间 CI 汇总",
+              kind: "relay",
+              trigger: "agent_notification:finished",
+              label: "网络层验证",
             },
           },
         },
@@ -633,16 +641,72 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
     host.remove();
   });
 
+  it("queues a quote-only draft through the composer plus menu", async () => {
+    await page.viewport(1440, 900);
+    const draftKey = buildDraftStoreKey({ serverId: "srv_1", agentId: "agent_main" });
+    useChatQuoteStore.getState().addQuote({ draftKey, text: "保留引用原文", role: "assistant" });
+    renderScene(<ParityMainChatScene serverId="srv_1" agentId="agent_main" />);
+    await waitForFrames();
+    await act(async () => {
+      await page.getByTestId("parity-composer-plus-trigger").click();
+    });
+    await act(async () => {
+      await page.getByTestId("main-chat-attach-queue-message").click();
+    });
+    expect(useMainChatQueueStore.getState().queuesByAgentId.agent_main?.at(-1)?.text).toContain(
+      "保留引用原文",
+    );
+    expect(useChatQuoteStore.getState().getQuotes(draftKey)).toHaveLength(0);
+    useMainChatQueueStore.getState().clearQueue("agent_main");
+  });
+
+  it("drags the left edge, saves the released width, and restores it on remount", async () => {
+    await page.viewport(1440, 900);
+    const scene = (
+      <div style={DRAWER_TEST_STYLE}>
+        <div data-testid="chat-body" style={CHAT_TEST_STYLE}>
+          主对话
+        </div>
+        <TaskDrawerFrame containerWidth={1200}>
+          <Text>任务详情</Text>
+        </TaskDrawerFrame>
+      </div>
+    );
+    renderScene(scene);
+    await waitForFrames();
+    const drawerWidth = () =>
+      page.getByTestId("main-chat-task-drawer-frame").element().getBoundingClientRect().width;
+    const before = drawerWidth();
+    await userEvent.dragAndDrop(page.getByRole("separator"), page.getByTestId("chat-body"), {
+      targetPosition: { x: 380, y: 90 },
+    });
+    await waitForFrames();
+    const after = drawerWidth();
+    expect(after).toBeGreaterThan(before + 100);
+    expect(after).toBeLessThanOrEqual(840);
+    const persisted = await AsyncStorage.getItem("panel-state");
+    expect(JSON.parse(persisted!).state.taskDrawerWidth).toBe(after);
+    renderScene(<View />);
+    await usePanelStore.persist.rehydrate();
+    renderScene(scene);
+    await waitForFrames();
+    expect(drawerWidth()).toBe(after);
+    await page.screenshot({ path: SCREENSHOT_DIR + "/05-drawer-resized.png" });
+  });
+
   it("01: wide 1440x900 light — single-line @督办巡检 fold/expand, zero redundant dock bars, <=1px alignment, and composer + menu", async () => {
     await page.viewport(1440, 900);
     renderScene(<ParityMainChatScene serverId="srv_1" agentId="agent_main" />);
     await waitForFrames();
 
-    // 1. User Q&A visible; patrol & routine entire turns collapsed to single inline row
+    // 1. User reports remain visible next to collapsed patrol and relay details.
     expect(host.querySelector('[data-testid="stream-item-user_ask_1"]')).toBeTruthy();
     expect(host.querySelector('[data-testid="stream-item-assistant_reply_1"]')).toBeTruthy();
-    expect(host.querySelector('[data-testid="stream-item-bg_patrol_reply_1"]')).toBeNull();
-    expect(host.querySelector('[data-testid="stream-item-bg_routine_reply_1"]')).toBeNull();
+    expect(host.querySelector('[data-testid="stream-item-bg_patrol_reply_1"]')).toBeTruthy();
+    expect(host.querySelector('[data-testid="stream-item-bg_routine_reply_1"]')).toBeTruthy();
+    expect(
+      host.querySelector('[data-testid="background-turn-summary-bg_routine_1"]')?.textContent,
+    ).toContain("@网络层验证");
 
     const patrolRow = host.querySelector<HTMLElement>(
       '[data-testid="background-turn-summary-bg_patrol_1"]',
@@ -688,7 +752,7 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
     });
     await waitForFrames();
     expect(patrolRow!.getAttribute("aria-expanded")).toBe("false");
-    expect(host.querySelector('[data-testid="stream-item-bg_patrol_reply_1"]')).toBeNull();
+    expect(host.querySelector('[data-testid="stream-item-bg_patrol_reply_1"]')).toBeTruthy();
   });
 
   it("02: wide 1440x900 light — Needs You structured Ask Card with radio options, inline custom input, submit, and silent dismiss", async () => {
@@ -705,7 +769,7 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
     });
     await waitForFrames();
 
-    // Expand manual session question row ("补齐网络层的单元测试") -> structured Ask Card with parsed 1/2 options
+    // Free-text requests retain their Markdown without acquiring radio options.
     const toggleFramework = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-action-needs-toggle-agent:srv_1:child_framework"]',
     )!;
@@ -718,22 +782,13 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
       '[data-testid="main-chat-needs-ask-card-agent:srv_1:child_framework"]',
     );
     expect(askCard).toBeTruthy();
-    const opt1 = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-needs-ask-option-agent:srv_1:child_framework-parsed-1"]',
-    )!;
-    expect(opt1.textContent).toContain("Swift Testing");
-    expect(opt1.textContent).toContain("推荐");
-    expect(
-      host.querySelector('[data-testid="main-chat-needs-ask-input-agent:srv_1:child_framework"]'),
-    ).toBeTruthy();
-    expect(
-      host.querySelector('[data-testid="main-chat-needs-ask-open-agent:srv_1:child_framework"]'),
-    ).toBeTruthy();
-
-    // Select option 1 visually before screenshot
-    act(() => {
-      opt1.click();
-    });
+    expect(askCard?.querySelector('[role="radio"]')).toBeNull();
+    const question = page.getByTestId("main-chat-needs-ask-question-agent:srv_1:child_framework");
+    expect(question.element().textContent).toContain("网络层");
+    expect(question.element().textContent).not.toContain("**");
+    await page
+      .getByTestId("main-chat-needs-ask-input-agent:srv_1:child_framework")
+      .fill("Swift Testing");
     await waitForFrames();
 
     const composerRect = host
@@ -764,7 +819,7 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
       path: `${SCREENSHOT_DIR}/02-wide-light-needs-you-ask-card.png`,
     });
 
-    // Submit selected option -> dispatches directly to target session!
+    // Submit the user’s own text to the session that requested input.
     const submitBtn = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-needs-ask-submit-agent:srv_1:child_framework"]',
     )!;
@@ -789,22 +844,18 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
     await waitForFrames();
 
     const ignoreOpt = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-needs-ask-option-agent:srv_1:child_build_err-dismiss"]',
+      '[data-testid="main-chat-needs-ask-dismiss-agent:srv_1:child_build_err"]',
     )!;
     act(() => {
       ignoreOpt.click();
     });
     await waitForFrames();
 
-    const submitErrBtn = host.querySelector<HTMLElement>(
-      '[data-testid="main-chat-needs-ask-submit-agent:srv_1:child_build_err"]',
-    )!;
-    act(() => {
-      submitErrBtn.click();
+    expect(await AsyncStorage.getItem("main-chat-request-dismissals")).toContain("child_build_err");
+    await act(async () => {
+      await useMainChatActionBarDrawerStore.persist.rehydrate();
     });
-    await waitForFrames();
-
-    expect(sendAgentMessageMock).toHaveBeenCalledTimes(1); // NO extra message sent!
+    expect(sendAgentMessageMock).toHaveBeenCalledTimes(1);
     expect(
       host.querySelector('[data-testid="main-chat-action-needs-item-agent:srv_1:child_build_err"]'),
     ).toBeNull();

@@ -547,6 +547,18 @@ describe("Wave 4 (P1-4 / P1-5 / P1-6) frontend panels, fallback retry, and zero-
       tasks: [managedFailedTask, readWithoutReplyTask, missingWrapUpTask],
       triages: [
         {
+          agentId: "agent_failed_1",
+          workspaceId: "ws_paseo",
+          title: managedFailedTask.title,
+          managedByMainChat: true,
+          phase: "blocked_user",
+          summary: "等待用户选择重试方式",
+          waitReason: "需要选择替代模型",
+          suggestedAction: null,
+          triageSource: "rule",
+          updatedAt: now,
+        },
+        {
           agentId: "agent_manual_err",
           workspaceId: "ws_paseo",
           title: "用户手动调试会话",

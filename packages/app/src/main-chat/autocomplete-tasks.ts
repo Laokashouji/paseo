@@ -1,4 +1,4 @@
-import { MAIN_CHAT_CONVERSATION_ID_LABEL, isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { isMainChatConversationAgent } from "@getpaseo/protocol/main-chat";
 import equal from "fast-deep-equal";
 import type { TFunction } from "i18next";
 import { useCallback, useMemo } from "react";
@@ -54,15 +54,6 @@ const EMPTY_MENTIONS_STATE: MainChatAutocompleteMentionsState = {
   isMainChatContext: false,
   sources: EMPTY_SESSION_MENTION_SOURCES,
 };
-
-function isMainChatOrDirectionAgent(
-  agent: { labels?: Record<string, string> | null } | null | undefined,
-): boolean {
-  if (!agent) return false;
-  if (isMainChatAgent(agent)) return true;
-  const conversationId = agent.labels?.[MAIN_CHAT_CONVERSATION_ID_LABEL];
-  return typeof conversationId === "string" && conversationId.trim().length > 0;
-}
 
 /**
  * Selects active child tasks when the current composer belongs to Main Chat and `@` mention
@@ -121,7 +112,7 @@ export function useMainChatAutocompleteMentions(input: {
         if (!enabled) return EMPTY_MENTIONS_STATE;
         const session = state.sessions[serverId];
         const currentAgent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-        if (!isMainChatOrDirectionAgent(currentAgent)) {
+        if (!isMainChatConversationAgent(currentAgent)) {
           return EMPTY_MENTIONS_STATE;
         }
         return {

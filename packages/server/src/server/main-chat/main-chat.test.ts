@@ -938,6 +938,35 @@ describe("main-chat service, tools, and session", () => {
     service.stop();
   });
 
+  it("includes active conversation requests in the steward overview and preserves each owner's scope", async () => {
+    const { service } = makeHarness();
+    await service.start();
+    try {
+      const main = await service.ensureMainChat();
+      const direction = await service.createConversation({ kind: "leader", title: "发布" });
+      const other = await service.createConversation({ kind: "side", title: "记录" });
+      const ask = (id: string) =>
+        service.askUserDecision(id, {
+          title: "计划确认",
+          question: "选择窗口",
+          options: [
+            { id: "a", label: "周一", leadsTo: "排入周一" },
+            { id: "b", label: "周二", leadsTo: "排入周二" },
+          ],
+        });
+      const first = await ask(direction.agentId),
+        second = await ask(other.agentId);
+      expect((await service.getOverview(main.agentId)).decisions.map((d) => d.id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
+      expect((await service.getOverview(direction.agentId)).decisions.map((d) => d.id)).toEqual([
+        first.id,
+      ]);
+    } finally {
+      service.stop();
+    }
+  });
+
   it("enforces rework round cap and routes answered decisions straight to child agent", async () => {
     const { service, agentManager } = makeHarness();
     await service.start();
@@ -1514,6 +1543,32 @@ describe("main-chat service, tools, and session", () => {
 
     expect(sentPrompts.filter((entry) => entry.agentId === manual.id)).toHaveLength(0);
     expect(sentPrompts.some((entry) => entry.agentId === ensured.agentId)).toBe(true);
+
+    // Shared directory prefixes must not accumulate the supervisor's repeated-call counter.
+    sentPrompts.length = 0;
+    (manual as unknown as { lifecycle: string }).lifecycle = "running";
+    const prefix = "/repo/" + "nested-directory/".repeat(30);
+    for (let i = 0; i < 8; i++) {
+      subscriber?.({
+        type: "agent_stream",
+        agentId: manual.id,
+        event: {
+          type: "timeline",
+          provider: "claude",
+          item: {
+            type: "tool_call",
+            callId: "distinct-read-" + i,
+            name: "Read",
+            status: "completed",
+            error: null,
+            detail: { type: "read", filePath: prefix + i + ".ts" },
+          },
+        },
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await service.triggerPatrol({ mainAgentId: ensured.agentId });
+    expect(sentPrompts.filter((entry) => entry.agentId === manual.id)).toHaveLength(0);
 
     // 4. Proactive style auto-nudges no-progress polling loops on manual patrol
     sentPrompts.length = 0;

@@ -6,6 +6,14 @@ import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { useMainChatConversationsStore } from "./conversations-store";
+import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
+import { buildMainChatActionBarModel } from "./action-bar-model";
+import {
+  selectActionBarSessionSnapshot,
+  filterDismissedRequests,
+  EMPTY_DISMISSED_NEEDS_MAP,
+  useMainChatActionBarDrawerStore,
+} from "./action-bar-state";
 import { useMainChatDrawerStore } from "./drawer-store";
 import { findMainChatAgentOnHost, selectStewardActivitySummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
@@ -73,6 +81,7 @@ export function useMainChatRosterSync(): void {
     equal,
   );
 
+  const syncedOverviewClients = useRef(new Map<string, DaemonClient>());
   const syncedSettingsClientsRef = useRef<Map<string, DaemonClient>>(new Map());
   const syncedFleetClientsRef = useRef<Map<string, DaemonClient>>(new Map());
 
@@ -95,6 +104,21 @@ export function useMainChatRosterSync(): void {
         void loadSettings(entry.serverId, client).catch(() => {
           syncedSettingsClientsRef.current.delete(entry.serverId);
         });
+      }
+
+      const main = findMainChatAgentOnHost(
+        useSessionStore.getState().sessions[entry.serverId],
+        entry.serverId,
+      );
+      if (main && typeof client.getMainChatOverview === "function") {
+        const key = overviewStoreKey(entry.serverId, main.agentId);
+        if (syncedOverviewClients.current.get(key) !== client) {
+          syncedOverviewClients.current.set(key, client);
+          void useMainChatOverviewStore
+            .getState()
+            .loadOverview(entry.serverId, main.agentId, client)
+            .catch(() => syncedOverviewClients.current.delete(key));
+        }
       }
 
       const settings = settingsByServerId[entry.serverId];
@@ -305,42 +329,51 @@ export function useMainChatStewardRoster(options?: {
     ],
   );
 
-  const activityBySteward = useStoreWithEqualityFn(
-    useSessionStore,
-    useCallback(
-      (state) => {
-        const result: Record<
-          string,
-          {
-            isMainRunning: boolean;
-            needsYouCount: number;
-            runningCount: number;
-            attentionCount: number;
-            totalActiveCount: number;
-          }
-        > = {};
-        const singleLegacyAllConnected =
-          baseRoster.length === 1 &&
-          baseRoster[0]?.fleetScope.mode === "all_connected" &&
-          !fleetHostsByServerId[baseRoster[0].serverId]?.length;
-
-        for (const item of baseRoster) {
-          const scopeSet = singleLegacyAllConnected ? null : new Set(item.managedHostIds);
-          const summary = selectStewardActivitySummary(state, item.serverId, scopeSet);
-          result[item.serverId] = {
-            isMainRunning: summary.isMainRunning,
-            needsYouCount: summary.needsYouCount,
-            runningCount: summary.runningCount,
-            attentionCount: summary.attentionCount,
-            totalActiveCount: summary.totalActiveCount,
-          };
-        }
-        return result;
-      },
-      [baseRoster, fleetHostsByServerId],
-    ),
-    equal,
+  const overviews = useMainChatOverviewStore((state) => state.overviewsByKey);
+  const dismissals = useMainChatActionBarDrawerStore(
+    (state) => state.dismissedNeedsSignaturesByKey,
   );
+  const sessions = useSessionStore((state) => state.sessions);
+  const activityBySteward = useMemo(() => {
+    const state = { sessions };
+    const result: Record<
+      string,
+      {
+        isMainRunning: boolean;
+        needsYouCount: number;
+        runningCount: number;
+        attentionCount: number;
+        totalActiveCount: number;
+      }
+    > = {};
+    const singleLegacyAllConnected =
+      baseRoster.length === 1 &&
+      baseRoster[0]?.fleetScope.mode === "all_connected" &&
+      !fleetHostsByServerId[baseRoster[0].serverId]?.length;
+
+    for (const item of baseRoster) {
+      const scopeSet = singleLegacyAllConnected ? null : new Set(item.managedHostIds);
+      const summary = selectStewardActivitySummary(state, item.serverId, scopeSet);
+      const mainAgentId = summary.existing?.agentId ?? "";
+      const key = overviewStoreKey(item.serverId, mainAgentId);
+      const snapshot = selectActionBarSessionSnapshot(state, item.serverId, mainAgentId, scopeSet);
+      const model = buildMainChatActionBarModel({
+        serverId: item.serverId,
+        mainAgentId,
+        overview: overviews[key] ?? null,
+        ...snapshot,
+      });
+      result[item.serverId] = {
+        isMainRunning: summary.isMainRunning,
+        needsYouCount: filterDismissedRequests(model, dismissals[key] ?? EMPTY_DISMISSED_NEEDS_MAP)
+          .counts.needsYou,
+        runningCount: summary.runningCount,
+        attentionCount: summary.attentionCount,
+        totalActiveCount: summary.totalActiveCount,
+      };
+    }
+    return result;
+  }, [baseRoster, fleetHostsByServerId, overviews, dismissals, sessions]);
 
   const roster = useMemo<MainChatStewardRosterItemWithActivity[]>(
     () =>

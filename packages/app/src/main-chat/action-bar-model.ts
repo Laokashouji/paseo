@@ -40,6 +40,8 @@ export interface ActionBarLiveAgentSnapshot {
   background: boolean;
   isMainChat: boolean;
   managedByMainChat: boolean;
+  parent?: { serverId: string; agentId: string } | null;
+  conversationId?: string | null;
   mode: MainChatTaskMode | null;
   taskRecordId: string | null;
   planId: string | null;
@@ -77,6 +79,7 @@ export interface ActionBarPermissionNeedsYouItem {
   reason: string | null;
   permission: PendingPermission;
   permissions: readonly PendingPermission[];
+  sources?: Readonly<Record<string, { title: string; cwd: string | null }>>;
   taskRecord: MainChatTaskRecord | null;
   updatedAtMs: number;
 }
@@ -126,6 +129,7 @@ export interface ActionBarTaskNeedsYouItem {
   summary: string | null;
   suggestedAction: string | null;
   goal: string | null;
+  requestUpdatedAt?: string;
   isFailed: boolean;
   canRetryWithFallback: boolean;
   ruleDiagnostic: MainChatRuleDiagnostic | null;
@@ -133,11 +137,31 @@ export interface ActionBarTaskNeedsYouItem {
   updatedAtMs: number;
 }
 
-export type ActionBarNeedsYouItem =
+export type ActionBarNeedsYouItem = (
   | ActionBarPermissionNeedsYouItem
   | ActionBarDecisionNeedsYouItem
   | ActionBarPlanNeedsYouItem
-  | ActionBarTaskNeedsYouItem;
+  | ActionBarTaskNeedsYouItem
+) & { relatedRequests?: ActionBarNeedsYouItem[] };
+
+export function groupNeedsYouRequests(
+  items: readonly ActionBarNeedsYouItem[],
+): ActionBarNeedsYouItem[] {
+  const groups = new Map<string, ActionBarNeedsYouItem>();
+  for (const item of items) {
+    // Plans are answered as a whole, even when their first task already has a request.
+    let owner = ["request", item.id];
+    if (item.kind !== "plan") {
+      if (item.taskId) owner = ["task", item.taskId];
+      else if (item.agentId) owner = ["agent", item.agentId];
+    }
+    const key = JSON.stringify([item.serverId, owner]);
+    const group = groups.get(key);
+    if (!group) groups.set(key, { ...item, relatedRequests: [] });
+    else group.relatedRequests!.push(item);
+  }
+  return Array.from(groups.values());
+}
 
 export interface ActionBarTaskItem {
   id: string;
@@ -212,7 +236,7 @@ function parseTimestampMs(iso: string | null | undefined, fallbackMs = 0): numbe
   return Number.isNaN(parsed) ? fallbackMs : parsed;
 }
 
-function agentScopeKey(serverId: string, agentId: string): string {
+export function agentScopeKey(serverId: string, agentId: string): string {
   return `${serverId}:${agentId}`;
 }
 
@@ -257,14 +281,11 @@ function dedupePendingPermissions(
   inputs: readonly ActionBarPendingPermissionInput[],
 ): ActionBarPendingPermissionInput[] {
   const seenRequestKeys = new Set<string>();
-  const seenPermKeys = new Set<string>();
   const result: ActionBarPendingPermissionInput[] = [];
   for (const entry of inputs) {
     const requestKey = `${entry.serverId}:${entry.permission.agentId}:${entry.permission.request.id}`;
-    const permKey = `${entry.serverId}:${entry.permission.key}`;
-    if (seenRequestKeys.has(requestKey) || seenPermKeys.has(permKey)) continue;
+    if (seenRequestKeys.has(requestKey)) continue;
     seenRequestKeys.add(requestKey);
-    seenPermKeys.add(permKey);
     result.push(entry);
   }
   return result;
@@ -285,15 +306,14 @@ interface ActionBarBuildContext {
   readonly plans: readonly MainChatPlanRecord[];
   readonly decisions: readonly MainChatDecisionRecord[];
   readonly liveAgentByKey: Map<string, ActionBarLiveAgentSnapshot>;
-  readonly liveAgentById: Map<string, ActionBarLiveAgentSnapshot>;
-  readonly triageByAgentId: Map<string, MainChatSessionTriage>;
+  readonly triageByAgentKey: Map<string, MainChatSessionTriage>;
   readonly taskById: Map<string, MainChatTaskRecord>;
   readonly taskByAgentId: Map<string, MainChatTaskRecord>;
   readonly awaitingReviewAgentIds: Set<string>;
   readonly parkedAgentIds: Set<string>;
   readonly terminalExcludedAgentIds: Set<string>;
   readonly claimedAgentKeys: Set<string>;
-  readonly claimedAgentIds: Set<string>;
+  readonly supervisorHeldAgentKeys: Set<string>;
   readonly claimedTaskIds: Set<string>;
   readonly claimedDecisionIds: Set<string>;
   readonly claimedPlanIds: Set<string>;
@@ -313,17 +333,13 @@ function createActionBarBuildContext(input: BuildActionBarModelInput): ActionBar
   const triages = input.overview?.triages ?? [];
 
   const liveAgentByKey = new Map<string, ActionBarLiveAgentSnapshot>();
-  const liveAgentById = new Map<string, ActionBarLiveAgentSnapshot>();
   for (const agent of input.liveAgents) {
     liveAgentByKey.set(agentScopeKey(agent.serverId, agent.agentId), agent);
-    if (!liveAgentById.has(agent.agentId) || agent.serverId === input.serverId) {
-      liveAgentById.set(agent.agentId, agent);
-    }
   }
 
-  const triageByAgentId = new Map<string, MainChatSessionTriage>();
+  const triageByAgentKey = new Map<string, MainChatSessionTriage>();
   for (const triage of triages) {
-    triageByAgentId.set(triage.agentId, triage);
+    triageByAgentKey.set(agentScopeKey(input.serverId, triage.agentId), triage);
   }
 
   const taskById = new Map<string, MainChatTaskRecord>();
@@ -334,7 +350,7 @@ function createActionBarBuildContext(input: BuildActionBarModelInput): ActionBar
 
   for (const task of tasks) {
     taskById.set(task.id, task);
-    indexTaskAgents(task, {
+    indexTaskAgents(task, resolveTaskServerId(task, input.serverId), {
       taskByAgentId,
       awaitingReviewAgentIds,
       parkedAgentIds,
@@ -349,15 +365,14 @@ function createActionBarBuildContext(input: BuildActionBarModelInput): ActionBar
     plans,
     decisions,
     liveAgentByKey,
-    liveAgentById,
-    triageByAgentId,
+    triageByAgentKey,
     taskById,
     taskByAgentId,
     awaitingReviewAgentIds,
     parkedAgentIds,
     terminalExcludedAgentIds,
     claimedAgentKeys: new Set<string>(),
-    claimedAgentIds: new Set<string>(),
+    supervisorHeldAgentKeys: new Set<string>(),
     claimedTaskIds: new Set<string>(),
     claimedDecisionIds: new Set<string>(),
     claimedPlanIds: new Set<string>(),
@@ -372,6 +387,7 @@ function createActionBarBuildContext(input: BuildActionBarModelInput): ActionBar
 
 function indexTaskAgents(
   task: MainChatTaskRecord,
+  serverId: string,
   maps: {
     taskByAgentId: Map<string, MainChatTaskRecord>;
     awaitingReviewAgentIds: Set<string>;
@@ -381,16 +397,17 @@ function indexTaskAgents(
 ): void {
   const isTerminal = task.status === "cancelled" || Boolean(task.supersededByTaskId);
   for (const agentId of resolveAllTaskAgentIds(task)) {
-    const existing = maps.taskByAgentId.get(agentId);
+    const key = agentScopeKey(serverId, agentId);
+    const existing = maps.taskByAgentId.get(key);
     if (!existing || existing.supersededByTaskId || existing.status === "completed") {
-      maps.taskByAgentId.set(agentId, task);
+      maps.taskByAgentId.set(key, task);
     }
     if (task.status === "awaiting_review") {
-      maps.awaitingReviewAgentIds.add(agentId);
+      maps.awaitingReviewAgentIds.add(key);
     } else if (task.status === "parked") {
-      maps.parkedAgentIds.add(agentId);
+      maps.parkedAgentIds.add(key);
     } else if (isTerminal) {
-      maps.terminalExcludedAgentIds.add(agentId);
+      maps.terminalExcludedAgentIds.add(key);
     }
   }
 }
@@ -402,7 +419,6 @@ function claimAgent(
 ): void {
   if (!agentId) return;
   ctx.claimedAgentKeys.add(agentScopeKey(serverId, agentId));
-  ctx.claimedAgentIds.add(agentId);
 }
 
 function isAgentClaimed(
@@ -411,9 +427,7 @@ function isAgentClaimed(
   agentId: string | null | undefined,
 ): boolean {
   if (!agentId) return false;
-  return (
-    ctx.claimedAgentKeys.has(agentScopeKey(serverId, agentId)) || ctx.claimedAgentIds.has(agentId)
-  );
+  return ctx.claimedAgentKeys.has(agentScopeKey(serverId, agentId));
 }
 
 function claimTask(ctx: ActionBarBuildContext, task: MainChatTaskRecord | null | undefined): void {
@@ -431,12 +445,13 @@ function lookupLiveAgent(
   agentId: string | null | undefined,
 ): ActionBarLiveAgentSnapshot | undefined {
   if (!agentId) return undefined;
-  return ctx.liveAgentByKey.get(agentScopeKey(serverId, agentId)) ?? ctx.liveAgentById.get(agentId);
+  return ctx.liveAgentByKey.get(agentScopeKey(serverId, agentId));
 }
 
 function resolveLinkedTaskForAgent(
   ctx: ActionBarBuildContext,
   agentId: string | null | undefined,
+  serverId: string,
   explicitTaskId?: string | null,
 ): MainChatTaskRecord | null {
   if (explicitTaskId) {
@@ -444,12 +459,12 @@ function resolveLinkedTaskForAgent(
     if (byId) return byId;
   }
   if (!agentId) return null;
-  const live = ctx.liveAgentById.get(agentId);
+  const live = lookupLiveAgent(ctx, serverId, agentId);
   if (live?.taskRecordId) {
     const byRecord = ctx.taskById.get(live.taskRecordId);
     if (byRecord) return byRecord;
   }
-  return ctx.taskByAgentId.get(agentId) ?? null;
+  return ctx.taskByAgentId.get(agentScopeKey(serverId, agentId)) ?? null;
 }
 
 function resolveTaskActivityMs(
@@ -478,7 +493,9 @@ function buildTaskItemBase(
   },
 ): ActionBarTaskItem {
   const dag = deriveTaskDagSummary(task, ctx.tasks);
-  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  const triage = primaryAgentId
+    ? ctx.triageByAgentKey.get(agentScopeKey(srvId, primaryAgentId))
+    : undefined;
   return {
     id: `task:${task.id}`,
     serverId: srvId,
@@ -514,7 +531,9 @@ function collectAwaitingReviewTasks(ctx: ActionBarBuildContext): void {
     const primaryAgentId = resolveTaskPrimaryAgentId(task);
     if (isAgentClaimed(ctx, srvId, primaryAgentId)) continue;
     const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
-    const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+    const triage = primaryAgentId
+      ? ctx.triageByAgentKey.get(agentScopeKey(srvId, primaryAgentId))
+      : undefined;
     ctx.awaitingReview.push(
       buildTaskItemBase(ctx, task, srvId, primaryAgentId, live, {
         summary: task.latestReceipt?.summary ?? triage?.summary ?? task.brief.goal ?? null,
@@ -530,6 +549,11 @@ function collectAwaitingReviewTasks(ctx: ActionBarBuildContext): void {
 }
 
 function collectPermissionNeedsYou(ctx: ActionBarBuildContext): void {
+  const heldApprovals = new Set(
+    (ctx.input.overview?.supervisorHeldPermissions ?? []).map((entry) =>
+      JSON.stringify([entry.serverId ?? ctx.input.serverId, entry.agentId, entry.requestId]),
+    ),
+  );
   const dedupedPerms = dedupePendingPermissions(ctx.input.pendingPermissions);
   const permsByAgentKey = new Map<
     string,
@@ -537,15 +561,20 @@ function collectPermissionNeedsYou(ctx: ActionBarBuildContext): void {
   >();
   for (const entry of dedupedPerms) {
     const permAgentId = entry.permission.agentId;
+    if (
+      heldApprovals.has(JSON.stringify([entry.serverId, permAgentId, entry.permission.request.id]))
+    ) {
+      ctx.supervisorHeldAgentKeys.add(agentScopeKey(entry.serverId, permAgentId));
+      continue;
+    }
     const live = lookupLiveAgent(ctx, entry.serverId, permAgentId);
     if (live && (live.archived || live.background) && permAgentId !== ctx.input.mainAgentId) {
       continue;
     }
-    const linkedTask = resolveLinkedTaskForAgent(ctx, permAgentId);
-    if (linkedTask?.status === "awaiting_review" || ctx.awaitingReviewAgentIds.has(permAgentId)) {
-      continue;
-    }
-    const key = agentScopeKey(entry.serverId, permAgentId);
+    const linkedTask = resolveLinkedTaskForAgent(ctx, permAgentId, entry.serverId);
+    const key = linkedTask
+      ? JSON.stringify([entry.serverId, "task", linkedTask.id])
+      : agentScopeKey(entry.serverId, permAgentId);
     const group = permsByAgentKey.get(key);
     if (group) {
       group.entries.push(entry);
@@ -588,11 +617,9 @@ function pushPermissionGroup(
   ctx: ActionBarBuildContext,
   group: { serverId: string; agentId: string; entries: ActionBarPendingPermissionInput[] },
 ): void {
-  if (isAgentClaimed(ctx, group.serverId, group.agentId)) return;
   const first = group.entries[0];
   if (!first) return;
-  const linkedTask = resolveLinkedTaskForAgent(ctx, group.agentId);
-  if (linkedTask && ctx.claimedTaskIds.has(linkedTask.id)) return;
+  const linkedTask = resolveLinkedTaskForAgent(ctx, group.agentId, group.serverId);
   const live = lookupLiveAgent(ctx, group.serverId, group.agentId);
   const permissions = group.entries.map((entry) => entry.permission);
   const req = first.permission.request;
@@ -611,6 +638,15 @@ function pushPermissionGroup(
     reason: firstNonEmptyText(req.title, req.description, req.name),
     permission: permissions[0]!,
     permissions,
+    sources: Object.fromEntries(
+      group.entries.map((entry) => [
+        entry.permission.agentId,
+        {
+          title: entry.sourceAgentTitle ?? entry.permission.agentId,
+          cwd: entry.sourceAgentCwd ?? null,
+        },
+      ]),
+    ),
     taskRecord: linkedTask,
     updatedAtMs: Math.max(live?.updatedAtMs ?? 0, ctx.nowMs),
   });
@@ -621,16 +657,17 @@ function pushPermissionGroup(
 function collectDecisionNeedsYou(ctx: ActionBarBuildContext): void {
   for (const decision of ctx.decisions) {
     if (decision.answeredAt || ctx.claimedDecisionIds.has(decision.id)) continue;
-    const linkedTask = resolveLinkedTaskForAgent(ctx, decision.agentId, decision.taskId);
-    if (linkedTask?.status === "awaiting_review") continue;
+    const linkedTask = resolveLinkedTaskForAgent(
+      ctx,
+      decision.agentId,
+      ctx.input.serverId,
+      decision.taskId,
+    );
     const srvId = linkedTask
       ? resolveTaskServerId(linkedTask, ctx.input.serverId)
       : ctx.input.serverId;
-    if (isAgentClaimed(ctx, srvId, decision.agentId)) continue;
-    if (linkedTask && ctx.claimedTaskIds.has(linkedTask.id)) continue;
     const live = lookupLiveAgent(ctx, srvId, decision.agentId);
-    // Drop stale open decisions immediately once the target session is archived or running again.
-    if (live?.archived || (live && isLiveAgentRunning(live))) continue;
+    if (live?.archived) continue;
 
     ctx.needsYou.push({
       kind: "decision",
@@ -698,7 +735,9 @@ function buildTaskNeedsYouRecord(
   primaryAgentId: string | null,
   live: ActionBarLiveAgentSnapshot | undefined,
 ): ActionBarTaskNeedsYouItem {
-  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  const triage = primaryAgentId
+    ? ctx.triageByAgentKey.get(agentScopeKey(srvId, primaryAgentId))
+    : undefined;
   const isFailed = task.status === "failed" || live?.status === "error";
   const ruleDiagnostic = triage?.ruleDiagnostic ?? task.lastRuleDiagnostic ?? null;
   return {
@@ -722,6 +761,7 @@ function buildTaskNeedsYouRecord(
     summary: firstNonEmptyText(triage?.summary),
     suggestedAction: firstNonEmptyText(triage?.suggestedAction),
     goal: firstNonEmptyText(task.brief.goal),
+    requestUpdatedAt: triage?.updatedAt,
     isFailed,
     canRetryWithFallback: canRetryManagedFailedTask(task, isFailed),
     ruleDiagnostic,
@@ -733,12 +773,24 @@ function buildTaskNeedsYouRecord(
 function collectTaskNeedsYou(ctx: ActionBarBuildContext): void {
   for (const task of ctx.tasks) {
     if (task.supersededByTaskId || ctx.claimedTaskIds.has(task.id)) continue;
-    if (task.status !== "needs_you" && task.status !== "failed") continue;
     const srvId = resolveTaskServerId(task, ctx.input.serverId);
     const primaryAgentId = resolveTaskPrimaryAgentId(task);
+    if (
+      task.status !== "needs_you" &&
+      !(
+        task.status === "failed" &&
+        ctx.triageByAgentKey.get(agentScopeKey(srvId, primaryAgentId ?? ""))?.phase ===
+          "blocked_user"
+      )
+    )
+      continue;
     if (isAgentClaimed(ctx, srvId, primaryAgentId)) continue;
     const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
-    if (isLiveAgentResumedWithoutBlock(live)) continue;
+    if (
+      isLiveAgentResumedWithoutBlock(live) ||
+      (primaryAgentId && ctx.supervisorHeldAgentKeys.has(agentScopeKey(srvId, primaryAgentId)))
+    )
+      continue;
 
     ctx.needsYou.push(buildTaskNeedsYouRecord(ctx, task, srvId, primaryAgentId, live));
     claimTask(ctx, task);
@@ -751,9 +803,9 @@ function isLiveAgentExcludedFromNeedsYou(
   linkedTask: MainChatTaskRecord | null,
 ): boolean {
   if (
-    ctx.awaitingReviewAgentIds.has(agent.agentId) ||
-    ctx.parkedAgentIds.has(agent.agentId) ||
-    ctx.terminalExcludedAgentIds.has(agent.agentId)
+    ctx.awaitingReviewAgentIds.has(agentScopeKey(agent.serverId, agent.agentId)) ||
+    ctx.parkedAgentIds.has(agentScopeKey(agent.serverId, agent.agentId)) ||
+    ctx.terminalExcludedAgentIds.has(agentScopeKey(agent.serverId, agent.agentId))
   ) {
     return true;
   }
@@ -771,7 +823,7 @@ function isLiveAgentBlockedForUser(
   agent: ActionBarLiveAgentSnapshot,
   triage: MainChatSessionTriage | undefined,
 ): boolean {
-  if (agent.attentionReason === "permission" || agent.status === "error") {
+  if (agent.attentionReason === "permission") {
     return true;
   }
   // Ignore stale blocked_user triage once the session is actively running again.
@@ -807,6 +859,7 @@ function buildLiveAgentNeedsYouRecord(
     summary: firstNonEmptyText(triage?.summary),
     suggestedAction: firstNonEmptyText(triage?.suggestedAction),
     goal: firstNonEmptyText(linkedTask?.brief.goal),
+    requestUpdatedAt: triage?.updatedAt,
     isFailed,
     canRetryWithFallback: canRetryManagedFailedTask(linkedTask, isFailed),
     ruleDiagnostic,
@@ -819,10 +872,14 @@ function collectLiveAgentNeedsYou(ctx: ActionBarBuildContext): void {
   for (const agent of ctx.input.liveAgents) {
     if (agent.archived || agent.background || agent.isMainChat) continue;
     if (isAgentClaimed(ctx, agent.serverId, agent.agentId)) continue;
-    const linkedTask = resolveLinkedTaskForAgent(ctx, agent.agentId);
-    if (isLiveAgentExcludedFromNeedsYou(ctx, agent, linkedTask)) continue;
+    const linkedTask = resolveLinkedTaskForAgent(ctx, agent.agentId, agent.serverId);
+    if (
+      ctx.supervisorHeldAgentKeys.has(agentScopeKey(agent.serverId, agent.agentId)) ||
+      isLiveAgentExcludedFromNeedsYou(ctx, agent, linkedTask)
+    )
+      continue;
 
-    const triage = ctx.triageByAgentId.get(agent.agentId);
+    const triage = ctx.triageByAgentKey.get(agentScopeKey(agent.serverId, agent.agentId));
     if (!isLiveAgentBlockedForUser(agent, triage)) continue;
 
     ctx.needsYou.push(buildLiveAgentNeedsYouRecord(ctx, agent, linkedTask, triage));
@@ -886,7 +943,9 @@ function resolveInProgressTaskItem(
   const lastActivityAtMs = resolveTaskActivityMs(task, live);
   const rawStale =
     lastActivityAtMs > 0 && ctx.nowMs - lastActivityAtMs >= STALE_IN_PROGRESS_THRESHOLD_MS;
-  const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
+  const triage = primaryAgentId
+    ? ctx.triageByAgentKey.get(agentScopeKey(srvId, primaryAgentId))
+    : undefined;
   const dag = deriveTaskDagSummary(task, ctx.tasks);
   const isWaiting =
     dag.dependencyState === "blocked" ||
@@ -988,7 +1047,7 @@ function collectFallbackLiveAgents(ctx: ActionBarBuildContext): void {
   for (const agent of ctx.input.liveAgents) {
     if (agent.archived || agent.background || agent.isMainChat) continue;
     if (isAgentClaimed(ctx, agent.serverId, agent.agentId)) continue;
-    const triage = ctx.triageByAgentId.get(agent.agentId);
+    const triage = ctx.triageByAgentKey.get(agentScopeKey(agent.serverId, agent.agentId));
     const lastActivityAtMs = agent.lastActivityAtMs || agent.updatedAtMs;
 
     if (isLiveAgentRunning(agent)) {
@@ -1027,11 +1086,7 @@ function collectFallbackLiveAgents(ctx: ActionBarBuildContext): void {
 /**
  * Pure, cross-platform five-state deduplicated view-model for `MainChatActionBar`.
  *
- * Guarantees:
- * - Every `agentId`, `taskId`, `permission.request.id`, `decision.id`, and `plan.id` is owned by
- *   at most ONE row across all five buckets (`needsYou`, `inProgress`, `awaitingReview`, `parked`,
- *   `completed24h`).
- * - `awaiting_review` tasks are NEVER mixed into `needsYou`; they always stay in `awaitingReview`.
+ * Explicit permissions and open decisions have independent lifetimes.
  * - `inProgress` splits by last activity into normal (`stale48h: false`) and >=48h inactive
  *   (`stale48h: true`).
  * - `completed24h` includes only tasks completed within the last 24 hours; older completed or
@@ -1071,10 +1126,11 @@ export function buildMainChatActionBarModel(
   const orderedAwaitingReview = orderBucketItemsWithHierarchy(ctx.awaitingReview);
   const orderedParked = orderBucketItemsWithHierarchy(ctx.parked);
   const orderedCompleted24h = orderBucketItemsWithHierarchy(ctx.completed24h);
+  const needsYou = groupNeedsYouRequests(ctx.needsYou);
   const inProgressAll = [...orderedInProgressActive, ...orderedInProgressStale];
 
   return {
-    needsYou: ctx.needsYou,
+    needsYou,
     inProgress: {
       active: orderedInProgressActive,
       stale: orderedInProgressStale,
@@ -1084,7 +1140,7 @@ export function buildMainChatActionBarModel(
     parked: orderedParked,
     completed24h: orderedCompleted24h,
     counts: {
-      needsYou: ctx.needsYou.length,
+      needsYou: needsYou.length,
       inProgress: inProgressAll.length,
       inProgressActive: orderedInProgressActive.length,
       inProgressStale: orderedInProgressStale.length,
@@ -1092,7 +1148,7 @@ export function buildMainChatActionBarModel(
       parked: orderedParked.length,
       completed24h: orderedCompleted24h.length,
       total:
-        ctx.needsYou.length +
+        needsYou.length +
         inProgressAll.length +
         orderedAwaitingReview.length +
         orderedParked.length +

@@ -65,6 +65,8 @@ export interface PanelState {
   // folders stay expanded as the diff changes.
   diffCollapsedFoldersByWorkspace: Record<string, string[]>;
   collapsedFilePathsByWorkspace: Record<string, string[]>;
+  taskDrawerWidth?: number;
+  setTaskDrawerWidth: (width: number) => void;
   sidebarWidth: number;
   explorerSortOption: SortOption;
   explorerShowHiddenFiles: boolean;
@@ -250,6 +252,7 @@ export const usePanelStore = create<PanelState>()(
             [workspaceKey]: paths,
           },
         })),
+      setTaskDrawerWidth: (width) => set({ taskDrawerWidth: width }),
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
       setExplorerSortOption: (option) => set({ explorerSortOption: option }),
       toggleExplorerShowHiddenFiles: () =>
@@ -267,6 +270,7 @@ export const usePanelStore = create<PanelState>()(
         expandedPathsByWorkspace: state.expandedPathsByWorkspace,
         diffCollapsedFoldersByWorkspace: state.diffCollapsedFoldersByWorkspace,
         collapsedFilePathsByWorkspace: state.collapsedFilePathsByWorkspace,
+        taskDrawerWidth: state.taskDrawerWidth,
         sidebarWidth: state.sidebarWidth,
         explorerSortOption: state.explorerSortOption,
         explorerShowHiddenFiles: state.explorerShowHiddenFiles,

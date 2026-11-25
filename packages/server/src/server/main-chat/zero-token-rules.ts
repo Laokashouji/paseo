@@ -131,61 +131,46 @@ function tryParseJsonRecord(value: unknown): unknown {
   return value;
 }
 
-const NESTED_ARG_CONTAINER_KEYS = new Set(["input", "arguments", "args", "params"]);
-
-function shouldSkipArgKey(key: string, detailType: string, depth: number): boolean {
-  if (TOOL_OUTPUT_ONLY_KEYS.has(key)) return true;
-  if (key === "content" && (detailType === "read" || detailType === "search")) return true;
-  return depth === 0 && DETAIL_META_ONLY_KEYS.has(key);
-}
-
-function normalizeArgRecord(record: Record<string, unknown>, depth: number): unknown {
-  const detailType = typeof record.type === "string" ? record.type.toLowerCase() : "";
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(record).sort()) {
-    if (shouldSkipArgKey(key, detailType, depth)) continue;
-    const raw = NESTED_ARG_CONTAINER_KEYS.has(key) ? tryParseJsonRecord(record[key]) : record[key];
-    const norm = normalizeArgValue(raw, depth + 1);
-    if (norm !== undefined) {
-      out[key] = norm;
+// Output fields belong to the provider envelope. Real arguments can use the same names.
+export function canonicalizeDetailForHash(detail: unknown): string {
+  const parsed = tryParseJsonRecord(detail);
+  if (parsed == null) return "";
+  let input: unknown = parsed;
+  if (typeof parsed === "object" && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    const container = ["input", "arguments", "args", "params"].find((key) =>
+      Object.prototype.hasOwnProperty.call(record, key),
+    );
+    if (container) {
+      input = tryParseJsonRecord(record[container]);
+      if (input == null) return "";
+    } else {
+      const entries = Object.entries(record).filter(
+        ([key]) =>
+          !TOOL_OUTPUT_ONLY_KEYS.has(key) &&
+          !DETAIL_META_ONLY_KEYS.has(key) &&
+          !(key === "content" && (record.type === "read" || record.type === "search")),
+      );
+      if (!entries.length) return "";
+      input = Object.fromEntries(entries);
     }
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  return (
+    JSON.stringify(input, (_, value: unknown) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(
+            Object.keys(value)
+              .sort()
+              .map((key) => [key, (value as Record<string, unknown>)[key]]),
+          )
+        : value,
+    ) ?? ""
+  );
 }
 
-function normalizeArgValue(value: unknown, depth = 0): unknown {
-  if (depth > 5) return "[max-depth]";
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return undefined;
-    return trimmed.length > 2000 ? `${trimmed.slice(0, 1000)}…${trimmed.slice(-500)}` : trimmed;
-  }
-  if (typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) {
-    const items = value
-      .slice(0, 50)
-      .map((item) => normalizeArgValue(item, depth + 1))
-      .filter((item) => item !== undefined);
-    return items.length > 0 ? items : undefined;
-  }
-  if (typeof value === "object") {
-    return normalizeArgRecord(value as Record<string, unknown>, depth);
-  }
-  return String(value);
-}
-
-export function canonicalizeDetailForHash(detail: unknown): string {
-  if (detail === null || detail === undefined) return "";
-  const parsed = tryParseJsonRecord(detail);
-  const normalized = normalizeArgValue(parsed, 0);
-  if (normalized === undefined) return "";
-  if (typeof normalized === "string") return normalized;
-  try {
-    return JSON.stringify(normalized);
-  } catch {
-    return String(detail).slice(0, 1000);
-  }
+export function toolInputHash(detail: unknown): string {
+  const input = canonicalizeDetailForHash(detail);
+  return input ? stableHash(input) : "";
 }
 
 function extractTextFromArgRecord(record: Record<string, unknown>): string {
@@ -694,8 +679,7 @@ export function createZeroTokenRuleWindowManager(
       windows.set(agentId, win);
 
       const detailText = extractDetailText(event.detail);
-      const canonicalInput = canonicalizeDetailForHash(event.detail) || detailText;
-      const inputHash = canonicalInput ? stableHash(canonicalInput) : "";
+      const inputHash = toolInputHash(event.detail);
       const action = classifyToolAction(event.toolName, detailText);
       const isError = event.status === "failed" || Boolean(event.error);
       const errorExcerpt = isError ? extractErrorExcerpt(event.error) : null;

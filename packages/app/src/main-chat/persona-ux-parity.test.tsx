@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
   MAIN_CHAT_ROLE_LABEL,
@@ -10,16 +11,16 @@ import type { TFunction } from "i18next";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { collapseTurns } from "@/agent-stream/turn-collapse/model";
-import { ToastProvider } from "@/contexts/toast-context";
+import { ToastApiProvider } from "@/contexts/toast-api-context";
 import { useSessionStore, type Agent, type SessionState } from "@/stores/session-store";
 import type { StreamItem } from "@/types/stream";
-import { MainChatActionBar, useMainChatActionBarDrawerStore } from "./action-bar";
-import type { ActionBarDecisionNeedsYouItem, ActionBarTaskNeedsYouItem } from "./action-bar-model";
 import {
-  buildDecisionAskCardModel,
-  buildTaskAskCardModel,
-  extractQuestionOptionsFromText,
-} from "./needs-you-ask-model";
+  NeedsYouInlineBody,
+  MainChatActionBar,
+  useMainChatActionBarDrawerStore,
+} from "./action-bar";
+import type { ActionBarDecisionNeedsYouItem, ActionBarTaskNeedsYouItem } from "./action-bar-model";
+import { buildDecisionAskCardModel, buildTaskAskCardModel } from "./needs-you-ask-model";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
 
 vi.mock("@/runtime/host-runtime", async (importOriginal) => {
@@ -97,11 +98,17 @@ function makeFakeAgent(overrides: Partial<Agent> & { id: string }): Agent {
   } as Agent;
 }
 
+const toast = { show: vi.fn(), copied: vi.fn(), error: vi.fn(), dismiss: vi.fn() };
+
 function renderWithToast(node: ReactNode) {
-  return render(<ToastProvider>{node}</ToastProvider>);
+  return render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ToastApiProvider api={toast}>{node}</ToastApiProvider>
+    </QueryClientProvider>,
+  );
 }
 
-describe("Persona UX parity — full-turn background folding & structured Ask Cards", () => {
+describe("Persona UX parity — background reports and actionable requests", () => {
   afterEach(() => {
     cleanup();
   });
@@ -113,7 +120,7 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
     useSessionStore.setState({ sessions: {} });
   });
 
-  it("folds entire background supervision/patrol/routine turns while NEVER folding user questions/replies or plan/decision/receipt cards", () => {
+  it("folds background work and preserves reports, user exchanges, and interactive cards", () => {
     const ts = new Date("2026-11-25T10:00:00.000Z");
     const tail: StreamItem[] = [
       // 1. User active question & reply -> NEVER folded into background row
@@ -129,7 +136,7 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
         timestamp: ts,
         text: "目前 2 个主线分支均通过检查。",
       },
-      // 2. Background supervision turn with tools + long assistant wall-of-text -> entire turn folds!
+      // 2. Background supervision with tools and a visible final report.
       {
         kind: "tool_call",
         id: "bg_sup_1",
@@ -176,7 +183,7 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
         timestamp: ts,
         text: "巡检完毕：一切正常，未发现阻塞。",
       },
-      // 3. Background turn that emits a plan card & decision card -> text folds, cards STAY visible!
+      // The background turn delivers interactive cards and a report.
       {
         kind: "tool_call",
         id: "bg_sup_2",
@@ -250,15 +257,16 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
       collapseBackgroundTurns: true,
     });
 
-    // User Q&A visible; bg_sup_1 completely collapsed to 1 row; bg_sup_2 collapsed to 1 row while
-    // keeping decision & receipt inline cards directly visible!
+    // Both reports and their interactive cards remain visible with background work folded.
     expect(collapsed.tail.map((item) => item.id)).toEqual([
       "user_q1",
       "assistant_a1",
       "turn-summary:bg_sup_1",
+      "bg_sup_reply_1",
       "turn-summary:bg_sup_2",
       "card_decision_1",
       "card_receipt_1",
+      "bg_sup_reply_2",
     ]);
 
     // Clicking to expand bg_sup_1 reveals its full turn details in place
@@ -281,69 +289,18 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
       "turn-summary:bg_sup_2",
       "card_decision_1",
       "card_receipt_1",
+      "bg_sup_reply_2",
     ]);
   });
 
-  it("extracts 1/2/3 and A/B options from manual session questions and generates error/default options cleanly", () => {
-    // 1. Multiline numbered options with recommended badge & descriptions
-    const multiline = extractQuestionOptionsFromText(
-      [
-        "网络层的测试用哪个框架？",
-        "1. Swift Testing（推荐）— 新代码统一用 @Test，参数化测试写起来更短",
-        "2. XCTest — 和现有的 UI 测试保持一致",
-      ].join("\n"),
-    );
-    expect(multiline?.questionLead).toBe("网络层的测试用哪个框架？");
-    expect(multiline?.options).toEqual([
-      {
-        id: "parsed-1",
-        label: "Swift Testing",
-        description: "新代码统一用 @Test，参数化测试写起来更短",
-        recommended: true,
-      },
-      {
-        id: "parsed-2",
-        label: "XCTest",
-        description: "和现有的 UI 测试保持一致",
-        recommended: false,
-      },
-    ]);
-
-    // 2. Inline numbered choices
-    const inline = extractQuestionOptionsFromText(
-      "请拍板缓存策略：1) Redis 集群 (Recommended) 2) 本地 LRU 3) 暂不加缓存",
-    );
-    expect(inline?.questionLead).toBe("请拍板缓存策略");
-    expect(inline?.options.map((opt) => opt.label)).toEqual([
-      "Redis 集群",
-      "本地 LRU",
-      "暂不加缓存",
-    ]);
-    expect(inline?.options[0]?.recommended).toBe(true);
-
-    // 3. Error item builds "已处理，继续" + "先不管"
-    const errorModel = buildTaskAskCardModel(
-      makeTaskNeedsItem({
-        isFailed: true,
-        reason: "构建失败：缺少 NPM_TOKEN",
-      }),
-      fakeT,
-    );
-    expect(errorModel.tone).toBe("danger");
-    expect(errorModel.options.map((opt) => opt.id)).toEqual(["handled_continue", "dismiss"]);
-
-    // 4. Plain question without numbered choices builds default quick options + "先不管"
-    const plainModel = buildTaskAskCardModel(
-      makeTaskNeedsItem({ reason: "是否现在合并到主分支？" }),
-      fakeT,
-    );
-    expect(plainModel.options.map((opt) => opt.id)).toEqual([
-      "quick_proceed",
-      "quick_list_options",
-      "dismiss",
-    ]);
-
-    // 5. Decision item preserves original decision options + "先不管"
+  it("preserves free text and exposes only choices from a structured decision", () => {
+    for (const reason of ["1. First finding\n2. Second finding", "**Blocked**", "Do you agree?"]) {
+      for (const isFailed of [true, false]) {
+        const model = buildTaskAskCardModel(makeTaskNeedsItem({ reason, isFailed }), fakeT);
+        expect(model.question).toBe(reason);
+        expect(model.options).toEqual([]);
+      }
+    }
     const decItem: ActionBarDecisionNeedsYouItem = {
       kind: "decision",
       id: "decision:dec_1",
@@ -380,7 +337,6 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
     expect(decModel.options.map((opt) => opt.id)).toEqual([
       "decision-opt:compat",
       "decision-opt:break",
-      "dismiss",
     ]);
     expect(decModel.options[0]?.recommended).toBe(true);
   });
@@ -496,12 +452,11 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
 
     // 1. Expand error card, choose "先不管", click Submit -> silently dismisses, ZERO messages sent!
     fireEvent.click(view.getByTestId("main-chat-action-needs-toggle-agent:srv_1:child_err"));
-    fireEvent.click(view.getByTestId("main-chat-needs-ask-option-agent:srv_1:child_err-dismiss"));
-    fireEvent.click(view.getByTestId("main-chat-needs-ask-submit-agent:srv_1:child_err"));
+    fireEvent.click(view.getByTestId("main-chat-needs-ask-dismiss-agent:srv_1:child_err"));
     expect(sendAgentMessage).not.toHaveBeenCalled();
     expect(view.queryByTestId("main-chat-action-needs-item-agent:srv_1:child_err")).toBeNull();
 
-    // 2. Remaining manual ask card auto-expands (1 item left) -> test bottom-right "打开", then pick parsed option 1 & submit!
+    // 2. Open the remaining task, then respond in free text.
     fireEvent.click(view.getByTestId("main-chat-needs-ask-open-agent:srv_1:child_ask"));
     expect(openTaskTargetMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -511,15 +466,51 @@ describe("Persona UX parity — full-turn background folding & structured Ask Ca
       }),
     );
 
-    const opt1 = view.getByTestId("main-chat-needs-ask-option-agent:srv_1:child_ask-parsed-1");
-    expect(opt1.textContent).toContain("Swift Testing");
-    fireEvent.click(opt1);
+    expect(view.queryByRole("radio")).toBeNull();
+    fireEvent.change(view.getByTestId("main-chat-needs-ask-input-agent:srv_1:child_ask"), {
+      target: { value: "Swift Testing" },
+    });
     fireEvent.click(view.getByTestId("main-chat-needs-ask-submit-agent:srv_1:child_ask"));
 
     await waitFor(() => {
       expect(sendAgentMessage).toHaveBeenCalledTimes(1);
     });
     expect(sendAgentMessage).toHaveBeenCalledWith("child_ask", "Swift Testing", expect.any(Object));
+  });
+
+  it("retries a direction task through the root ledger when the tray has no retry handler", async () => {
+    const client = {} as DaemonClient;
+    useSessionStore.getState().initializeSession("srv_1", client);
+    const retry = vi
+      .spyOn(useMainChatOverviewStore.getState(), "retryTaskWithFallback")
+      .mockResolvedValue({} as never);
+    const item = makeTaskNeedsItem({
+      taskId: "task-17",
+      isFailed: true,
+      canRetryWithFallback: true,
+    });
+    const onSubmitted = vi.fn();
+    try {
+      const view = renderWithToast(
+        <NeedsYouInlineBody
+          item={item}
+          mainServerId="srv_1"
+          mainAgentId="root"
+          isRetrying={false}
+          onOpenTarget={vi.fn()}
+          onDismiss={vi.fn()}
+          onSubmitted={onSubmitted}
+        />,
+      );
+      fireEvent.click(view.getByRole("radio"));
+      fireEvent.click(view.getByTestId("main-chat-needs-ask-submit-" + item.id));
+      await waitFor(() =>
+        expect(retry).toHaveBeenCalledWith("srv_1", "root", { taskId: "task-17" }, client),
+      );
+      expect(onSubmitted).toHaveBeenCalledWith(item.id);
+    } finally {
+      retry.mockRestore();
+    }
   });
 
   it("submits custom free-text typed in the inline input directly to the target session", async () => {

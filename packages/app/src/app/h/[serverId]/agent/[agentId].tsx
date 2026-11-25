@@ -1,4 +1,4 @@
-import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { getManagedConversationId, isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
@@ -12,6 +12,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { getHostRuntimeStore, useHostRuntimeSnapshot, useHosts } from "@/runtime/host-runtime";
 import {
   buildHostRootRoute,
+  buildMainChatConversationRoute,
   buildMainChatRoute,
   buildSettingsHostRoute,
 } from "@/utils/host-routes";
@@ -94,6 +95,7 @@ function useHostAgentRouteLookup(input: {
       return {
         workspaceId: result?.agent?.workspaceId ?? null,
         isMainChat: isMainChatAgent(result?.agent),
+        labels: result?.agent?.labels,
       };
     },
     enabled: shouldLookupAgent,
@@ -127,6 +129,7 @@ function useHostAgentRouteLookup(input: {
 
   return {
     lookup,
+    labels: lookupQuery.data?.labels,
     resolvedIsMainChat: cachedAgentIsMainChat || lookupQuery.data?.isMainChat === true,
     refetch: lookupQuery.refetch,
   };
@@ -154,13 +157,19 @@ function HostAgentReadyRouteContent() {
     const agent = session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId);
     return isMainChatAgent(agent);
   });
+  const cachedConversationId = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    return getManagedConversationId(
+      (session?.agents.get(agentId) ?? session?.agentDetails.get(agentId))?.labels,
+    );
+  });
   const agentWorkspaceId = useSessionStore((state) => {
     if (!serverId || !agentId) {
       return null;
     }
     return state.sessions[serverId]?.agents?.get(agentId)?.workspaceId ?? null;
   });
-  const { lookup, resolvedIsMainChat, refetch } = useHostAgentRouteLookup({
+  const { lookup, resolvedIsMainChat, labels, refetch } = useHostAgentRouteLookup({
     serverId,
     agentId,
     client,
@@ -169,6 +178,7 @@ function HostAgentReadyRouteContent() {
     agentWorkspaceId,
     cachedAgentIsMainChat,
   });
+  const conversationId = cachedConversationId ?? getManagedConversationId(labels);
   const hasHydratedWorkspaces = useHasHydratedWorkspaces(serverId);
   const hasHydratedLayout = useWorkspaceLayoutStoreHydrated();
   useDirectoryDemand(serverId);
@@ -183,22 +193,34 @@ function HostAgentReadyRouteContent() {
   });
 
   useEffect(() => {
-    const navigationKey = resolveHostAgentNavigationKey(resolvedIsMainChat, serverId, resolution);
+    const navigationKey = conversationId
+      ? buildMainChatConversationRoute(conversationId, serverId)
+      : resolveHostAgentNavigationKey(resolvedIsMainChat, serverId, resolution);
     if (!navigationKey || handledNavigationRef.current === navigationKey) {
       return;
     }
     handledNavigationRef.current = navigationKey;
 
+    if (conversationId) {
+      router.replace(buildMainChatConversationRoute(conversationId, serverId) as Href);
+      return;
+    }
     if (resolvedIsMainChat) {
       router.replace(buildMainChatRoute(serverId) as Href);
       return;
     }
     if (resolution.kind === "resolved") {
-      navigateToAgent({ serverId, agentId, workspaceId: resolution.workspaceId, pin: true });
+      navigateToAgent({
+        serverId,
+        agentId,
+        workspaceId: resolution.workspaceId,
+        labels,
+        pin: true,
+      });
       return;
     }
     router.replace(resolution.kind === "invalid" ? ("/" as Href) : buildHostRootRoute(serverId));
-  }, [agentId, resolution, resolvedIsMainChat, router, serverId]);
+  }, [agentId, conversationId, labels, resolution, resolvedIsMainChat, router, serverId]);
 
   const handleRetry = useCallback(() => {
     if (resolution.kind === "lookupError") {

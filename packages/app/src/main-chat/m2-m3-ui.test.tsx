@@ -14,6 +14,7 @@ import {
   type MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React, { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
@@ -556,9 +557,11 @@ const DRAWER_MULTI_AGENT_TARGET = {
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
-    <ToastApiProvider api={toastApi}>
-      <MainChatShellProvider value={SHELL_CONTEXT_VALUE}>{ui}</MainChatShellProvider>
-    </ToastApiProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <ToastApiProvider api={toastApi}>
+        <MainChatShellProvider value={SHELL_CONTEXT_VALUE}>{ui}</MainChatShellProvider>
+      </ToastApiProvider>
+    </QueryClientProvider>,
   );
 }
 

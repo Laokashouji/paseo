@@ -34,6 +34,8 @@ import {
   type MainChatMentionItem,
   type MainChatMentionKind,
 } from "./mention-sources";
+import { composeMessageWithQuotes } from "@/chat-quotes/format";
+import { useChatQuoteStore } from "@/chat-quotes/store";
 import { MainChatQueuePanel } from "./queue-panel";
 import { useMainChatQueueStore } from "./queue-store";
 import { useStewardAllowedServerIds } from "./use-steward-roster";
@@ -367,14 +369,17 @@ export function useMainChatComposerToolbar({
   const handleQueueAction = useCallback(() => {
     setActivePickerKind(null);
     const currentDraft = (useDraftStore.getState().getDraftInput(draftKey)?.text ?? "").trim();
-    if (currentDraft.length > 0) {
-      enqueue(agentId, currentDraft);
-      useDraftStore.getState().replaceDraftText({ draftKey, text: "" });
+    const quoteStore = useChatQuoteStore.getState();
+    const queuedText = composeMessageWithQuotes(currentDraft, quoteStore.getQuotes(draftKey));
+    if (queuedText.length > 0) {
+      if (!enqueue(agentId, queuedText)) return;
+      applyTextToComposer("");
+      quoteStore.clearQuotes(draftKey);
       toast.show(t("mainChat.composer.queue.enqueuedToast"), { variant: "success" });
       return;
     }
     setQuickQueueOpen(true);
-  }, [agentId, draftKey, enqueue, t, toast]);
+  }, [agentId, applyTextToComposer, draftKey, enqueue, t, toast]);
 
   const handleSubmitQuickQueue = useCallback(() => {
     const trimmed = quickQueueDraft.trim();

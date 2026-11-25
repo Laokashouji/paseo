@@ -135,6 +135,7 @@ export const PanelPersistedStateSchema = z.strictObject({
   diffExpandedPathsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
   diffCollapsedFoldersByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
   collapsedFilePathsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
+  taskDrawerWidth: z.number().finite().positive().optional(),
   sidebarWidth: z.number().optional(),
   // Accepted only so migration can discard the former docked explorer sidebar width.
   explorerWidth: z.number().optional(),

@@ -884,6 +884,9 @@ const StewardSwitcherMenu = memo(function StewardSwitcherMenu({
   );
 });
 
+function sidebarNeedsCount(steward: { needsYouCount: number } | null) {
+  return steward?.needsYouCount ?? 0;
+}
 function useMainChatHeroData() {
   useMainChatRosterSync();
 
@@ -905,7 +908,7 @@ function useMainChatHeroData() {
   const preferredServerId = activeServerId ?? fallbackPreferredServerId;
   const strictServerId = roster.length > 0;
 
-  const summaryBase = useStoreWithEqualityFn(
+  const activitySummary = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
       (state) =>
@@ -918,7 +921,12 @@ function useMainChatHeroData() {
     equal,
   );
 
-  const targetServerId = activeServerId ?? summaryBase.targetServerId;
+  const targetServerId = activeServerId ?? activitySummary.targetServerId;
+  const needsYouCount = sidebarNeedsCount(activeSteward);
+  const summaryBase = useMemo(
+    () => ({ ...activitySummary, needsYouCount }),
+    [activitySummary, needsYouCount],
+  );
   const client = useSessionStore((state) =>
     targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
   );

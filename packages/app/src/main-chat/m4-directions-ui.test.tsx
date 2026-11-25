@@ -769,7 +769,35 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
     useMainChatOverviewStore.setState({
       overviewsByKey: {
         [overviewStoreKey("srv_main", "agent_main")]: makeOverview({
-          tasks: [taskRunning, taskNeedsYou],
+          tasks: [
+            taskRunning,
+            taskNeedsYou,
+            makeTask({
+              id: "unattended-failure",
+              title: "自动恢复中",
+              status: "failed",
+              conversationId: "conv_pay",
+              mainAgentId: "agent_leader_pay",
+            }),
+          ],
+          decisions: [
+            {
+              id: "direction-choice",
+              mainAgentId: "agent_leader_pay",
+              title: "发布窗口",
+              question: "何时发布？",
+              agentId: null,
+              taskId: null,
+              planId: null,
+              options: [{ id: "now", label: "现在", leadsTo: "开始" }],
+              recommendedOptionId: null,
+              reason: null,
+              answer: null,
+              answeredOptionId: null,
+              answeredAt: null,
+              createdAt: "2026-11-23T11:00:00Z",
+            },
+          ],
           conversations: [leaderConv, ...sideConversations],
         }),
       },
@@ -777,11 +805,11 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
 
     const view = render(<SidebarDirectionsSection />);
 
-    // Leader group shows running 1 + needsYou 1 counts
+    // Count the explicit decision and the blocked task. The unattended failure has its own status.
     expect(view.getByTestId("sidebar-directions-leaders-group")).toBeTruthy();
     expect(view.getByTestId("sidebar-direction-row-conv_pay")).toBeTruthy();
     expect(view.getByTestId("sidebar-direction-counts-conv_pay").textContent).toContain(
-      '"running":1,"needsYou":1',
+      '"running":1,"needsYou":2',
     );
 
     // Recent sides caps at 5 initially and expands to 6 on Show all
@@ -904,7 +932,12 @@ describe("Main Chat M4 UI — directions store, 3-level tree, conversation scree
     });
 
     // Pure filter sanity: excludes unrelated main-chat tasks
-    const filtered = filterOverviewForConversation(overview, "conv_pay", "agent_leader_pay");
+    const filtered = filterOverviewForConversation(
+      overview,
+      "conv_pay",
+      "agent_leader_pay",
+      "srv_main",
+    );
     expect(filtered.overview?.tasks?.map((task) => task.id)).toEqual(["task_pay_only"]);
 
     const scopedModel = buildConversationActionBarModel({

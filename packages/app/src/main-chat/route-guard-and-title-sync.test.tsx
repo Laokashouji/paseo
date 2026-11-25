@@ -341,6 +341,15 @@ describe("Main Chat route guard and Sessions filtering", () => {
   it("filters paseo.role=main and former_main agents out of SessionsScreen while showing regular and child sessions", () => {
     mockHistoryAgents.value = [
       makeAggregatedAgent({
+        id: "leader-1",
+        title: "方向管家",
+        workspaceId: "ws_main",
+        labels: {
+          "paseo.main-chat.conversation-kind": "leader",
+          "paseo.main-chat.conversation-id": "direction-1",
+        },
+      }),
+      makeAggregatedAgent({
         id: "agent_main",
         title: "主对话",
         workspaceId: "ws_main",
@@ -367,6 +376,7 @@ describe("Main Chat route guard and Sessions filtering", () => {
 
     const view = render(<SessionsScreen />);
 
+    expect(view.queryByText("方向管家")).toBeNull();
     expect(view.queryByTestId("session-row-agent_main")).toBeNull();
     expect(view.queryByTestId("session-row-agent_former_main")).toBeNull();
     expect(view.getByTestId("session-row-agent_child")).toBeTruthy();

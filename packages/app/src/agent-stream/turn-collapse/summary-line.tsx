@@ -24,17 +24,21 @@ function resolveBackgroundTagKey(kind: MainChatBackgroundTurnKind | undefined): 
       return "mainChat.backgroundTurn.compactionTag";
     case "cache_keepalive":
       return "mainChat.backgroundTurn.cacheKeepaliveTag";
-    default:
+    case "relay":
+      return "mainChat.backgroundTurn.kindRelay";
+    case "routine":
+      return "mainChat.backgroundTurn.kindRoutine";
+    case "briefing":
+      return "mainChat.backgroundTurn.kindBriefing";
+    case "supervision":
+    case "patrol":
       return "mainChat.backgroundTurn.supervisionTag";
+    default:
+      return "mainChat.backgroundTurn.completed";
   }
 }
 
-/**
- * The row a collapsed turn leaves under its user message, styled like a tool-call group.
- * Pressing it opens the turn's rows beneath it. For Main Chat system-injected background turns,
- * renders a quiet full-width minimalist inline row (`@督办巡检 · 已在后台处理 >`) that expands
- * and collapses the entire background turn in place.
- */
+/** Opens the folded work behind a turn while its final report stays visible. */
 export const TurnSummaryLine = memo(function TurnSummaryLine({
   item,
   onExpandedChange,
@@ -59,7 +63,10 @@ export const TurnSummaryLine = memo(function TurnSummaryLine({
   if (isBackground) {
     const running = item.backgroundMeta?.running === true;
     const kind = item.backgroundMeta?.kind;
-    const actorTag = t(resolveBackgroundTagKey(kind));
+    const actorTag =
+      kind === "relay" && item.backgroundMeta?.label
+        ? "@" + item.backgroundMeta.label.replace(/^@/, "")
+        : t(resolveBackgroundTagKey(kind));
     const statusText = t(
       running
         ? "mainChat.backgroundTurn.handlingInBackground"

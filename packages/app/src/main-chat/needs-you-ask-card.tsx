@@ -1,3 +1,4 @@
+import { MarkdownRenderer } from "@/components/markdown/renderer";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { QueryClientContext } from "@tanstack/react-query";
 import { ArrowUp, ArrowUpRight } from "lucide-react-native";
@@ -58,10 +59,6 @@ const AskRadioRow = memo(function AskRadioRow({
     () => (selected ? [styles.radioOuter, styles.radioOuterSelected] : styles.radioOuter),
     [selected],
   );
-  const labelStyle = useMemo(
-    () => (selected ? [styles.optionLabel, styles.optionLabelSelected] : styles.optionLabel),
-    [selected],
-  );
   const rowStyle = useMemo(
     () => (selected ? [styles.optionRow, styles.optionRowSelected] : styles.optionRow),
     [selected],
@@ -82,7 +79,7 @@ const AskRadioRow = memo(function AskRadioRow({
       <View style={radioOuterStyle}>{selected ? <View style={styles.radioInnerDot} /> : null}</View>
       <View style={styles.optionTextCol}>
         <View style={styles.optionLabelRow}>
-          <Text style={labelStyle}>{option.label}</Text>
+          <MarkdownRenderer text={option.label} compact muted={!selected} selectable={false} />
           {option.recommended ? (
             <View style={styles.recommendedBadge}>
               <Text style={styles.recommendedBadgeText}>
@@ -91,9 +88,7 @@ const AskRadioRow = memo(function AskRadioRow({
             </View>
           ) : null}
         </View>
-        {option.description ? (
-          <Text style={styles.optionDescription}>{option.description}</Text>
-        ) : null}
+        {option.description ? <MarkdownRenderer text={option.description} compact muted /> : null}
       </View>
     </PressHighlight>
   );
@@ -151,7 +146,6 @@ function resolveSubmissionIntent(
   trimmedCustom: string,
   selectedOption: NeedsYouAskOption | null,
 ):
-  | { kind: "dismiss" }
   | { kind: "retry_fallback" }
   | { kind: "send"; answerText: string; decisionOptionId?: string }
   | null {
@@ -159,7 +153,6 @@ function resolveSubmissionIntent(
     return { kind: "send", answerText: trimmedCustom };
   }
   if (!selectedOption) return null;
-  if (selectedOption.action === "dismiss") return { kind: "dismiss" };
   if (selectedOption.action === "retry_fallback") return { kind: "retry_fallback" };
   const answerText = (selectedOption.sendText ?? selectedOption.label).trim();
   if (!answerText) return null;
@@ -257,17 +250,31 @@ export const NeedsYouAskCard = memo(function NeedsYouAskCard({
     const intent = resolveSubmissionIntent(trimmedCustom, selectedOption);
     if (!intent) return;
 
-    // Choosing "先不管" silently collapses & dismisses without sending ANY business command.
-    if (intent.kind === "dismiss") {
-      setSelectedOptionId(null);
-      setCustomText("");
-      inputRef.current?.reset();
-      onDismiss(item.id);
-      return;
-    }
-
     if (intent.kind === "retry_fallback") {
-      onRetryWithFallback?.();
+      if (onRetryWithFallback) {
+        onRetryWithFallback();
+        return;
+      }
+      if (item.kind !== "task" || !item.taskId || !mainClient) {
+        setSubmitError(t("workspace.terminal.hostDisconnected"));
+        return;
+      }
+      setIsSubmitting(true);
+      setSubmitError(null);
+      try {
+        await useMainChatOverviewStore
+          .getState()
+          .retryTaskWithFallback(mainServerId, mainAgentId, { taskId: item.taskId }, mainClient);
+        onSubmitted?.(item.id);
+      } catch (error) {
+        setSubmitError(
+          error instanceof Error
+            ? error.message
+            : t("mainChat.modelProfiles.retryFallback.failedToast"),
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -309,7 +316,6 @@ export const NeedsYouAskCard = memo(function NeedsYouAskCard({
     mainAgentId,
     mainClient,
     mainServerId,
-    onDismiss,
     onRetryWithFallback,
     onSubmitted,
     selectedOption,
@@ -321,6 +327,7 @@ export const NeedsYouAskCard = memo(function NeedsYouAskCard({
     trimmedCustom,
   ]);
 
+  const handleDismiss = useCallback(() => onDismiss(item.id), [onDismiss, item.id]);
   const handleSubmitPress = useCallback(() => {
     void handleSubmit();
   }, [handleSubmit]);
@@ -351,30 +358,30 @@ export const NeedsYouAskCard = memo(function NeedsYouAskCard({
           </Text>
         </View>
 
-        <Text style={styles.questionText} testID={`main-chat-needs-ask-question-${item.id}`}>
-          {model.question}
-        </Text>
+        <View testID={`main-chat-needs-ask-question-${item.id}`}>
+          <MarkdownRenderer text={model.question} compact />
+        </View>
 
         {model.detail ? (
           <View style={styles.detailBox} testID={`main-chat-needs-ask-detail-${item.id}`}>
-            <Text style={styles.detailText} numberOfLines={3}>
-              {model.detail}
-            </Text>
+            <MarkdownRenderer text={model.detail} compact muted />
           </View>
         ) : null}
 
-        <View style={styles.optionsList} accessibilityRole="radiogroup">
-          {model.options.map((option) => (
-            <AskRadioRow
-              key={option.id}
-              itemId={item.id}
-              option={option}
-              selected={selectedOptionId === option.id}
-              disabled={busy}
-              onSelect={handleSelectOption}
-            />
-          ))}
-        </View>
+        {model.options.length > 0 ? (
+          <View style={styles.optionsList} accessibilityRole="radiogroup">
+            {model.options.map((option) => (
+              <AskRadioRow
+                key={option.id}
+                itemId={item.id}
+                option={option}
+                selected={selectedOptionId === option.id}
+                disabled={busy}
+                onSelect={handleSelectOption}
+              />
+            ))}
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.footer}>
@@ -396,6 +403,17 @@ export const NeedsYouAskCard = memo(function NeedsYouAskCard({
         )}
 
         <View style={styles.footerActions}>
+          <PressHighlight
+            accessibilityRole="button"
+            disabled={busy}
+            onPress={handleDismiss}
+            style={styles.openButton}
+            testID={`main-chat-needs-ask-dismiss-${item.id}`}
+          >
+            <Text style={styles.openButtonText}>
+              {t("mainChat.actionBar.askCard.optionIgnore")}
+            </Text>
+          </PressHighlight>
           <PressHighlight
             onPress={handleSubmitPress}
             disabled={!canSubmit}
@@ -504,22 +522,11 @@ const styles = StyleSheet.create((theme) => ({
   kickerTextDanger: {
     color: theme.colors.statusDanger,
   },
-  questionText: {
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: theme.fontWeight.semibold,
-    color: theme.colors.foreground,
-  },
   detailBox: {
     borderRadius: theme.borderRadius.md,
     backgroundColor: theme.colors.surface1,
     paddingHorizontal: 10,
     paddingVertical: theme.spacing[1.5],
-  },
-  detailText: {
-    fontSize: 12,
-    lineHeight: 17,
-    color: theme.colors.foregroundMuted,
   },
   optionsList: {
     gap: 2,
@@ -571,15 +578,6 @@ const styles = StyleSheet.create((theme) => ({
     flexWrap: "wrap",
     gap: 6,
   },
-  optionLabel: {
-    fontSize: 13.5,
-    lineHeight: 19,
-    color: theme.colors.foregroundMuted,
-  },
-  optionLabelSelected: {
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foreground,
-  },
   recommendedBadge: {
     paddingHorizontal: 6,
     paddingVertical: 1,
@@ -591,11 +589,6 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: 15,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.statusDotRunning,
-  },
-  optionDescription: {
-    fontSize: 12,
-    lineHeight: 17,
-    color: theme.colors.foregroundExtraMuted,
   },
   footer: {
     flexDirection: "row",
