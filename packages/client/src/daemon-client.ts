@@ -92,6 +92,14 @@ import type {
   MainChatUpdateSettingsResponsePayload,
   MainChatUpdateTaskScopeResponsePayload,
   MainChatWithdrawPlanResponsePayload,
+  FeishuBridgeAuditDirection,
+  FeishuBridgeConfigPatch,
+  FeishuBridgeReceiveIdType,
+  MainChatFeishuBridgeGetStateResponsePayload,
+  MainChatFeishuBridgeUpdateConfigResponsePayload,
+  MainChatFeishuBridgeTestConnectionResponsePayload,
+  MainChatFeishuBridgeSendTestCardResponsePayload,
+  MainChatFeishuBridgeListAuditResponsePayload,
 } from "@getpaseo/protocol/main-chat";
 import type { PluginListingDetail, PluginListingIndex } from "@getpaseo/protocol/plugin-registry";
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
@@ -6623,6 +6631,95 @@ export class DaemonClient {
           type: "main_chat.delete_prompt_template.request",
           ...(input.id !== undefined ? { id: input.id } : {}),
           ...(input.slug !== undefined ? { slug: input.slug } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async getMainChatFeishuBridgeState(
+    input?: { auditLimit?: number },
+    requestId?: string,
+  ): Promise<MainChatFeishuBridgeGetStateResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.feishu_bridge_get_state.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.feishu_bridge_get_state.request",
+          ...(input?.auditLimit !== undefined ? { auditLimit: input.auditLimit } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async updateMainChatFeishuBridgeConfig(
+    patch: FeishuBridgeConfigPatch,
+    requestId?: string,
+  ): Promise<MainChatFeishuBridgeUpdateConfigResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.feishu_bridge_update_config.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.feishu_bridge_update_config.request",
+          patch,
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async testMainChatFeishuBridgeConnection(
+    input?: { forceRefreshToken?: boolean },
+    requestId?: string,
+  ): Promise<MainChatFeishuBridgeTestConnectionResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.feishu_bridge_test_connection.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.feishu_bridge_test_connection.request",
+          ...(input?.forceRefreshToken !== undefined
+            ? { forceRefreshToken: input.forceRefreshToken }
+            : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async sendMainChatFeishuBridgeTestCard(
+    input?: {
+      receiveId?: string;
+      receiveIdType?: FeishuBridgeReceiveIdType;
+      title?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatFeishuBridgeSendTestCardResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.feishu_bridge_send_test_card.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.feishu_bridge_send_test_card.request",
+          ...(input?.receiveId !== undefined ? { receiveId: input.receiveId } : {}),
+          ...(input?.receiveIdType !== undefined ? { receiveIdType: input.receiveIdType } : {}),
+          ...(input?.title !== undefined ? { title: input.title } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async listMainChatFeishuBridgeAudit(
+    input?: { limit?: number; direction?: FeishuBridgeAuditDirection },
+    requestId?: string,
+  ): Promise<MainChatFeishuBridgeListAuditResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.feishu_bridge_list_audit.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.feishu_bridge_list_audit.request",
+          ...(input?.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input?.direction !== undefined ? { direction: input.direction } : {}),
         },
         timeout: 30000,
       },

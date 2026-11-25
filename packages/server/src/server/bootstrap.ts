@@ -9,7 +9,12 @@ import {
   createJsonFinishSubscriptionStore,
 } from "./agent/finish-subscriptions/index.js";
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { FEISHU_BRIDGE_WEBHOOK_PATH } from "@getpaseo/protocol/main-chat";
 import { createMainChatService } from "./main-chat/service.js";
+import type {
+  FeishuWebhookHttpRequest,
+  FeishuWebhookHttpResponse,
+} from "./main-chat/feishu-bridge-seam.js";
 import type { PluginRegistries } from "@getpaseo/protocol/plugin-registry";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
@@ -837,6 +842,57 @@ export async function createPaseoDaemon(
     createTerminalActivityRouteHandler(terminalManager),
   );
 
+  // Plugin-owned Feishu webhook callback endpoint: uses Feishu's own SHA-256
+  // signature + timestamp anti-replay + verification token + AES-256-CBC auth
+  // inside `plugins/feishu-bot-bridge/`, so it skips daemon bearer auth and
+  // reads the exact raw request body bytes. Default-off (503) until configured.
+  let handleFeishuBridgeWebhook:
+    | ((request: FeishuWebhookHttpRequest) => Promise<FeishuWebhookHttpResponse>)
+    | null = null;
+  app.post(FEISHU_BRIDGE_WEBHOOK_PATH, express.raw({ type: "*/*", limit: "1mb" }), (req, res) => {
+    if (!handleFeishuBridgeWebhook) {
+      res.status(503).json({
+        error: "Feishu bot bridge is not initialized",
+        code: "bridge_not_ready",
+      });
+      return;
+    }
+    let rawBody: string;
+    if (Buffer.isBuffer(req.body)) {
+      rawBody = req.body.toString("utf8");
+    } else if (typeof req.body === "string") {
+      rawBody = req.body;
+    } else {
+      rawBody = JSON.stringify(req.body ?? {});
+    }
+    const readHeader = (name: string): string | null => {
+      const value = req.headers[name];
+      if (typeof value === "string") return value;
+      if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+      return null;
+    };
+    void (async () => {
+      try {
+        const result = await handleFeishuBridgeWebhook({
+          rawBody,
+          headers: {
+            timestamp: readHeader("x-lark-request-timestamp"),
+            nonce: readHeader("x-lark-request-nonce"),
+            signature: readHeader("x-lark-signature"),
+          },
+        });
+        if (!res.headersSent) {
+          res.status(result.httpStatus).json(result.body);
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to process Feishu bridge webhook callback");
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Internal webhook error", code: "internal_error" });
+        }
+      }
+    })();
+  });
+
   // Serve the bundled browser web UI when enabled. Mounted after service-proxy
   // classification and host/CORS handling, but before daemon bearer auth, so
   // static app files load without the daemon password while API/WebSocket calls
@@ -1651,8 +1707,23 @@ export async function createPaseoDaemon(
     terminalManager,
     scheduleService,
     workspaceGitService,
+    feishuPluginInvoker: pluginRuntime,
+    resolveFeishuWebhookUrl: () => {
+      if (serviceProxyPublicBaseUrl) {
+        return `${serviceProxyPublicBaseUrl.replace(/\/+$/, "")}${FEISHU_BRIDGE_WEBHOOK_PATH}`;
+      }
+      if (boundListenTarget?.type === "tcp") {
+        const host =
+          boundListenTarget.host === "0.0.0.0" || boundListenTarget.host === "::"
+            ? "127.0.0.1"
+            : boundListenTarget.host;
+        return `http://${host}:${boundListenTarget.port}${FEISHU_BRIDGE_WEBHOOK_PATH}`;
+      }
+      return null;
+    },
     logger,
   });
+  handleFeishuBridgeWebhook = (request) => mainChatService.handleFeishuWebhook(request);
   scheduleService.setAgentScheduleExecutor((schedule, runId) =>
     mainChatService.executeScheduledAgentRoutine(schedule, runId),
   );

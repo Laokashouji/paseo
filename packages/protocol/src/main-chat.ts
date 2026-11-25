@@ -115,6 +115,20 @@ export const MAIN_CHAT_PROMPT_DESC_MAX_CHARS = 160;
 export const MAIN_CHAT_PROMPT_CONTENT_MAX_CHARS = 4000;
 export const MAIN_CHAT_PROMPT_RESERVED_SLUGS = ["exit", "quit", "q", "clear", "new"] as const;
 
+export const FEISHU_BRIDGE_PLUGIN_ID = "feishu-bot-bridge";
+export const FEISHU_BRIDGE_WEBHOOK_PATH = "/api/plugins/feishu-bot-bridge/webhook";
+export const FEISHU_BRIDGE_DOMAIN_PRESETS = ["feishu", "lark", "custom"] as const;
+export const FEISHU_BRIDGE_API_BASE_URLS = {
+  feishu: "https://open.feishu.cn",
+  lark: "https://open.larksuite.com",
+} as const;
+export const FEISHU_BRIDGE_RECEIVE_ID_TYPES = ["chat_id", "open_id", "user_id"] as const;
+export const FEISHU_BRIDGE_FORWARD_TIERS = ["critical", "actionable", "digest"] as const;
+export const FEISHU_BRIDGE_DEFAULT_REPLAY_WINDOW_SEC = 300;
+export const FEISHU_BRIDGE_MIN_REPLAY_WINDOW_SEC = 30;
+export const FEISHU_BRIDGE_MAX_REPLAY_WINDOW_SEC = 3600;
+export const FEISHU_BRIDGE_MAX_AUDIT_RECORDS = 100;
+
 export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "title",
   "style",
@@ -5412,3 +5426,357 @@ export function extractMainChatPermissionRuleCandidate(request: {
   }
   return { toolName, commandPrefix: null };
 }
+
+// ============================================================================
+// Wave 6 (P2-1): Plugin-Based Feishu Bot Bridge Schemas & RPCs
+// ============================================================================
+
+export const FeishuBridgeDomainPresetSchema = z.enum(FEISHU_BRIDGE_DOMAIN_PRESETS);
+export type FeishuBridgeDomainPreset = z.infer<typeof FeishuBridgeDomainPresetSchema>;
+
+export const FeishuBridgeReceiveIdTypeSchema = z.enum(FEISHU_BRIDGE_RECEIVE_ID_TYPES);
+export type FeishuBridgeReceiveIdType = z.infer<typeof FeishuBridgeReceiveIdTypeSchema>;
+
+export const FeishuBridgeForwardTierSchema = z.enum(FEISHU_BRIDGE_FORWARD_TIERS);
+export type FeishuBridgeForwardTier = z.infer<typeof FeishuBridgeForwardTierSchema>;
+
+export const FeishuBridgeRedactedConfigSchema = z.object({
+  enabled: z.boolean(),
+  domainPreset: FeishuBridgeDomainPresetSchema,
+  apiBaseUrl: z.string(),
+  appId: z.string(),
+  hasAppSecret: z.boolean(),
+  appSecretMask: z.string().nullable(),
+  hasVerificationToken: z.boolean(),
+  verificationTokenMask: z.string().nullable(),
+  hasEncryptKey: z.boolean(),
+  encryptKeyMask: z.string().nullable(),
+  receiveIdType: FeishuBridgeReceiveIdTypeSchema,
+  receiveId: z.string(),
+  allowedOpenIds: z.array(z.string()),
+  forwardTiers: z.array(FeishuBridgeForwardTierSchema),
+  respectLowDistraction: z.boolean(),
+  replayWindowSeconds: z
+    .number()
+    .int()
+    .min(FEISHU_BRIDGE_MIN_REPLAY_WINDOW_SEC)
+    .max(FEISHU_BRIDGE_MAX_REPLAY_WINDOW_SEC),
+  requireSignature: z.boolean(),
+  updatedAt: z.string().nullable(),
+});
+export type FeishuBridgeRedactedConfig = z.infer<typeof FeishuBridgeRedactedConfigSchema>;
+
+export const FeishuBridgeConfigPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  domainPreset: FeishuBridgeDomainPresetSchema.optional(),
+  apiBaseUrl: z.string().max(512).optional(),
+  appId: z.string().max(128).optional(),
+  appSecret: z.string().max(512).optional(),
+  clearAppSecret: z.boolean().optional(),
+  verificationToken: z.string().max(512).optional(),
+  clearVerificationToken: z.boolean().optional(),
+  encryptKey: z.string().max(512).optional(),
+  clearEncryptKey: z.boolean().optional(),
+  receiveIdType: FeishuBridgeReceiveIdTypeSchema.optional(),
+  receiveId: z.string().max(256).optional(),
+  allowedOpenIds: z.array(z.string().max(128)).max(100).optional(),
+  forwardTiers: z.array(FeishuBridgeForwardTierSchema).max(3).optional(),
+  respectLowDistraction: z.boolean().optional(),
+  replayWindowSeconds: z
+    .number()
+    .int()
+    .min(FEISHU_BRIDGE_MIN_REPLAY_WINDOW_SEC)
+    .max(FEISHU_BRIDGE_MAX_REPLAY_WINDOW_SEC)
+    .optional(),
+  requireSignature: z.boolean().optional(),
+});
+export type FeishuBridgeConfigPatch = z.infer<typeof FeishuBridgeConfigPatchSchema>;
+
+export const FeishuBridgeAuditDirectionSchema = z.enum(["outbound", "inbound", "system"]);
+export type FeishuBridgeAuditDirection = z.infer<typeof FeishuBridgeAuditDirectionSchema>;
+
+export const FeishuBridgeAuditKindSchema = z.enum([
+  "outbound_permission_card",
+  "outbound_decision_card",
+  "outbound_notification_card",
+  "outbound_test_card",
+  "outbound_card_update",
+  "inbound_challenge",
+  "inbound_permission_action",
+  "inbound_decision_action",
+  "inbound_rejected",
+  "inbound_deduplicated",
+  "connection_test",
+]);
+export type FeishuBridgeAuditKind = z.infer<typeof FeishuBridgeAuditKindSchema>;
+
+export const FeishuBridgeAuditStatusSchema = z.enum([
+  "succeeded",
+  "failed",
+  "rejected",
+  "deduplicated",
+  "filtered",
+]);
+export type FeishuBridgeAuditStatus = z.infer<typeof FeishuBridgeAuditStatusSchema>;
+
+export const FeishuBridgeAuditRecordSchema = z.object({
+  id: z.string(),
+  direction: FeishuBridgeAuditDirectionSchema,
+  kind: FeishuBridgeAuditKindSchema,
+  status: FeishuBridgeAuditStatusSchema,
+  title: z.string(),
+  summary: z.string(),
+  errorCode: z.string().nullable(),
+  latencyMs: z.number().int().nonnegative().nullable(),
+  messageId: z.string().nullable(),
+  actorOpenId: z.string().nullable(),
+  eventOrActionId: z.string().nullable(),
+  tier: MainChatNotificationTierSchema.nullable(),
+  createdAt: z.string(),
+});
+export type FeishuBridgeAuditRecord = z.infer<typeof FeishuBridgeAuditRecordSchema>;
+
+export const FeishuBridgeStatsSchema = z.object({
+  outboundSent: z.number().int().nonnegative(),
+  outboundFailed: z.number().int().nonnegative(),
+  inboundProcessed: z.number().int().nonnegative(),
+  inboundRejected: z.number().int().nonnegative(),
+  inboundDeduplicated: z.number().int().nonnegative(),
+  lastOutboundAt: z.string().nullable(),
+  lastInboundAt: z.string().nullable(),
+});
+export type FeishuBridgeStats = z.infer<typeof FeishuBridgeStatsSchema>;
+
+export const FeishuBridgeStateSchema = z.object({
+  pluginAvailable: z.boolean(),
+  pluginId: z.string(),
+  active: z.boolean(),
+  webhookPath: z.string(),
+  webhookUrl: z.string().nullable(),
+  config: FeishuBridgeRedactedConfigSchema,
+  stats: FeishuBridgeStatsSchema,
+  recentAudit: z.array(FeishuBridgeAuditRecordSchema),
+});
+export type FeishuBridgeState = z.infer<typeof FeishuBridgeStateSchema>;
+
+export const FeishuBridgeConnectionTestResultSchema = z.object({
+  ok: z.boolean(),
+  latencyMs: z.number().int().nonnegative(),
+  apiBaseUrl: z.string(),
+  statusCode: z.number().int().nullable(),
+  tokenExpiresInSec: z.number().int().nonnegative().nullable(),
+  cachedTokenReused: z.boolean().optional(),
+  errorCode: z.string().nullable(),
+  message: z.string(),
+  troubleshootingHint: z.string().nullable(),
+  testedAt: z.string(),
+});
+export type FeishuBridgeConnectionTestResult = z.infer<
+  typeof FeishuBridgeConnectionTestResultSchema
+>;
+
+export const FeishuBridgeSendTestCardResultSchema = z.object({
+  ok: z.boolean(),
+  latencyMs: z.number().int().nonnegative(),
+  messageId: z.string().nullable(),
+  receiveId: z.string(),
+  receiveIdType: FeishuBridgeReceiveIdTypeSchema,
+  errorCode: z.string().nullable(),
+  message: z.string(),
+  troubleshootingHint: z.string().nullable(),
+  sentAt: z.string(),
+});
+export type FeishuBridgeSendTestCardResult = z.infer<typeof FeishuBridgeSendTestCardResultSchema>;
+
+export function resolveFeishuBridgeApiBaseUrl(
+  preset: FeishuBridgeDomainPreset,
+  customApiBaseUrl?: string | null,
+): string {
+  if (preset === "feishu") return FEISHU_BRIDGE_API_BASE_URLS.feishu;
+  if (preset === "lark") return FEISHU_BRIDGE_API_BASE_URLS.lark;
+  return (customApiBaseUrl ?? "").trim().replace(/\/+$/, "");
+}
+
+export function createDefaultFeishuBridgeRedactedConfig(): FeishuBridgeRedactedConfig {
+  return {
+    enabled: false,
+    domainPreset: "feishu",
+    apiBaseUrl: FEISHU_BRIDGE_API_BASE_URLS.feishu,
+    appId: "",
+    hasAppSecret: false,
+    appSecretMask: null,
+    hasVerificationToken: false,
+    verificationTokenMask: null,
+    hasEncryptKey: false,
+    encryptKeyMask: null,
+    receiveIdType: "chat_id",
+    receiveId: "",
+    allowedOpenIds: [],
+    forwardTiers: ["critical", "actionable"],
+    respectLowDistraction: true,
+    replayWindowSeconds: FEISHU_BRIDGE_DEFAULT_REPLAY_WINDOW_SEC,
+    requireSignature: true,
+    updatedAt: null,
+  };
+}
+
+export function createEmptyFeishuBridgeStats(): FeishuBridgeStats {
+  return {
+    outboundSent: 0,
+    outboundFailed: 0,
+    inboundProcessed: 0,
+    inboundRejected: 0,
+    inboundDeduplicated: 0,
+    lastOutboundAt: null,
+    lastInboundAt: null,
+  };
+}
+
+export function createUnavailableFeishuBridgeState(
+  webhookUrl: string | null = null,
+): FeishuBridgeState {
+  return {
+    pluginAvailable: false,
+    pluginId: FEISHU_BRIDGE_PLUGIN_ID,
+    active: false,
+    webhookPath: FEISHU_BRIDGE_WEBHOOK_PATH,
+    webhookUrl,
+    config: createDefaultFeishuBridgeRedactedConfig(),
+    stats: createEmptyFeishuBridgeStats(),
+    recentAudit: [],
+  };
+}
+
+export const MainChatFeishuBridgeGetStateRequestSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_get_state.request"),
+  requestId: z.string(),
+  auditLimit: z.number().int().min(1).max(FEISHU_BRIDGE_MAX_AUDIT_RECORDS).optional(),
+});
+export type MainChatFeishuBridgeGetStateRequest = z.infer<
+  typeof MainChatFeishuBridgeGetStateRequestSchema
+>;
+
+export const MainChatFeishuBridgeGetStateResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  state: FeishuBridgeStateSchema,
+  error: z.string().nullable(),
+});
+export type MainChatFeishuBridgeGetStateResponsePayload = z.infer<
+  typeof MainChatFeishuBridgeGetStateResponsePayloadSchema
+>;
+
+export const MainChatFeishuBridgeGetStateResponseSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_get_state.response"),
+  payload: MainChatFeishuBridgeGetStateResponsePayloadSchema,
+});
+export type MainChatFeishuBridgeGetStateResponse = z.infer<
+  typeof MainChatFeishuBridgeGetStateResponseSchema
+>;
+
+export const MainChatFeishuBridgeUpdateConfigRequestSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_update_config.request"),
+  requestId: z.string(),
+  patch: FeishuBridgeConfigPatchSchema,
+});
+export type MainChatFeishuBridgeUpdateConfigRequest = z.infer<
+  typeof MainChatFeishuBridgeUpdateConfigRequestSchema
+>;
+
+export const MainChatFeishuBridgeUpdateConfigResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  state: FeishuBridgeStateSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatFeishuBridgeUpdateConfigResponsePayload = z.infer<
+  typeof MainChatFeishuBridgeUpdateConfigResponsePayloadSchema
+>;
+
+export const MainChatFeishuBridgeUpdateConfigResponseSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_update_config.response"),
+  payload: MainChatFeishuBridgeUpdateConfigResponsePayloadSchema,
+});
+export type MainChatFeishuBridgeUpdateConfigResponse = z.infer<
+  typeof MainChatFeishuBridgeUpdateConfigResponseSchema
+>;
+
+export const MainChatFeishuBridgeTestConnectionRequestSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_test_connection.request"),
+  requestId: z.string(),
+  forceRefreshToken: z.boolean().optional(),
+});
+export type MainChatFeishuBridgeTestConnectionRequest = z.infer<
+  typeof MainChatFeishuBridgeTestConnectionRequestSchema
+>;
+
+export const MainChatFeishuBridgeTestConnectionResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  result: FeishuBridgeConnectionTestResultSchema,
+  error: z.string().nullable(),
+});
+export type MainChatFeishuBridgeTestConnectionResponsePayload = z.infer<
+  typeof MainChatFeishuBridgeTestConnectionResponsePayloadSchema
+>;
+
+export const MainChatFeishuBridgeTestConnectionResponseSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_test_connection.response"),
+  payload: MainChatFeishuBridgeTestConnectionResponsePayloadSchema,
+});
+export type MainChatFeishuBridgeTestConnectionResponse = z.infer<
+  typeof MainChatFeishuBridgeTestConnectionResponseSchema
+>;
+
+export const MainChatFeishuBridgeSendTestCardRequestSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_send_test_card.request"),
+  requestId: z.string(),
+  receiveId: z.string().max(256).optional(),
+  receiveIdType: FeishuBridgeReceiveIdTypeSchema.optional(),
+  title: z.string().max(120).optional(),
+});
+export type MainChatFeishuBridgeSendTestCardRequest = z.infer<
+  typeof MainChatFeishuBridgeSendTestCardRequestSchema
+>;
+
+export const MainChatFeishuBridgeSendTestCardResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  result: FeishuBridgeSendTestCardResultSchema,
+  error: z.string().nullable(),
+});
+export type MainChatFeishuBridgeSendTestCardResponsePayload = z.infer<
+  typeof MainChatFeishuBridgeSendTestCardResponsePayloadSchema
+>;
+
+export const MainChatFeishuBridgeSendTestCardResponseSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_send_test_card.response"),
+  payload: MainChatFeishuBridgeSendTestCardResponsePayloadSchema,
+});
+export type MainChatFeishuBridgeSendTestCardResponse = z.infer<
+  typeof MainChatFeishuBridgeSendTestCardResponseSchema
+>;
+
+export const MainChatFeishuBridgeListAuditRequestSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_list_audit.request"),
+  requestId: z.string(),
+  limit: z.number().int().min(1).max(FEISHU_BRIDGE_MAX_AUDIT_RECORDS).optional(),
+  direction: FeishuBridgeAuditDirectionSchema.optional(),
+});
+export type MainChatFeishuBridgeListAuditRequest = z.infer<
+  typeof MainChatFeishuBridgeListAuditRequestSchema
+>;
+
+export const MainChatFeishuBridgeListAuditResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  records: z.array(FeishuBridgeAuditRecordSchema),
+  stats: FeishuBridgeStatsSchema,
+  error: z.string().nullable(),
+});
+export type MainChatFeishuBridgeListAuditResponsePayload = z.infer<
+  typeof MainChatFeishuBridgeListAuditResponsePayloadSchema
+>;
+
+export const MainChatFeishuBridgeListAuditResponseSchema = z.object({
+  type: z.literal("main_chat.feishu_bridge_list_audit.response"),
+  payload: MainChatFeishuBridgeListAuditResponsePayloadSchema,
+});
+export type MainChatFeishuBridgeListAuditResponse = z.infer<
+  typeof MainChatFeishuBridgeListAuditResponseSchema
+>;

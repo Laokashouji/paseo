@@ -162,6 +162,16 @@ import {
   MainChatSavePromptTemplateResponseSchema,
   MainChatDeletePromptTemplateRequestSchema,
   MainChatDeletePromptTemplateResponseSchema,
+  MainChatFeishuBridgeGetStateRequestSchema,
+  MainChatFeishuBridgeGetStateResponseSchema,
+  MainChatFeishuBridgeUpdateConfigRequestSchema,
+  MainChatFeishuBridgeUpdateConfigResponseSchema,
+  MainChatFeishuBridgeTestConnectionRequestSchema,
+  MainChatFeishuBridgeTestConnectionResponseSchema,
+  MainChatFeishuBridgeSendTestCardRequestSchema,
+  MainChatFeishuBridgeSendTestCardResponseSchema,
+  MainChatFeishuBridgeListAuditRequestSchema,
+  MainChatFeishuBridgeListAuditResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -4348,6 +4358,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatListPromptLibraryRequestSchema,
   MainChatSavePromptTemplateRequestSchema,
   MainChatDeletePromptTemplateRequestSchema,
+  MainChatFeishuBridgeGetStateRequestSchema,
+  MainChatFeishuBridgeUpdateConfigRequestSchema,
+  MainChatFeishuBridgeTestConnectionRequestSchema,
+  MainChatFeishuBridgeSendTestCardRequestSchema,
+  MainChatFeishuBridgeListAuditRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8536,6 +8551,11 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatListPromptLibraryResponseSchema,
   MainChatSavePromptTemplateResponseSchema,
   MainChatDeletePromptTemplateResponseSchema,
+  MainChatFeishuBridgeGetStateResponseSchema,
+  MainChatFeishuBridgeUpdateConfigResponseSchema,
+  MainChatFeishuBridgeTestConnectionResponseSchema,
+  MainChatFeishuBridgeSendTestCardResponseSchema,
+  MainChatFeishuBridgeListAuditResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

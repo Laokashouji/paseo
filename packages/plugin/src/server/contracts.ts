@@ -40,6 +40,8 @@ export interface PluginSettings<Schema extends ZodType> {
 }
 
 export interface PluginServerContext extends PluginLifecycleRegistration {
+  /** Host-scoped directory reserved for this plugin installation's private files, if available. */
+  readonly dataDirectory?: string;
   registerSettings<Schema extends ZodType>(
     definition: import("../settings.js").SettingsDefinition<Schema>,
   ): PluginSettings<Schema>;

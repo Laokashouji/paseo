@@ -430,6 +430,7 @@ export function createPluginWorker(options: {
         )
       : null;
     const contributedCleanup = contribute({
+      dataDirectory: message.settingsDirectory,
       handle,
       registerProvider,
       registerUsageSource,
