@@ -1,8 +1,5 @@
 import type { AgentAddress } from "@getpaseo/protocol/addresses";
-import {
-  MAIN_CHAT_CONVERSATION_ID_LABEL,
-  isMainChatAgent,
-} from "@getpaseo/protocol/main-chat";
+import { isMainChatConversationAgent } from "@getpaseo/protocol/main-chat";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import { BackgroundWorkTrack, createHostBackgroundWorkModel } from "@/background-work";
 import { BranchesTrack, useBranchesForAgent } from "@/branches";
@@ -76,13 +73,10 @@ export const AgentTracks = memo(function AgentTracks({
   // Main Chat and its direction/side conversations unify dispatched subagents inside the
   // five-state `MainChatActionBar`, so hiding the generic `SubagentsTrack` avoids stacking two
   // competing task strips above the composer while child agents in TaskPanelDrawer keep theirs.
-  const isMainChatConversationAgent = useSessionStore((state) => {
+  const isManagedConversation = useSessionStore((state) => {
     const session = state.sessions[serverId];
     const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-    if (!agent) return false;
-    return (
-      isMainChatAgent(agent) || typeof agent.labels[MAIN_CHAT_CONVERSATION_ID_LABEL] === "string"
-    );
+    return isMainChatConversationAgent(agent);
   });
   const backgroundModel = useMemo(
     () => createHostBackgroundWorkModel(serverId, agentId),
@@ -215,7 +209,7 @@ export const AgentTracks = memo(function AgentTracks({
         isCreatingBranch={isCreatingBranch}
         onArchiveBranch={archiveSubagent}
       />
-      {!isMainChatConversationAgent ? (
+      {!isManagedConversation ? (
         <SubagentsTrack
           serverId={serverId}
           rows={subagentRows}

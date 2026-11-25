@@ -154,7 +154,13 @@ function isMissingReplyRecoveryTrigger(item: StreamItem): boolean {
 
 export function extractBackgroundTurnLabel(item: StreamItem): string | null {
   const structuredMeta = getStructuredBackgroundTurnMeta(item);
-  const explicitLabel = structuredMeta?.label?.replace(/\s+/g, " ").trim();
+  const sender =
+    item.kind === "tool_call" && item.payload.source === "agent" && structuredMeta?.kind === "relay"
+      ? item.payload.data.agentMessage?.sender
+      : undefined;
+  const explicitLabel = (sender?.title || sender?.id || structuredMeta?.label)
+    ?.replace(/\s+/g, " ")
+    .trim();
   if (explicitLabel) {
     return explicitLabel.length > MAX_BACKGROUND_LABEL_CHARS
       ? `${explicitLabel.slice(0, MAX_BACKGROUND_LABEL_CHARS - 1)}…`
@@ -239,7 +245,7 @@ export function isSilentBackgroundTurn(
     .filter(Boolean)
     .join("\n")
     .trim();
-  if (combined.length === 0) return true;
+  if (combined.length === 0) return false;
   return EXPLICIT_SILENT_SENTINEL_RE.test(combined) || PLACEHOLDER_EMPTY_REPLY_RE.test(combined);
 }
 
@@ -460,9 +466,16 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       return;
     }
 
-    // Fold the entire background supervision / patrol / routine turn (system trigger, intermediate
-    // tool calls, and assistant summary text) behind one minimalist inline row, while NEVER hiding
-    // interactive inline cards (plans, decisions, receipts, rework, settings proposals, compaction).
+    // Only the trailing assistant message is a delivery. Earlier narration belongs to the work.
+    const replyStart = findLastReplyIndex(body, 0, body.length);
+    const visibleReplies = new Set(
+      replyStart >= 0 &&
+        !body.slice(replyStart).some((item) => item.kind === "tool_call" || item.kind === "thought")
+        ? body.slice(replyStart).filter(isAssistantReply)
+        : [],
+    );
+    const keepVisible = (item: StreamItem) =>
+      visibleReplies.has(item) || staysVisibleInCollapsedBackgroundTurn(item);
     const tools = summarizeTurn(body, input.getGroupedCalls);
     const expanded = input.expandedHostIds.has(host.id);
     const summary = summaryRow(
@@ -483,17 +496,12 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
 
     const revealedItems = [host, ...(expanded ? expandCalls(body) : body)];
     for (const item of revealedItems) {
-      if (item !== host && staysVisibleInCollapsedBackgroundTurn(item)) continue;
+      if (item !== host && keepVisible(item)) continue;
       hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
       if (expanded) nestedItemIds.add(item.id);
       else hostIdByHiddenRowId.set(item.id, host.id);
     }
-    output.push(
-      summary,
-      ...(expanded
-        ? revealedItems
-        : body.filter((item) => staysVisibleInCollapsedBackgroundTurn(item))),
-    );
+    output.push(summary, ...(expanded ? revealedItems : body.filter(keepVisible)));
   };
 
   const flushNormalRun = (host: StreamItem | undefined, runEnd: number, isClosed: boolean) => {

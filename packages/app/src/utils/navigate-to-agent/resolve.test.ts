@@ -1,3 +1,4 @@
+import { isMainChatConversationAgent } from "@getpaseo/protocol/main-chat";
 import { MAIN_CHAT_ROLE_LABEL, MAIN_CHAT_ROLE_VALUE } from "@getpaseo/protocol/main-chat";
 import { describe, expect, it } from "vitest";
 import {
@@ -132,6 +133,44 @@ describe("resolveNavigateToAgent", () => {
     expect(hostNavigations).toEqual([]);
     expect(tabNavigations).toEqual([]);
   });
+
+  it("keeps regular plan tasks in their workspace with normal conversation actions", () => {
+    const labels = {
+      "paseo.main-chat.conversation-id": "direction-1",
+      "paseo.main-chat.task-id": "task-1",
+    };
+    const { deps, tabNavigations } = createFakeNavigators({
+      agentWorkspaceId: WORKSPACE_ID,
+      labels,
+    });
+    expect(isMainChatConversationAgent({ labels })).toBe(false);
+    resolveNavigateToAgent({ serverId: SERVER_ID, agentId: AGENT_ID }, deps);
+    expect(tabNavigations[0]?.target).toEqual({ kind: "agent", agentId: AGENT_ID });
+  });
+
+  it.each(["side", "leader"])(
+    "opens a managed %s conversation from cached or fetched labels",
+    (kind) => {
+      const labels = {
+        "paseo.main-chat.conversation-kind": kind,
+        "paseo.main-chat.conversation-id": "direction-1",
+      };
+      expect(isMainChatConversationAgent({ labels })).toBe(true);
+      for (const cached of [true, false]) {
+        const { deps, mainChatNavigations } = createFakeNavigators({
+          agentWorkspaceId: WORKSPACE_ID,
+          isMainChatWorkspace: true,
+          labels: cached ? labels : undefined,
+        });
+        const route = resolveNavigateToAgent(
+          { serverId: SERVER_ID, agentId: AGENT_ID, labels: cached ? undefined : labels },
+          deps,
+        );
+        expect(route).toContain("/main/c/direction-1");
+        expect(mainChatNavigations).toEqual([{ route }]);
+      }
+    },
+  );
 
   it("redirects agents in the dedicated main-chat workspace or with main role labels to /main", () => {
     const byWorkspace = createFakeNavigators({

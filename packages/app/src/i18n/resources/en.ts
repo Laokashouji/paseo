@@ -3826,6 +3826,7 @@ export const en = {
       newSessionSuccessToast: "Started a new main chat with handoff summary",
       newSessionFailedToast: "Failed to start new main chat",
     },
+    taskDrawerResize: "Resize task panel",
     backgroundTurn: {
       running: "Background running",
       completed: "Background turn",

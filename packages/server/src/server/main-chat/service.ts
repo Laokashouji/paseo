@@ -1641,8 +1641,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     openDecisions: readonly MainChatDecisionRecord[],
   ): boolean {
     return openDecisions.some((decision) => {
-      if (decision.taskId === task.id) return true;
-      if (decision.agentId === null) return false;
+      if (decision.taskId) return decision.taskId === task.id;
+      if (
+        decision.mainAgentId !== task.mainAgentId ||
+        (task.serverId && task.serverId !== deps.serverId) ||
+        decision.agentId === null
+      )
+        return false;
       return decision.agentId === task.activeAgentId || task.agentIds.includes(decision.agentId);
     });
   }
@@ -1655,17 +1660,20 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
   async function listTaskRecordsInternal(options?: {
     mainAgentId?: string;
+    ownerAgentIds?: ReadonlySet<string>;
     conversationId?: string;
     includeCompleted?: boolean;
   }): Promise<MainChatTaskRecord[]> {
     await store.load();
     const includeCompleted = options?.includeCompleted ?? true;
     const mainAgentId = options?.mainAgentId?.trim() || undefined;
-    const rawTasks = store.listTasks({
-      mainAgentId,
-      conversationId: options?.conversationId?.trim() || undefined,
-      includeCompleted: true,
-    });
+    const rawTasks = store
+      .listTasks({
+        mainAgentId,
+        conversationId: options?.conversationId?.trim() || undefined,
+        includeCompleted: true,
+      })
+      .filter((task) => !options?.ownerAgentIds || options.ownerAgentIds.has(task.mainAgentId));
     const allTasksById = new Map(
       store.listTasks({ includeCompleted: true }).map((entry) => [entry.id, entry]),
     );
@@ -1675,11 +1683,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
     const resolved: MainChatTaskRecord[] = [];
     for (const task of rawTasks) {
-      const liveAgent = task.activeAgentId ? deps.agentManager.getAgent(task.activeAgentId) : null;
-      const storedStatus = liveAgent
-        ? null
-        : await resolveStoredAgentLastStatus(task.activeAgentId);
-      const triage = task.activeAgentId ? store.getTriage(task.activeAgentId) : null;
+      const localAgentId =
+        !task.serverId || task.serverId === deps.serverId ? task.activeAgentId : null;
+      const liveAgent = localAgentId ? deps.agentManager.getAgent(localAgentId) : null;
+      const storedStatus = liveAgent ? null : await resolveStoredAgentLastStatus(localAgentId);
+      const triage = localAgentId ? store.getTriage(localAgentId) : null;
       const effectiveStatus = resolveEffectiveTaskStatus({
         task,
         liveAgent,
@@ -6514,10 +6522,6 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         limit: 200,
         includeSilent: true,
       });
-      const tasks = await listTaskRecordsInternal({
-        mainAgentId: resolvedMainAgentId,
-        includeCompleted: true,
-      });
       const recentReceipts: MainChatTaskReceipt[] = store
         .listReceipts(resolvedMainAgentId)
         .map((entry) => ({
@@ -6535,8 +6539,24 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         collectResourceAdmissionSnapshotInternal().catch(() => undefined),
       ]);
       const promptLibraryListing = listMergedPromptTemplates(store.listCustomPromptTemplates());
-      const plans = store.listPlans(resolvedMainAgentId);
-      const decisions = store.listDecisions(resolvedMainAgentId);
+      // A steward's tray includes actions created under its active direction and side agents.
+      // An overview requested for a single conversation remains scoped to that owner.
+      const isRoot = conversations.some(
+        (record) => record.kind === "main" && record.agentId === resolvedMainAgentId,
+      );
+      const owners = isRoot ? new Set(conversations.map((record) => record.agentId)) : undefined;
+      const ownerId = isRoot ? undefined : resolvedMainAgentId;
+      const tasks = await listTaskRecordsInternal({
+        mainAgentId: ownerId,
+        ownerAgentIds: owners,
+        includeCompleted: true,
+      });
+      const plans = store
+        .listPlans(ownerId)
+        .filter((plan) => !owners || owners.has(plan.mainAgentId));
+      const decisions = store
+        .listDecisions(ownerId)
+        .filter((decision) => !owners || owners.has(decision.mainAgentId));
       const triages = store.listTriages();
       const standingAuthorizations = store.listStandingAuthorizations({ includeRevoked: false });
       const ruleSuggestions = store.listRuleSuggestions({ includeDismissed: false });
@@ -6550,6 +6570,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         pendingClarifications,
       });
       return {
+        supervisorHeldPermissions: supervisor
+          .getApprovalTracker()
+          .list()
+          .filter((entry) => entry.tier !== "user")
+          .map(({ serverId, agentId, requestId }) => ({ serverId, agentId, requestId })),
         plans,
         decisions,
         autoStartRules: store.listTrustRules(),

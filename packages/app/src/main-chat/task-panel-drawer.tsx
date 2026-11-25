@@ -1575,9 +1575,8 @@ const styles = StyleSheet.create((theme) => {
 
   return {
     drawer: {
-      width: "42%",
-      minWidth: 340,
-      maxWidth: 640,
+      flex: 1,
+      minWidth: 0,
       borderLeftWidth: theme.borderWidth[1],
       borderLeftColor: theme.colors.border,
       backgroundColor: theme.colors.surface0,

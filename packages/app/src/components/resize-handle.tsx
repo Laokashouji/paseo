@@ -11,6 +11,7 @@ import {
 
 export interface ResizeHandleProps {
   testID?: string;
+  accessibilityLabel?: string;
   direction: "horizontal" | "vertical";
   hitAreaAlignment?: "center" | "end";
   groupId: string;
@@ -37,6 +38,7 @@ function resetWindowHorizontalScroll() {
 
 export function ResizeHandle({
   testID,
+  accessibilityLabel,
   direction,
   hitAreaAlignment = "center",
   groupId,
@@ -266,6 +268,7 @@ export function ResizeHandle({
       {finePointer ? (
         <View
           role="separator"
+          accessibilityLabel={accessibilityLabel}
           aria-orientation={direction === "horizontal" ? "vertical" : "horizontal"}
           style={hitAreaStyle}
           onPointerDown={handlePointerDown}
@@ -276,6 +279,7 @@ export function ResizeHandle({
         <GestureDetector gesture={touchGesture}>
           <View
             role="separator"
+            accessibilityLabel={accessibilityLabel}
             aria-orientation={direction === "horizontal" ? "vertical" : "horizontal"}
             collapsable={false}
             style={touchHitAreaStyle}

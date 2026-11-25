@@ -22,6 +22,7 @@ export function navigateToAgent(input: NavigateToAgentInput): string {
         : null;
       const workspace = workspaceKey ? session?.workspaces.get(workspaceKey) : undefined;
       return {
+        labels: agent?.labels,
         agentWorkspaceId: agent?.workspaceId,
         isMainChatAgent: isMainChatAgent(agent),
         isMainChatWorkspace: workspace

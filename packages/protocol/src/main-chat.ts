@@ -3445,6 +3445,15 @@ export const MainChatOverviewSchema = z.object({
   recentReceipts: z.array(MainChatTaskReceiptSchema).optional(),
   standingAuthorizations: z.array(MainChatStandingAuthorizationSchema).optional(),
   ruleSuggestions: z.array(MainChatRuleSuggestionSchema).optional(),
+  supervisorHeldPermissions: z
+    .array(
+      z.object({
+        serverId: z.string().nullable(),
+        agentId: z.string(),
+        requestId: z.string(),
+      }),
+    )
+    .optional(),
   pendingClarifications: z.array(MainChatApprovalClarificationSchema).optional(),
   nextStepSuggestions: z.array(MainChatNextStepSuggestionSchema).optional(),
   suppressedQuietBadgeCount: z.number().int().nonnegative().optional(),
@@ -5066,6 +5075,16 @@ export interface MainChatTaskLabelsMeta {
   goal: string | null;
 }
 
+export function getManagedConversationId(
+  labels: Record<string, unknown> | null | undefined,
+): string | null {
+  const kind = labels?.[MAIN_CHAT_CONVERSATION_KIND_LABEL];
+  const id = labels?.[MAIN_CHAT_CONVERSATION_ID_LABEL];
+  return (kind === "side" || kind === "leader") && typeof id === "string"
+    ? id.trim() || null
+    : null;
+}
+
 export function isMainChatLabels(labels: Record<string, unknown> | null | undefined): boolean {
   return labels?.[MAIN_CHAT_ROLE_LABEL] === MAIN_CHAT_ROLE_VALUE;
 }
@@ -5078,6 +5097,10 @@ export function isFormerMainChatLabels(
 
 export function isMainChatAgent(agent: AgentLabelSource | null | undefined): boolean {
   return Boolean(agent && isMainChatLabels(agent.labels));
+}
+
+export function isMainChatConversationAgent(agent: AgentLabelSource | null | undefined): boolean {
+  return isMainChatAgent(agent) || getManagedConversationId(agent?.labels) !== null;
 }
 
 export function isMainChatTaskQuietLabels(
@@ -5780,3 +5803,47 @@ export const MainChatFeishuBridgeListAuditResponseSchema = z.object({
 export type MainChatFeishuBridgeListAuditResponse = z.infer<
   typeof MainChatFeishuBridgeListAuditResponseSchema
 >;
+
+const PASEO_SYSTEM_ENVELOPE_RE = /^<paseo-system(?:\s[^>]*)?>[\s\S]*<\/paseo-system>$/;
+const LEGACY_BACKGROUND_PROMPTS: ReadonlyArray<{
+  prefix: string;
+  marker: string;
+}> = [
+  {
+    prefix: "📋 督办 · 主动巡检唤醒：",
+    marker: "（这是 Paseo 后台",
+  },
+  {
+    prefix: "👋 首次就绪简报：",
+    marker: "（这是 Paseo 自动触发的首次态势简报",
+  },
+  {
+    prefix: "【系统自动补答提醒】",
+    marker: "上一轮你在响应用户消息时调用了工具",
+  },
+  {
+    prefix: "【后台空闲预压缩检查点】",
+    marker: "以下是最新的结构化上下文交接摘要",
+  },
+  {
+    prefix: "【主对话上下文压缩检查点】",
+    marker: "以下是最新的结构化上下文交接摘要",
+  },
+];
+
+/**
+ * Filters daemon-injected `<paseo-system>` background patrol/keepalive/relay envelopes
+ * (and legacy unwrapped main-chat patrol prompts) out of the user prompt outline index.
+ */
+export function isHiddenSystemTimelinePrompt(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (PASEO_SYSTEM_ENVELOPE_RE.test(trimmed)) {
+    return true;
+  }
+  return LEGACY_BACKGROUND_PROMPTS.some(
+    ({ prefix, marker }) => trimmed.startsWith(prefix) && trimmed.includes(marker),
+  );
+}

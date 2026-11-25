@@ -1,8 +1,9 @@
-import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { getManagedConversationId, isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useNavigation } from "expo-router/react-navigation";
 import { StyleSheet, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { buildMainChatConversationRoute } from "@/utils/host-routes";
+import { router, useLocalSearchParams } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
 import { RetainedPanel } from "@/components/retained-panel";
 import { selectIsMainChatWorkspaceRedirectTarget } from "@/main-chat/selectors";
@@ -135,6 +136,11 @@ function HostWorkspaceRouteContent() {
         ? (sessionState.sessions[serverId]?.agents.get(targetAgentId) ??
           sessionState.sessions[serverId]?.agentDetails.get(targetAgentId))
         : undefined;
+      const conversationId = getManagedConversationId(targetAgent?.labels);
+      if (conversationId) {
+        router.replace(buildMainChatConversationRoute(conversationId, serverId));
+        return;
+      }
       const isMainChatRedirect =
         isMainChatAgent(targetAgent) ||
         selectIsMainChatWorkspaceRedirectTarget(sessionState, serverId, workspaceId, targetAgentId);

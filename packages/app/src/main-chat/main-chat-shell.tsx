@@ -29,7 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Text, View } from "react-native";
+import { type LayoutChangeEvent, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
@@ -81,6 +81,7 @@ import {
   formatSwitchedMainChatPresetToast,
   type MainChatStylePresetListItem,
 } from "./style-presets";
+import { TaskDrawerFrame } from "./task-drawer-frame";
 import { TaskPanelDrawer } from "./task-panel-drawer";
 import { formatCompactTokenCount } from "./usage-format";
 
@@ -849,6 +850,11 @@ export const MainChatShell = memo(function MainChatShell({
   );
 
   const showHeaderAvatar = isCompact || !isDesktopSidebarOpen || variant === "conversation";
+  const [workbenchWidth, setWorkbenchWidth] = useState(0);
+  const measureWorkbench = useCallback(
+    (event: LayoutChangeEvent) => setWorkbenchWidth(event.nativeEvent.layout.width),
+    [],
+  );
   const showRightDrawer = !isCompact && actions.activeDrawerTarget !== null;
   const headerHorizontalPadding = isCompact ? 8 : 12;
 
@@ -902,7 +908,7 @@ export const MainChatShell = memo(function MainChatShell({
             </View>
           </View>
 
-          <View style={styles.workbench}>
+          <View style={styles.workbench} onLayout={measureWorkbench}>
             <View
               style={styles.mainColumn}
               onStartShouldSetResponderCapture={handleMainColumnResponderCapture}
@@ -915,13 +921,15 @@ export const MainChatShell = memo(function MainChatShell({
             </View>
 
             {showRightDrawer && actions.activeDrawerTarget ? (
-              <TaskPanelDrawer
-                target={actions.activeDrawerTarget}
-                mainServerId={serverId}
-                mainAgentId={mainAgentId ?? null}
-                isFocused={activePane === "drawer"}
-                onFocus={handleFocusDrawerPane}
-              />
+              <TaskDrawerFrame containerWidth={workbenchWidth}>
+                <TaskPanelDrawer
+                  target={actions.activeDrawerTarget}
+                  mainServerId={serverId}
+                  mainAgentId={mainAgentId ?? null}
+                  isFocused={activePane === "drawer"}
+                  onFocus={handleFocusDrawerPane}
+                />
+              </TaskDrawerFrame>
             ) : null}
           </View>
         </View>

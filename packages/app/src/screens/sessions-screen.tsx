@@ -1,4 +1,4 @@
-import { isFormerMainChatLabels, isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { isFormerMainChatLabels, isMainChatConversationAgent } from "@getpaseo/protocol/main-chat";
 import { useMemo, useState, useCallback, useEffect, type ReactElement } from "react";
 import { View, Text } from "react-native";
 import { useIsFocused } from "expo-router/react-navigation";
@@ -97,7 +97,9 @@ function SessionsScreenContent() {
   });
   const agents = useMemo(
     () =>
-      rawAgents.filter((agent) => !isMainChatAgent(agent) && !isFormerMainChatLabels(agent.labels)),
+      rawAgents.filter(
+        (agent) => !isMainChatConversationAgent(agent) && !isFormerMainChatLabels(agent.labels),
+      ),
     [rawAgents],
   );
   const isSearching = isSearchSupported && search.length > 0;

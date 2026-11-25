@@ -961,6 +961,29 @@ describe("Wave 4 P1-6: zero-token deterministic detectors (read_without_reply, m
     ).toBeNull();
   });
 
+  it("distinguishes deep code and long paths with identical prefixes and suffixes", () => {
+    const manager = createZeroTokenRuleWindowManager();
+    const prefix = "a".repeat(2200);
+    const suffix = "b".repeat(900);
+    for (const toolName of ["Read", "Edit", "execute"]) {
+      for (let i = 0; i < 6; i++) {
+        const value = prefix + i + suffix;
+        const detail =
+          toolName === "execute"
+            ? { type: "unknown", input: { call: { code: value } } }
+            : { type: toolName.toLowerCase(), filePath: value };
+        const result = manager.recordToolEvent(toolName, {
+          toolName,
+          detail,
+          callId: String(i),
+          status: "completed",
+          nowMs: i * 1000,
+        });
+        expect(result.diagnostic).toBeNull();
+      }
+    }
+  });
+
   it("detects exact_repeat, alternating_ab, and repeated_error tool loops while exempting slow polling, and persists window across restarts", () => {
     const nowIso = "2026-11-25T05:15:00.000Z";
     const baseMs = Date.parse(nowIso);

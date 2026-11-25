@@ -48,6 +48,7 @@ import {
 } from "./prompts.js";
 import {
   createZeroTokenRuleWindowManager,
+  toolInputHash,
   detectReadWithoutReply,
   type ZeroTokenRuleWindowManager,
 } from "./zero-token-rules.js";
@@ -217,10 +218,10 @@ const STALE_BLOCKED_PHASES = new Set<MainChatSessionTriage["phase"]>([
   "no_progress",
   "unsure",
 ]);
-const AUTO_RESOLVED_TURN_STARTED_ANSWER = "已在原会话继续处理，该待决策项已自动结项";
 const AUTO_RESOLVED_ARCHIVED_ANSWER = "关联会话已归档，该待决策项已自动结项";
 
 interface AgentToolLoopTracker {
+  seenCallIds: Set<string>;
   lastSubstantiveAt: number;
   noProgressSinceAt: number | null;
   noProgressCalls: number;
@@ -1373,19 +1374,27 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       mutated = true;
     }
 
-    const autoResolved = await deps.store.resolveOpenDecisionsForAgent(agentId, {
-      answer:
-        reason === "archived" ? AUTO_RESOLVED_ARCHIVED_ANSWER : AUTO_RESOLVED_TURN_STARTED_ANSWER,
-      answeredAt: nowIso,
-      taskId: linkedTask?.id ?? null,
-    });
-    if (autoResolved.length > 0) {
-      mutated = true;
+    if (reason === "archived") {
+      const closed = await deps.store.resolveOpenDecisionsForAgent(agentId, {
+        answer: AUTO_RESOLVED_ARCHIVED_ANSWER,
+        answeredAt: nowIso,
+        taskId: linkedTask?.id ?? null,
+      });
+      if (closed.length) mutated = true;
     }
 
     if (reason === "turn_started" && linkedTask && linkedTask.status === "needs_you") {
       const live = deps.agentManager.getAgent(agentId);
-      if (!live || live.pendingPermissions.size === 0) {
+      if (
+        (!live || live.pendingPermissions.size === 0) &&
+        !deps.store
+          .listDecisions()
+          .some(
+            (decision) =>
+              !decision.answeredAt &&
+              (decision.agentId === agentId || decision.taskId === linkedTask.id),
+          )
+      ) {
         await deps.store.putTask({
           ...linkedTask,
           status: "running",
@@ -2052,10 +2061,13 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
   function recordToolCallForLoopDetection(
     agentId: string,
     toolName: string,
-    detailText: string | null,
+    detail: Extract<AgentTimelineItem, { type: "tool_call" }>["detail"],
+    callId: string,
     now: number,
   ): void {
+    const detailText = extractToolDetailText(detail);
     const tracker: AgentToolLoopTracker = toolLoopByAgent.get(agentId) ?? {
+      seenCallIds: new Set<string>(),
       lastSubstantiveAt: now,
       noProgressSinceAt: null,
       noProgressCalls: 0,
@@ -2065,7 +2077,13 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       nudgedAt: null,
     };
 
-    if (isSubstantiveProgressToolCall(toolName, detailText)) {
+    const inputHash = toolInputHash(detail);
+    const progress = isSubstantiveProgressToolCall(toolName, detailText);
+    const waiting = isNoProgressToolCall(toolName, detailText);
+    if (!inputHash && !waiting && !progress) return;
+    if (callId && tracker.seenCallIds.has(callId)) return;
+    if (callId) tracker.seenCallIds.add(callId);
+    if (progress) {
       tracker.lastSubstantiveAt = now;
       tracker.noProgressSinceAt = null;
       tracker.noProgressCalls = 0;
@@ -2078,10 +2096,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     }
 
     tracker.totalCallsSinceSubstantive += 1;
-    const normalizedDetail = (detailText ?? "").trim();
-    const signature = normalizedDetail
-      ? `${toolName.toLowerCase()}:${normalizedDetail.slice(0, 120)}`
-      : null;
+    const signature = inputHash ? toolName.toLowerCase() + ":" + inputHash : null;
     if (signature && signature === tracker.lastToolSignature) {
       tracker.repeatedSignatureCount += 1;
     } else {
@@ -2089,8 +2104,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       tracker.repeatedSignatureCount = signature ? 1 : 0;
     }
 
-    const isWaitCall =
-      isNoProgressToolCall(toolName, detailText) || tracker.repeatedSignatureCount >= 3;
+    const isWaitCall = waiting || tracker.repeatedSignatureCount >= 3;
     if (isWaitCall) {
       if (tracker.noProgressSinceAt === null) {
         tracker.noProgressSinceAt = now;
@@ -2641,7 +2655,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     now: number,
   ): void {
     sealCurrentAssistantSegment(agent.id);
-    recordToolCallForLoopDetection(agent.id, item.name, extractToolDetailText(item.detail), now);
+    recordToolCallForLoopDetection(agent.id, item.name, item.detail, item.callId, now);
     if (isHandoffBlockedAgent(agent)) return;
     const loopResult = getZeroTokenRules().recordToolEvent(agent.id, {
       callId: item.callId,

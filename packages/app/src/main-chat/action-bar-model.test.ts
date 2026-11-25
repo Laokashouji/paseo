@@ -296,21 +296,22 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
       ],
       pendingPermissions: [
         makePermission("child_perm", "req_1"),
-        // Even if a stale permission points to an awaiting_review task, awaiting_review stays out of needsYou!
+        // An open permission still needs a response while its task awaits review.
         makePermission("child_review", "req_stale"),
       ],
       hostLabelsByServerId: { srv_1: "DevBox" },
       nowMs: NOW_MS,
     });
 
-    // Bucket 1: needsYou has permission(child_perm), decision(dec_1), open plan(plan_open) — NO awaiting_review!
+    // Open requests, including the permission for the task under review.
     expect(model.needsYou.map((item) => item.id)).toEqual([
       "perm:srv_1:child_perm",
+      "perm:srv_1:child_review",
       "decision:dec_1",
       "plan:plan_open",
     ]);
-    expect(model.needsYou.some((item) => item.taskId === "task_review")).toBe(false);
-    expect(model.needsYou.some((item) => item.agentId === "child_review")).toBe(false);
+    expect(model.needsYou.some((item) => item.taskId === "task_review")).toBe(true);
+    expect(model.needsYou.some((item) => item.agentId === "child_review")).toBe(true);
 
     // Bucket 2: inProgress splits cleanly into normal active vs stale48h
     expect(model.inProgress.active.map((item) => item.taskId)).toEqual(["task_active"]);
@@ -319,7 +320,7 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
     expect(model.inProgress.stale[0]?.stale48h).toBe(true);
     expect(model.inProgress.all).toHaveLength(2);
 
-    // Bucket 3: awaitingReview owns task_review exclusively
+    // Task state remains visible alongside its pending permission.
     expect(model.awaitingReview.map((item) => item.taskId)).toEqual(["task_review"]);
 
     // Bucket 4: parked owns task_parked
@@ -330,18 +331,18 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
     expect(model.completed24h.map((item) => item.taskId)).toEqual(["task_done_recent"]);
 
     expect(model.counts).toEqual({
-      needsYou: 3,
+      needsYou: 4,
       inProgress: 2,
       inProgressActive: 1,
       inProgressStale: 1,
       awaitingReview: 1,
       parked: 1,
       completed24h: 1,
-      total: 8,
+      total: 9,
     });
   });
 
-  it("strictly deduplicates duplicate permissions and prevents the same agentId/taskId from appearing twice", () => {
+  it("groups requests for the same task and retains distinct actions", () => {
     const overview = makeOverview({
       decisions: [
         {
@@ -384,16 +385,23 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
         makeLiveAgent({ agentId: "child_1", status: "running", turnPhase: "open" }),
         makeLiveAgent({ agentId: "child_0", status: "idle" }),
       ],
-      pendingPermissions: [permA, permADup, permB],
+      pendingPermissions: [permA, permADup, permB, makePermission("child_0", "req_peer")],
       nowMs: NOW_MS,
     });
 
     // child_1 appears ONCE in needsYou, carrying 2 deduplicated permissions (req_same + req_second).
-    expect(model.needsYou).toHaveLength(1);
+    expect(model.needsYou.map((item) => item.kind)).toEqual(["permission"]);
+    expect(model.needsYou[0]?.relatedRequests?.map((item) => item.id)).toEqual([
+      "decision:dec_dup",
+    ]);
     const first = model.needsYou[0];
     expect(first?.kind).toBe("permission");
     if (first?.kind === "permission") {
-      expect(first.permissions.map((p) => p.request.id)).toEqual(["req_same", "req_second"]);
+      expect(first.permissions.map((p) => p.request.id)).toEqual([
+        "req_same",
+        "req_second",
+        "req_peer",
+      ]);
     }
 
     // Neither child_1 nor its historical lineage agent child_0 nor task_1 appears in any other bucket!
@@ -401,6 +409,58 @@ describe("buildMainChatActionBarModel — five-state bucketing & strict deduplic
     expect(model.awaitingReview).toHaveLength(0);
     expect(model.parked).toHaveLength(0);
     expect(model.completed24h).toHaveLength(0);
+  });
+
+  it("keeps user approvals on another host and excludes only the explicitly held request", () => {
+    const held = makePermission("worker", "same", "srv_1"),
+      own = makePermission("worker", "same", "srv_2");
+    const input = {
+      serverId: "srv_1",
+      mainAgentId: "root",
+      overview: makeOverview({
+        supervisorHeldPermissions: [{ serverId: "srv_1", agentId: "worker", requestId: "same" }],
+      }),
+      liveAgents: [makeLiveAgent({ agentId: "worker", attentionReason: "permission" })],
+      pendingPermissions: [held, own],
+      nowMs: NOW_MS,
+    };
+    expect(buildMainChatActionBarModel(input).needsYou.map((item) => item.serverId)).toEqual([
+      "srv_2",
+    ]);
+    expect(
+      buildMainChatActionBarModel({ ...input, overview: makeOverview({}) }).counts.needsYou,
+    ).toBe(2);
+  });
+
+  it("keeps a local blocked-user triage off a remote session with the same agent id", () => {
+    const overview = makeOverview({
+      triages: [
+        {
+          agentId: "worker",
+          workspaceId: null,
+          title: "本机会话",
+          managedByMainChat: true,
+          phase: "blocked_user",
+          summary: "确认",
+          waitReason: "请确认本机结果",
+          suggestedAction: null,
+          triageSource: "rule",
+          updatedAt: isoAgo(5000),
+        },
+      ],
+    });
+    const input = {
+      serverId: "srv_1",
+      mainAgentId: "agent_main",
+      overview,
+      pendingPermissions: [],
+      liveAgents: ["srv_1", "srv_2"].map((serverId) =>
+        makeLiveAgent({ serverId, agentId: "worker" }),
+      ),
+    };
+    expect(buildMainChatActionBarModel(input).needsYou.map((item) => item.serverId)).toEqual([
+      "srv_1",
+    ]);
   });
 
   it("applies exact 48h stale boundary and exact 24h completion window boundary", () => {
@@ -700,7 +760,11 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       collapseBackgroundTurns: true,
     });
 
-    expect(folded.tail.map((item) => item.id)).toEqual(["turn-summary:bg_report", "msg_recovered"]);
+    expect(folded.tail.map((item) => item.id)).toEqual([
+      "turn-summary:bg_report",
+      "msg_report",
+      "msg_recovered",
+    ]);
     const bgSummary = folded.summaryRowsByHostId.get("bg_report");
     expect(bgSummary?.variant).toBe("background");
     expect(bgSummary?.backgroundMeta).toEqual({
@@ -726,12 +790,12 @@ describe("M2 background turn collapse & silent turn suppression", () => {
       "msg_report",
       "msg_recovered",
     ]);
-    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2", "msg_report"]);
+    expect([...expanded.nestedItemIds]).toEqual(["bg_report", "tool_2"]);
   });
 });
 
 describe("ActionBarModel stale live-session filtering & rich task context", () => {
-  it("filters stale open decisions, blocked_user triages, and needs_you tasks when liveAgents are running or archived", () => {
+  it("retains open decisions across resumed turns and removes archived sessions and stale triage", () => {
     const now = Date.parse("2026-11-24T12:00:00.000Z");
     const overview: MainChatOverview = {
       plans: [],
@@ -848,9 +912,9 @@ describe("ActionBarModel stale live-session filtering & rich task context", () =
       nowMs: now,
     });
 
-    // Only child_blocked remains in needsYou; running & archived stale items are immediately filtered out.
-    expect(model.needsYou).toHaveLength(1);
-    const blockedItem = model.needsYou[0]!;
+    // The explicit decision and the currently blocked session both remain actionable.
+    expect(model.needsYou.map((item) => item.kind).sort()).toEqual(["decision", "task"]);
+    const blockedItem = model.needsYou.find((item) => item.kind === "task")!;
     expect(blockedItem.kind).toBe("task");
     if (blockedItem.kind === "task") {
       expect(blockedItem.agentId).toBe("child_blocked");
@@ -860,8 +924,8 @@ describe("ActionBarModel stale live-session filtering & rich task context", () =
       expect(blockedItem.cwd).toBe("/repo/paseo-fork");
     }
 
-    // child_running moved cleanly into inProgress.active!
-    expect(model.inProgress.active.some((item) => item.agentId === "child_running")).toBe(true);
+    // The outstanding decision still owns the running session.
+    expect(model.inProgress.active.some((item) => item.agentId === "child_running")).toBe(false);
     expect(
       [...model.needsYou, ...model.inProgress.all, ...model.completed24h].some(
         (item) => item.agentId === "child_archived",

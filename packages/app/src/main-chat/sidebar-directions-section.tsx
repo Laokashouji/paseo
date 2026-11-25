@@ -1,13 +1,18 @@
-import { isAgentRunning } from "@getpaseo/protocol/agent-state-bucket";
+import type { ActionBarNeedsYouItem } from "./action-bar-model";
+import { buildConversationActionBarModel } from "./conversation-action-bar-model";
+import {
+  selectActionBarSessionSnapshot,
+  useMainChatActionBarDrawerStore,
+  filterDismissedRequests,
+  EMPTY_DISMISSED_NEEDS_MAP,
+} from "./action-bar-state";
 import { isMainChatEnabled, type MainChatConversationRecord } from "@getpaseo/protocol/main-chat";
 import { router, usePathname } from "expo-router";
-import equal from "fast-deep-equal";
 import { History, Plus, X } from "lucide-react-native";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { useStoreWithEqualityFn } from "zustand/traditional";
 import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { PressHighlight } from "@/components/ui/press-highlight";
@@ -34,7 +39,6 @@ import {
   DirectionsTree,
   EditConversationModal,
   buildDirectionsTreeModel,
-  type DirectionTreeLiveAgent,
   type OpenDirectionAgentTargetInput,
 } from "./directions-tree";
 import { openMainChatTaskTarget } from "./open-task-target";
@@ -112,45 +116,12 @@ interface DirectionsSessionSnapshot {
   targetServerId: string | null;
   mainAgentId: string | null;
   runningCount: number;
-  needsYouCount: number;
-  liveAgents: DirectionTreeLiveAgent[];
+  requests: ReturnType<typeof selectActionBarSessionSnapshot>;
   hostnamesByServerId: Record<string, string>;
 }
 
-function collectHostLiveAgents(
-  hostId: string,
-  hostSession: SessionStoreState["sessions"][string],
-  liveAgents: DirectionTreeLiveAgent[],
-): void {
-  const pendingAgentIds = new Set<string>();
-  for (const perm of hostSession.pendingPermissions.values()) {
-    pendingAgentIds.add(perm.agentId);
-  }
-
-  for (const agent of hostSession.agents.values()) {
-    if (agent.archivedAt || agent.background) continue;
-    const isRunning =
-      agent.turn.phase === "open" ||
-      isAgentRunning({ status: agent.status, backgroundWork: agent.backgroundWork });
-    const needsYou =
-      pendingAgentIds.has(agent.id) ||
-      agent.pendingPermissions.length > 0 ||
-      agent.attentionReason === "permission";
-
-    liveAgents.push({
-      serverId: hostId,
-      agentId: agent.id,
-      workspaceId: agent.workspaceId ?? null,
-      title: agent.title?.trim() || agent.id,
-      isRunning,
-      isFailed: agent.status === "error",
-      needsYou,
-    });
-  }
-}
-
 function selectDirectionsSessionSnapshot(
-  state: SessionStoreState,
+  state: Pick<SessionStoreState, "sessions">,
   preferredServerId: string | null,
   allowedServerIds?: ReadonlySet<string> | null,
   strictServerId?: boolean,
@@ -165,13 +136,11 @@ function selectDirectionsSessionSnapshot(
       targetServerId: null,
       mainAgentId: null,
       runningCount: 0,
-      needsYouCount: 0,
-      liveAgents: [],
+      requests: { isMainChat: false, liveAgents: [], pendingPermissions: [] },
       hostnamesByServerId: {},
     };
   }
 
-  const liveAgents: DirectionTreeLiveAgent[] = [];
   const hostnamesByServerId: Record<string, string> = {};
 
   for (const [hostId, hostSession] of Object.entries(state.sessions)) {
@@ -182,7 +151,6 @@ function selectDirectionsSessionSnapshot(
     if (hostname) {
       hostnamesByServerId[hostId] = hostname;
     }
-    collectHostLiveAgents(hostId, hostSession, liveAgents);
   }
 
   return {
@@ -190,8 +158,12 @@ function selectDirectionsSessionSnapshot(
     targetServerId: summary.existing?.serverId ?? summary.targetServerId,
     mainAgentId: summary.existing?.agentId ?? null,
     runningCount: summary.runningCount,
-    needsYouCount: summary.needsYouCount,
-    liveAgents,
+    requests: selectActionBarSessionSnapshot(
+      state,
+      summary.existing?.serverId ?? "",
+      summary.existing?.agentId ?? "",
+      allowedServerIds,
+    ),
     hostnamesByServerId,
   };
 }
@@ -246,14 +218,16 @@ function useSidebarDirectionsState(
   allowedServerIds: ReadonlySet<string> | null,
   strictServerId: boolean,
 ) {
-  const snapshot = useStoreWithEqualityFn(
-    useSessionStore,
-    useCallback(
-      (state) =>
-        selectDirectionsSessionSnapshot(state, preferredServerId, allowedServerIds, strictServerId),
-      [allowedServerIds, preferredServerId, strictServerId],
-    ),
-    equal,
+  const sessions = useSessionStore((state) => state.sessions);
+  const snapshot = useMemo(
+    () =>
+      selectDirectionsSessionSnapshot(
+        { sessions },
+        preferredServerId,
+        allowedServerIds,
+        strictServerId,
+      ),
+    [sessions, allowedServerIds, preferredServerId, strictServerId],
   );
 
   const targetServerId = snapshot.targetServerId;
@@ -305,25 +279,42 @@ function useSidebarDirectionsState(
     return labels;
   }, [effectiveFleetHosts, snapshot.hostnamesByServerId]);
 
-  const treeModel = useMemo(
-    () =>
-      buildDirectionsTreeModel({
-        conversations: effectiveConversations,
-        tasks: overview?.tasks ?? [],
-        liveAgents: snapshot.liveAgents,
-        hostLabelsByServerId,
-        mainServerId: targetServerId,
-        fallbackDirections: directions,
-      }),
-    [
-      directions,
-      effectiveConversations,
-      hostLabelsByServerId,
-      overview?.tasks,
-      snapshot.liveAgents,
-      targetServerId,
-    ],
+  const dismissals = useMainChatActionBarDrawerStore(
+    (state) =>
+      (overviewKey && state.dismissedNeedsSignaturesByKey[overviewKey]) ||
+      EMPTY_DISMISSED_NEEDS_MAP,
   );
+  const treeModel = useMemo(() => {
+    const requests = new Map<string, ActionBarNeedsYouItem[]>();
+    for (const conversation of effectiveConversations) {
+      if (conversation.kind !== "leader" || conversation.archivedAt || !targetServerId) continue;
+      const scoped = buildConversationActionBarModel({
+        serverId: targetServerId,
+        conversationId: conversation.id,
+        conversationAgentId: conversation.agentId,
+        overview,
+        ...snapshot.requests,
+      });
+      requests.set(conversation.id, filterDismissedRequests(scoped, dismissals).needsYou);
+    }
+    return buildDirectionsTreeModel({
+      conversations: effectiveConversations,
+      tasks: overview?.tasks ?? [],
+      liveAgents: snapshot.requests.liveAgents,
+      requests,
+      hostLabelsByServerId,
+      mainServerId: targetServerId,
+      fallbackDirections: directions,
+    });
+  }, [
+    effectiveConversations,
+    targetServerId,
+    overview,
+    snapshot.requests,
+    dismissals,
+    hostLabelsByServerId,
+    directions,
+  ]);
 
   return { snapshot, targetServerId, client, treeModel };
 }
@@ -354,7 +345,7 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
   const fallbackPreferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
-  const { activeServerId, activeAllowedServerIds, roster, hasMultipleStewards } =
+  const { activeServerId, activeSteward, activeAllowedServerIds, roster, hasMultipleStewards } =
     useMainChatStewardRoster({
       fallbackPreferredServerId,
     });
@@ -510,12 +501,13 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
     return null;
   }
 
+  const needsYouCount = activeSteward?.needsYouCount ?? 0;
   const collapsedSummary = collapsed
-    ? formatCollapsedCounts(snapshot.runningCount, snapshot.needsYouCount, t)
+    ? formatCollapsedCounts(snapshot.runningCount, needsYouCount, t)
     : null;
   const activeConversationId = parseMainChatConversationIdFromPathname(pathname);
   const isHistoryActive = pathname === buildMainChatHistoryRoute();
-  const hasConversations = treeModel.leaders.length > 0 || treeModel.sides.length > 0;
+  const hasConversations = treeModel.leaders.length + treeModel.sides.length > 0;
 
   return (
     <>
@@ -528,8 +520,8 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
         >
           {collapsedSummary ? (
             <View style={styles.collapsedSummaryPill} testID="sidebar-directions-collapsed-summary">
-              {snapshot.needsYouCount > 0 ? <View style={styles.dotNeedsYou} /> : null}
-              {snapshot.runningCount > 0 && snapshot.needsYouCount === 0 ? (
+              {needsYouCount > 0 ? <View style={styles.dotNeedsYou} /> : null}
+              {snapshot.runningCount > 0 && needsYouCount === 0 ? (
                 <View style={styles.dotRunning} />
               ) : null}
               <Text style={styles.collapsedSummaryText} numberOfLines={1}>

@@ -441,7 +441,7 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     expect(chipRect.height).toBeLessThanOrEqual(36);
   });
 
-  it("positions MainChatComposerEnhancements directly above MainChatActionBar without overlapping its expanded drawer and renders full NeedsYou context", () => {
+  it("positions MainChatComposerEnhancements directly above MainChatActionBar without overlapping its expanded drawer and renders full NeedsYou context", async () => {
     const blockedChild = makeAgent({
       id: "child_browser_1",
       serverId: "srv_1",
@@ -528,8 +528,10 @@ describe("Main Chat UX polish browser layout & style verification", () => {
     const detailEl = host.querySelector<HTMLElement>(
       '[data-testid="main-chat-needs-ask-detail-agent:srv_1:child_browser_1"]',
     );
-    expect(questionEl?.textContent).toContain("请确认是否同步更新《发布说明与变更文档清单》？");
-    expect(detailEl?.textContent).toContain("已完成前后端 4 处模块改造与单测");
+    await expect
+      .poll(() => questionEl?.textContent)
+      .toContain("请确认是否同步更新《发布说明与变更文档清单》？");
+    await expect.poll(() => detailEl?.textContent).toContain("已完成前后端 4 处模块改造与单测");
   });
 
   it("renders MainChatCompactionBanner with real 1M window usage and side-by-side auto-compact toggle & compact button", () => {

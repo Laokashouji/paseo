@@ -14,6 +14,7 @@ import {
   type MainChatTaskRecord,
 } from "@getpaseo/protocol/main-chat";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React, { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
@@ -556,9 +557,11 @@ const DRAWER_MULTI_AGENT_TARGET = {
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
-    <ToastApiProvider api={toastApi}>
-      <MainChatShellProvider value={SHELL_CONTEXT_VALUE}>{ui}</MainChatShellProvider>
-    </ToastApiProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <ToastApiProvider api={toastApi}>
+        <MainChatShellProvider value={SHELL_CONTEXT_VALUE}>{ui}</MainChatShellProvider>
+      </ToastApiProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -1026,7 +1029,7 @@ describe("Main Chat M2 & M3 UI components", () => {
           status: "parked",
           activeAgentId: "child_parked",
           agentIds: ["child_parked"],
-          parkedReason: "等外部接口",
+          parkedReason: "等 **外部接口** `api_v2`",
         }),
         makeTask({
           id: "task_done",
@@ -1108,6 +1111,9 @@ describe("Main Chat M2 & M3 UI components", () => {
 
     // Switch to Parked -> Resume directly
     fireEvent.click(view.getByTestId("main-chat-action-capsule-parked"));
+    expect(view.getByTestId("main-chat-action-task-open-task:task_parked").textContent).toContain(
+      "等 外部接口 api_v2",
+    );
     fireEvent.click(view.getByTestId("main-chat-action-resume-task_parked"));
     await waitFor(() => {
       expect(client.parkMainChatTask).toHaveBeenCalledWith({

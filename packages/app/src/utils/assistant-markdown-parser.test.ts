@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAssistantMarkdownParser } from "./assistant-markdown-parser";
+import { createAssistantMarkdownParser, markdownPreviewText } from "./assistant-markdown-parser";
 
 describe("createAssistantMarkdownParser", () => {
   it("keeps ordinary parsing for completed messages", () => {
@@ -30,5 +30,22 @@ describe("createAssistantMarkdownParser", () => {
     const parser = createAssistantMarkdownParser();
 
     expect(parser.render("[x](javascript:alert(1))")).not.toContain("href");
+  });
+});
+
+describe("markdownPreviewText", () => {
+  it("keeps option numbers when a nested list is flattened to one line", () => {
+    expect(markdownPreviewText("3. First\n   - detail\n   1. nested\n4. Next")).toBe(
+      "3. First detail 1. nested 4. Next",
+    );
+  });
+
+  it("flattens block and inline markup while preserving literal punctuation and code", () => {
+    expect(
+      markdownPreviewText(
+        "## **Review**\n- _See_ [`test_api`](file:///repo/test_api) and ![diagram](diagram.png)\n" +
+          "- `a ** b` or a * b in run_tests (#42)",
+      ),
+    ).toBe("Review See test_api and diagram a ** b or a * b in run_tests (#42)");
   });
 });

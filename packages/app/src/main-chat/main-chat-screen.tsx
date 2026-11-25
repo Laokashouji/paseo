@@ -365,11 +365,17 @@ function useMainChatTargetSession(routeServerId: string | null) {
   const hosts = useHosts();
   const lastWorkspace = useLastWorkspaceSelection();
   const fallbackPreferredServerId = lastWorkspace?.serverId ?? hosts[0]?.serverId ?? null;
-  const { activeServerId, activeAllowedServerIds, roster, hasMultipleStewards, selectSteward } =
-    useMainChatStewardRoster({
-      routeServerId,
-      fallbackPreferredServerId,
-    });
+  const {
+    activeSteward,
+    activeServerId,
+    activeAllowedServerIds,
+    roster,
+    hasMultipleStewards,
+    selectSteward,
+  } = useMainChatStewardRoster({
+    routeServerId,
+    fallbackPreferredServerId,
+  });
   const preferredServerId = activeServerId ?? fallbackPreferredServerId;
   const strictServerId = Boolean(routeServerId || roster.length > 0);
 
@@ -434,6 +440,7 @@ function useMainChatTargetSession(routeServerId: string | null) {
   }, [activeAgentOverride, clearActiveAgentOverride, summary.existing]);
 
   return {
+    needsYouCount: activeSteward?.needsYouCount ?? 0,
     summary,
     targetServerId,
     client,
@@ -495,6 +502,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
   const { t } = useTranslation();
   const toast = useToast();
   const {
+    needsYouCount,
     summary,
     targetServerId,
     client,
@@ -632,7 +640,7 @@ function MainChatScreenContent({ routeServerId }: { routeServerId: string | null
       mainAgentId={resolvedRef?.agentId ?? null}
       originRoute={buildMainChatRoute(navServerId)}
       isRunning={!isDisabled && summary.isMainRunning}
-      needsYouCount={isDisabled ? 0 : summary.needsYouCount}
+      needsYouCount={isDisabled ? 0 : needsYouCount}
       runningCount={isDisabled ? 0 : summary.runningCount}
       activePane={activePane}
       onActivePaneChange={setActivePane}

@@ -1,3 +1,8 @@
+import {
+  agentScopeKey,
+  type ActionBarNeedsYouItem,
+  type ActionBarLiveAgentSnapshot,
+} from "./action-bar-model";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
   MainChatConversationRecord,
@@ -70,18 +75,14 @@ export interface DirectionTreeFallbackEntry {
   needsYouCount: number;
 }
 
-export interface DirectionTreeLiveAgent {
-  serverId: string;
-  agentId: string;
-  workspaceId: string | null;
-  title: string;
-  isRunning: boolean;
-  isFailed: boolean;
-  needsYou: boolean;
-}
-
 export type DirectionAgentBucket = "needs_you" | "failed" | "running" | "done";
-export type DirectionTaskBucket = "needs_you" | "running" | "awaiting_review" | "parked" | "done";
+export type DirectionTaskBucket =
+  | "failed"
+  | "needs_you"
+  | "running"
+  | "awaiting_review"
+  | "parked"
+  | "done";
 
 export interface DirectionAgentNode {
   agentId: string;
@@ -132,31 +133,34 @@ export interface DirectionsTreeModel {
 export interface BuildDirectionsTreeInput {
   conversations: readonly MainChatConversationRecord[];
   tasks: readonly MainChatTaskRecord[];
-  liveAgents: readonly DirectionTreeLiveAgent[];
+  liveAgents: readonly ActionBarLiveAgentSnapshot[];
+  requests: ReadonlyMap<string, readonly ActionBarNeedsYouItem[]>;
   hostLabelsByServerId: Readonly<Record<string, string>>;
   mainServerId: string | null;
   fallbackDirections?: readonly DirectionTreeFallbackEntry[];
 }
 
-function resolveAgentBucket(agent: DirectionTreeLiveAgent | undefined): DirectionAgentBucket {
-  if (!agent) return "done";
-  if (agent.needsYou) return "needs_you";
-  if (agent.isFailed) return "failed";
-  if (agent.isRunning) return "running";
+function resolveAgentBucket(
+  agent: ActionBarLiveAgentSnapshot | undefined,
+  needsYou: boolean,
+): DirectionAgentBucket {
+  if (needsYou) return "needs_you";
+  if (agent?.status === "error") return "failed";
+  if (
+    agent &&
+    (agent.turnPhase === "open" || agent.status === "running" || agent.hasBackgroundWork)
+  )
+    return "running";
   return "done";
 }
 
 function resolveTaskBucket(
   status: MainChatTaskStatus,
   agents: readonly DirectionAgentNode[],
+  needsYou: boolean,
 ): DirectionTaskBucket {
-  if (
-    status === "needs_you" ||
-    status === "failed" ||
-    agents.some((agent) => agent.bucket === "needs_you" || agent.bucket === "failed")
-  ) {
-    return "needs_you";
-  }
+  if (needsYou || agents.some((agent) => agent.bucket === "needs_you")) return "needs_you";
+  if (status === "failed" || agents.some((agent) => agent.bucket === "failed")) return "failed";
   if (status === "awaiting_review") return "awaiting_review";
   if (status === "parked") return "parked";
   if (status === "running" || status === "open" || agents.some((a) => a.bucket === "running")) {
@@ -179,33 +183,23 @@ function collectTaskAgentIds(task: MainChatTaskRecord): string[] {
   return ordered;
 }
 
-function buildLiveAgentIndex(liveAgents: readonly DirectionTreeLiveAgent[]): {
-  byHostAndId: Map<string, DirectionTreeLiveAgent>;
-  byId: Map<string, DirectionTreeLiveAgent>;
-} {
-  const byHostAndId = new Map<string, DirectionTreeLiveAgent>();
-  const byId = new Map<string, DirectionTreeLiveAgent>();
-  for (const agent of liveAgents) {
-    byHostAndId.set(`${agent.serverId}:${agent.agentId}`, agent);
-    if (!byId.has(agent.agentId)) {
-      byId.set(agent.agentId, agent);
-    }
-  }
-  return { byHostAndId, byId };
-}
-
 function buildTaskNode(
   task: MainChatTaskRecord,
-  agentIndex: ReturnType<typeof buildLiveAgentIndex>,
+  agentIndex: ReadonlyMap<string, ActionBarLiveAgentSnapshot>,
+  requests: readonly ActionBarNeedsYouItem[],
   hostLabelsByServerId: Readonly<Record<string, string>>,
   mainServerId: string | null,
 ): DirectionTaskNode {
   const taskServerId = task.serverId ?? mainServerId ?? "";
   const agentIds = collectTaskAgentIds(task);
   const agents: DirectionAgentNode[] = agentIds.map((agentId) => {
-    const live =
-      (taskServerId ? agentIndex.byHostAndId.get(`${taskServerId}:${agentId}`) : undefined) ??
-      agentIndex.byId.get(agentId);
+    const live = agentIndex.get(agentScopeKey(taskServerId, agentId));
+    const needsYou = requests.some(
+      (item) =>
+        item.serverId === taskServerId &&
+        (item.agentId === agentId ||
+          (item.kind === "permission" && item.permissions.some((p) => p.agentId === agentId))),
+    );
     const agentServerId = live?.serverId ?? taskServerId;
     const hostLabel =
       (agentServerId ? hostLabelsByServerId[agentServerId] : undefined) ??
@@ -220,7 +214,7 @@ function buildTaskNode(
       title: live?.title?.trim() || agentId,
       hostLabel,
       isRemoteHost,
-      bucket: resolveAgentBucket(live),
+      bucket: resolveAgentBucket(live, needsYou),
     };
   });
 
@@ -231,7 +225,11 @@ function buildTaskNode(
     taskId: task.id,
     title: task.title,
     status: task.status,
-    bucket: resolveTaskBucket(task.status, agents),
+    bucket: resolveTaskBucket(
+      task.status,
+      agents,
+      requests.some((item) => item.taskId === task.id),
+    ),
     serverId: primaryAgent?.serverId ?? taskServerId,
     hostLabel:
       task.hostLabel?.trim() || (taskServerId ? hostLabelsByServerId[taskServerId] : null) || null,
@@ -245,7 +243,11 @@ export function buildDirectionsTreeModel(input: BuildDirectionsTreeInput): Direc
   const { leaders: leaderRecords, sides: sideRecords } = partitionActiveConversations(
     input.conversations,
   );
-  const agentIndex = buildLiveAgentIndex(input.liveAgents);
+  const agentIndex = new Map(
+    input.liveAgents
+      .filter((a) => !a.archived && !a.background)
+      .map((a) => [agentScopeKey(a.serverId, a.agentId), a]),
+  );
 
   const activeTasks = input.tasks.filter(
     (task) => task.status !== "completed" && task.status !== "cancelled",
@@ -254,26 +256,16 @@ export function buildDirectionsTreeModel(input: BuildDirectionsTreeInput): Direc
   const leaderIds = new Set<string>();
   const leaders: DirectionLeaderNode[] = leaderRecords.map((record) => {
     leaderIds.add(record.id);
+    const groups = input.requests.get(record.id) ?? [];
+    const requests = groups.flatMap((item) => [item, ...(item.relatedRequests ?? [])]);
     const ownedTasks = activeTasks
       .filter((task) => task.conversationId === record.id || task.mainAgentId === record.agentId)
       .map((task) =>
-        buildTaskNode(task, agentIndex, input.hostLabelsByServerId, input.mainServerId),
+        buildTaskNode(task, agentIndex, requests, input.hostLabelsByServerId, input.mainServerId),
       );
 
-    let runningCount = 0;
-    let needsYouCount = 0;
-    for (const task of ownedTasks) {
-      if (task.bucket === "needs_you") needsYouCount += 1;
-      else if (task.bucket === "running") runningCount += 1;
-    }
-
-    const leaderLive =
-      (input.mainServerId
-        ? agentIndex.byHostAndId.get(`${input.mainServerId}:${record.agentId}`)
-        : undefined) ?? agentIndex.byId.get(record.agentId);
-    if (leaderLive?.needsYou) {
-      needsYouCount += 1;
-    }
+    const runningCount = ownedTasks.filter((task) => task.bucket === "running").length;
+    const needsYouCount = groups.length;
 
     return {
       conversationId: record.id,

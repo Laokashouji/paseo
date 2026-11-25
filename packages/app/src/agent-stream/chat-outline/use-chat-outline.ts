@@ -5,6 +5,7 @@ import { useStableEvent } from "@/hooks/use-stable-event";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { planTimelinePromptJump } from "@/timeline/timeline-sync-plan";
 import type { StreamItem } from "@/types/stream";
+import { isHiddenSystemTimelinePrompt } from "@getpaseo/protocol/main-chat";
 import { isSystemBackgroundTrigger } from "../turn-collapse/model";
 import type { StreamViewportHandle } from "../strategy";
 import {
@@ -53,7 +54,7 @@ function latestPromptSeqIn(items: StreamItem[], timelineEpoch: string | null): n
     if (
       item.kind === "user_message" &&
       item.timelineCursor?.epoch === timelineEpoch &&
-      !isSystemBackgroundTrigger(item)
+      !isOutlineSystemItem(item)
     ) {
       latest = Math.max(latest, item.timelineCursor.seq);
     }
@@ -69,18 +70,24 @@ function collectSystemBackgroundSeqs(
   if (!timelineEpoch) return undefined;
   let seqs: Set<number> | undefined;
   for (const item of tail) {
-    if (item.timelineCursor?.epoch === timelineEpoch && isSystemBackgroundTrigger(item)) {
+    if (item.timelineCursor?.epoch === timelineEpoch && isOutlineSystemItem(item)) {
       seqs ??= new Set();
       seqs.add(item.timelineCursor.seq);
     }
   }
   for (const item of head) {
-    if (item.timelineCursor?.epoch === timelineEpoch && isSystemBackgroundTrigger(item)) {
+    if (item.timelineCursor?.epoch === timelineEpoch && isOutlineSystemItem(item)) {
       seqs ??= new Set();
       seqs.add(item.timelineCursor.seq);
     }
   }
   return seqs;
+}
+
+function isOutlineSystemItem(item: StreamItem): boolean {
+  return item.kind === "user_message"
+    ? isHiddenSystemTimelinePrompt(item.text)
+    : isSystemBackgroundTrigger(item);
 }
 
 function findLoadedItem(

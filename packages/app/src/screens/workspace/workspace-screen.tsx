@@ -198,6 +198,7 @@ import type { PaneHost } from "@/panels/panel-manifest";
 import { WorkspaceFocusProvider } from "@/workspace/focus";
 import { DiffDocumentWorkspaceCacheProvider } from "@/git/diff-document/workspace-cache";
 import { MainChatCameFromBar } from "@/main-chat/came-from-bar";
+import { getManagedConversationId } from "@getpaseo/protocol/main-chat";
 import { selectIsMainChatWorkspaceRedirectTarget } from "@/main-chat/selectors";
 import type { NewTabSelection } from "@/workspace-tabs/new-tab";
 import {
@@ -222,6 +223,7 @@ import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/l
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import {
   buildHostRootRoute,
+  buildMainChatConversationRoute,
   buildMainChatRoute,
   buildSettingsHostRoute,
 } from "@/utils/host-routes";
@@ -476,6 +478,14 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
     const activeTab = collectAllTabs(layout.root).find((tab) => tab.tabId === activeTabId);
     return activeTab?.target.kind === "agent" ? activeTab.target.agentId : null;
   });
+  const conversationId = useSessionStore((state) => {
+    const session = state.sessions[normalizedServerId];
+    const target = workspaceRouteAgentId
+      ? (session?.agents.get(workspaceRouteAgentId) ??
+        session?.agentDetails.get(workspaceRouteAgentId))
+      : null;
+    return getManagedConversationId(target?.labels);
+  });
   const shouldRedirectToMainChat = useSessionStore((state) =>
     selectIsMainChatWorkspaceRedirectTarget(
       state,
@@ -487,7 +497,7 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
   const redirectedMainChatKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!shouldRedirectToMainChat || !effectiveIsRouteFocused) {
+    if ((!conversationId && !shouldRedirectToMainChat) || !effectiveIsRouteFocused) {
       redirectedMainChatKeyRef.current = null;
       return;
     }
@@ -496,13 +506,18 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
       return;
     }
     redirectedMainChatKeyRef.current = redirectKey;
-    router.replace(buildMainChatRoute(normalizedServerId) as Href);
+    router.replace(
+      (conversationId
+        ? buildMainChatConversationRoute(conversationId, normalizedServerId)
+        : buildMainChatRoute(normalizedServerId)) as Href,
+    );
   }, [
     effectiveIsRouteFocused,
     normalizedServerId,
     normalizedWorkspaceId,
     router,
     shouldRedirectToMainChat,
+    conversationId,
     workspaceRouteAgentId,
   ]);
 
@@ -513,7 +528,7 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
     };
   }, [serverId, workspaceId]);
 
-  if (shouldRedirectToMainChat) {
+  if (conversationId || shouldRedirectToMainChat) {
     return <View style={styles.container} testID="workspace-main-chat-redirect" />;
   }
 

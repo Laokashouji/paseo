@@ -362,7 +362,7 @@ describe("main-chat UX polish: streaming triage accumulation, live needs-you cle
     expect(result.summary.length).toBeGreaterThan(10);
   });
 
-  it("clears stale blocked_user triage and auto-resolves open decisions immediately on turn_started", async () => {
+  it("clears stale triage but retains an explicit decision when another turn starts", async () => {
     const h = makeHarness();
     await h.service.start();
     await h.service.updateSettings({ enabled: true });
@@ -441,10 +441,10 @@ describe("main-chat UX polish: streaming triage accumulation, live needs-you cle
     const afterOverview = await h.service.getOverview(mainId);
     expect(afterOverview.triages?.find((t) => t.agentId === childId)).toBeUndefined();
     const resolvedDecision = afterOverview.decisions.find((d) => d.id === decision.id);
-    expect(resolvedDecision?.answeredAt).not.toBeNull();
-    expect(resolvedDecision?.answer).toContain("原会话");
+    expect(resolvedDecision?.answeredAt).toBeNull();
+    expect(resolvedDecision?.answer).toBeNull();
     const refreshedTask = afterOverview.tasks?.find((t) => t.id === taskId);
-    expect(refreshedTask?.status).toBe("running");
+    expect(refreshedTask?.status).toBe("needs_you");
 
     h.service.stop();
   });

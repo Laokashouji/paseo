@@ -1,12 +1,13 @@
-import { getParentAddressFromLabels } from "@getpaseo/protocol/agent-labels";
-import { isAgentRunning } from "@getpaseo/protocol/agent-state-bucket";
 import {
-  MAIN_CHAT_TASK_RECORD_ID_LABEL,
-  getMainChatTaskMetaFromLabels,
-  isMainChatAgent,
-} from "@getpaseo/protocol/main-chat";
+  type ActionBarSessionSnapshot,
+  selectActionBarSessionSnapshot,
+  EMPTY_DISMISSED_NEEDS_MAP,
+  needsYouDismissSignature,
+  useMainChatActionBarDrawerStore,
+  filterDismissedRequests,
+} from "./action-bar-state";
+export { useMainChatActionBarDrawerStore } from "./action-bar-state";
 import { router } from "expo-router";
-import equal from "fast-deep-equal";
 import {
   ArrowUpRight,
   AtSign,
@@ -29,8 +30,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElem
 import { useTranslation } from "react-i18next";
 import { ScrollView, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { create } from "zustand";
-import { useStoreWithEqualityFn } from "zustand/traditional";
 import { PermissionRequestCard } from "@/agent-stream/view";
 import { CHAT_COLUMN_RAIL_DATASET } from "@/chat-rail";
 import { StatusRing } from "@/components/status-ring";
@@ -44,13 +43,12 @@ import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
+import { markdownPreviewText } from "@/utils/assistant-markdown-parser";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import {
   buildMainChatActionBarModel,
   type ActionBarBucketKey,
-  type ActionBarLiveAgentSnapshot,
   type ActionBarNeedsYouItem,
-  type ActionBarPendingPermissionInput,
   type ActionBarTaskItem,
 } from "./action-bar-model";
 import { deriveTaskAdmissionBadge } from "./admission-ui";
@@ -87,117 +85,6 @@ const successIconMapping = (theme: Theme) => ({ color: theme.colors.statusSucces
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 const dangerIconMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 
-type SessionStoreState = ReturnType<typeof useSessionStore.getState>;
-
-interface ActionBarSessionSnapshot {
-  isMainChat: boolean;
-  liveAgents: ActionBarLiveAgentSnapshot[];
-  pendingPermissions: ActionBarPendingPermissionInput[];
-}
-
-type HostSessionEntry = SessionStoreState["sessions"][string];
-type SessionAgentEntry = ReturnType<HostSessionEntry["agents"]["get"]> & object;
-
-function extractTaskRecordId(labels: Record<string, string | undefined>): string | null {
-  const rawRecordId = labels[MAIN_CHAT_TASK_RECORD_ID_LABEL];
-  return typeof rawRecordId === "string" && rawRecordId.trim().length > 0
-    ? rawRecordId.trim()
-    : null;
-}
-
-function buildLiveAgentSnapshot(
-  hostId: string,
-  agent: SessionAgentEntry,
-  serverId: string,
-  mainAgentId: string,
-): ActionBarLiveAgentSnapshot {
-  const parent = getParentAddressFromLabels(agent.labels, hostId);
-  const managedByMainChat = parent?.serverId === serverId && parent.agentId === mainAgentId;
-  const meta = getMainChatTaskMetaFromLabels(agent.labels);
-  const running = isAgentRunning({
-    status: agent.status,
-    backgroundWork: agent.backgroundWork,
-  });
-  const effectiveStatus = running && agent.status !== "error" ? "running" : agent.status;
-  const trimmedTitle = agent.title?.trim();
-
-  return {
-    serverId: hostId,
-    agentId: agent.id,
-    workspaceId: agent.workspaceId ?? null,
-    title: trimmedTitle || meta?.goal || agent.id,
-    cwd: agent.cwd || null,
-    status: effectiveStatus,
-    turnPhase: agent.turn.phase === "open" ? "open" : "idle",
-    hasBackgroundWork: (agent.backgroundWork?.count ?? 0) > 0,
-    requiresAttention: Boolean(agent.requiresAttention),
-    attentionReason: agent.attentionReason ?? null,
-    archived: Boolean(agent.archivedAt),
-    background: Boolean(agent.background),
-    isMainChat: isMainChatAgent(agent),
-    managedByMainChat,
-    mode: meta?.mode ?? null,
-    taskRecordId: extractTaskRecordId(agent.labels),
-    planId: meta?.planId ?? null,
-    updatedAtMs: agent.updatedAt.getTime(),
-    lastActivityAtMs: (agent.lastActivityAt ?? agent.updatedAt).getTime(),
-  };
-}
-
-function collectHostPendingPermissions(
-  hostId: string,
-  hostSession: HostSessionEntry,
-  mainAgentId: string,
-  target: ActionBarPendingPermissionInput[],
-): void {
-  for (const perm of hostSession.pendingPermissions.values()) {
-    const sourceAgent =
-      hostSession.agents.get(perm.agentId) ?? hostSession.agentDetails.get(perm.agentId);
-    const isHiddenNonMain =
-      Boolean(sourceAgent && (sourceAgent.archivedAt || sourceAgent.background)) &&
-      perm.agentId !== mainAgentId;
-    if (isHiddenNonMain) continue;
-    if (sourceAgent && isMainChatAgent(sourceAgent) && perm.agentId !== mainAgentId) {
-      continue;
-    }
-    target.push({
-      serverId: hostId,
-      permission: perm,
-      sourceAgentTitle: sourceAgent?.title?.trim() || perm.agentId,
-      sourceAgentCwd: sourceAgent?.cwd ?? null,
-    });
-  }
-}
-
-function selectActionBarSessionSnapshot(
-  state: SessionStoreState,
-  serverId: string,
-  mainAgentId: string,
-  allowedServerIds?: ReadonlySet<string> | null,
-): ActionBarSessionSnapshot {
-  const mainSession = state.sessions[serverId];
-  const currentAgent =
-    mainSession?.agents.get(mainAgentId) ?? mainSession?.agentDetails.get(mainAgentId);
-  if (!isMainChatAgent(currentAgent)) {
-    return { isMainChat: false, liveAgents: [], pendingPermissions: [] };
-  }
-
-  const liveAgents: ActionBarLiveAgentSnapshot[] = [];
-  const pendingPermissions: ActionBarPendingPermissionInput[] = [];
-
-  for (const [hostId, hostSession] of Object.entries(state.sessions)) {
-    if (allowedServerIds && allowedServerIds.size > 0 && !allowedServerIds.has(hostId)) {
-      continue;
-    }
-    for (const agent of hostSession.agents.values()) {
-      liveAgents.push(buildLiveAgentSnapshot(hostId, agent, serverId, mainAgentId));
-    }
-    collectHostPendingPermissions(hostId, hostSession, mainAgentId, pendingPermissions);
-  }
-
-  return { isMainChat: true, liveAgents, pendingPermissions };
-}
-
 export interface MainChatActionBarProps {
   serverId: string;
   agentId: string;
@@ -208,112 +95,6 @@ export interface MainChatActionBarProps {
    */
   drawerMode?: "floating" | "external";
 }
-
-const EMPTY_DISMISSED_NEEDS_MAP: Readonly<Record<string, boolean>> = {};
-
-function needsYouDismissSignature(item: ActionBarNeedsYouItem): string {
-  return `${item.id}:${item.updatedAtMs}`;
-}
-
-interface MainChatActionBarDrawerStoreState {
-  openBucketByKey: Record<string, ActionBarBucketKey | null>;
-  expandedByKey: Record<string, boolean>;
-  compactDockCollapsedByKey: Record<string, boolean>;
-  focusedNeedsIdByKey: Record<string, string | null>;
-  dismissedNeedsSignaturesByKey: Record<string, Readonly<Record<string, boolean>>>;
-  toggleBucket: (key: string, bucket: ActionBarBucketKey) => void;
-  openBucketWithFocus: (
-    key: string,
-    bucket: ActionBarBucketKey,
-    focusNeedsId?: string | null,
-  ) => void;
-  consumeFocusedNeedsId: (key: string) => void;
-  setCompactDockCollapsed: (key: string, collapsed: boolean) => void;
-  dismissNeedsItem: (key: string, signature: string) => void;
-  closeDrawer: (key: string) => void;
-  toggleExpanded: (key: string) => void;
-  reset: () => void;
-}
-
-export const useMainChatActionBarDrawerStore = create<MainChatActionBarDrawerStoreState>((set) => ({
-  openBucketByKey: {},
-  expandedByKey: {},
-  compactDockCollapsedByKey: {},
-  focusedNeedsIdByKey: {},
-  dismissedNeedsSignaturesByKey: {},
-  toggleBucket(key, bucket) {
-    set((state) => {
-      const current = state.openBucketByKey[key] ?? null;
-      const next = current === bucket ? null : bucket;
-      return {
-        openBucketByKey: { ...state.openBucketByKey, [key]: next },
-        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
-        ...(next === null ? { expandedByKey: { ...state.expandedByKey, [key]: false } } : {}),
-      };
-    });
-  },
-  openBucketWithFocus(key, bucket, focusNeedsId = null) {
-    set((state) => ({
-      openBucketByKey: { ...state.openBucketByKey, [key]: bucket },
-      focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: focusNeedsId },
-    }));
-  },
-  consumeFocusedNeedsId(key) {
-    set((state) => {
-      if (!state.focusedNeedsIdByKey?.[key]) return state;
-      return {
-        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
-      };
-    });
-  },
-  setCompactDockCollapsed(key, collapsed) {
-    set((state) => ({
-      compactDockCollapsedByKey: { ...state.compactDockCollapsedByKey, [key]: collapsed },
-    }));
-  },
-  dismissNeedsItem(key, signature) {
-    set((state) => {
-      const prevMap = state.dismissedNeedsSignaturesByKey[key] ?? EMPTY_DISMISSED_NEEDS_MAP;
-      if (prevMap[signature]) return state;
-      return {
-        dismissedNeedsSignaturesByKey: {
-          ...state.dismissedNeedsSignaturesByKey,
-          [key]: { ...prevMap, [signature]: true },
-        },
-      };
-    });
-  },
-  closeDrawer(key) {
-    set((state) => {
-      if (
-        (state.openBucketByKey[key] ?? null) === null &&
-        !state.expandedByKey[key] &&
-        !state.focusedNeedsIdByKey?.[key]
-      ) {
-        return state;
-      }
-      return {
-        openBucketByKey: { ...state.openBucketByKey, [key]: null },
-        expandedByKey: { ...state.expandedByKey, [key]: false },
-        focusedNeedsIdByKey: { ...state.focusedNeedsIdByKey, [key]: null },
-      };
-    });
-  },
-  toggleExpanded(key) {
-    set((state) => ({
-      expandedByKey: { ...state.expandedByKey, [key]: !state.expandedByKey[key] },
-    }));
-  },
-  reset() {
-    set({
-      openBucketByKey: {},
-      expandedByKey: {},
-      compactDockCollapsedByKey: {},
-      focusedNeedsIdByKey: {},
-      dismissedNeedsSignaturesByKey: {},
-    });
-  },
-}));
 
 const SELECTED_ACCESSIBILITY_STATE = { selected: true } as const;
 const UNSELECTED_ACCESSIBILITY_STATE = { selected: false } as const;
@@ -400,13 +181,12 @@ function resolveNeedsYouKindKey(item: ActionBarNeedsYouItem): string {
   }
 }
 
-const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
+export const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   item,
   mainServerId,
   mainAgentId,
-  targetClient,
   isRetrying,
-  onOpen,
+  onOpenTarget,
   onDismiss,
   onSubmitted,
   onRetryWithFallback,
@@ -414,15 +194,32 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
   item: ActionBarNeedsYouItem;
   mainServerId: string;
   mainAgentId: string;
-  targetClient: ReturnType<typeof useSessionStore.getState>["sessions"][string]["client"] | null;
   isRetrying: boolean;
-  onOpen: () => void;
-  onDismiss: (itemId: string) => void;
+  onOpenTarget: (target: {
+    serverId: string;
+    agentId: string;
+    title: string;
+    workspaceId?: string | null;
+    taskId?: string | null;
+  }) => void;
+  onDismiss: (item: ActionBarNeedsYouItem) => void;
   onSubmitted: (itemId: string) => void;
   onRetryWithFallback?: () => void;
 }) {
   const { t } = useTranslation();
 
+  const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
+  const handleDismiss = useCallback(() => onDismiss(item), [item, onDismiss]);
+  const onOpen = useCallback(() => {
+    if (item.agentId)
+      onOpenTarget({
+        serverId: item.serverId,
+        agentId: item.agentId,
+        workspaceId: item.workspaceId,
+        title: item.title,
+        taskId: item.taskId,
+      });
+  }, [item, onOpenTarget]);
   if (item.kind === "permission") {
     return (
       <View style={styles.inlineStack}>
@@ -440,9 +237,9 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
               mainAgentId={mainAgentId}
               permission={perm}
               client={targetClient}
-              sourceAgentId={item.agentId}
-              sourceAgentTitle={item.title}
-              sourceAgentCwd={item.cwd}
+              sourceAgentId={perm.agentId}
+              sourceAgentTitle={item.sources?.[perm.agentId]?.title ?? item.title}
+              sourceAgentCwd={item.sources?.[perm.agentId]?.cwd ?? item.cwd}
             >
               {permCard}
             </ChildPermissionWrapper>
@@ -479,7 +276,7 @@ const NeedsYouInlineBody = memo(function NeedsYouInlineBody({
       mainAgentId={mainAgentId}
       isRetrying={isRetrying}
       onOpen={onOpen}
-      onDismiss={onDismiss}
+      onDismiss={handleDismiss}
       onSubmitted={onSubmitted}
       onRetryWithFallback={onRetryWithFallback}
     />
@@ -528,7 +325,8 @@ const NeedsYouRowHeaderActions = memo(function NeedsYouRowHeaderActions({
 
 function resolveNeedsYouRowMetaText(item: ActionBarNeedsYouItem): string | null {
   if (!item.reason) return null;
-  const compactReason = item.reason.replace(/\s+/g, " ").trim();
+  const compactReason = markdownPreviewText(item.reason);
+  if (!compactReason) return item.hostLabel || null;
   return item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
 }
 
@@ -567,22 +365,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
   onRetryWithFallback?: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
-  const targetClient = useSessionStore((state) => state.sessions[item.serverId]?.client ?? null);
   const handleToggle = useCallback(() => onToggleExpand(item.id), [item.id, onToggleExpand]);
-  const handleDismiss = useCallback(() => {
-    onDismissNeedsItem(item);
-  }, [item, onDismissNeedsItem]);
-  const handleOpen = useCallback(() => {
-    if (!item.agentId) return;
-    onOpenTask({
-      serverId: item.serverId,
-      agentId: item.agentId,
-      workspaceId: item.workspaceId,
-      title: item.title,
-      taskId: item.taskId,
-    });
-  }, [item.agentId, item.serverId, item.taskId, item.title, item.workspaceId, onOpenTask]);
-
   const retryTaskId = resolveNeedsYouRetryTaskId(item);
   const isRetrying = retryTaskId !== null && busyTaskId === retryTaskId;
   const handleRetry = useCallback(() => {
@@ -595,7 +378,8 @@ const NeedsYouRow = memo(function NeedsYouRow({
 
   const kindLabel = t(resolveNeedsYouKindKey(item));
   const isFailedTask = item.kind === "task" && item.isFailed;
-  const metaText = resolveNeedsYouRowMetaText(item);
+  const title = useMemo(() => markdownPreviewText(item.title) || item.title, [item.title]);
+  const metaText = useMemo(() => resolveNeedsYouRowMetaText(item), [item]);
 
   const cardStyle = useMemo(
     () => [styles.needsCard, isFailedTask && styles.needsCardFailed],
@@ -614,7 +398,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
           style={styles.needsRowToggle}
           highlightStyle={styles.rowPressed}
           accessibilityRole="button"
-          accessibilityLabel={item.title}
+          accessibilityLabel={title}
           testID={`main-chat-action-needs-toggle-${item.id}`}
         >
           <View style={isFailedTask ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
@@ -623,7 +407,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
           <View style={styles.rowTextCol}>
             <View style={styles.rowTitleLine}>
               <Text style={styles.needsRowTitle} numberOfLines={1}>
-                {item.title}
+                {title}
               </Text>
               {item.kind === "permission" && item.permissions.length > 1 ? (
                 <StatusBadge size="xs" variant="muted" label={`${item.permissions.length}`} />
@@ -667,17 +451,19 @@ const NeedsYouRow = memo(function NeedsYouRow({
 
       {expanded ? (
         <View style={styles.inlineBody} testID={`main-chat-action-needs-inline-${item.id}`}>
-          <NeedsYouInlineBody
-            item={item}
-            mainServerId={mainServerId}
-            mainAgentId={mainAgentId}
-            targetClient={targetClient}
-            isRetrying={isRetrying}
-            onOpen={handleOpen}
-            onDismiss={handleDismiss}
-            onSubmitted={onSubmittedNeedsItem}
-            onRetryWithFallback={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
-          />
+          {[item, ...(item.relatedRequests ?? [])].map((request) => (
+            <NeedsYouInlineBody
+              key={request.id}
+              item={request}
+              mainServerId={mainServerId}
+              mainAgentId={mainAgentId}
+              isRetrying={isRetrying}
+              onOpenTarget={onOpenTask}
+              onDismiss={onDismissNeedsItem}
+              onSubmitted={onSubmittedNeedsItem}
+              onRetryWithFallback={retryTaskId && onRetryWithFallback ? handleRetry : undefined}
+            />
+          ))}
         </View>
       ) : null}
     </View>
@@ -919,13 +705,15 @@ function resolveTaskRowDagMeta(
   t: (key: string, params?: Record<string, unknown>) => string,
 ): string | null {
   if (item.dependencyState === "blocked" && item.blockedByTitles.length > 0) {
-    return t("mainChat.taskDag.blockedMeta", { deps: item.blockedByTitles.join("、") });
+    return t("mainChat.taskDag.blockedMeta", {
+      deps: item.blockedByTitles.map(markdownPreviewText).join("、"),
+    });
   }
   if (item.dependencyState === "ready") {
     return t("mainChat.taskDag.readyMeta");
   }
   if (item.parentTitle) {
-    return t("mainChat.taskDag.partOfLabel", { title: item.parentTitle });
+    return t("mainChat.taskDag.partOfLabel", { title: markdownPreviewText(item.parentTitle) });
   }
   return null;
 }
@@ -989,14 +777,12 @@ const TaskBucketRow = memo(function TaskBucketRow({
     setReworkOpen(false);
   }, [item.taskId, onSubmitRework, reworkDraft]);
 
+  const title = useMemo(() => markdownPreviewText(item.title) || item.title, [item.title]);
   const dagMetaText = resolveTaskRowDagMeta(item, t);
+  const summary = (bucket === "parked" && item.parkedReason) || item.summary;
+  const preview = useMemo(() => summary && markdownPreviewText(summary), [summary]);
 
-  const metaParts = [
-    dagMetaText,
-    item.hostLabel,
-    item.workspaceLabel,
-    bucket === "parked" && item.parkedReason ? item.parkedReason : item.summary,
-  ].filter(Boolean);
+  const metaParts = [dagMetaText, item.hostLabel, item.workspaceLabel, preview].filter(Boolean);
 
   const rowStyle = useMemo(
     () => [
@@ -1016,7 +802,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           style={styles.taskRowPress}
           highlightStyle={styles.rowPressed}
           accessibilityRole="button"
-          accessibilityLabel={item.title}
+          accessibilityLabel={title}
           testID={`main-chat-action-task-open-${item.id}`}
         >
           {item.hierarchyDepth === 1 ? (
@@ -1029,7 +815,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           <View style={styles.rowTextCol}>
             <View style={styles.rowTitleLine}>
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.title}
+                {title}
               </Text>
               <TaskBucketRowBadges item={item} />
               {item.stale48h ? (
@@ -1391,17 +1177,14 @@ const ActionBarDrawerPanel = memo(function ActionBarDrawerPanel({
   );
 });
 
-function useMainChatActionBarData(serverId: string, agentId: string) {
+export function useMainChatActionBarData(serverId: string, agentId: string) {
   const hosts = useHosts();
   const allowedServerIds = useStewardAllowedServerIds(serverId);
 
-  const sessionSnapshot = useStoreWithEqualityFn(
-    useSessionStore,
-    useCallback(
-      (state) => selectActionBarSessionSnapshot(state, serverId, agentId, allowedServerIds),
-      [agentId, allowedServerIds, serverId],
-    ),
-    equal,
+  const sessions = useSessionStore((state) => state.sessions);
+  const sessionSnapshot = useMemo(
+    () => selectActionBarSessionSnapshot({ sessions }, serverId, agentId, allowedServerIds),
+    [sessions, serverId, agentId, allowedServerIds],
   );
 
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
@@ -1432,22 +1215,7 @@ function useMainChatActionBarData(serverId: string, agentId: string) {
       pendingPermissions: sessionSnapshot.pendingPermissions,
       hostLabelsByServerId,
     });
-    const visibleNeedsYou = raw.needsYou.filter(
-      (item) => !dismissedSignatures[needsYouDismissSignature(item)],
-    );
-    if (visibleNeedsYou.length === raw.needsYou.length) {
-      return raw;
-    }
-    const delta = raw.needsYou.length - visibleNeedsYou.length;
-    return {
-      ...raw,
-      needsYou: visibleNeedsYou,
-      counts: {
-        ...raw.counts,
-        needsYou: visibleNeedsYou.length,
-        total: Math.max(0, raw.counts.total - delta),
-      },
-    };
+    return filterDismissedRequests(raw, dismissedSignatures);
   }, [
     agentId,
     dismissedSignatures,

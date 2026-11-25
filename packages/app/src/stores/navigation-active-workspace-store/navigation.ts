@@ -1,8 +1,9 @@
-import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { getManagedConversationId, isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import {
   buildHostWorkspaceRoute,
+  buildMainChatConversationRoute,
   buildMainChatRoute,
   decodeWorkspaceIdFromPathSegment,
   parseHostWorkspaceRouteFromPathname,
@@ -104,11 +105,15 @@ export function navigateToWorkspace(
       ? (deps.getSessionAgent?.(input.serverId, input.target.agentId) ??
         agents?.get(input.target.agentId))
       : undefined;
+  const conversationId = getManagedConversationId(targetAgent?.labels);
   if (
+    conversationId ||
     isMainChatAgent(targetAgent) ||
     (workspace !== undefined && isMainChatDedicatedWorkspace(workspace, agents))
   ) {
-    const mainRoute = buildMainChatRoute(input.serverId);
+    const mainRoute = conversationId
+      ? buildMainChatConversationRoute(conversationId, input.serverId)
+      : buildMainChatRoute(input.serverId);
     (deps.navigateToMainChat ?? deps.navigateToRoute)(mainRoute);
     return mainRoute;
   }

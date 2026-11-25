@@ -14,8 +14,9 @@ import type { PendingPermission } from "@/types/shared";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 
-type SessionStoreState = ReturnType<
-  typeof import("@/stores/session-store").useSessionStore.getState
+type SessionStoreState = Pick<
+  ReturnType<typeof import("@/stores/session-store").useSessionStore.getState>,
+  "sessions"
 >;
 
 export interface MainChatAgentRef {

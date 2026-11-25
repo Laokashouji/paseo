@@ -412,7 +412,7 @@ function projectAgentMessage(item: AgentTimelineItem): AgentTimelineItem | null 
           foldable: true,
           kind: "relay",
           trigger: `agent_notification:${source.event}`,
-          label: source.title ? `${source.title} (${source.event})` : source.event,
+          label: source.title?.trim() || source.agentId,
         }
       : null;
   return {
