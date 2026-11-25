@@ -43,6 +43,7 @@ import { useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import type { Theme } from "@/styles/theme";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
+import { markdownPreviewText } from "@/utils/assistant-markdown-parser";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import {
   buildMainChatActionBarModel,
@@ -324,7 +325,8 @@ const NeedsYouRowHeaderActions = memo(function NeedsYouRowHeaderActions({
 
 function resolveNeedsYouRowMetaText(item: ActionBarNeedsYouItem): string | null {
   if (!item.reason) return null;
-  const compactReason = item.reason.replace(/\s+/g, " ").trim();
+  const compactReason = markdownPreviewText(item.reason);
+  if (!compactReason) return item.hostLabel || null;
   return item.hostLabel ? `${item.hostLabel} · ${compactReason}` : compactReason;
 }
 
@@ -376,7 +378,8 @@ const NeedsYouRow = memo(function NeedsYouRow({
 
   const kindLabel = t(resolveNeedsYouKindKey(item));
   const isFailedTask = item.kind === "task" && item.isFailed;
-  const metaText = resolveNeedsYouRowMetaText(item);
+  const title = useMemo(() => markdownPreviewText(item.title) || item.title, [item.title]);
+  const metaText = useMemo(() => resolveNeedsYouRowMetaText(item), [item]);
 
   const cardStyle = useMemo(
     () => [styles.needsCard, isFailedTask && styles.needsCardFailed],
@@ -395,7 +398,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
           style={styles.needsRowToggle}
           highlightStyle={styles.rowPressed}
           accessibilityRole="button"
-          accessibilityLabel={item.title}
+          accessibilityLabel={title}
           testID={`main-chat-action-needs-toggle-${item.id}`}
         >
           <View style={isFailedTask ? styles.haloFailedOuter : styles.haloNeedsYouOuter}>
@@ -404,7 +407,7 @@ const NeedsYouRow = memo(function NeedsYouRow({
           <View style={styles.rowTextCol}>
             <View style={styles.rowTitleLine}>
               <Text style={styles.needsRowTitle} numberOfLines={1}>
-                {item.title}
+                {title}
               </Text>
               {item.kind === "permission" && item.permissions.length > 1 ? (
                 <StatusBadge size="xs" variant="muted" label={`${item.permissions.length}`} />
@@ -702,13 +705,15 @@ function resolveTaskRowDagMeta(
   t: (key: string, params?: Record<string, unknown>) => string,
 ): string | null {
   if (item.dependencyState === "blocked" && item.blockedByTitles.length > 0) {
-    return t("mainChat.taskDag.blockedMeta", { deps: item.blockedByTitles.join("、") });
+    return t("mainChat.taskDag.blockedMeta", {
+      deps: item.blockedByTitles.map(markdownPreviewText).join("、"),
+    });
   }
   if (item.dependencyState === "ready") {
     return t("mainChat.taskDag.readyMeta");
   }
   if (item.parentTitle) {
-    return t("mainChat.taskDag.partOfLabel", { title: item.parentTitle });
+    return t("mainChat.taskDag.partOfLabel", { title: markdownPreviewText(item.parentTitle) });
   }
   return null;
 }
@@ -772,14 +777,12 @@ const TaskBucketRow = memo(function TaskBucketRow({
     setReworkOpen(false);
   }, [item.taskId, onSubmitRework, reworkDraft]);
 
+  const title = useMemo(() => markdownPreviewText(item.title) || item.title, [item.title]);
   const dagMetaText = resolveTaskRowDagMeta(item, t);
+  const summary = (bucket === "parked" && item.parkedReason) || item.summary;
+  const preview = useMemo(() => summary && markdownPreviewText(summary), [summary]);
 
-  const metaParts = [
-    dagMetaText,
-    item.hostLabel,
-    item.workspaceLabel,
-    bucket === "parked" && item.parkedReason ? item.parkedReason : item.summary,
-  ].filter(Boolean);
+  const metaParts = [dagMetaText, item.hostLabel, item.workspaceLabel, preview].filter(Boolean);
 
   const rowStyle = useMemo(
     () => [
@@ -799,7 +802,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           style={styles.taskRowPress}
           highlightStyle={styles.rowPressed}
           accessibilityRole="button"
-          accessibilityLabel={item.title}
+          accessibilityLabel={title}
           testID={`main-chat-action-task-open-${item.id}`}
         >
           {item.hierarchyDepth === 1 ? (
@@ -812,7 +815,7 @@ const TaskBucketRow = memo(function TaskBucketRow({
           <View style={styles.rowTextCol}>
             <View style={styles.rowTitleLine}>
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.title}
+                {title}
               </Text>
               <TaskBucketRowBadges item={item} />
               {item.stale48h ? (

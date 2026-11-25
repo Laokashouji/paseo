@@ -1029,7 +1029,7 @@ describe("Main Chat M2 & M3 UI components", () => {
           status: "parked",
           activeAgentId: "child_parked",
           agentIds: ["child_parked"],
-          parkedReason: "等外部接口",
+          parkedReason: "等 **外部接口** `api_v2`",
         }),
         makeTask({
           id: "task_done",
@@ -1111,6 +1111,9 @@ describe("Main Chat M2 & M3 UI components", () => {
 
     // Switch to Parked -> Resume directly
     fireEvent.click(view.getByTestId("main-chat-action-capsule-parked"));
+    expect(view.getByTestId("main-chat-action-task-open-task:task_parked").textContent).toContain(
+      "等 外部接口 api_v2",
+    );
     fireEvent.click(view.getByTestId("main-chat-action-resume-task_parked"));
     await waitFor(() => {
       expect(client.parkMainChatTask).toHaveBeenCalledWith({

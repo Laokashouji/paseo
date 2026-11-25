@@ -379,7 +379,8 @@ describe("Persona UX parity — background reports and actionable requests", () 
           managedByMainChat: false,
           phase: "blocked_user",
           summary: "",
-          waitReason: "网络层的测试用哪个框架？\n1. Swift Testing（推荐）\n2. XCTest",
+          waitReason:
+            "## **网络层**\n用 *哪个* `test_id` 检查 [PR #42](https://example.com/pr/42)？",
           suggestedAction: null,
           triageSource: "model",
           updatedAt: "2026-11-25T10:01:00.000Z",
@@ -449,6 +450,8 @@ describe("Persona UX parity — background reports and actionable requests", () 
 
     // Open Needs You drawer
     fireEvent.click(view.getByTestId("main-chat-action-capsule-needsYou"));
+
+    expect(view.getByText("DevBox · 网络层 用 哪个 test_id 检查 PR #42？")).toBeTruthy();
 
     // 1. Expand error card, choose "先不管", click Submit -> silently dismisses, ZERO messages sent!
     fireEvent.click(view.getByTestId("main-chat-action-needs-toggle-agent:srv_1:child_err"));

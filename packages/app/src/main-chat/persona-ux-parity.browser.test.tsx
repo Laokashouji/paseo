@@ -784,7 +784,7 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
     expect(askCard).toBeTruthy();
     expect(askCard?.querySelector('[role="radio"]')).toBeNull();
     const question = page.getByTestId("main-chat-needs-ask-question-agent:srv_1:child_framework");
-    expect(question.element().textContent).toContain("网络层");
+    expect(question.element().querySelector("strong")?.textContent).toBe("网络层");
     expect(question.element().textContent).not.toContain("**");
     await page
       .getByTestId("main-chat-needs-ask-input-agent:srv_1:child_framework")
@@ -889,6 +889,18 @@ describe("Persona UX Parity — Real Playwright Chromium E2E & Visual Verificati
       host.querySelector<HTMLElement>('[data-testid="parity-root"]')!,
       "Wide dark Needs You tray",
     );
+
+    const frameworkRow = page.getByTestId(
+      "main-chat-action-needs-toggle-agent:srv_1:child_framework",
+    );
+    expect(frameworkRow.element().textContent).toContain(
+      "网络层的测试用哪个框架？ 1. Swift Testing",
+    );
+    expect(frameworkRow.element().textContent).toContain("2. XCTest");
+    expect(frameworkRow.element().textContent).not.toContain("**");
+    expect(
+      host.querySelector('[data-testid="main-chat-needs-ask-card-agent:srv_1:child_framework"]'),
+    ).toBeNull();
 
     // Screenshot 3 matches Persona web-after-tray-needs-dark.png (clean dark Needs You list!)
     await page.screenshot({
