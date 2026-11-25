@@ -809,6 +809,57 @@ describe("Main Chat M2 & M3 UI components", () => {
     });
   });
 
+  it("prioritizes settings.title over stale underlying main agent.title in /main/history", async () => {
+    const client = makeFakeClient({
+      getMainChatSettings: vi.fn(async () => ({
+        requestId: "r_settings",
+        settings: {
+          ...createDefaultMainChatSettings("conservative"),
+          enabled: true,
+          title: "对话管理",
+        },
+        error: null,
+      })),
+    });
+
+    const staleMainAgent = makeAgent({
+      id: "agent_main",
+      serverId: "srv_1",
+      workspaceId: "ws_main",
+      title: "主对话",
+      labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
+    });
+    const archivedFormerMain = makeAgent({
+      id: "agent_main_old",
+      serverId: "srv_1",
+      workspaceId: "ws_main",
+      title: "昨日主对话",
+      archivedAt: new Date("2026-11-22T23:00:00.000Z"),
+      labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_FORMER_ROLE_VALUE },
+    });
+
+    seedSession(client, [staleMainAgent, archivedFormerMain]);
+    useMainChatSettingsStore.setState({ settingsByServerId: {} });
+
+    const view = renderWithProviders(<MainChatHistoryScreen />);
+
+    await waitFor(() => {
+      expect(client.getMainChatSettings).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(view.getByTestId("main-chat-history-conv-agent_main").textContent).toContain(
+        "对话管理",
+      );
+    });
+    expect(view.getByTestId("main-chat-history-conv-agent_main").textContent).not.toContain(
+      "主对话",
+    );
+    // Archived former main chat preserves its own historical title
+    expect(view.getByTestId("main-chat-history-conv-agent_main_old").textContent).toContain(
+      "昨日主对话",
+    );
+  });
+
   it("supports inline PlanCard editing, rememberAutoStart checkbox, withdrawn state, and started HandoffCard convergence", async () => {
     const client = makeFakeClient();
     seedSession(client);

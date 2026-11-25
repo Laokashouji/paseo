@@ -1,4 +1,5 @@
-import { buildHostAgentDetailRoute } from "@/utils/host-routes";
+import { isMainChatLabels } from "@getpaseo/protocol/main-chat";
+import { buildHostAgentDetailRoute, buildMainChatRoute } from "@/utils/host-routes";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-workspace-store";
 
@@ -8,6 +9,7 @@ export interface NavigateToAgentInput {
   // Used as the workspace target when the agent is not yet in the session store
   // (cold deep-links). Otherwise the workspace is read from the store.
   workspaceId?: string | null;
+  labels?: Record<string, unknown>;
   pin?: boolean;
   /** Opens the agent with its composer, where a compact layout would show a sheet without one. */
   asTab?: boolean;
@@ -15,21 +17,37 @@ export interface NavigateToAgentInput {
 
 export interface AgentNavTarget {
   agentWorkspaceId: string | null | undefined;
+  isMainChatAgent?: boolean;
+  isMainChatWorkspace?: boolean;
 }
 
 export interface NavigateToAgentDeps {
   readAgentNavTarget: (input: { serverId: string; agentId: string }) => AgentNavTarget;
   navigateToHostAgent: (route: string) => void;
   navigateToWorkspace: (input: NavigateToWorkspaceInput) => string;
+  navigateToMainChat?: (route: string) => void;
 }
 
 export function resolveNavigateToAgent(
   input: NavigateToAgentInput,
   deps: NavigateToAgentDeps,
 ): string {
-  const agentWorkspaceId =
-    deps.readAgentNavTarget({ serverId: input.serverId, agentId: input.agentId })
-      .agentWorkspaceId ?? input.workspaceId;
+  const navTarget = deps.readAgentNavTarget({ serverId: input.serverId, agentId: input.agentId });
+  if (
+    isMainChatLabels(input.labels) ||
+    navTarget.isMainChatAgent ||
+    navTarget.isMainChatWorkspace
+  ) {
+    const route = buildMainChatRoute(input.serverId);
+    if (deps.navigateToMainChat) {
+      deps.navigateToMainChat(route);
+    } else {
+      deps.navigateToHostAgent(route);
+    }
+    return route;
+  }
+
+  const agentWorkspaceId = navTarget.agentWorkspaceId ?? input.workspaceId;
   const workspaceId = normalizeWorkspaceOpaqueId(agentWorkspaceId);
 
   if (!workspaceId) {

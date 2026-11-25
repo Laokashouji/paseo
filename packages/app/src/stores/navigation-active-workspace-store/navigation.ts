@@ -1,6 +1,9 @@
-import type { WorkspaceDescriptor } from "@/stores/session-store";
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
+import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
+import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import {
   buildHostWorkspaceRoute,
+  buildMainChatRoute,
   decodeWorkspaceIdFromPathSegment,
   parseHostWorkspaceRouteFromPathname,
 } from "@/utils/host-routes";
@@ -31,10 +34,13 @@ export interface NavigateToWorkspaceInput {
 
 export interface NavigateToWorkspaceDeps extends PrepareWorkspaceTabDeps {
   getSessionWorkspaces: (serverId: string) => Map<string, WorkspaceDescriptor> | null | undefined;
+  getSessionAgents?: (serverId: string) => ReadonlyMap<string, Agent> | null | undefined;
+  getSessionAgent?: (serverId: string, agentId: string) => Agent | null | undefined;
   isWorkspaceLayoutHydrated: () => boolean;
   deferOpenTab: (input: OpenWorkspaceTabInput) => null;
   rememberLastWorkspace: (selection: ActiveWorkspaceSelection) => void;
   navigateToRoute: (route: string) => void;
+  navigateToMainChat?: (route: string) => void;
   revealTab: (workspaceKey: string, tabId: string | null) => void;
   revealWorkspace: (workspaceKey: string, surface?: "sidebar") => void;
 }
@@ -91,6 +97,22 @@ export function navigateToWorkspace(
     workspaces,
     workspaceId: input.workspaceId,
   });
+  const agents = deps.getSessionAgents?.(input.serverId) ?? undefined;
+  const workspace = resolvedWorkspaceId ? workspaces?.get(resolvedWorkspaceId) : undefined;
+  const targetAgent =
+    input.target?.kind === "agent"
+      ? (deps.getSessionAgent?.(input.serverId, input.target.agentId) ??
+        agents?.get(input.target.agentId))
+      : undefined;
+  if (
+    isMainChatAgent(targetAgent) ||
+    (workspace !== undefined && isMainChatDedicatedWorkspace(workspace, agents))
+  ) {
+    const mainRoute = buildMainChatRoute(input.serverId);
+    (deps.navigateToMainChat ?? deps.navigateToRoute)(mainRoute);
+    return mainRoute;
+  }
+
   const shouldDeferOpen = !resolvedWorkspaceId || !deps.isWorkspaceLayoutHydrated();
   const openTab: NavigateToWorkspaceDeps["openTab"] = (request) => {
     if (shouldDeferOpen) return deps.deferOpenTab(request);

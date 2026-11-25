@@ -12,6 +12,7 @@ import {
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import type { PendingPermission } from "@/types/shared";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
+import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 
 type SessionStoreState = ReturnType<
   typeof import("@/stores/session-store").useSessionStore.getState
@@ -55,7 +56,8 @@ export interface MainChatDockTaskItem {
   updatedAtMs: number;
 }
 
-function directoryBasename(dirPath: string): string {
+function directoryBasename(dirPath: string | null | undefined): string {
+  if (!dirPath) return "";
   const trimmed = dirPath.replace(/[\\/]+$/, "");
   const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
   return index >= 0 ? trimmed.slice(index + 1) : trimmed;
@@ -85,6 +87,48 @@ export function isMainChatDedicatedWorkspace(
   if (hasMainChatAgent && !hasNonMainAgent) return true;
   const base = directoryBasename(candidatePath);
   return base === MAIN_CHAT_WORKSPACE_DIR_NAME && hasMainChatAgent;
+}
+
+/**
+ * Primitive boolean selector used by regular workspace routes to detect when the requested
+ * workspace or target agent belongs to the dedicated Main Chat shell and must redirect to `/main`.
+ */
+export function selectIsMainChatWorkspaceRedirectTarget(
+  state: SessionStoreState,
+  serverId: string,
+  workspaceId: string,
+  targetAgentId?: string | null,
+): boolean {
+  if (!serverId) return false;
+  const session = state.sessions[serverId];
+  if (!session) return false;
+
+  if (targetAgentId) {
+    const targetAgent =
+      session.agents.get(targetAgentId) ?? session.agentDetails.get(targetAgentId);
+    if (isMainChatAgent(targetAgent)) {
+      return true;
+    }
+  }
+
+  if (!workspaceId) return false;
+  const resolvedWorkspaceId = resolveWorkspaceMapKeyByIdentity({
+    workspaces: session.workspaces,
+    workspaceId,
+  });
+  const workspace = resolvedWorkspaceId ? session.workspaces.get(resolvedWorkspaceId) : undefined;
+  if (workspace && isMainChatDedicatedWorkspace(workspace, session.agents)) {
+    return true;
+  }
+
+  let hasMainChatAgent = false;
+  let hasNonMainAgent = false;
+  for (const agent of session.agents.values()) {
+    if (agent.archivedAt || agent.background || agent.workspaceId !== workspaceId) continue;
+    if (isMainChatAgent(agent)) hasMainChatAgent = true;
+    else hasNonMainAgent = true;
+  }
+  return hasMainChatAgent && !hasNonMainAgent;
 }
 
 export function findMainChatAgentOnHost(

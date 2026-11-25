@@ -1,3 +1,9 @@
+import {
+  MAIN_CHAT_FORMER_ROLE_VALUE,
+  MAIN_CHAT_ROLE_LABEL,
+  MAIN_CHAT_ROLE_VALUE,
+  MAIN_CHAT_TASK_ID_LABEL,
+} from "@getpaseo/protocol/main-chat";
 import { describe, expect, it } from "vitest";
 import type {
   DaemonClient,
@@ -75,6 +81,7 @@ function historyEntry(input: {
   updatedAt: string;
   title?: string | null;
   archivedAt?: string | null;
+  labels?: Record<string, string>;
   searchScore?: number;
 }): FetchAgentHistoryEntry {
   return {
@@ -110,7 +117,7 @@ function historyEntry(input: {
       attentionReason: null,
       attentionTimestamp: null,
       archivedAt: input.archivedAt ?? null,
-      labels: {},
+      labels: input.labels ?? {},
     },
     project: {
       projectKey: input.cwd,
@@ -236,6 +243,47 @@ describe("fetchAgentHistoryPage", () => {
     const page = await fetchAgentHistoryPage({ client, serverId: "server-1", cursor: null });
 
     expect(page.agents[0]?.archivedAt).toEqual(new Date("2026-04-01T10:05:00.000Z"));
+  });
+
+  it("filters out main-chat and former main-chat agents while keeping normal and child task sessions", async () => {
+    const client = createClient([
+      historyPayload({
+        entries: [
+          historyEntry({
+            id: "agent-main",
+            cwd: "/home/user/.paseo/main-chat",
+            updatedAt: "2026-04-04T10:00:00.000Z",
+            title: "主对话",
+            labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_ROLE_VALUE },
+          }),
+          historyEntry({
+            id: "agent-former-main",
+            cwd: "/home/user/.paseo/main-chat",
+            updatedAt: "2026-04-03T10:00:00.000Z",
+            title: "昨日主对话",
+            archivedAt: "2026-04-03T11:00:00.000Z",
+            labels: { [MAIN_CHAT_ROLE_LABEL]: MAIN_CHAT_FORMER_ROLE_VALUE },
+          }),
+          historyEntry({
+            id: "agent-child-task",
+            cwd: "/repo/app",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            title: "修复登录鉴权",
+            labels: { [MAIN_CHAT_TASK_ID_LABEL]: "task_1" },
+          }),
+          historyEntry({
+            id: "agent-regular",
+            cwd: "/repo/app",
+            updatedAt: "2026-04-01T10:00:00.000Z",
+            title: "常规开发会话",
+          }),
+        ],
+      }),
+    ]);
+
+    const page = await fetchAgentHistoryPage({ client, serverId: "server-1", cursor: null });
+
+    expect(page.agents.map((agent) => agent.id)).toEqual(["agent-child-task", "agent-regular"]);
   });
 
   it("fetches and sorts history across hosts with host labels", async () => {

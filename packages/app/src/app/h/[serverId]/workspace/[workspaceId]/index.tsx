@@ -1,13 +1,16 @@
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useNavigation } from "expo-router/react-navigation";
 import { StyleSheet, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
 import { RetainedPanel } from "@/components/retained-panel";
+import { selectIsMainChatWorkspaceRedirectTarget } from "@/main-chat/selectors";
 import {
   type ActiveWorkspaceSelection,
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
+import { useSessionStore } from "@/stores/session-store";
 import { useHasHydratedWorkspaces, useWorkspaceExists } from "@/stores/session-store-hooks";
 import { useDirectoryDemand } from "@/hooks/use-directory-demand";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
@@ -126,15 +129,26 @@ function HostWorkspaceRouteContent() {
     if (!openValue || !serverId || !workspaceId) return;
     const openIntent = parseWorkspaceOpenIntent(openValue);
     if (openIntent) {
-      prepareWorkspaceTab(
-        {
-          serverId,
-          workspaceId,
-          target: getOpenIntentTarget(openIntent),
-          pin: openIntent.kind === "agent",
-        },
-        { openTab: useWorkspaceLayoutStore.getState().deferOpenTab },
-      );
+      const targetAgentId = openIntent.kind === "agent" ? openIntent.agentId : null;
+      const sessionState = useSessionStore.getState();
+      const targetAgent = targetAgentId
+        ? (sessionState.sessions[serverId]?.agents.get(targetAgentId) ??
+          sessionState.sessions[serverId]?.agentDetails.get(targetAgentId))
+        : undefined;
+      const isMainChatRedirect =
+        isMainChatAgent(targetAgent) ||
+        selectIsMainChatWorkspaceRedirectTarget(sessionState, serverId, workspaceId, targetAgentId);
+      if (!isMainChatRedirect) {
+        prepareWorkspaceTab(
+          {
+            serverId,
+            workspaceId,
+            target: getOpenIntentTarget(openIntent),
+            pin: openIntent.kind === "agent",
+          },
+          { openTab: useWorkspaceLayoutStore.getState().deferOpenTab },
+        );
+      }
     }
     clearConsumedOpenIntent({
       navigation: navigation as unknown as {

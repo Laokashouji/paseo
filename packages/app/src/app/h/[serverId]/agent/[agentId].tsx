@@ -1,3 +1,4 @@
+import { isMainChatAgent } from "@getpaseo/protocol/main-chat";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
@@ -9,7 +10,11 @@ import { useDirectoryDemand } from "@/hooks/use-directory-demand";
 import { useWorkspaceLayoutStoreHydrated } from "@/stores/workspace-layout-store";
 import { useSessionStore } from "@/stores/session-store";
 import { getHostRuntimeStore, useHostRuntimeSnapshot, useHosts } from "@/runtime/host-runtime";
-import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
+import {
+  buildHostRootRoute,
+  buildMainChatRoute,
+  buildSettingsHostRoute,
+} from "@/utils/host-routes";
 import { toErrorMessage } from "@/utils/error-messages";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 
@@ -19,6 +24,112 @@ export default function HostAgentReadyRoute() {
       <HostAgentReadyRouteContent />
     </HostRouteBootstrapBoundary>
   );
+}
+
+function resolveHostAgentNavigationKey(
+  resolvedIsMainChat: boolean,
+  serverId: string,
+  resolution: ReturnType<typeof resolveAgentRoute>,
+): string | null {
+  if (resolvedIsMainChat) {
+    return `main-chat:${serverId}`;
+  }
+  if (resolution.kind === "invalid") {
+    return "invalid";
+  }
+  if (resolution.kind === "resolved") {
+    return `workspace:${resolution.workspaceId}`;
+  }
+  if (resolution.kind === "notFound") {
+    return "not-found";
+  }
+  return null;
+}
+
+function useHostAgentRouteLookup(input: {
+  serverId: string;
+  agentId: string;
+  client: ReturnType<typeof useHostRuntimeSnapshot> extends infer T
+    ? T extends { client: infer C }
+      ? C | null
+      : null
+    : null;
+  clientGeneration: number;
+  connectionStatus: string;
+  agentWorkspaceId: string | null;
+  cachedAgentIsMainChat: boolean;
+}) {
+  const {
+    serverId,
+    agentId,
+    client,
+    clientGeneration,
+    connectionStatus,
+    agentWorkspaceId,
+    cachedAgentIsMainChat,
+  } = input;
+
+  useEffect(() => {
+    if (!serverId || !agentId || agentWorkspaceId || cachedAgentIsMainChat) return;
+    void getHostRuntimeStore()
+      .prepareAgentRoute(serverId, agentId)
+      .catch(() => undefined);
+  }, [agentId, agentWorkspaceId, cachedAgentIsMainChat, serverId]);
+
+  const shouldLookupAgent = Boolean(
+    serverId &&
+    agentId &&
+    client &&
+    connectionStatus === "online" &&
+    !agentWorkspaceId &&
+    !cachedAgentIsMainChat,
+  );
+  const lookupQuery = useFetchQuery({
+    queryKey: ["agentRouteResolution", serverId, agentId, clientGeneration],
+    queryFn: async () => {
+      if (!client) {
+        throw new Error("Target host client is unavailable");
+      }
+      const result = await client.fetchAgent({ agentId });
+      return {
+        workspaceId: result?.agent?.workspaceId ?? null,
+        isMainChat: isMainChatAgent(result?.agent),
+      };
+    },
+    enabled: shouldLookupAgent,
+    retry: false,
+    dataShape: "value",
+    staleTimeMs: 0,
+  });
+
+  const lookup = useMemo<AgentRouteLookup>(() => {
+    if (!shouldLookupAgent) {
+      return { kind: "idle" };
+    }
+    if (lookupQuery.isFetching) {
+      return { kind: "fetching" };
+    }
+    if (lookupQuery.isError) {
+      return { kind: "failed", error: toErrorMessage(lookupQuery.error) };
+    }
+    if (lookupQuery.isSuccess) {
+      return { kind: "found", workspaceId: lookupQuery.data?.workspaceId ?? null };
+    }
+    return { kind: "fetching" };
+  }, [
+    lookupQuery.data,
+    lookupQuery.error,
+    lookupQuery.isError,
+    lookupQuery.isFetching,
+    lookupQuery.isSuccess,
+    shouldLookupAgent,
+  ]);
+
+  return {
+    lookup,
+    resolvedIsMainChat: cachedAgentIsMainChat || lookupQuery.data?.isMainChat === true,
+    refetch: lookupQuery.refetch,
+  };
 }
 
 function HostAgentReadyRouteContent() {
@@ -35,57 +146,29 @@ function HostAgentReadyRouteContent() {
   const client = runtimeSnapshot?.client ?? null;
   const connectionStatus = runtimeSnapshot?.connectionStatus ?? "connecting";
   const hostName = hosts.find((host) => host.serverId === serverId)?.label ?? serverId;
+  const cachedAgentIsMainChat = useSessionStore((state) => {
+    if (!serverId || !agentId) {
+      return false;
+    }
+    const session = state.sessions[serverId];
+    const agent = session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId);
+    return isMainChatAgent(agent);
+  });
   const agentWorkspaceId = useSessionStore((state) => {
     if (!serverId || !agentId) {
       return null;
     }
     return state.sessions[serverId]?.agents?.get(agentId)?.workspaceId ?? null;
   });
-  useEffect(() => {
-    if (!serverId || !agentId || agentWorkspaceId) return;
-    void getHostRuntimeStore()
-      .prepareAgentRoute(serverId, agentId)
-      .catch(() => undefined);
-  }, [agentId, agentWorkspaceId, serverId]);
-  const shouldLookupAgent = Boolean(
-    serverId && agentId && client && connectionStatus === "online" && !agentWorkspaceId,
-  );
-  const lookupQuery = useFetchQuery({
-    queryKey: ["agentRouteResolution", serverId, agentId, runtimeSnapshot?.clientGeneration ?? 0],
-    queryFn: async () => {
-      if (!client) {
-        throw new Error("Target host client is unavailable");
-      }
-      const result = await client.fetchAgent({ agentId });
-      return result?.agent?.workspaceId ?? null;
-    },
-    enabled: shouldLookupAgent,
-    retry: false,
-    dataShape: "value",
-    staleTimeMs: 0,
+  const { lookup, resolvedIsMainChat, refetch } = useHostAgentRouteLookup({
+    serverId,
+    agentId,
+    client,
+    clientGeneration: runtimeSnapshot?.clientGeneration ?? 0,
+    connectionStatus,
+    agentWorkspaceId,
+    cachedAgentIsMainChat,
   });
-  const lookup = useMemo<AgentRouteLookup>(() => {
-    if (!shouldLookupAgent) {
-      return { kind: "idle" };
-    }
-    if (lookupQuery.isFetching) {
-      return { kind: "fetching" };
-    }
-    if (lookupQuery.isError) {
-      return { kind: "failed", error: toErrorMessage(lookupQuery.error) };
-    }
-    if (lookupQuery.isSuccess) {
-      return { kind: "found", workspaceId: lookupQuery.data };
-    }
-    return { kind: "fetching" };
-  }, [
-    lookupQuery.data,
-    lookupQuery.error,
-    lookupQuery.isError,
-    lookupQuery.isFetching,
-    lookupQuery.isSuccess,
-    shouldLookupAgent,
-  ]);
   const hasHydratedWorkspaces = useHasHydratedWorkspaces(serverId);
   const hasHydratedLayout = useWorkspaceLayoutStoreHydrated();
   useDirectoryDemand(serverId);
@@ -100,35 +183,32 @@ function HostAgentReadyRouteContent() {
   });
 
   useEffect(() => {
-    let navigationKey: string | null = null;
-    if (resolution.kind === "invalid") {
-      navigationKey = "invalid";
-    } else if (resolution.kind === "resolved") {
-      navigationKey = `workspace:${resolution.workspaceId}`;
-    } else if (resolution.kind === "notFound") {
-      navigationKey = "not-found";
-    }
+    const navigationKey = resolveHostAgentNavigationKey(resolvedIsMainChat, serverId, resolution);
     if (!navigationKey || handledNavigationRef.current === navigationKey) {
       return;
     }
     handledNavigationRef.current = navigationKey;
 
+    if (resolvedIsMainChat) {
+      router.replace(buildMainChatRoute(serverId) as Href);
+      return;
+    }
     if (resolution.kind === "resolved") {
       navigateToAgent({ serverId, agentId, workspaceId: resolution.workspaceId, pin: true });
       return;
     }
     router.replace(resolution.kind === "invalid" ? ("/" as Href) : buildHostRootRoute(serverId));
-  }, [agentId, resolution, router, serverId]);
+  }, [agentId, resolution, resolvedIsMainChat, router, serverId]);
 
   const handleRetry = useCallback(() => {
     if (resolution.kind === "lookupError") {
-      void lookupQuery.refetch();
+      void refetch();
       return;
     }
     if (serverId) {
       void getHostRuntimeStore().runProbeCycleNow(serverId);
     }
-  }, [lookupQuery, resolution.kind, serverId]);
+  }, [refetch, resolution.kind, serverId]);
   const handleManageHost = useCallback(() => {
     if (serverId) {
       router.push(buildSettingsHostRoute(serverId));

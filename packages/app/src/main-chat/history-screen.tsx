@@ -149,13 +149,51 @@ function isAssistantConversationAgent(agent: { labels: Record<string, unknown> }
   return kind === "main" || kind === "leader" || kind === "side";
 }
 
+function buildAssistantConversationItem(input: {
+  serverId: string;
+  agent: {
+    id: string;
+    title?: string | null;
+    archivedAt?: Date | null;
+    updatedAt: Date;
+    labels: Record<string, unknown>;
+  };
+  activeMain: { serverId: string; agentId: string } | null;
+  configuredTitle: string | null;
+}): AssistantConversationListItem {
+  const { serverId, agent, activeMain, configuredTitle } = input;
+  const isFormerMain = isFormerMainChatLabels(agent.labels);
+  const isArchived = Boolean(agent.archivedAt) || isFormerMain;
+  const isActiveMain =
+    activeMain !== null &&
+    activeMain.serverId === serverId &&
+    activeMain.agentId === agent.id &&
+    !isArchived;
+  const isCurrentMainRole = isMainChatAgent(agent) && !isArchived;
+  const title =
+    (isActiveMain || isCurrentMainRole) && configuredTitle
+      ? configuredTitle
+      : agent.title?.trim() || agent.id;
+  return {
+    serverId,
+    agentId: agent.id,
+    title,
+    archived: isArchived,
+    isActiveMain,
+    isFormerMain,
+    updatedAtMs: agent.updatedAt.getTime(),
+  };
+}
+
 function selectAssistantConversations(
   state: ReturnType<typeof useSessionStore.getState>,
   activeMain: { serverId: string; agentId: string } | null,
   scopedServerId?: string | null,
+  configuredMainTitle?: string | null,
 ): AssistantConversationListItem[] {
   const items: AssistantConversationListItem[] = [];
   const seen = new Set<string>();
+  const configuredTitle = configuredMainTitle?.trim() || null;
 
   for (const [serverId, session] of Object.entries(state.sessions)) {
     if (scopedServerId && serverId !== scopedServerId) {
@@ -166,21 +204,7 @@ function selectAssistantConversations(
       const key = `${serverId}:${agent.id}`;
       if (seen.has(key) || !isAssistantConversationAgent(agent)) continue;
       seen.add(key);
-      const isFormerMain = isFormerMainChatLabels(agent.labels);
-      items.push({
-        serverId,
-        agentId: agent.id,
-        title: agent.title?.trim() || agent.id,
-        archived: agent.archivedAt !== null || isFormerMain,
-        isActiveMain:
-          activeMain !== null &&
-          activeMain.serverId === serverId &&
-          activeMain.agentId === agent.id &&
-          agent.archivedAt === null &&
-          !isFormerMain,
-        isFormerMain,
-        updatedAtMs: agent.updatedAt.getTime(),
-      });
+      items.push(buildAssistantConversationItem({ serverId, agent, activeMain, configuredTitle }));
     }
   }
 
@@ -1020,10 +1044,12 @@ function mergeOverviewConversationsIntoList(
   overviewConversations: readonly MainChatConversationRecord[] | undefined,
   activeMainRef: { serverId: string; agentId: string } | null,
   targetServerId: string | null,
+  configuredMainTitle?: string | null,
 ): AssistantConversationListItem[] {
   if (!overviewConversations || overviewConversations.length === 0) {
     return [...conversationsFromStore];
   }
+  const normalizedConfiguredTitle = configuredMainTitle?.trim() || null;
   const existingKeys = new Set(
     conversationsFromStore.map((item) => `${item.serverId}:${item.agentId}`),
   );
@@ -1034,13 +1060,14 @@ function mergeOverviewConversationsIntoList(
     const key = `${srvId}:${conv.agentId}`;
     if (existingKeys.has(key)) continue;
     existingKeys.add(key);
+    const isActiveMain =
+      conv.kind === "main" && conv.archivedAt === null && activeMainRef?.agentId === conv.agentId;
     merged.push({
       serverId: srvId,
       agentId: conv.agentId,
-      title: conv.title,
+      title: isActiveMain && normalizedConfiguredTitle ? normalizedConfiguredTitle : conv.title,
       archived: conv.archivedAt !== null,
-      isActiveMain:
-        conv.kind === "main" && conv.archivedAt === null && activeMainRef?.agentId === conv.agentId,
+      isActiveMain,
       isFormerMain: conv.kind === "main" && conv.archivedAt !== null,
       updatedAtMs: Date.parse(conv.updatedAt) || 0,
     });
@@ -1054,6 +1081,26 @@ function resolveHistoryNavServerId(
   targetServerId: string | null,
 ): string | undefined {
   return hasMultipleStewards || Boolean(routeServerId) ? (targetServerId ?? undefined) : undefined;
+}
+
+function useMainChatHistoryConfiguredTitle(input: {
+  targetServerId: string | null;
+  client: DaemonClient | null;
+  supportsMainChat: boolean;
+}): string | null {
+  const { targetServerId, client, supportsMainChat } = input;
+  const settings = useMainChatSettingsStore((state) =>
+    targetServerId ? state.settingsByServerId[targetServerId] : undefined,
+  );
+  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+
+  useEffect(() => {
+    if (!targetServerId || !client || !supportsMainChat || settings) return;
+    if (typeof client.getMainChatSettings !== "function") return;
+    void loadSettings(targetServerId, client).catch(() => undefined);
+  }, [client, loadSettings, settings, supportsMainChat, targetServerId]);
+
+  return settings?.title?.trim() || null;
 }
 
 const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent({
@@ -1105,12 +1152,18 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
   const client = useSessionStore((state) =>
     targetServerId ? (state.sessions[targetServerId]?.client ?? null) : null,
   );
+  const configuredTitle = useMainChatHistoryConfiguredTitle({
+    targetServerId,
+    client,
+    supportsMainChat: summary.supportsMainChat,
+  });
 
   const conversationsFromStore = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
-      (state) => selectAssistantConversations(state, activeMainRef, targetServerId),
-      [activeMainRef, targetServerId],
+      (state) =>
+        selectAssistantConversations(state, activeMainRef, targetServerId, configuredTitle),
+      [activeMainRef, configuredTitle, targetServerId],
     ),
     equal,
   );
@@ -1188,8 +1241,15 @@ const MainChatHistoryScreenContent = memo(function MainChatHistoryScreenContent(
         overview?.conversations,
         activeMainRef,
         targetServerId,
+        configuredTitle,
       ),
-    [activeMainRef, conversationsFromStore, overview?.conversations, targetServerId],
+    [
+      activeMainRef,
+      configuredTitle,
+      conversationsFromStore,
+      overview?.conversations,
+      targetServerId,
+    ],
   );
 
   const hostLabelByServerId = useMemo(

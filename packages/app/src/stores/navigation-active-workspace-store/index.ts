@@ -1,8 +1,9 @@
 import { revealWorkspaceTab } from "@/workspace-tabs/navigation";
 import { usePanelStore } from "@/stores/panel-store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useLocalSearchParams, usePathname } from "expo-router";
+import { router, useLocalSearchParams, usePathname, type Href } from "expo-router";
 import { useEffect, useSyncExternalStore } from "react";
+import { isMainChatDedicatedWorkspace } from "@/main-chat/selectors";
 import {
   createLastWorkspaceSelectionStore,
   LAST_WORKSPACE_SELECTION_STORAGE_KEY,
@@ -20,6 +21,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit } from "@/utils/host-route-browser";
 import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navigation";
+import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 
 export type { ActiveWorkspaceSelection } from "@/stores/last-workspace-selection";
 export type { NavigateToWorkspaceInput } from "./navigation";
@@ -44,6 +46,11 @@ function navigateDeps(): NavigateToWorkspaceDeps {
       else panels.showMobileAgent();
     },
     getSessionWorkspaces: (serverId) => useSessionStore.getState().sessions[serverId]?.workspaces,
+    getSessionAgents: (serverId) => useSessionStore.getState().sessions[serverId]?.agents,
+    getSessionAgent: (serverId, agentId) => {
+      const session = useSessionStore.getState().sessions[serverId];
+      return session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    },
     isWorkspaceLayoutHydrated: () => useWorkspaceLayoutStore.persist.hasHydrated(),
     deferOpenTab: (input) => useWorkspaceLayoutStore.getState().deferOpenTab(input),
     openTab: (input) => useWorkspaceLayoutStore.getState().openTab(input),
@@ -51,6 +58,9 @@ function navigateDeps(): NavigateToWorkspaceDeps {
     navigateToRoute: (route) => {
       navigateToHostWorkspaceRoute(route);
       stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit();
+    },
+    navigateToMainChat: (route) => {
+      router.navigate(route as Href);
     },
   };
 }
@@ -88,6 +98,17 @@ export function useActiveWorkspaceSelection(): ActiveWorkspaceSelection | null {
   const workspaceId = selection?.workspaceId ?? null;
   useEffect(() => {
     if (!serverId || !workspaceId) {
+      return;
+    }
+    const session = useSessionStore.getState().sessions[serverId];
+    const resolvedWorkspaceId = resolveWorkspaceMapKeyByIdentity({
+      workspaces: session?.workspaces,
+      workspaceId,
+    });
+    const workspace = resolvedWorkspaceId
+      ? session?.workspaces.get(resolvedWorkspaceId)
+      : undefined;
+    if (workspace && isMainChatDedicatedWorkspace(workspace, session?.agents)) {
       return;
     }
     lastWorkspaceSelectionStore.remember({ serverId, workspaceId });
