@@ -2,6 +2,11 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.531 - 2026-11-25
+
+- **修复 Markdown 表格单元格内 `<br>` 换行导致的裂行与断表错乱**：为 `normalizeMarkdownHtml` 启用 GFM 表格解析感知，单元格内的 `<br>` / `<br/>` / `<BR />`、块级 HTML 标签（`<p>`、`<div>`、`<ul>`/`<li>`、`<details>`/`<summary>` 等）及换行 HTML 实体（`&#10;`、`&NewLine;` 等）不再向表格行内插入真实 `\n`，彻底消除单元格内容向左串列、右侧多出空列以及 `<br>1. ...` 打断表格暴露原始 `|` 文本的问题；表格外普通段落硬换行、行内代码 `` `<br>` `` 与代码块均保持原行为不变。
+- **跨端保留表格单元格内真正换行与选区复制兼容**：通过独立递增补丁将表格单元格内的换行标记在 Web / Electron（`<br />`）、iOS / macOS 与 Android 渲染器中还原为真正的 `LineBreak` 节点，保留多行排版与自动行高计算，并兼容中文强调边界（如 `**中文：**<br>正文`）与跨 `<br>` 路径/URL 独立链接识别；Web 选区复制同步在 `text/plain` 中保持单行合法 GFM（还原为 `<br>`），在 `text/html` 中保留真实 `<br>` 富文本换行。
+
 ## 0.17.530 - 2026-11-25
 
 - **插件化飞书机器人通知与审批卡片双向桥接（P2-1）**：新增内置隔离插件 `feishu-bot-bridge`，并通过主对话薄桥接缝（`feishu-bridge-seam`）双向联动，默认保守关闭且零外发流量；开启并配置凭据后，可按通知分级（`critical` / `actionable` / `digest`）并遵循低打扰静默与关键直通策略，向飞书群聊或私聊（`chat_id` / `open_id` / `user_id`）自动推送权限审批互动卡、拍板决策卡、分级通知卡与测试卡；支持通过入站回调 `POST /api/plugins/feishu-bot-bridge/webhook` 完成 URL `challenge` 校验、在飞书卡片远程点击「允许 / 拒绝」或拍板选项并回写主对话，同时原位更新飞书卡片终态，防止 Paseo 端内与飞书端重复审批；原生主对话 P0 / P1 / P2 全部 15 项演进需求至此全量收官。
