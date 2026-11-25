@@ -233,8 +233,11 @@ gh workflow run fork-release.yml \
   --repo Laokashouji/paseo \
   --ref fork \
   -f tag=fork-v0.17.531 \
+  -f checkout_ref=fork \
   -f ios_only=true
 ```
+
+> 若目标 `tag` 本身已包含最新 `fork-infra` 脚本，可省略 `-f checkout_ref=fork`；补发早于 iOS 流水线合入的老 tag 时需传入 `-f checkout_ref=fork`。
 
 - **后续所有发版**：当 iOS Secrets 配置齐全后，执行 `./scripts/fork/release.sh --push` 时，`build-ios` 会与 `build-macos`、`build-daemon` 并行执行，自动生成 1024×1024 无透明通道蓝图蓝图标、签名验包、上传 TestFlight 并同步 `FORK_CHANGELOG.md` 中文更新日志；若尚未配置 iOS Secrets，`build-ios` 自动温和跳过，绝不影响 macOS 与 Linux Daemon 发布。
 
