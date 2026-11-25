@@ -183,6 +183,48 @@ describe("plugin example import boundaries", () => {
   });
 });
 
+describe("built-in feishu-bot-bridge plugin import boundaries", () => {
+  const pluginRoot = path.resolve(sourceDirectory, "../../../plugins/feishu-bot-bridge");
+  const files = readdirSync(pluginRoot, { recursive: true }).filter(
+    (file) => !file.split(path.sep).includes("node_modules") && /(?<!\.test)\.tsx?$/.test(file),
+  );
+  const owner = (file: string) => {
+    const [segment] = path.relative(pluginRoot, file).split(path.sep);
+    if (segment?.startsWith("index.client.")) return "client";
+    if (segment?.startsWith("index.server.")) return "server";
+    return segment;
+  };
+
+  it.each(files)("%s respects runtime ownership, including type imports", (relative) => {
+    const file = path.join(pluginRoot, relative);
+    const runtime = owner(file);
+    expect(["shared", "client", "server"]).toContain(runtime);
+    const violations: string[] = [];
+    for (const { fileName: specifier } of ts.preProcessFile(readFileSync(file, "utf8"), true, true)
+      .importedFiles) {
+      if (specifier.startsWith(".")) {
+        const imported = owner(resolveLocal(file, specifier));
+        if (imported !== "shared" && imported !== runtime) violations.push(specifier);
+      } else if (specifier.startsWith("@getpaseo/plugin")) {
+        const entry = specifier.replace("@getpaseo/plugin", ".") as keyof typeof entries;
+        if (
+          entry === "./client/host" ||
+          entry.startsWith("./internal/") ||
+          !(entry in entries) ||
+          (entries[entry] !== "shared" && entries[entry] !== runtime)
+        )
+          violations.push(specifier);
+      } else if (
+        (runtime !== "client" && uiDependency.test(specifier)) ||
+        (runtime !== "server" && isBuiltin(specifier))
+      ) {
+        violations.push(specifier);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
 describe("plugin panel SDK boundary", () => {
   it("accepts uniform params and persisted tab state alongside 0.12 panels", () => {
     expect(

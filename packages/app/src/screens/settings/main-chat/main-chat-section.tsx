@@ -58,6 +58,7 @@ import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute } from "@/utils/host-routes";
 import { MainChatCostControlPanel } from "./cost-control-panel";
+import { MainChatFeishuBridgePanel } from "./feishu-bridge-panel";
 import { MainChatIdleArchiveAndPromptsPanel } from "./idle-archive-and-prompts-panel";
 import { MainChatLimitFallbacksPanel } from "./limit-fallbacks-panel";
 import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
@@ -1587,6 +1588,18 @@ export function MainChatSettingsSection(): ReactElement {
               initialAuditLog={idleArchiveAudit}
               disabled={saving}
               onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.feishuBridge.sectionTitle")}
+            info={t("mainChat.feishuBridge.sectionDescription")}
+            testID="settings-main-chat-feishu-bridge"
+          >
+            <MainChatFeishuBridgePanel
+              serverId={selectedServerId}
+              client={client}
+              disabled={saving}
             />
           </SettingsSection>
 

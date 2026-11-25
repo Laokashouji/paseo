@@ -74,6 +74,12 @@ interface PluginRuntimePort {
   bindPaseoSessionHost(sessionHost: Parameters<PluginRuntime["bindPaseoSessionHost"]>[0]): void;
 }
 
+export interface PluginRpcCompletedEvent {
+  pluginId: string;
+  method: string;
+  result: unknown;
+}
+
 interface PluginServiceDependencies {
   usageAgents?: AgentUsageLookup;
   settingsDirectory?: string;
@@ -112,6 +118,7 @@ export class PluginService {
   >();
   private started = false;
   private readonly settingsListeners = new Set<(pluginId: string, settingsId: string) => void>();
+  private readonly rpcCompletedListeners = new Set<(event: PluginRpcCompletedEvent) => void>();
 
   constructor(
     logger: pino.Logger,
@@ -195,6 +202,13 @@ export class PluginService {
   subscribeSettings(listener: (pluginId: string, settingsId: string) => void): () => void {
     this.settingsListeners.add(listener);
     return () => this.settingsListeners.delete(listener);
+  }
+
+  onPluginRpcCompleted(listener: (event: PluginRpcCompletedEvent) => void): () => void {
+    this.rpcCompletedListeners.add(listener);
+    return () => {
+      this.rpcCompletedListeners.delete(listener);
+    };
   }
 
   subscribe(listener: (pluginId: string) => void): () => void {
@@ -552,8 +566,19 @@ export class PluginService {
     });
   }
 
-  invokePluginRpc(pluginId: string, method: string, input: unknown): Promise<unknown> {
-    return this.runtime.invoke(pluginId, method, input);
+  async invokePluginRpc(pluginId: string, method: string, input: unknown): Promise<unknown> {
+    const result = await this.runtime.invoke(pluginId, method, input);
+    if (this.rpcCompletedListeners.size > 0) {
+      const event: PluginRpcCompletedEvent = { pluginId, method, result };
+      for (const listener of this.rpcCompletedListeners) {
+        try {
+          listener(event);
+        } catch (error) {
+          this.logger.warn({ err: error, pluginId, method }, "Plugin RPC completed listener threw");
+        }
+      }
+    }
+    return result;
   }
 
   subscribePluginRpc(pluginId: string, method: string, input: unknown): PluginRuntimeSubscription {

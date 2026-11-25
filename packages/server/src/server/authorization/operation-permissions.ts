@@ -303,6 +303,11 @@ const INBOUND_PERMISSION = {
   "main_chat.list_prompt_library.request": "workspace.read",
   "main_chat.save_prompt_template.request": ["workspace.write", "hub.execute"],
   "main_chat.delete_prompt_template.request": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_get_state.request": "workspace.read",
+  "main_chat.feishu_bridge_update_config.request": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_test_connection.request": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_send_test_card.request": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_list_audit.request": "workspace.read",
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -624,6 +629,11 @@ const OUTBOUND_PERMISSION = {
   "main_chat.list_prompt_library.response": "workspace.read",
   "main_chat.save_prompt_template.response": ["workspace.write", "hub.execute"],
   "main_chat.delete_prompt_template.response": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_get_state.response": "workspace.read",
+  "main_chat.feishu_bridge_update_config.response": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_test_connection.response": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_send_test_card.response": ["workspace.write", "hub.execute"],
+  "main_chat.feishu_bridge_list_audit.response": "workspace.read",
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

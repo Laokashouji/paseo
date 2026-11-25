@@ -96,6 +96,14 @@ import {
   type MainChatTaskReviewVerdict,
   type MainChatTokenUsageSource,
   type MainChatTokenUsageSummary,
+  type FeishuBridgeAuditDirection,
+  type FeishuBridgeAuditRecord,
+  type FeishuBridgeConfigPatch,
+  type FeishuBridgeConnectionTestResult,
+  type FeishuBridgeReceiveIdType,
+  type FeishuBridgeSendTestCardResult,
+  type FeishuBridgeState,
+  type FeishuBridgeStats,
 } from "@getpaseo/protocol/main-chat";
 import {
   PARENT_AGENT_ID_LABEL,
@@ -139,6 +147,13 @@ import {
 } from "./conversations.js";
 import { createMainChatFleetAggregator, type FleetConnectedHosts } from "./fleet-aggregator.js";
 import { createMainChatFleetBridge, type MainChatFleetBridge } from "./fleet-bridge.js";
+import {
+  createFeishuBridgeSeam,
+  type FeishuBridgePluginInvoker,
+  type FeishuBridgeSeam,
+  type FeishuWebhookHttpRequest,
+  type FeishuWebhookHttpResponse,
+} from "./feishu-bridge-seam.js";
 import {
   formatLeaderProgressMessage,
   type LeaderProgressReportInput,
@@ -407,6 +422,8 @@ export interface MainChatServiceDependencies {
   compactThresholdTokens?: number;
   idlePrecompactMinIdleMs?: number;
   idlePrecompactCheckIntervalMs?: number;
+  feishuPluginInvoker?: FeishuBridgePluginInvoker | null;
+  resolveFeishuWebhookUrl?: () => string | null;
 }
 
 export interface MainChatCompactOptions {
@@ -772,6 +789,22 @@ export interface MainChatService {
     deleted: boolean;
     templates: MainChatPromptTemplate[];
   }>;
+  // Wave 6: Plugin-based Feishu Bot Bridge minimal seam
+  getFeishuBridgeState(options?: { auditLimit?: number }): Promise<FeishuBridgeState>;
+  updateFeishuBridgeConfig(patch: FeishuBridgeConfigPatch): Promise<FeishuBridgeState>;
+  testFeishuBridgeConnection(options?: {
+    forceRefreshToken?: boolean;
+  }): Promise<FeishuBridgeConnectionTestResult>;
+  sendFeishuBridgeTestCard(options?: {
+    receiveId?: string;
+    receiveIdType?: FeishuBridgeReceiveIdType;
+    title?: string;
+  }): Promise<FeishuBridgeSendTestCardResult>;
+  listFeishuBridgeAudit(options?: {
+    limit?: number;
+    direction?: FeishuBridgeAuditDirection;
+  }): Promise<{ records: FeishuBridgeAuditRecord[]; stats: FeishuBridgeStats }>;
+  handleFeishuWebhook(request: FeishuWebhookHttpRequest): Promise<FeishuWebhookHttpResponse>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -1132,6 +1165,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
   let admissionDrainPending = false;
   const deliveryNotifiedKeys = new Set<string>();
   let unsubscribeGitSnapshots: WorkspaceGitSubscription | null = null;
+  let feishuBridgeRef: FeishuBridgeSeam | null = null;
 
   const supervisor = createMainChatSupervisor({
     agentManager: deps.agentManager,
@@ -1144,6 +1178,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     now: getNowMs,
     providerSnapshotManager: deps.providerSnapshotManager,
     readDaemonConfig: deps.readDaemonConfig,
+    onBridgeEvent: (event) => {
+      feishuBridgeRef?.dispatchMainChatEvent(event);
+    },
     resolveConversationTarget: async (conversationId) => {
       if (!conversationId) return null;
       await conversationManager.load();
@@ -5780,7 +5817,21 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     return fallbackEvent;
   }
 
-  return {
+  function isManagedByMainChatOrTask(agentId: string): boolean {
+    const trimmed = agentId.trim();
+    if (!trimmed) return false;
+    if (isManagedConversationAgent(trimmed)) return true;
+    if (store.findTaskByAgentId(trimmed) !== null) return true;
+    const live = deps.agentManager.getAgent(trimmed);
+    if (live) {
+      const parentId = getParentAgentIdFromLabels(live.labels);
+      const taskMeta = getMainChatTaskMetaFromLabels(live.labels);
+      if (parentId && taskMeta?.planId) return true;
+    }
+    return false;
+  }
+
+  const serviceInstance: MainChatService = {
     async start() {
       serviceStarted = true;
       await store.load();
@@ -5788,11 +5839,13 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       await conversationManager.load();
       await maybeMigrateLegacyDefaultOptIn();
       syncRuntimeEnabledState();
+      await feishuBridge.syncInitialActiveState();
     },
 
     stop() {
       serviceStarted = false;
       stopActiveRuntime();
+      feishuBridge.stop();
     },
 
     async ensureMainChat(input) {
@@ -6288,6 +6341,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
 
       contextSnapshots.invalidateCache();
+      feishuBridgeRef?.dispatchMainChatEvent({
+        kind: "decision_created",
+        decisionId: decision.id,
+        title: decision.title,
+        question: decision.question,
+        options: decision.options,
+        recommendedOptionId: decision.recommendedOptionId ?? null,
+        reason: decision.reason ?? null,
+        agentId: decision.agentId ?? null,
+        taskId: decision.taskId ?? null,
+        planId: decision.planId ?? null,
+      });
       return decision;
     },
 
@@ -6355,6 +6420,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         summary: `用户已回复拍板「${updated.title}」：${(updated.answer ?? input.answer).slice(0, 120)}`,
         fingerprintSeed: `decision_reply:${updated.id}`,
         quiet: false,
+      });
+
+      feishuBridgeRef?.dispatchMainChatEvent({
+        kind: "decision_answered",
+        decisionId: updated.id,
+        optionId: updated.answeredOptionId ?? null,
+        answer: updated.answer ?? answer,
+        source: "paseo",
       });
 
       return updated;
@@ -7598,5 +7671,73 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         templates: merged.templates,
       };
     },
+
+    async getFeishuBridgeState(options) {
+      return feishuBridge.getState(options);
+    },
+
+    async updateFeishuBridgeConfig(patch) {
+      return feishuBridge.updateConfig(patch);
+    },
+
+    async testFeishuBridgeConnection(options) {
+      return feishuBridge.testConnection(options);
+    },
+
+    async sendFeishuBridgeTestCard(options) {
+      return feishuBridge.sendTestCard(options);
+    },
+
+    async listFeishuBridgeAudit(options) {
+      return feishuBridge.listAudit(options);
+    },
+
+    async handleFeishuWebhook(request) {
+      return feishuBridge.handleWebhookRequest(request);
+    },
   };
+
+  const feishuBridge = createFeishuBridgeSeam({
+    pluginInvoker: deps.feishuPluginInvoker,
+    resolveWebhookUrl: deps.resolveFeishuWebhookUrl,
+    getSettings: () => store.getSettings(),
+    isManagedAgent: isManagedByMainChatOrTask,
+    hasPendingPermission: async ({ agentId, serverId, permissionRequestId }) => {
+      const localLive = deps.agentManager.getAgent(agentId);
+      if (localLive?.pendingPermissions.has(permissionRequestId)) {
+        return true;
+      }
+      if (serverId && serverId !== deps.serverId) {
+        const snapshot = await fleetAggregator.collectFleet().catch(() => null);
+        const remoteAgent = snapshot?.agents.find(
+          (entry) => entry.serverId === serverId && entry.agentId === agentId,
+        );
+        return Boolean(
+          remoteAgent?.pendingPermissions.some((perm) => perm.requestId === permissionRequestId),
+        );
+      }
+      return false;
+    },
+    respondToPermission: async ({ agentId, serverId, permissionRequestId, response }) => {
+      if (serverId && serverId !== deps.serverId) {
+        await fleetBridge.respondPermissionOnTargetHost(
+          serverId,
+          agentId,
+          permissionRequestId,
+          response,
+        );
+        return;
+      }
+      await deps.agentManager.respondToPermission(agentId, permissionRequestId, response);
+    },
+    getDecision: async (decisionId) => {
+      await store.load();
+      return store.getDecision(decisionId) ?? null;
+    },
+    answerDecision: (input) => serviceInstance.answerDecision(input),
+    logger,
+  });
+  feishuBridgeRef = feishuBridge;
+
+  return serviceInstance;
 }

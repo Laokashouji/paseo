@@ -35,6 +35,7 @@ import type {
   FleetBridgePermissionRequestedEvent,
   FleetBridgePermissionResolvedEvent,
 } from "./fleet-bridge.js";
+import type { MainChatBridgeEvent } from "./feishu-bridge-seam.js";
 import { hasHandoffBlockLabel } from "./limit-fallback.js";
 import { evaluateMainChatNightMode, type MainChatNightModeEvaluation } from "./night-mode.js";
 import {
@@ -131,6 +132,7 @@ export interface MainChatSupervisorDependencies {
   onAgentEvent?: (event: AgentManagerEvent) => void;
   onTryLimitFallback?: (agent: ManagedAgent, errorMessage: string) => Promise<boolean>;
   onAgentTurnCompleted?: (agent: ManagedAgent) => void;
+  onBridgeEvent?: (event: MainChatBridgeEvent) => void;
   isHostAllowed?: (serverId: string) => boolean;
   getRemoteAgent?: (serverId: string, agentId: string) => AggregatedHostAgent | null;
   listRemoteAgents?: () => AggregatedHostAgent[];
@@ -1139,6 +1141,19 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
         readAt: null,
       };
       void deps.store.recordNotificationReceipt(suppressedReceipt).catch(() => undefined);
+      deps.onBridgeEvent?.({
+        kind: "notification_recorded",
+        receiptId: suppressedReceipt.id,
+        category: suppressedReceipt.category,
+        tier: suppressedReceipt.tier,
+        status: suppressedReceipt.status,
+        title: suppressedReceipt.title,
+        summary: suppressedReceipt.summary,
+        reason: suppressedReceipt.reason,
+        passthrough: false,
+        taskId: suppressedReceipt.taskId ?? null,
+        agentId: suppressedReceipt.agentId ?? null,
+      });
     }
     if (dispatch.status === "suppressed_quiet") {
       void deps.store.incrementSuppressedQuietBadgeCount().catch(() => undefined);
@@ -1177,6 +1192,19 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       readAt: null,
     };
     void deps.store.recordNotificationReceipt(queuedReceipt).catch(() => undefined);
+    deps.onBridgeEvent?.({
+      kind: "notification_recorded",
+      receiptId: queuedReceipt.id,
+      category: queuedReceipt.category,
+      tier: queuedReceipt.tier,
+      status: queuedReceipt.status,
+      title: queuedReceipt.title,
+      summary: queuedReceipt.summary,
+      reason: queuedReceipt.reason,
+      passthrough: Boolean(queuedReceipt.passthrough),
+      taskId: queuedReceipt.taskId ?? null,
+      agentId: queuedReceipt.agentId ?? null,
+    });
   }
 
   function enqueueStructuredSignal(
@@ -1715,6 +1743,36 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     return conversationId ? "leader" : "main";
   }
 
+  function emitPendingPermissionToBridge(input: {
+    agentId: string;
+    serverId: string | null;
+    request: AgentPermissionRequest;
+    title: string;
+    toolName: string;
+    waitLabel: string;
+    rawCommand: string | null;
+    managed: boolean;
+    redLine: { blocked: boolean; reason?: string | null };
+    taskId: string | null;
+    conversationId: string | null;
+  }): void {
+    deps.onBridgeEvent?.({
+      kind: "permission_requested",
+      agentId: input.agentId,
+      serverId: input.serverId,
+      requestId: input.request.id,
+      title: input.title,
+      toolName: input.toolName || input.waitLabel,
+      command: input.rawCommand,
+      description: input.request.description ?? null,
+      managed: input.managed,
+      isRedLine: input.redLine.blocked,
+      redLineReason: input.redLine.reason ?? null,
+      taskId: input.taskId,
+      conversationId: input.conversationId,
+    });
+  }
+
   function trackAndSignalPendingPermission(input: {
     agent: ManagedAgent;
     request: AgentPermissionRequest;
@@ -1747,6 +1805,20 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       label: waitLabel,
       initialTier,
       nowMs,
+    });
+
+    emitPendingPermissionToBridge({
+      agentId: agent.id,
+      serverId,
+      request,
+      title,
+      toolName,
+      waitLabel,
+      rawCommand,
+      managed,
+      redLine,
+      taskId,
+      conversationId: route.conversationId,
     });
 
     void deps.store
@@ -1864,6 +1936,13 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     if (!wasAutoApproved && behavior === "allow" && pendingMeta) {
       observeManualPermissionApproval(pendingMeta);
     }
+    deps.onBridgeEvent?.({
+      kind: "permission_resolved",
+      agentId,
+      requestId,
+      behavior,
+      source: "paseo",
+    });
   }
 
   function finalizeTurnFailed(agent: ManagedAgent, errorMessage: string): void {

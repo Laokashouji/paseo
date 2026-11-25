@@ -1,4 +1,8 @@
-import type { MainChatNotificationSummary } from "@getpaseo/protocol/main-chat";
+import {
+  createEmptyFeishuBridgeStats,
+  createUnavailableFeishuBridgeState,
+  type MainChatNotificationSummary,
+} from "@getpaseo/protocol/main-chat";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../messages.js";
 import type { MainChatService } from "./service.js";
 
@@ -75,6 +79,11 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.list_prompt_library.request" }
   | { type: "main_chat.save_prompt_template.request" }
   | { type: "main_chat.delete_prompt_template.request" }
+  | { type: "main_chat.feishu_bridge_get_state.request" }
+  | { type: "main_chat.feishu_bridge_update_config.request" }
+  | { type: "main_chat.feishu_bridge_test_connection.request" }
+  | { type: "main_chat.feishu_bridge_send_test_card.request" }
+  | { type: "main_chat.feishu_bridge_list_audit.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -139,6 +148,11 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.list_prompt_library.request",
   "main_chat.save_prompt_template.request",
   "main_chat.delete_prompt_template.request",
+  "main_chat.feishu_bridge_get_state.request",
+  "main_chat.feishu_bridge_update_config.request",
+  "main_chat.feishu_bridge_test_connection.request",
+  "main_chat.feishu_bridge_send_test_card.request",
+  "main_chat.feishu_bridge_list_audit.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -488,6 +502,67 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
       requestId: msg.requestId,
       deleted: false,
       templates: [],
+      error,
+    },
+  }),
+  "main_chat.feishu_bridge_get_state.request": (msg, error) => ({
+    type: "main_chat.feishu_bridge_get_state.response",
+    payload: {
+      requestId: msg.requestId,
+      state: createUnavailableFeishuBridgeState(null),
+      error,
+    },
+  }),
+  "main_chat.feishu_bridge_update_config.request": (msg, error) => ({
+    type: "main_chat.feishu_bridge_update_config.response",
+    payload: {
+      requestId: msg.requestId,
+      state: null,
+      error,
+    },
+  }),
+  "main_chat.feishu_bridge_test_connection.request": (msg, error) => ({
+    type: "main_chat.feishu_bridge_test_connection.response",
+    payload: {
+      requestId: msg.requestId,
+      result: {
+        ok: false,
+        latencyMs: 0,
+        apiBaseUrl: "",
+        statusCode: null,
+        tokenExpiresInSec: null,
+        errorCode: "service_unconfigured",
+        message: error,
+        troubleshootingHint: null,
+        testedAt: new Date().toISOString(),
+      },
+      error,
+    },
+  }),
+  "main_chat.feishu_bridge_send_test_card.request": (msg, error) => ({
+    type: "main_chat.feishu_bridge_send_test_card.response",
+    payload: {
+      requestId: msg.requestId,
+      result: {
+        ok: false,
+        latencyMs: 0,
+        messageId: null,
+        receiveId: "",
+        receiveIdType: "chat_id",
+        errorCode: "service_unconfigured",
+        message: error,
+        troubleshootingHint: null,
+        sentAt: new Date().toISOString(),
+      },
+      error,
+    },
+  }),
+  "main_chat.feishu_bridge_list_audit.request": (msg, error) => ({
+    type: "main_chat.feishu_bridge_list_audit.response",
+    payload: {
+      requestId: msg.requestId,
+      records: [],
+      stats: createEmptyFeishuBridgeStats(),
       error,
     },
   }),
@@ -2237,6 +2312,174 @@ async function handleDeletePromptTemplate(
   }
 }
 
+async function handleFeishuBridgeGetState(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.feishu_bridge_get_state.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const state = await service.getFeishuBridgeState({ auditLimit: msg.auditLimit });
+    send({
+      type: "main_chat.feishu_bridge_get_state.response",
+      payload: {
+        requestId: msg.requestId,
+        state,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.feishu_bridge_get_state.response",
+      payload: {
+        requestId: msg.requestId,
+        state: createUnavailableFeishuBridgeState(null),
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleFeishuBridgeUpdateConfig(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.feishu_bridge_update_config.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const state = await service.updateFeishuBridgeConfig(msg.patch);
+    send({
+      type: "main_chat.feishu_bridge_update_config.response",
+      payload: {
+        requestId: msg.requestId,
+        state,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.feishu_bridge_update_config.response",
+      payload: {
+        requestId: msg.requestId,
+        state: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleFeishuBridgeTestConnection(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.feishu_bridge_test_connection.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.testFeishuBridgeConnection({
+      forceRefreshToken: msg.forceRefreshToken,
+    });
+    send({
+      type: "main_chat.feishu_bridge_test_connection.response",
+      payload: {
+        requestId: msg.requestId,
+        result,
+        error: null,
+      },
+    });
+  } catch (error) {
+    const errText = errorMessage(error);
+    send({
+      type: "main_chat.feishu_bridge_test_connection.response",
+      payload: {
+        requestId: msg.requestId,
+        result: {
+          ok: false,
+          latencyMs: 0,
+          apiBaseUrl: "",
+          statusCode: null,
+          tokenExpiresInSec: null,
+          errorCode: "test_connection_failed",
+          message: errText,
+          troubleshootingHint: null,
+          testedAt: new Date().toISOString(),
+        },
+        error: errText,
+      },
+    });
+  }
+}
+
+async function handleFeishuBridgeSendTestCard(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.feishu_bridge_send_test_card.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.sendFeishuBridgeTestCard({
+      receiveId: msg.receiveId,
+      receiveIdType: msg.receiveIdType,
+      title: msg.title,
+    });
+    send({
+      type: "main_chat.feishu_bridge_send_test_card.response",
+      payload: {
+        requestId: msg.requestId,
+        result,
+        error: null,
+      },
+    });
+  } catch (error) {
+    const errText = errorMessage(error);
+    send({
+      type: "main_chat.feishu_bridge_send_test_card.response",
+      payload: {
+        requestId: msg.requestId,
+        result: {
+          ok: false,
+          latencyMs: 0,
+          messageId: null,
+          receiveId: msg.receiveId ?? "",
+          receiveIdType: msg.receiveIdType ?? "chat_id",
+          errorCode: "send_test_card_failed",
+          message: errText,
+          troubleshootingHint: null,
+          sentAt: new Date().toISOString(),
+        },
+        error: errText,
+      },
+    });
+  }
+}
+
+async function handleFeishuBridgeListAudit(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.feishu_bridge_list_audit.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.listFeishuBridgeAudit({
+      limit: msg.limit,
+      direction: msg.direction,
+    });
+    send({
+      type: "main_chat.feishu_bridge_list_audit.response",
+      payload: {
+        requestId: msg.requestId,
+        records: result.records,
+        stats: result.stats,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.feishu_bridge_list_audit.response",
+      payload: {
+        requestId: msg.requestId,
+        records: [],
+        stats: createEmptyFeishuBridgeStats(),
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -2297,6 +2540,11 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.list_prompt_library.request": handleListPromptLibrary,
   "main_chat.save_prompt_template.request": handleSavePromptTemplate,
   "main_chat.delete_prompt_template.request": handleDeletePromptTemplate,
+  "main_chat.feishu_bridge_get_state.request": handleFeishuBridgeGetState,
+  "main_chat.feishu_bridge_update_config.request": handleFeishuBridgeUpdateConfig,
+  "main_chat.feishu_bridge_test_connection.request": handleFeishuBridgeTestConnection,
+  "main_chat.feishu_bridge_send_test_card.request": handleFeishuBridgeSendTestCard,
+  "main_chat.feishu_bridge_list_audit.request": handleFeishuBridgeListAudit,
 };
 
 export async function handleMainChatSessionMessage(

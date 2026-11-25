@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES,
+  FEISHU_BRIDGE_API_BASE_URLS,
+  FEISHU_BRIDGE_PLUGIN_ID,
+  FEISHU_BRIDGE_WEBHOOK_PATH,
+  FeishuBridgeRedactedConfigSchema,
+  createDefaultFeishuBridgeRedactedConfig,
+  createEmptyFeishuBridgeStats,
+  createUnavailableFeishuBridgeState,
+  resolveFeishuBridgeApiBaseUrl,
   MAIN_CHAT_COMPACT_WINDOW_RATIO,
   MAIN_CHAT_FORMER_ROLE_VALUE,
   MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS,
@@ -1013,6 +1021,186 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
             requestId: "req_pl_3",
             deleted: true,
             templates: [...BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES],
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("validates Wave 6 (P2-1) Feishu bot bridge redacted schemas, helpers, and AOT RPC messages", () => {
+    expect(FEISHU_BRIDGE_PLUGIN_ID).toBe("feishu-bot-bridge");
+    expect(FEISHU_BRIDGE_WEBHOOK_PATH).toBe("/api/plugins/feishu-bot-bridge/webhook");
+    expect(resolveFeishuBridgeApiBaseUrl("feishu")).toBe(FEISHU_BRIDGE_API_BASE_URLS.feishu);
+    expect(resolveFeishuBridgeApiBaseUrl("lark")).toBe(FEISHU_BRIDGE_API_BASE_URLS.lark);
+    expect(resolveFeishuBridgeApiBaseUrl("custom", "http://127.0.0.1:9999///")).toBe(
+      "http://127.0.0.1:9999",
+    );
+
+    const redactedDefaults = createDefaultFeishuBridgeRedactedConfig();
+    expect(redactedDefaults.enabled).toBe(false);
+    expect(redactedDefaults.hasAppSecret).toBe(false);
+    expect(redactedDefaults.appSecretMask).toBeNull();
+    // Redacted config schema must NEVER declare plaintext secret keys
+    const configKeys = Object.keys(FeishuBridgeRedactedConfigSchema.shape);
+    expect(configKeys).not.toContain("appSecret");
+    expect(configKeys).not.toContain("verificationToken");
+    expect(configKeys).not.toContain("encryptKey");
+
+    // Inbound validation for all 5 Wave 6 RPCs
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.feishu_bridge_get_state.request",
+        requestId: "req_fb_1",
+        auditLimit: 20,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.feishu_bridge_update_config.request",
+        requestId: "req_fb_2",
+        patch: {
+          enabled: true,
+          domainPreset: "custom",
+          apiBaseUrl: "http://127.0.0.1:43210",
+          appId: "cli_mock_app",
+          receiveIdType: "chat_id",
+          receiveId: "oc_mock_chat",
+          allowedOpenIds: ["ou_owner_01"],
+          forwardTiers: ["critical", "actionable"],
+          respectLowDistraction: true,
+          replayWindowSeconds: 300,
+          requireSignature: true,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.feishu_bridge_test_connection.request",
+        requestId: "req_fb_3",
+        forceRefreshToken: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.feishu_bridge_send_test_card.request",
+        requestId: "req_fb_4",
+        receiveId: "oc_mock_chat",
+        receiveIdType: "chat_id",
+        title: "连通测试",
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.feishu_bridge_list_audit.request",
+        requestId: "req_fb_5",
+        limit: 15,
+        direction: "outbound",
+      }).success,
+    ).toBe(true);
+
+    // Outbound AOT validation for all 5 Wave 6 RPC responses
+    const sampleState = createUnavailableFeishuBridgeState(
+      "http://127.0.0.1:6768/api/plugins/feishu-bot-bridge/webhook",
+    );
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.feishu_bridge_get_state.response",
+          payload: {
+            requestId: "req_fb_1",
+            state: sampleState,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.feishu_bridge_update_config.response",
+          payload: {
+            requestId: "req_fb_2",
+            state: sampleState,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.feishu_bridge_test_connection.response",
+          payload: {
+            requestId: "req_fb_3",
+            result: {
+              ok: true,
+              latencyMs: 12,
+              apiBaseUrl: "http://127.0.0.1:43210",
+              statusCode: 200,
+              tokenExpiresInSec: 7200,
+              cachedTokenReused: false,
+              errorCode: null,
+              message: "连接成功",
+              troubleshootingHint: null,
+              testedAt: "2026-11-25T09:00:00.000Z",
+            },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.feishu_bridge_send_test_card.response",
+          payload: {
+            requestId: "req_fb_4",
+            result: {
+              ok: true,
+              latencyMs: 18,
+              messageId: "om_mock_001",
+              receiveId: "oc_mock_chat",
+              receiveIdType: "chat_id",
+              errorCode: null,
+              message: "测试卡片已送达",
+              troubleshootingHint: null,
+              sentAt: "2026-11-25T09:00:01.000Z",
+            },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.feishu_bridge_list_audit.response",
+          payload: {
+            requestId: "req_fb_5",
+            records: [
+              {
+                id: "faud_1",
+                direction: "outbound",
+                kind: "outbound_permission_card",
+                status: "succeeded",
+                title: "推送权限审批卡",
+                summary: "工具 Bash",
+                errorCode: null,
+                latencyMs: 14,
+                messageId: "om_mock_002",
+                actorOpenId: null,
+                eventOrActionId: "perm_1",
+                tier: "critical",
+                createdAt: "2026-11-25T09:00:02.000Z",
+              },
+            ],
+            stats: createEmptyFeishuBridgeStats(),
             error: null,
           },
         },

@@ -1,0 +1,6 @@
+{
+  "id": "feishu-bot-bridge",
+  "requirements": {
+    "paseo": ">=0.17.0-beta.1"
+  }
+}
