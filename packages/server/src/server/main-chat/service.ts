@@ -32,10 +32,13 @@ import {
   resolveMainChatCompactionConfig,
   resolveMainChatDeliveryGatePolicy,
   resolveMainChatFleetScope,
+  resolveMainChatIdleArchivePolicy,
   resolveMainChatModelConfig,
   resolveMainChatProfile,
+  resolveMainChatResourceAdmissionPolicy,
   type MainChatActivityEntry,
   type MainChatActivityKind,
+  type MainChatAdmissionQueueEntry,
   type MainChatApprovalClarification,
   type MainChatCacheKeepaliveStatus,
   type MainChatCompactionReason,
@@ -45,8 +48,11 @@ import {
   type MainChatConversationRecord,
   type MainChatDecisionOption,
   type MainChatDecisionRecord,
+  type MainChatDrainAdmissionAction,
   type MainChatFleetHostStatus,
   type MainChatFleetScope,
+  type MainChatHostResourceSnapshot,
+  type MainChatIdleArchiveSweepResult,
   type MainChatLimitFallbackEvent,
   type MainChatMemoryFileContent,
   type MainChatMemoryFileMeta,
@@ -65,7 +71,11 @@ import {
   type MainChatPlannedTask,
   type MainChatProjectLesson,
   type MainChatProjectLessonGroup,
+  type MainChatPromptTemplate,
+  type MainChatPromptTemplateInput,
   type MainChatReceiptCheck,
+  type MainChatResourceAdmissionPolicy,
+  type MainChatResourceAdmissionSnapshot,
   type MainChatReworkRecord,
   type MainChatRoutineRecord,
   type MainChatRuleKind,
@@ -174,6 +184,28 @@ import {
   type BuildClarificationAnswerInput,
 } from "./safety.js";
 import { createMainChatStore, type MainChatMetrics, type MainChatStore } from "./store.js";
+import { type IdleArchiveAgentCandidate, runIdleSubagentArchiveSweep } from "./idle-archive.js";
+import {
+  listMergedPromptTemplates,
+  removeCustomPromptTemplate,
+  upsertCustomPromptTemplate,
+} from "./prompt-library.js";
+import {
+  MainChatAdmissionRejectedError,
+  buildHostResourceSnapshot,
+  buildResourceAdmissionSnapshot,
+  createAdmissionQueueId,
+  createTaskQueuedAdmissionState,
+  createTaskRejectedAdmissionState,
+  evaluateHostResourceAdmission,
+  sampleLocalHostOsResources,
+  type HostResourceSampler,
+} from "./resource-admission.js";
+import type { StatelessSupervisionRunner } from "./stateless-supervision.js";
+import {
+  createMainChatToolLoaderRegistry,
+  type MainChatToolLoaderRegistry,
+} from "./tool-loading.js";
 import { createMainChatSupervisor } from "./supervisor.js";
 import {
   DeliveryGateBlockedError,
@@ -331,6 +363,8 @@ export interface MainChatServiceDependencies {
   emitWorkspaceUpdates?: (workspaceIds: Iterable<string>) => Promise<void>;
   readDaemonConfig?: () => StructuredGenerationDaemonConfig | null;
   semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
+  statelessSupervisionRunner?: StatelessSupervisionRunner;
+  hostResourceSampler?: HostResourceSampler;
   ensureWorkspaceForCreate?: EnsureWorkspaceForCreate;
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   finishSubscriptions?: () => FinishSubscriptions;
@@ -703,6 +737,41 @@ export interface MainChatService {
     receipts: MainChatNotificationReceipt[];
     summary: MainChatNotificationSummary;
   }>;
+  // Wave 5: Resource Admission, On-Demand Tool Loading, Idle Subagent Archive & Prompt Library
+  getToolLoaderRegistry(): MainChatToolLoaderRegistry;
+  getResourceAdmission(options?: {
+    forceRefresh?: boolean;
+  }): Promise<MainChatResourceAdmissionSnapshot>;
+  drainAdmissionQueue(input?: {
+    action?: MainChatDrainAdmissionAction;
+    queueId?: string;
+    serverId?: string;
+  }): Promise<{
+    action: MainChatDrainAdmissionAction;
+    dispatchedCount: number;
+    removedCount: number;
+    remainingCount: number;
+    snapshot: MainChatResourceAdmissionSnapshot;
+  }>;
+  sweepIdleSubagents(input?: {
+    dryRun?: boolean;
+    idleThresholdMinutes?: number;
+    limit?: number;
+    trigger?: "scheduled" | "manual";
+  }): Promise<MainChatIdleArchiveSweepResult>;
+  listPromptLibrary(): Promise<{
+    templates: MainChatPromptTemplate[];
+    builtinCount: number;
+    customCount: number;
+  }>;
+  savePromptTemplate(template: MainChatPromptTemplateInput): Promise<{
+    template: MainChatPromptTemplate;
+    templates: MainChatPromptTemplate[];
+  }>;
+  deletePromptTemplate(input: { id?: string; slug?: string }): Promise<{
+    deleted: boolean;
+    templates: MainChatPromptTemplate[];
+  }>;
 }
 
 async function isExistingDirectory(dirPath: string): Promise<boolean> {
@@ -1057,6 +1126,10 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
 
   const clarificationProofs = createClarificationProofStore();
   const lessonsStore = new MainChatProjectLessonsStore(deps.paseoHome, { now: getNowMs });
+  const toolLoaderRegistry = createMainChatToolLoaderRegistry();
+  const inFlightAdmissionByHost = new Map<string, number>();
+  let admissionDrainPromise: Promise<void> | null = null;
+  let admissionDrainPending = false;
   const deliveryNotifiedKeys = new Set<string>();
   let unsubscribeGitSnapshots: WorkspaceGitSubscription | null = null;
 
@@ -1097,6 +1170,8 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     onPatrolTick: async () => {
       await checkIdlePrecompactionInternal();
       await cacheKeepalive.tick();
+      await maybeRunScheduledIdleArchiveSweep();
+      await drainAdmissionQueueInternal({ action: "drain" });
     },
     onTryLimitFallback: async (agent, errorMessage) => {
       const outcome = await limitFallbackController.handleTurnLimitError(agent, errorMessage);
@@ -1105,6 +1180,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     onAgentTurnCompleted: (agent) => {
       limitFallbackController.handleTurnCompleted(agent);
       cacheKeepalive.notifyTurnCompleted(agent.id);
+      scheduleAdmissionQueueDrain();
     },
     isHostAllowed: isHostAllowedForSteward,
     getRemoteAgent: (serverId, agentId) => fleetBridge.getCachedRemoteAgent(serverId, agentId),
@@ -1115,6 +1191,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       if (event.type === "agent_removed") {
         lastCumulativeCostByAgent.delete(event.agentId);
         cacheKeepalive.clearAgent(event.agentId);
+        toolLoaderRegistry.clearSession(event.agentId);
+        scheduleAdmissionQueueDrain();
+        return;
+      }
+      if (event.type === "agent_state") {
+        if (
+          event.agent.lifecycle === "idle" ||
+          event.agent.lifecycle === "closed" ||
+          event.agent.lifecycle === "error"
+        ) {
+          scheduleAdmissionQueueDrain();
+        }
         return;
       }
       if (event.type !== "agent_stream" || event.event.type !== "turn_completed") return;
@@ -1137,6 +1225,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       });
     },
     semanticTriageRunner: deps.semanticTriageRunner,
+    statelessSupervisionRunner: deps.statelessSupervisionRunner,
     transientRetryDelayMs: deps.transientRetryDelayMs,
     maxTransientAutoRetries: deps.maxTransientAutoRetries,
     usageLimitRetryDelayMs: deps.usageLimitRetryDelayMs,
@@ -1991,7 +2080,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
             ? input.thinkingOptionId
             : (updatedRecord.lastThinkingOptionId ?? null),
         lastRuleDiagnostic: null,
+        admissionState: null,
       });
+      await store.removeAdmissionEntriesByTaskId(updatedRecord.id);
       return;
     }
 
@@ -2710,6 +2801,788 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
     }
   }
 
+  function isActiveManagedAgentEntry(
+    labels: Record<string, string>,
+    agentId: string,
+    lifecycle: string,
+    managedTaskAgentIds: ReadonlySet<string>,
+  ): boolean {
+    if (isMainChatLabels(labels) || isMainChatConversationLabels(labels)) {
+      return false;
+    }
+    if (lifecycle !== "running" && lifecycle !== "initializing") {
+      return false;
+    }
+    return Boolean(getMainChatTaskMetaFromLabels(labels)) || managedTaskAgentIds.has(agentId);
+  }
+
+  function countActiveManagedConcurrencyForHost(serverId: string): number {
+    const activeAgentIds = new Set<string>();
+    const tasks = store.listTasks({ includeCompleted: false });
+    const managedTaskAgentIds = new Set<string>();
+    for (const task of tasks) {
+      if ((task.serverId ?? deps.serverId) === serverId && task.activeAgentId) {
+        managedTaskAgentIds.add(task.activeAgentId);
+      }
+    }
+
+    if (serverId === deps.serverId) {
+      for (const agent of deps.agentManager.listAgents()) {
+        if (agent.background || agent.internal) continue;
+        if (
+          isActiveManagedAgentEntry(agent.labels, agent.id, agent.lifecycle, managedTaskAgentIds)
+        ) {
+          activeAgentIds.add(agent.id);
+        }
+      }
+      return activeAgentIds.size;
+    }
+
+    for (const remote of fleetBridge.listCachedRemoteAgents()) {
+      if (remote.serverId !== serverId) continue;
+      if (
+        isActiveManagedAgentEntry(
+          remote.labels,
+          remote.agentId,
+          remote.lifecycle,
+          managedTaskAgentIds,
+        )
+      ) {
+        activeAgentIds.add(remote.agentId);
+      }
+    }
+    // Include remote running tasks whose agent snapshot has not synced back yet
+    for (const task of tasks) {
+      const matchesRemote =
+        (task.serverId ?? deps.serverId) === serverId &&
+        task.status === "running" &&
+        Boolean(task.activeAgentId);
+      if (matchesRemote && !fleetBridge.getCachedRemoteAgent(serverId, task.activeAgentId!)) {
+        activeAgentIds.add(task.activeAgentId!);
+      }
+    }
+    return activeAgentIds.size;
+  }
+
+  async function collectHostResourceSnapshotsInternal(options?: {
+    forceRefresh?: boolean;
+  }): Promise<MainChatHostResourceSnapshot[]> {
+    const policy = resolveMainChatResourceAdmissionPolicy(store.getSettings());
+    const sampledAt = new Date(getNowMs()).toISOString();
+    const fleetHostsRes = await fleetBridge
+      .getFleetHosts({ forceRefresh: options?.forceRefresh })
+      .catch(() => ({
+        localServerId: deps.serverId,
+        hosts: [] as MainChatFleetHostStatus[],
+      }));
+
+    const hostsById = new Map<string, MainChatFleetHostStatus>();
+    for (const host of fleetHostsRes.hosts) {
+      hostsById.set(host.serverId, host);
+    }
+    if (!hostsById.has(deps.serverId)) {
+      hostsById.set(deps.serverId, {
+        serverId: deps.serverId,
+        label: deps.hostLabel?.trim() || "本机",
+        isLocal: true,
+        status: "online",
+        agentCount: 0,
+        needsAttentionCount: 0,
+        lastSyncedAt: sampledAt,
+        error: null,
+      });
+    }
+
+    const snapshots: MainChatHostResourceSnapshot[] = [];
+    for (const host of hostsById.values()) {
+      const isLocal = host.isLocal || host.serverId === deps.serverId;
+      let sample = null;
+      if (deps.hostResourceSampler) {
+        sample = await deps.hostResourceSampler({ serverId: host.serverId, isLocal });
+      } else if (isLocal) {
+        sample = sampleLocalHostOsResources();
+      }
+      const activeManagedAgents = countActiveManagedConcurrencyForHost(host.serverId);
+      snapshots.push(
+        buildHostResourceSnapshot({
+          serverId: host.serverId,
+          hostLabel: host.label || host.serverId,
+          isLocal,
+          connectivityStatus: isLocal ? "online" : host.status,
+          activeManagedAgents,
+          sample,
+          policy,
+          sampledAt,
+        }),
+      );
+    }
+
+    snapshots.sort((a, b) => {
+      if (a.isLocal !== b.isLocal) return a.isLocal ? -1 : 1;
+      return a.hostLabel.localeCompare(b.hostLabel);
+    });
+    return snapshots;
+  }
+
+  async function syncQueuePositionsToTaskRecords(
+    queue: readonly MainChatAdmissionQueueEntry[],
+  ): Promise<void> {
+    const byTaskId = new Map<string, MainChatAdmissionQueueEntry>();
+    for (const entry of queue) {
+      byTaskId.set(entry.taskId, entry);
+    }
+    for (const entry of queue) {
+      const task = store.getTask(entry.taskId);
+      if (!task) continue;
+      if (
+        task.admissionState?.status === "queued" &&
+        task.admissionState.queueId === entry.id &&
+        task.admissionState.position === entry.position &&
+        task.admissionState.reason === entry.reason
+      ) {
+        continue;
+      }
+      await store.putTask({
+        ...task,
+        admissionState: createTaskQueuedAdmissionState(entry),
+      });
+    }
+    for (const task of store.listTasks({ includeCompleted: false })) {
+      if (task.admissionState?.status === "queued" && !byTaskId.has(task.id)) {
+        await store.putTask({
+          ...task,
+          admissionState: null,
+        });
+      }
+    }
+  }
+
+  async function collectResourceAdmissionSnapshotInternal(options?: {
+    forceRefresh?: boolean;
+  }): Promise<MainChatResourceAdmissionSnapshot> {
+    await store.load();
+    const policy = resolveMainChatResourceAdmissionPolicy(store.getSettings());
+    const hosts = await collectHostResourceSnapshotsInternal(options);
+    const queue = store.listAdmissionQueue();
+    return buildResourceAdmissionSnapshot({
+      policy,
+      hosts,
+      queue,
+      updatedAt: new Date(getNowMs()).toISOString(),
+    });
+  }
+
+  async function clearTaskQueuedAdmissionState(taskId: string): Promise<void> {
+    const task = store.getTask(taskId);
+    if (task && task.admissionState?.status === "queued") {
+      await store.putTask({ ...task, admissionState: null });
+    }
+  }
+
+  function isQueuedTaskStillDispatchable(
+    taskRecord: MainChatTaskRecord | null | undefined,
+  ): taskRecord is MainChatTaskRecord {
+    return Boolean(
+      taskRecord &&
+      taskRecord.activeAgentId === null &&
+      taskRecord.status !== "completed" &&
+      taskRecord.status !== "cancelled" &&
+      taskRecord.status !== "parked",
+    );
+  }
+
+  function resolveFallbackHostSnapshot(
+    serverId: string,
+    hostLabel: string,
+    policy: MainChatResourceAdmissionPolicy,
+    nowIso: string,
+  ): MainChatHostResourceSnapshot {
+    const isLocal = serverId === deps.serverId;
+    return buildHostResourceSnapshot({
+      serverId,
+      hostLabel,
+      isLocal,
+      connectivityStatus: isLocal ? "online" : "offline",
+      activeManagedAgents: countActiveManagedConcurrencyForHost(serverId),
+      sample: null,
+      policy,
+      sampledAt: nowIso,
+    });
+  }
+
+  async function dispatchQueuedAdmissionEntry(input: {
+    entry: MainChatAdmissionQueueEntry;
+    taskRecord: MainChatTaskRecord;
+    action: MainChatDrainAdmissionAction;
+    nowIso: string;
+  }): Promise<boolean> {
+    const { entry, taskRecord, action, nowIso } = input;
+    const linkedPlan = entry.planId ? store.getPlan(entry.planId) : null;
+    const matchedPlannedTask = linkedPlan?.tasks.find(
+      (item) =>
+        (entry.plannedTaskId && item.id === entry.plannedTaskId) ||
+        item.taskRecordId === taskRecord.id ||
+        item.id === taskRecord.id,
+    );
+    const mainAgent = await resolveMainAgentSnapshot(taskRecord.mainAgentId);
+    const spawned = await spawnSinglePlannedTask({
+      plan: linkedPlan ?? buildSyntheticPlanForReadyTask(taskRecord, nowIso),
+      task: matchedPlannedTask ?? buildSyntheticPlannedTaskForReadyTask(taskRecord),
+      mainAgent,
+      nowIso,
+      skipAdmissionCheck: true,
+    });
+
+    if (linkedPlan && matchedPlannedTask) {
+      await store.putPlan({
+        ...linkedPlan,
+        status: "started",
+        startedAt: linkedPlan.startedAt ?? nowIso,
+        tasks: linkedPlan.tasks.map((item) => (item.id === matchedPlannedTask.id ? spawned : item)),
+      });
+    }
+
+    if (!spawned.agentId) {
+      return false;
+    }
+
+    await store.incrementMetric("admissionDequeued");
+    await store.appendActivity({
+      id: makeId("act"),
+      mainAgentId: taskRecord.mainAgentId,
+      kind: "background_turn",
+      trigger: "resource_admission",
+      summary:
+        action === "force_dispatch"
+          ? `资源排队手动放行：「${taskRecord.title}」已在「${entry.hostLabel}」启动`
+          : `资源恢复自动出队：「${taskRecord.title}」已在「${entry.hostLabel}」启动`,
+      silent: true,
+      status: "completed",
+      createdAt: nowIso,
+      completedAt: nowIso,
+      relatedAgentId: spawned.agentId,
+      detail: entry.reason,
+    });
+    return true;
+  }
+
+  async function finalizeAdmissionDrainResponse(input: {
+    action: MainChatDrainAdmissionAction;
+    dispatchedCount: number;
+    removedCount: number;
+    remainingQueue: readonly MainChatAdmissionQueueEntry[];
+  }): Promise<{
+    action: MainChatDrainAdmissionAction;
+    dispatchedCount: number;
+    removedCount: number;
+    remainingCount: number;
+    snapshot: MainChatResourceAdmissionSnapshot;
+  }> {
+    await syncQueuePositionsToTaskRecords(input.remainingQueue);
+    const snapshot = await collectResourceAdmissionSnapshotInternal();
+    return {
+      action: input.action,
+      dispatchedCount: input.dispatchedCount,
+      removedCount: input.removedCount,
+      remainingCount: input.remainingQueue.length,
+      snapshot,
+    };
+  }
+
+  function matchesDrainFilter(
+    entry: MainChatAdmissionQueueEntry,
+    targetQueueId: string | null,
+    targetServerId: string | null,
+  ): boolean {
+    if (targetQueueId && entry.id !== targetQueueId) return false;
+    if (targetServerId && entry.targetServerId !== targetServerId) return false;
+    return true;
+  }
+
+  function tryRequeueBlockedAdmissionEntry(input: {
+    entry: MainChatAdmissionQueueEntry;
+    hostsById: ReadonlyMap<string, MainChatHostResourceSnapshot>;
+    policy: MainChatResourceAdmissionPolicy;
+    reservedExtraByHost: ReadonlyMap<string, number>;
+    nowIso: string;
+  }): MainChatAdmissionQueueEntry | null {
+    const { entry, hostsById, policy, reservedExtraByHost, nowIso } = input;
+    const hostSnapshot =
+      hostsById.get(entry.targetServerId) ??
+      resolveFallbackHostSnapshot(entry.targetServerId, entry.hostLabel, policy, nowIso);
+    const pendingReservations =
+      (inFlightAdmissionByHost.get(entry.targetServerId) ?? 0) +
+      (reservedExtraByHost.get(entry.targetServerId) ?? 0);
+    const evaluation = evaluateHostResourceAdmission({
+      host: hostSnapshot,
+      policy,
+      pendingReservations,
+    });
+    if (evaluation.verdict === "allow") return null;
+    return {
+      ...entry,
+      reasonCode: evaluation.reasonCode,
+      reason: evaluation.reason,
+      suggestion: evaluation.suggestion,
+      attempts: entry.attempts + 1,
+      lastEvaluatedAt: nowIso,
+    };
+  }
+
+  async function handleClearOrRemoveAdmissionAction(
+    action: "clear" | "remove",
+    targetQueueId: string | null,
+    targetServerId: string | null,
+  ) {
+    if (action === "clear") {
+      const removed = await store.clearAdmissionQueue(targetServerId ?? undefined);
+      for (const entry of removed) await clearTaskQueuedAdmissionState(entry.taskId);
+      return finalizeAdmissionDrainResponse({
+        action,
+        dispatchedCount: 0,
+        removedCount: removed.length,
+        remainingQueue: store.listAdmissionQueue(),
+      });
+    }
+
+    const entry = targetQueueId
+      ? store.listAdmissionQueue().find((item) => item.id === targetQueueId)
+      : undefined;
+    const didRemove = targetQueueId ? await store.removeAdmissionEntry(targetQueueId) : false;
+    if (didRemove && entry) await clearTaskQueuedAdmissionState(entry.taskId);
+    return finalizeAdmissionDrainResponse({
+      action,
+      dispatchedCount: 0,
+      removedCount: didRemove ? 1 : 0,
+      remainingQueue: store.listAdmissionQueue(),
+    });
+  }
+
+  async function drainAdmissionQueueInternal(input?: {
+    action?: MainChatDrainAdmissionAction;
+    queueId?: string;
+    serverId?: string;
+  }): Promise<{
+    action: MainChatDrainAdmissionAction;
+    dispatchedCount: number;
+    removedCount: number;
+    remainingCount: number;
+    snapshot: MainChatResourceAdmissionSnapshot;
+  }> {
+    await store.load();
+    const action: MainChatDrainAdmissionAction = input?.action ?? "drain";
+    const targetQueueId = input?.queueId?.trim() || null;
+    const targetServerId = input?.serverId?.trim() || null;
+
+    if (action === "clear" || action === "remove") {
+      return handleClearOrRemoveAdmissionAction(action, targetQueueId, targetServerId);
+    }
+
+    const policy = resolveMainChatResourceAdmissionPolicy(store.getSettings());
+    const hosts = await collectHostResourceSnapshotsInternal();
+    const hostsById = new Map(hosts.map((host) => [host.serverId, host]));
+    const nextQueue: MainChatAdmissionQueueEntry[] = [];
+    const reservedExtraByHost = new Map<string, number>();
+    let dispatchedCount = 0;
+    let removedCount = 0;
+    const nowIso = new Date(getNowMs()).toISOString();
+
+    for (const entry of store.listAdmissionQueue()) {
+      if (!matchesDrainFilter(entry, targetQueueId, targetServerId)) {
+        nextQueue.push(entry);
+        continue;
+      }
+      const taskRecord = store.getTask(entry.taskId);
+      if (!isQueuedTaskStillDispatchable(taskRecord)) {
+        removedCount += 1;
+        continue;
+      }
+      if (action !== "force_dispatch") {
+        const stillBlocked = tryRequeueBlockedAdmissionEntry({
+          entry,
+          hostsById,
+          policy,
+          reservedExtraByHost,
+          nowIso,
+        });
+        if (stillBlocked) {
+          nextQueue.push(stillBlocked);
+          continue;
+        }
+      }
+
+      reservedExtraByHost.set(
+        entry.targetServerId,
+        (reservedExtraByHost.get(entry.targetServerId) ?? 0) + 1,
+      );
+      const started = await dispatchQueuedAdmissionEntry({ entry, taskRecord, action, nowIso });
+      if (started) dispatchedCount += 1;
+      else removedCount += 1;
+    }
+
+    const persistedQueue = await store.setAdmissionQueue(nextQueue);
+    contextSnapshots.invalidateCache();
+    return finalizeAdmissionDrainResponse({
+      action,
+      dispatchedCount,
+      removedCount,
+      remainingQueue: persistedQueue,
+    });
+  }
+
+  function scheduleAdmissionQueueDrain(): void {
+    if (store.listAdmissionQueue().length === 0) return;
+    if (admissionDrainPromise) {
+      admissionDrainPending = true;
+      return;
+    }
+    admissionDrainPromise = drainAdmissionQueueInternal({ action: "drain" })
+      .catch((error) => {
+        logger.warn({ err: error }, "Automatic resource admission queue drain failed");
+      })
+      .then(() => undefined)
+      .finally(() => {
+        admissionDrainPromise = null;
+        if (admissionDrainPending) {
+          admissionDrainPending = false;
+          scheduleAdmissionQueueDrain();
+        }
+      });
+  }
+
+  async function sweepIdleSubagentsInternal(input?: {
+    dryRun?: boolean;
+    idleThresholdMinutes?: number;
+    limit?: number;
+    trigger?: "scheduled" | "manual";
+  }): Promise<MainChatIdleArchiveSweepResult> {
+    await store.load();
+    await conversationManager.load();
+    const policy = resolveMainChatIdleArchivePolicy(store.getSettings());
+    const dryRun = input?.dryRun === true;
+    const idleThresholdMinutes = input?.idleThresholdMinutes ?? policy.idleThresholdMinutes;
+    const limit = input?.limit ?? policy.maxArchivePerSweep;
+    const trigger = input?.trigger ?? "manual";
+    const nowMs = getNowMs();
+
+    const mainChat = await findExistingMainChat();
+    const conversations = await conversationManager.listConversations({ includeArchived: true });
+    const conversationAgentIds = new Set<string>(conversations.map((conv) => conv.agentId));
+
+    const tasksByAgentId = new Map<string, MainChatTaskRecord>();
+    for (const task of store.listTasks({ includeCompleted: true })) {
+      if (task.activeAgentId) {
+        tasksByAgentId.set(task.activeAgentId, task);
+      }
+      for (const agentId of task.agentIds) {
+        if (!tasksByAgentId.has(agentId)) {
+          tasksByAgentId.set(agentId, task);
+        }
+      }
+    }
+
+    const queuedTaskIds = new Set<string>(store.listAdmissionQueue().map((item) => item.taskId));
+    const openPlans = store
+      .listPlans()
+      .filter((plan) => plan.status === "open" || plan.status === "started");
+    const openDecisions = store.listDecisions().filter((decision) => decision.answeredAt === null);
+
+    const storedArchivedById = new Map<string, string | null>();
+    const liveAgents = deps.agentManager
+      .listAgents()
+      .filter((agent) => !agent.internal && !agent.background);
+    for (const agent of liveAgents) {
+      const stored = await deps.agentStorage.get(agent.id);
+      storedArchivedById.set(agent.id, stored?.archivedAt ?? null);
+    }
+
+    const toCandidate = (agent: ManagedAgent): IdleArchiveAgentCandidate => ({
+      id: agent.id,
+      serverId: deps.serverId,
+      title: agent.config.title?.trim() || agent.id,
+      lifecycle: agent.lifecycle,
+      archivedAt: storedArchivedById.get(agent.id) ?? null,
+      requiresAttention: agent.attention.requiresAttention,
+      hasBackgroundWork: agent.activeTurnId !== null,
+      pendingPermissionCount: agent.pendingPermissions.size,
+      updatedAtMs: agent.updatedAt.getTime(),
+      labels: agent.labels,
+    });
+
+    const candidates = liveAgents.map(toCandidate);
+
+    const result = await runIdleSubagentArchiveSweep({
+      candidates,
+      context: {
+        nowMs,
+        idleThresholdMinutes,
+        mainAgentId: mainChat?.agentId ?? null,
+        conversationAgentIds,
+        tasksByAgentId,
+        openPlans,
+        openDecisions,
+        queuedTaskIds,
+      },
+      dryRun,
+      limit,
+      trigger,
+      existingAuditLog: store.listIdleArchiveAudit(),
+      revalidateBeforeArchive: (agentId) => {
+        const live = deps.agentManager.getAgent(agentId);
+        return live ? toCandidate(live) : null;
+      },
+      archiveAgent: async (agentId) => {
+        await deps.agentManager.archiveAgent(agentId);
+        await supervisor.handleAgentArchived(agentId);
+      },
+      onArchived: async (record) => {
+        await store.appendIdleArchiveAudit(record);
+        if (record.outcome === "archived") {
+          await store.incrementMetric("idleSubagentsArchived");
+          if (mainChat) {
+            await store.appendActivity({
+              id: makeId("act"),
+              mainAgentId: mainChat.agentId,
+              kind: "silent_turn",
+              trigger: "idle_archive",
+              summary: `闲置子会话已安全归档：「${record.title}」（闲置 ${record.idleMinutes} 分钟）`,
+              silent: true,
+              status: "completed",
+              createdAt: record.sweptAt,
+              completedAt: record.sweptAt,
+              relatedAgentId: record.agentId,
+              detail: record.reason,
+            });
+          }
+        }
+      },
+    });
+
+    if (!dryRun) {
+      await store.setLastIdleArchiveSweepAt(result.sweptAt);
+      if (result.archivedCount > 0) {
+        contextSnapshots.invalidateCache();
+      }
+    }
+
+    return result;
+  }
+
+  async function maybeRunScheduledIdleArchiveSweep(): Promise<void> {
+    const policy = resolveMainChatIdleArchivePolicy(store.getSettings());
+    if (!policy.enabled) return;
+    const nowMs = getNowMs();
+    const lastIso = store.getLastIdleArchiveSweepAt();
+    if (lastIso) {
+      const lastMs = Date.parse(lastIso);
+      if (Number.isFinite(lastMs) && nowMs - lastMs < policy.sweepIntervalMinutes * 60_000) {
+        return;
+      }
+    }
+    try {
+      await sweepIdleSubagentsInternal({
+        dryRun: false,
+        idleThresholdMinutes: policy.idleThresholdMinutes,
+        limit: policy.maxArchivePerSweep,
+        trigger: "scheduled",
+      });
+    } catch (error) {
+      logger.warn({ err: error }, "Scheduled idle subagent archive sweep failed");
+    }
+  }
+
+  function getOrCreateTaskRecordForAdmission(input: {
+    resolvedTaskId: string;
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    targetServerId: string;
+    hostLabel: string;
+    nowIso: string;
+  }): MainChatTaskRecord {
+    return (
+      store.getTask(input.resolvedTaskId) ??
+      createTaskRecordFromPlannedTask({
+        id: input.resolvedTaskId,
+        mainAgentId: input.plan.mainAgentId,
+        conversationId: input.plan.conversationId ?? null,
+        planId: input.plan.id,
+        plannedTask: input.task,
+        agentId: null,
+        cwd: input.task.cwd,
+        workspaceId: input.task.workspaceId,
+        serverId: input.targetServerId,
+        hostLabel: input.hostLabel,
+        nowIso: input.nowIso,
+      })
+    );
+  }
+
+  async function evaluatePreDispatchAdmission(input: {
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    targetServerId: string;
+    nowIso: string;
+  }): Promise<MainChatPlannedTask | null> {
+    const admissionPolicy = resolveMainChatResourceAdmissionPolicy(store.getSettings());
+    if (!admissionPolicy.enabled) return null;
+
+    const { plan, task, continuedTask, targetServerId, nowIso } = input;
+    const hostSnapshots = await collectHostResourceSnapshotsInternal();
+    const targetHostSnapshot =
+      hostSnapshots.find((item) => item.serverId === targetServerId) ??
+      resolveFallbackHostSnapshot(
+        targetServerId,
+        task.hostLabel?.trim() || targetServerId,
+        admissionPolicy,
+        nowIso,
+      );
+    const evaluation = evaluateHostResourceAdmission({
+      host: targetHostSnapshot,
+      policy: admissionPolicy,
+      pendingReservations: inFlightAdmissionByHost.get(targetServerId) ?? 0,
+    });
+    if (evaluation.verdict === "allow") return null;
+
+    const resolvedTaskId = continuedTask?.id ?? task.taskRecordId ?? task.id;
+    const record = getOrCreateTaskRecordForAdmission({
+      resolvedTaskId,
+      plan,
+      task,
+      targetServerId,
+      hostLabel: targetHostSnapshot.hostLabel,
+      nowIso,
+    });
+
+    if (evaluation.verdict === "queue") {
+      const queuedEntry = await store.enqueueAdmissionEntry({
+        id: createAdmissionQueueId(),
+        taskId: resolvedTaskId,
+        planId: plan.id,
+        plannedTaskId: task.id,
+        mainAgentId: plan.mainAgentId,
+        conversationId: plan.conversationId ?? null,
+        title: task.title,
+        targetServerId,
+        hostLabel: targetHostSnapshot.hostLabel,
+        reasonCode: evaluation.reasonCode,
+        reason: evaluation.reason,
+        suggestion: evaluation.suggestion,
+        position: store.listAdmissionQueue().length + 1,
+        enqueuedAt: nowIso,
+        attempts: 1,
+        lastEvaluatedAt: nowIso,
+      });
+      await store.putTask({
+        ...record,
+        admissionState: createTaskQueuedAdmissionState(queuedEntry),
+        updatedAt: nowIso,
+      });
+      await store.incrementMetric("admissionQueued");
+      await store.appendActivity({
+        id: makeId("act"),
+        mainAgentId: plan.mainAgentId,
+        kind: "background_turn",
+        trigger: "resource_admission",
+        summary: `资源准入排队 #${queuedEntry.position}：「${task.title}」等待主机「${targetHostSnapshot.hostLabel}」释放资源`,
+        silent: true,
+        status: "queued",
+        createdAt: nowIso,
+        completedAt: null,
+        detail: `${evaluation.reason}（建议：${evaluation.suggestion}）`,
+      });
+      return { ...task, taskRecordId: resolvedTaskId, startError: null };
+    }
+
+    await store.putTask({
+      ...record,
+      admissionState: createTaskRejectedAdmissionState({
+        targetServerId,
+        hostLabel: targetHostSnapshot.hostLabel,
+        reasonCode: evaluation.reasonCode,
+        reason: evaluation.reason,
+        suggestion: evaluation.suggestion,
+        updatedAt: nowIso,
+      }),
+      updatedAt: nowIso,
+    });
+    await store.incrementMetric("admissionRejected");
+    await store.appendActivity({
+      id: makeId("act"),
+      mainAgentId: plan.mainAgentId,
+      kind: "background_turn",
+      trigger: "resource_admission",
+      summary: `资源准入拒绝：「${task.title}」未能派发到「${targetHostSnapshot.hostLabel}」`,
+      silent: false,
+      status: "failed",
+      createdAt: nowIso,
+      completedAt: nowIso,
+      detail: `${evaluation.reason}（建议：${evaluation.suggestion}）`,
+    });
+    throw new MainChatAdmissionRejectedError({
+      targetServerId,
+      hostLabel: targetHostSnapshot.hostLabel,
+      reasonCode: evaluation.reasonCode,
+      reason: evaluation.reason,
+      suggestion: evaluation.suggestion,
+      hostSnapshot: evaluation.hostSnapshot,
+    });
+  }
+
+  function releaseInFlightAdmissionSlot(serverId: string): void {
+    const nextCount = Math.max(0, (inFlightAdmissionByHost.get(serverId) ?? 1) - 1);
+    if (nextCount === 0) {
+      inFlightAdmissionByHost.delete(serverId);
+    } else {
+      inFlightAdmissionByHost.set(serverId, nextCount);
+    }
+  }
+
+  async function handleSpawnPlannedTaskFailure(input: {
+    error: unknown;
+    plan: MainChatPlanRecord;
+    task: MainChatPlannedTask;
+    continuedTask: MainChatTaskRecord | null;
+    stoppedPreviousAgent: boolean;
+    nowIso: string;
+  }): Promise<MainChatPlannedTask> {
+    const { error, plan, task, continuedTask, stoppedPreviousAgent, nowIso } = input;
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ err: error, planId: plan.id, taskId: task.id }, "Failed to start plan task");
+    if (continuedTask && stoppedPreviousAgent) {
+      await store.putTask({
+        ...continuedTask,
+        activeAgentId: null,
+        status: "failed",
+        updatedAt: nowIso,
+        lastActivityAt: nowIso,
+      });
+    }
+    const isRejected = error instanceof MainChatAdmissionRejectedError;
+    supervisor.enqueueSignal({
+      kind: "failed",
+      urgency: "immediate",
+      taskId: continuedTask?.id ?? task.taskRecordId ?? null,
+      agentId: null,
+      serverId: task.serverId ?? deps.serverId,
+      conversationId: plan.conversationId ?? null,
+      title: task.title,
+      summary: isRejected
+        ? `资源准入拒绝：${message.slice(0, 140)}`
+        : `任务首次启动失败：${message.slice(0, 120)}`,
+      fingerprintSeed: `start_fail:${plan.id}:${task.id}:${message.slice(0, 40)}`,
+      quiet: task.quiet !== false,
+      escalatedToUser: true,
+    });
+    return {
+      ...task,
+      taskRecordId: isRejected
+        ? (continuedTask?.id ?? task.taskRecordId ?? task.id)
+        : task.taskRecordId,
+      startError: message,
+    };
+  }
+
   async function spawnSinglePlannedTask(input: {
     plan: MainChatPlanRecord;
     task: MainChatPlannedTask;
@@ -2720,15 +3593,35 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       thinkingOptionId: string | null;
     };
     nowIso: string;
+    skipAdmissionCheck?: boolean;
   }): Promise<MainChatPlannedTask> {
-    const { plan, task, mainAgent, nowIso } = input;
+    const { plan, task, mainAgent, nowIso, skipAdmissionCheck } = input;
     await lessonsStore.load();
     const continuedTask = task.continuesTaskId ? store.getTask(task.continuesTaskId) : null;
+    const targetServerId = task.serverId?.trim() || deps.serverId;
+    let slotReserved = false;
     let stoppedPreviousAgent = false;
     try {
       if (task.continuesTaskId && !continuedTask) {
         throw new Error(`找不到要续接的原任务：${task.continuesTaskId}`);
       }
+
+      if (!skipAdmissionCheck) {
+        const queuedResult = await evaluatePreDispatchAdmission({
+          plan,
+          task,
+          continuedTask,
+          targetServerId,
+          nowIso,
+        });
+        if (queuedResult) return queuedResult;
+      }
+
+      inFlightAdmissionByHost.set(
+        targetServerId,
+        (inFlightAdmissionByHost.get(targetServerId) ?? 0) + 1,
+      );
+      slotReserved = true;
 
       const previousAgentId = continuedTask ? continuedTask.activeAgentId : null;
       if (previousAgentId) {
@@ -2781,31 +3674,18 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         taskRecordId: prepared.resolvedTaskRecordId,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn({ err: error, planId: plan.id, taskId: task.id }, "Failed to start plan task");
-      if (continuedTask && stoppedPreviousAgent) {
-        await store.putTask({
-          ...continuedTask,
-          activeAgentId: null,
-          status: "failed",
-          updatedAt: nowIso,
-          lastActivityAt: nowIso,
-        });
-      }
-      supervisor.enqueueSignal({
-        kind: "failed",
-        urgency: "immediate",
-        taskId: continuedTask?.id ?? task.taskRecordId ?? null,
-        agentId: null,
-        serverId: task.serverId ?? deps.serverId,
-        conversationId: plan.conversationId ?? null,
-        title: task.title,
-        summary: `任务首次启动失败：${message.slice(0, 120)}`,
-        fingerprintSeed: `start_fail:${plan.id}:${task.id}:${message.slice(0, 40)}`,
-        quiet: task.quiet !== false,
-        escalatedToUser: true,
+      return handleSpawnPlannedTaskFailure({
+        error,
+        plan,
+        task,
+        continuedTask,
+        stoppedPreviousAgent,
+        nowIso,
       });
-      return { ...task, startError: message };
+    } finally {
+      if (slotReserved) {
+        releaseInFlightAdmissionSlot(targetServerId);
+      }
     }
   }
 
@@ -4593,10 +5473,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
             supervisor.handleRemotePermissionResolved(event);
           }
         },
+        onHostsChanged: () => {
+          scheduleAdmissionQueueDrain();
+        },
         onAgentsChanged: (event) => {
           if (event.serverId !== deps.serverId) {
             supervisor.handleRemoteAgentsChanged(event);
           }
+          scheduleAdmissionQueueDrain();
         },
       });
     }
@@ -4978,6 +5862,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
       syncRuntimeEnabledState();
       supervisor.refreshSchedule();
+      if (patch.resourceAdmission !== undefined) {
+        scheduleAdmissionQueueDrain();
+      }
 
       const existing = await findExistingMainChat();
       if (!existing) return updated;
@@ -5498,10 +6385,12 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           checks: entry.checks,
           nextSteps: entry.nextSteps,
         }));
-      const [conversations, fleetHostsResult] = await Promise.all([
+      const [conversations, fleetHostsResult, resourceAdmission] = await Promise.all([
         conversationManager.listConversations({ includeArchived: false }),
         fleetBridge.getFleetHosts().catch(() => ({ localServerId: deps.serverId, hosts: [] })),
+        collectResourceAdmissionSnapshotInternal().catch(() => undefined),
       ]);
+      const promptLibraryListing = listMergedPromptTemplates(store.listCustomPromptTemplates());
       const plans = store.listPlans(resolvedMainAgentId);
       const decisions = store.listDecisions(resolvedMainAgentId);
       const triages = store.listTriages();
@@ -5555,6 +6444,9 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         projectLessonGroups: lessonsStore.listGroups(),
         notificationSummary: store.getNotificationSummary(),
         recentNotificationReceipts: store.listNotificationReceipts({ limit: 30 }),
+        ...(resourceAdmission ? { resourceAdmission } : {}),
+        idleArchiveAudit: store.listIdleArchiveAudit(20),
+        promptLibraryCount: promptLibraryListing.templates.length,
       };
     },
 
@@ -6649,6 +7541,61 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
         updatedCount: result.updatedCount,
         receipts: result.receipts,
         summary: store.getNotificationSummary(),
+      };
+    },
+
+    getToolLoaderRegistry() {
+      return toolLoaderRegistry;
+    },
+
+    async getResourceAdmission(options) {
+      return collectResourceAdmissionSnapshotInternal(options);
+    },
+
+    async drainAdmissionQueue(input) {
+      return drainAdmissionQueueInternal(input);
+    },
+
+    async sweepIdleSubagents(input) {
+      return sweepIdleSubagentsInternal(input);
+    },
+
+    async listPromptLibrary() {
+      await store.load();
+      return listMergedPromptTemplates(store.listCustomPromptTemplates());
+    },
+
+    async savePromptTemplate(template) {
+      await store.load();
+      const existingCustom = store.listCustomPromptTemplates();
+      const { saved, nextCustom } = upsertCustomPromptTemplate({
+        template,
+        existingCustom,
+        nowIso: new Date(getNowMs()).toISOString(),
+      });
+      await store.setCustomPromptTemplates(nextCustom);
+      const merged = listMergedPromptTemplates(nextCustom);
+      return {
+        template: saved,
+        templates: merged.templates,
+      };
+    },
+
+    async deletePromptTemplate(input) {
+      await store.load();
+      const existingCustom = store.listCustomPromptTemplates();
+      const { deleted, nextCustom } = removeCustomPromptTemplate({
+        id: input.id,
+        slug: input.slug,
+        existingCustom,
+      });
+      if (deleted) {
+        await store.setCustomPromptTemplates(nextCustom);
+      }
+      const merged = listMergedPromptTemplates(nextCustom);
+      return {
+        deleted,
+        templates: merged.templates,
       };
     },
   };

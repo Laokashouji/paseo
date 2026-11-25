@@ -2,20 +2,26 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
+  MAIN_CHAT_MAX_ADMISSION_QUEUE,
+  MAIN_CHAT_MAX_CUSTOM_PROMPT_TEMPLATES,
+  MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS,
   MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
   MAIN_CHAT_WORKSPACE_DIR_NAME,
   MainChatActivityEntrySchema,
+  MainChatAdmissionQueueEntrySchema,
   MainChatApprovalClarificationSchema,
   MainChatAutoStartRuleSchema,
   MainChatCompactionReasonSchema,
   MainChatCompactionStrategySchema,
   MainChatDecisionRecordSchema,
   MainChatDurationSampleSchema,
+  MainChatIdleArchiveAuditRecordSchema,
   MainChatLimitFallbackEventSchema,
   MainChatMetricsSchema,
   MainChatNotificationReceiptSchema,
   MainChatPermissionRuleSchema,
   MainChatPlanRecordSchema,
+  MainChatPromptTemplateSchema,
   MainChatRuleSuggestionSchema,
   MainChatSessionTriageSchema,
   MainChatSettingsProposalRecordSchema,
@@ -35,6 +41,8 @@ import {
   isMainChatAutoCompactEnabled,
   isMainChatBackgroundFolded,
   isMainChatEnabled,
+  isMainChatOnDemandToolLoadingEnabled,
+  isMainChatStatelessBackgroundSupervisionEnabled,
   isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   mergeMainChatSettings,
@@ -43,19 +51,23 @@ import {
   resolveMainChatCompactionConfig,
   resolveMainChatCustomPresets,
   resolveMainChatDeliveryGatePolicy,
+  resolveMainChatIdleArchivePolicy,
   resolveMainChatLimitFallbacks,
   resolveMainChatModelConfig,
   resolveMainChatNightMode,
   resolveMainChatNotificationPolicy,
   resolveMainChatProfile,
+  resolveMainChatResourceAdmissionPolicy,
   type MainChatActivityEntry,
   type MainChatActivityKind,
+  type MainChatAdmissionQueueEntry,
   type MainChatApprovalClarification,
   type MainChatAutoStartRule,
   type MainChatCompactionReason,
   type MainChatCompactionStrategy,
   type MainChatDecisionRecord,
   type MainChatDurationSample,
+  type MainChatIdleArchiveAuditRecord,
   type MainChatLimitFallbackEvent,
   type MainChatMetrics,
   type MainChatNotificationCategory,
@@ -64,6 +76,7 @@ import {
   type MainChatNotificationSummary,
   type MainChatPermissionRule,
   type MainChatPlanRecord,
+  type MainChatPromptTemplate,
   type MainChatRuleSuggestion,
   type MainChatSessionTriage,
   type MainChatSettings,
@@ -79,6 +92,7 @@ import {
   type MainChatTokenUsageSource,
   type MainChatTokenUsageSummary,
 } from "@getpaseo/protocol/main-chat";
+import { recalculateAdmissionQueuePositions } from "./resource-admission.js";
 import { computeMainChatNotificationSummary } from "./notification-policy.js";
 import {
   buildStandingAuthorizationLabel,
@@ -182,6 +196,10 @@ const PersistedMainChatStateSchema = z.object({
   dagWakeMarkers: z.record(z.string(), z.string()).optional(),
   notificationReceipts: z.array(MainChatNotificationReceiptSchema).optional(),
   zeroTokenRuleState: z.record(z.string(), PersistedZeroTokenAgentWindowSchema).optional(),
+  admissionQueue: z.array(MainChatAdmissionQueueEntrySchema).optional(),
+  idleArchiveAudit: z.array(MainChatIdleArchiveAuditRecordSchema).optional(),
+  lastIdleArchiveSweepAt: z.string().nullable().optional(),
+  promptTemplates: z.array(MainChatPromptTemplateSchema).optional(),
 });
 
 interface MainChatStateFile {
@@ -215,6 +233,10 @@ interface MainChatStateFile {
   dagWakeMarkers: Record<string, string>;
   notificationReceipts: MainChatNotificationReceipt[];
   zeroTokenRuleState: Record<string, PersistedZeroTokenAgentWindow>;
+  admissionQueue: MainChatAdmissionQueueEntry[];
+  idleArchiveAudit: MainChatIdleArchiveAuditRecord[];
+  lastIdleArchiveSweepAt: string | null;
+  promptTemplates: MainChatPromptTemplate[];
 }
 
 export const MAX_RETAINED_ACTIVITIES = 200;
@@ -397,6 +419,12 @@ function emptyMetrics(): MainChatFullMetrics {
     silentTurns: 0,
     missingReplyRecoveries: 0,
     compactions: 0,
+    admissionQueued: 0,
+    admissionRejected: 0,
+    admissionDequeued: 0,
+    statelessSupervisionRounds: 0,
+    statelessSupervisionEscalations: 0,
+    idleSubagentsArchived: 0,
   };
 }
 
@@ -432,6 +460,10 @@ function emptyState(): MainChatStateFile {
     dagWakeMarkers: {},
     notificationReceipts: [],
     zeroTokenRuleState: {},
+    admissionQueue: [],
+    idleArchiveAudit: [],
+    lastIdleArchiveSweepAt: null,
+    promptTemplates: [],
   };
 }
 
@@ -690,6 +722,22 @@ export interface MainChatStore {
   getNotificationSummary(): MainChatNotificationSummary;
   getZeroTokenRuleState(): Record<string, PersistedZeroTokenAgentWindow>;
   setZeroTokenRuleState(next: Record<string, PersistedZeroTokenAgentWindow>): Promise<void>;
+  listAdmissionQueue(): MainChatAdmissionQueueEntry[];
+  setAdmissionQueue(
+    entries: readonly MainChatAdmissionQueueEntry[],
+  ): Promise<MainChatAdmissionQueueEntry[]>;
+  enqueueAdmissionEntry(entry: MainChatAdmissionQueueEntry): Promise<MainChatAdmissionQueueEntry>;
+  removeAdmissionEntry(queueId: string): Promise<boolean>;
+  removeAdmissionEntriesByTaskId(taskId: string): Promise<number>;
+  clearAdmissionQueue(serverId?: string): Promise<MainChatAdmissionQueueEntry[]>;
+  listIdleArchiveAudit(limit?: number): MainChatIdleArchiveAuditRecord[];
+  appendIdleArchiveAudit(record: MainChatIdleArchiveAuditRecord): Promise<void>;
+  getLastIdleArchiveSweepAt(): string | null;
+  setLastIdleArchiveSweepAt(iso: string): Promise<void>;
+  listCustomPromptTemplates(): MainChatPromptTemplate[];
+  setCustomPromptTemplates(
+    templates: readonly MainChatPromptTemplate[],
+  ): Promise<MainChatPromptTemplate[]>;
 }
 
 function standingAuthFromTrustRule(rule: MainChatAutoStartRule): MainChatStandingAuthorization {
@@ -880,6 +928,10 @@ function hydrateSettings(raw: MainChatSettings | undefined): MainChatSettings {
     limitFallbacks: resolveMainChatLimitFallbacks(raw),
     modelConfig: resolveMainChatModelConfig(raw),
     notificationPolicy: resolveMainChatNotificationPolicy(raw),
+    resourceAdmission: resolveMainChatResourceAdmissionPolicy(raw),
+    statelessBackgroundSupervision: isMainChatStatelessBackgroundSupervisionEnabled(raw),
+    onDemandToolLoading: isMainChatOnDemandToolLoadingEnabled(raw),
+    idleArchivePolicy: resolveMainChatIdleArchivePolicy(raw),
     mainBackgroundFolded: isMainChatBackgroundFolded(raw),
     mainTasksQuiet: isMainChatTasksQuiet(raw),
     taskLessonsEnabled: isMainChatTaskLessonsEnabled(raw),
@@ -905,6 +957,22 @@ function hydrateTokenUsage(
     byModel: raw.byModel.slice(0, MAX_RETAINED_USAGE_MODELS).map(cloneModelEntry),
     daily: pruneDailyUsage(raw.daily, nowMs),
     updatedAt: raw.updatedAt,
+  };
+}
+
+function hydrateWave5PersistedFields(data: z.infer<typeof PersistedMainChatStateSchema>) {
+  return {
+    admissionQueue: recalculateAdmissionQueuePositions(
+      (data.admissionQueue ?? []).slice(0, MAIN_CHAT_MAX_ADMISSION_QUEUE),
+    ),
+    idleArchiveAudit: (data.idleArchiveAudit ?? []).slice(
+      0,
+      MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS,
+    ),
+    lastIdleArchiveSweepAt: data.lastIdleArchiveSweepAt ?? null,
+    promptTemplates: (data.promptTemplates ?? [])
+      .filter((entry) => !entry.builtin)
+      .slice(0, MAIN_CHAT_MAX_CUSTOM_PROMPT_TEMPLATES),
   };
 }
 
@@ -945,6 +1013,7 @@ function hydratePersistedState(
       -MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS,
     ),
     zeroTokenRuleState: { ...data.zeroTokenRuleState },
+    ...hydrateWave5PersistedFields(data),
   };
 }
 
@@ -2019,6 +2088,106 @@ export function createMainChatStore(
       }
       state.zeroTokenRuleState = cloned;
       await persist();
+    },
+
+    listAdmissionQueue() {
+      return cloneShallowArray(recalculateAdmissionQueuePositions(state.admissionQueue));
+    },
+
+    async setAdmissionQueue(entries) {
+      state.admissionQueue = recalculateAdmissionQueuePositions(
+        cloneShallowArray(entries.slice(0, MAIN_CHAT_MAX_ADMISSION_QUEUE)),
+      );
+      await persist();
+      return cloneShallowArray(state.admissionQueue);
+    },
+
+    async enqueueAdmissionEntry(entry) {
+      const filtered = state.admissionQueue.filter(
+        (existing) => existing.id !== entry.id && existing.taskId !== entry.taskId,
+      );
+      filtered.push({ ...entry });
+      state.admissionQueue = recalculateAdmissionQueuePositions(
+        filtered.slice(-MAIN_CHAT_MAX_ADMISSION_QUEUE),
+      );
+      await persist();
+      const stored = state.admissionQueue.find((item) => item.id === entry.id) ?? entry;
+      return { ...stored };
+    },
+
+    async removeAdmissionEntry(queueId) {
+      const before = state.admissionQueue.length;
+      state.admissionQueue = recalculateAdmissionQueuePositions(
+        state.admissionQueue.filter((item) => item.id !== queueId),
+      );
+      if (state.admissionQueue.length === before) return false;
+      await persist();
+      return true;
+    },
+
+    async removeAdmissionEntriesByTaskId(taskId) {
+      const before = state.admissionQueue.length;
+      state.admissionQueue = recalculateAdmissionQueuePositions(
+        state.admissionQueue.filter((item) => item.taskId !== taskId),
+      );
+      const removed = before - state.admissionQueue.length;
+      if (removed > 0) await persist();
+      return removed;
+    },
+
+    async clearAdmissionQueue(serverId) {
+      const targetServerId = serverId?.trim() || null;
+      const removed: MainChatAdmissionQueueEntry[] = [];
+      const kept: MainChatAdmissionQueueEntry[] = [];
+      for (const item of state.admissionQueue) {
+        if (!targetServerId || item.targetServerId === targetServerId) {
+          removed.push({ ...item });
+        } else {
+          kept.push(item);
+        }
+      }
+      if (removed.length > 0) {
+        state.admissionQueue = recalculateAdmissionQueuePositions(kept);
+        await persist();
+      }
+      return removed;
+    },
+
+    listIdleArchiveAudit(limit = MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS) {
+      const clamped = Math.max(
+        1,
+        Math.min(MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS, Math.trunc(limit)),
+      );
+      return cloneShallowArray(state.idleArchiveAudit.slice(0, clamped));
+    },
+
+    async appendIdleArchiveAudit(record) {
+      state.idleArchiveAudit = [{ ...record }, ...state.idleArchiveAudit].slice(
+        0,
+        MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS,
+      );
+      await persist();
+    },
+
+    getLastIdleArchiveSweepAt() {
+      return state.lastIdleArchiveSweepAt;
+    },
+
+    async setLastIdleArchiveSweepAt(iso) {
+      state.lastIdleArchiveSweepAt = iso;
+      await persist();
+    },
+
+    listCustomPromptTemplates() {
+      return cloneShallowArray(state.promptTemplates);
+    },
+
+    async setCustomPromptTemplates(templates) {
+      state.promptTemplates = cloneShallowArray(
+        templates.filter((entry) => !entry.builtin).slice(0, MAIN_CHAT_MAX_CUSTOM_PROMPT_TEMPLATES),
+      );
+      await persist();
+      return cloneShallowArray(state.promptTemplates);
     },
   };
 }

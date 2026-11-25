@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES,
   MAIN_CHAT_COMPACT_WINDOW_RATIO,
   MAIN_CHAT_FORMER_ROLE_VALUE,
+  MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS,
   MAIN_CHAT_ROLE_LABEL,
   MAIN_CHAT_ROLE_VALUE,
   MainChatActivityEntrySchema,
@@ -13,21 +15,30 @@ import {
   MainChatOverviewSchema,
   MainChatSettingsSchema,
   createDefaultMainChatSettings,
+  expandMainChatPromptTemplate,
+  isBuiltinMainChatPromptSlug,
   isFormerMainChatLabels,
   isHostAllowedInFleetScope,
-  isMainChatEnabled,
   isMainChatAutoCompactEnabled,
+  isMainChatEnabled,
   isMainChatLabels,
+  isMainChatOnDemandToolLoadingEnabled,
+  isMainChatStatelessBackgroundSupervisionEnabled,
+  isReservedMainChatPromptSlug,
   mergeMainChatSettings,
   normalizeMainChatFleetScope,
+  normalizeMainChatPromptSlug,
   parseTaskAskUserToolPayload,
   parseTaskCompleteToolPayload,
   parseTaskPlanToolOutput,
   parseTaskReworkToolPayload,
   resolveMainChatFleetScope,
+  resolveMainChatIdleArchivePolicy,
   resolveMainChatModelConfig,
   resolveMainChatModelSlot,
   resolveMainChatNotificationPolicy,
+  resolveMainChatResourceAdmissionPolicy,
+  resolvePromptTemplateSlashInvocation,
   unwrapToolPayloadObject,
 } from "../src/main-chat.js";
 import { SessionInboundMessageSchema } from "../src/messages.js";
@@ -676,6 +687,332 @@ describe("main-chat M2 protocol schemas & zod-aot outbound validation", () => {
             updatedCount: 1,
             receipts: [],
             summary: { ...summary, unreadCount: 0 },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("validates Wave 5 settings, prompt library helpers, and zod-aot RPC contracts", () => {
+    const defaults = createDefaultMainChatSettings();
+    expect(resolveMainChatResourceAdmissionPolicy(defaults)).toEqual({
+      enabled: false,
+      maxConcurrentPerHost: 6,
+      maxCpuPercent: 85,
+      minFreeMemoryMb: 1024,
+      queueWhenPressured: true,
+    });
+    expect(isMainChatStatelessBackgroundSupervisionEnabled(defaults)).toBe(false);
+    expect(isMainChatOnDemandToolLoadingEnabled(defaults)).toBe(false);
+    expect(resolveMainChatIdleArchivePolicy(defaults)).toEqual({
+      enabled: false,
+      idleThresholdMinutes: 60,
+      sweepIntervalMinutes: 15,
+      maxArchivePerSweep: 10,
+    });
+
+    const merged = mergeMainChatSettings(defaults, {
+      resourceAdmission: {
+        enabled: true,
+        maxConcurrentPerHost: 3,
+        maxCpuPercent: 75,
+        minFreeMemoryMb: 2048,
+        queueWhenPressured: false,
+      },
+      statelessBackgroundSupervision: true,
+      onDemandToolLoading: true,
+      idleArchivePolicy: {
+        enabled: true,
+        idleThresholdMinutes: 90,
+      },
+    });
+    expect(resolveMainChatResourceAdmissionPolicy(merged)).toEqual({
+      enabled: true,
+      maxConcurrentPerHost: 3,
+      maxCpuPercent: 75,
+      minFreeMemoryMb: 2048,
+      queueWhenPressured: false,
+    });
+    expect(isMainChatStatelessBackgroundSupervisionEnabled(merged)).toBe(true);
+    expect(isMainChatOnDemandToolLoadingEnabled(merged)).toBe(true);
+    expect(resolveMainChatIdleArchivePolicy(merged)).toEqual({
+      enabled: true,
+      idleThresholdMinutes: 90,
+      sweepIntervalMinutes: 15,
+      maxArchivePerSweep: 10,
+    });
+
+    // Preserved across style preset switch
+    const afterPreset = mergeMainChatSettings(merged, { applyPreset: "proactive" });
+    expect(resolveMainChatResourceAdmissionPolicy(afterPreset).maxConcurrentPerHost).toBe(3);
+    expect(isMainChatStatelessBackgroundSupervisionEnabled(afterPreset)).toBe(true);
+    expect(isMainChatOnDemandToolLoadingEnabled(afterPreset)).toBe(true);
+    expect(resolveMainChatIdleArchivePolicy(afterPreset).idleThresholdMinutes).toBe(90);
+
+    // Allowlist contains Wave 5 settings keys
+    expect(MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS).toContain("resourceAdmission.enabled");
+    expect(MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS).toContain("resourceAdmission.maxConcurrentPerHost");
+    expect(MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS).toContain("statelessBackgroundSupervision");
+    expect(MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS).toContain("onDemandToolLoading");
+    expect(MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS).toContain("idleArchivePolicy.idleThresholdMinutes");
+
+    // Prompt library helpers & {{arg}} expansion
+    expect(BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES.length).toBeGreaterThanOrEqual(5);
+    expect(normalizeMainChatPromptSlug(" /My_Prompt 01 ")).toBe("my_prompt-01");
+    expect(isReservedMainChatPromptSlug("exit")).toBe(true);
+    expect(isReservedMainChatPromptSlug("clear")).toBe(true);
+    expect(isBuiltinMainChatPromptSlug("review")).toBe(true);
+    expect(expandMainChatPromptTemplate("排查 {{arg}} 并给证据", "登录 500 报错")).toBe(
+      "排查 登录 500 报错 并给证据",
+    );
+    expect(expandMainChatPromptTemplate("总结当前进展", "重点看后端")).toBe(
+      "总结当前进展\n\n重点看后端",
+    );
+
+    const invoked = resolvePromptTemplateSlashInvocation({
+      text: "/bugfix 刷新列表闪退",
+      templates: BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES,
+    });
+    expect(invoked?.template.slug).toBe("bugfix");
+    expect(invoked?.args).toBe("刷新列表闪退");
+    expect(invoked?.expandedText).toContain("刷新列表闪退");
+    expect(
+      resolvePromptTemplateSlashInvocation({
+        text: "/exit",
+        templates: BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES,
+      }),
+    ).toBeNull();
+
+    // Inbound + Outbound AOT validation for all 6 Wave 5 RPCs
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.get_resource_admission.request",
+        requestId: "req_adm_1",
+        forceRefresh: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.drain_admission_queue.request",
+        requestId: "req_adm_2",
+        action: "force_dispatch",
+        queueId: "aq_1",
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.sweep_idle_subagents.request",
+        requestId: "req_idle_1",
+        dryRun: true,
+        idleThresholdMinutes: 60,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.list_prompt_library.request",
+        requestId: "req_pl_1",
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.save_prompt_template.request",
+        requestId: "req_pl_2",
+        template: {
+          slug: "deploy-check",
+          title: "上线检查",
+          description: "发布前逐项核验",
+          content: "检查 {{arg}} 的上线清单",
+          argumentHint: "<服务名>",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "main_chat.delete_prompt_template.request",
+        requestId: "req_pl_3",
+        slug: "deploy-check",
+      }).success,
+    ).toBe(true);
+
+    const admissionSnapshot = {
+      policy: resolveMainChatResourceAdmissionPolicy(merged),
+      hosts: [
+        {
+          serverId: "srv_local",
+          hostLabel: "DevBox",
+          isLocal: true,
+          status: "pressured" as const,
+          cpuPercent: 91,
+          loadAvg1m: 7.3,
+          cpuCores: 8,
+          freeMemoryMb: 1500,
+          totalMemoryMb: 16384,
+          activeManagedAgents: 3,
+          maxConcurrent: 3,
+          pressureReasons: ["concurrency_limit" as const, "cpu_high" as const],
+          pressureSummary: "活跃并发 3/3，CPU 91%",
+          sampledAt: "2026-11-25T07:00:00.000Z",
+        },
+      ],
+      queue: [
+        {
+          id: "aq_1",
+          taskId: "task_1",
+          planId: "plan_1",
+          plannedTaskId: "pt_1",
+          mainAgentId: "agent_main",
+          conversationId: "conv_main",
+          title: "构建发布包",
+          targetServerId: "srv_local",
+          hostLabel: "DevBox",
+          reasonCode: "concurrency_limit" as const,
+          reason: "主机 DevBox 受管并发已达上限 (3/3)",
+          suggestion: "等待现有子任务释放或手动放行",
+          position: 1,
+          enqueuedAt: "2026-11-25T07:00:00.000Z",
+          attempts: 1,
+          lastEvaluatedAt: "2026-11-25T07:00:00.000Z",
+        },
+      ],
+      summary: {
+        enabled: true,
+        totalHosts: 1,
+        healthyHosts: 0,
+        pressuredHosts: 1,
+        offlineHosts: 0,
+        queuedCount: 1,
+        totalActiveManagedAgents: 3,
+      },
+      updatedAt: "2026-11-25T07:00:00.000Z",
+    };
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.get_resource_admission.response",
+          payload: {
+            requestId: "req_adm_1",
+            snapshot: admissionSnapshot,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.drain_admission_queue.response",
+          payload: {
+            requestId: "req_adm_2",
+            action: "force_dispatch",
+            dispatchedCount: 1,
+            removedCount: 0,
+            remainingCount: 0,
+            snapshot: { ...admissionSnapshot, queue: [] },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.sweep_idle_subagents.response",
+          payload: {
+            requestId: "req_idle_1",
+            result: {
+              dryRun: true,
+              evaluatedCount: 2,
+              eligibleCount: 1,
+              archivedCount: 0,
+              refusedCount: 1,
+              failedCount: 0,
+              archived: [],
+              eligible: [
+                {
+                  id: "ia_1",
+                  agentId: "agent_child_1",
+                  serverId: "srv_local",
+                  title: "已完成调研",
+                  taskId: "task_done_1",
+                  idleMinutes: 95,
+                  outcome: "eligible",
+                  refusalCode: null,
+                  reason: "已结项且闲置 95 分钟，满足归档条件",
+                  sweptAt: "2026-11-25T07:00:00.000Z",
+                  trigger: "manual",
+                },
+              ],
+              refused: [
+                {
+                  id: "ia_2",
+                  agentId: "agent_manual_1",
+                  serverId: "srv_local",
+                  title: "手动调试会话",
+                  taskId: null,
+                  idleMinutes: 180,
+                  outcome: "refused",
+                  refusalCode: "is_manual_session",
+                  reason: "用户手动会话受红线保护，禁止自动归档",
+                  sweptAt: "2026-11-25T07:00:00.000Z",
+                  trigger: "manual",
+                },
+              ],
+              auditLog: [],
+              sweptAt: "2026-11-25T07:00:00.000Z",
+            },
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.list_prompt_library.response",
+          payload: {
+            requestId: "req_pl_1",
+            templates: [...BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES],
+            builtinCount: BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES.length,
+            customCount: 0,
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.save_prompt_template.response",
+          payload: {
+            requestId: "req_pl_2",
+            template: BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES[0]!,
+            templates: [...BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES],
+            error: null,
+          },
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      validateWSOutboundMessage({
+        type: "session",
+        message: {
+          type: "main_chat.delete_prompt_template.response",
+          payload: {
+            requestId: "req_pl_3",
+            deleted: true,
+            templates: [...BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES],
             error: null,
           },
         },

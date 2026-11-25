@@ -45,6 +45,9 @@ export interface PaseoToolCatalog {
     input: unknown,
     context?: PaseoToolExecutionContext,
   ): Promise<PaseoToolResult>;
+  subscribeToolsActivated?: (
+    listener: (activatedTools: readonly PaseoToolDefinition[]) => void,
+  ) => () => void;
 }
 
 export interface PaseoToolRuntimeContext {

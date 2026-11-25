@@ -5,6 +5,7 @@ import type {
   MainChatPlanRecord,
   MainChatRuleDiagnostic,
   MainChatSessionTriage,
+  MainChatTaskAdmissionState,
   MainChatTaskDeliveryGate,
   MainChatTaskDependencyState,
   MainChatTaskMode,
@@ -165,6 +166,7 @@ export interface ActionBarTaskItem {
   canStartReady: boolean;
   deliveryGate: MainChatTaskDeliveryGate | null;
   ruleDiagnostic: MainChatRuleDiagnostic | null;
+  admissionState: MainChatTaskAdmissionState | null;
   taskRecord: MainChatTaskRecord | null;
 }
 
@@ -498,6 +500,7 @@ function buildTaskItemBase(
     canStartReady: dag.canStartReady,
     deliveryGate: task.deliveryGate ?? null,
     ruleDiagnostic: triage?.ruleDiagnostic ?? task.lastRuleDiagnostic ?? null,
+    admissionState: task.admissionState ?? null,
     taskRecord: task,
     ...overrides,
   };
@@ -850,6 +853,25 @@ function collectParkedTasks(ctx: ActionBarBuildContext): void {
   }
 }
 
+function isEligibleInProgressTask(
+  task: MainChatTaskRecord,
+  live: ActionBarLiveAgentSnapshot | undefined,
+): boolean {
+  if (task.status === "running" || task.status === "open") return true;
+  return task.status === "needs_you" && Boolean(live && !live.archived && isLiveAgentRunning(live));
+}
+
+function resolveInProgressTaskSummary(
+  task: MainChatTaskRecord,
+  triage: MainChatSessionTriage | undefined,
+  isQueuedAdmission: boolean,
+): string | null {
+  if (isQueuedAdmission && task.admissionState?.reason) {
+    return task.admissionState.reason;
+  }
+  return triage?.summary ?? task.brief.goal ?? null;
+}
+
 function resolveInProgressTaskItem(
   ctx: ActionBarBuildContext,
   task: MainChatTaskRecord,
@@ -859,21 +881,24 @@ function resolveInProgressTaskItem(
   const primaryAgentId = resolveTaskPrimaryAgentId(task);
   if (isAgentClaimed(ctx, srvId, primaryAgentId)) return null;
   const live = lookupLiveAgent(ctx, srvId, primaryAgentId);
-  const isResumedNeedsYou =
-    task.status === "needs_you" && Boolean(live) && !live!.archived && isLiveAgentRunning(live);
-  if (task.status !== "running" && task.status !== "open" && !isResumedNeedsYou) return null;
+  if (!isEligibleInProgressTask(task, live)) return null;
 
   const lastActivityAtMs = resolveTaskActivityMs(task, live);
-  const stale48h =
+  const rawStale =
     lastActivityAtMs > 0 && ctx.nowMs - lastActivityAtMs >= STALE_IN_PROGRESS_THRESHOLD_MS;
   const triage = primaryAgentId ? ctx.triageByAgentId.get(primaryAgentId) : undefined;
   const dag = deriveTaskDagSummary(task, ctx.tasks);
-  const waitingOnDeps = dag.dependencyState === "blocked" || dag.dependencyState === "ready";
+  const isWaiting =
+    dag.dependencyState === "blocked" ||
+    dag.dependencyState === "ready" ||
+    task.admissionState?.status === "queued";
+  const stale48h = isWaiting ? false : rawStale;
+  const isLiveRunning =
+    !isWaiting && (isLiveAgentRunning(live) || (task.status === "running" && !stale48h));
   return buildTaskItemBase(ctx, task, srvId, primaryAgentId, live, {
-    summary: triage?.summary ?? task.brief.goal ?? null,
-    stale48h: waitingOnDeps ? false : stale48h,
-    isLiveRunning:
-      !waitingOnDeps && (isLiveAgentRunning(live) || (task.status === "running" && !stale48h)),
+    summary: resolveInProgressTaskSummary(task, triage, task.admissionState?.status === "queued"),
+    stale48h,
+    isLiveRunning,
     lastActivityAtMs,
     completedAtMs: null,
     parkedReason: null,
@@ -953,6 +978,7 @@ function buildFallbackAgentTaskItem(
     canStartReady: false,
     deliveryGate: null,
     ruleDiagnostic: triage?.ruleDiagnostic ?? null,
+    admissionState: null,
     taskRecord: null,
     ...overrides,
   };

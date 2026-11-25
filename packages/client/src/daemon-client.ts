@@ -58,10 +58,18 @@ import type {
   MainChatReviewTaskResponsePayload,
   MainChatRevokeStandingAuthorizationResponsePayload,
   MainChatAckNotificationReceiptResponsePayload,
+  MainChatDeletePromptTemplateResponsePayload,
+  MainChatDrainAdmissionAction,
+  MainChatDrainAdmissionQueueResponsePayload,
+  MainChatGetResourceAdmissionResponsePayload,
   MainChatListNotificationReceiptsResponsePayload,
+  MainChatListPromptLibraryResponsePayload,
   MainChatNotificationCategory,
   MainChatNotificationDeliveryStatus,
+  MainChatPromptTemplateInput,
   MainChatRetryTaskWithFallbackResponsePayload,
+  MainChatSavePromptTemplateResponsePayload,
+  MainChatSweepIdleSubagentsResponsePayload,
   MainChatRoutineKind,
   MainChatRoutinesCreateResponsePayload,
   MainChatRoutinesDeleteResponsePayload,
@@ -6333,6 +6341,112 @@ export class DaemonClient {
           ...(input.receiptIds !== undefined ? { receiptIds: input.receiptIds } : {}),
           ...(input.markAll !== undefined ? { markAll: input.markAll } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async getMainChatResourceAdmission(
+    options?: {
+      forceRefresh?: boolean;
+    },
+    requestId?: string,
+  ): Promise<MainChatGetResourceAdmissionResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.get_resource_admission.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.get_resource_admission.request",
+          ...(options?.forceRefresh !== undefined ? { forceRefresh: options.forceRefresh } : {}),
+        },
+        timeout: 30000,
+      },
+    );
+  }
+
+  async drainMainChatAdmissionQueue(
+    input?: {
+      action?: MainChatDrainAdmissionAction;
+      queueId?: string;
+      serverId?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatDrainAdmissionQueueResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.drain_admission_queue.response">({
+      requestId,
+      message: {
+        type: "main_chat.drain_admission_queue.request",
+        ...(input?.action !== undefined ? { action: input.action } : {}),
+        ...(input?.queueId !== undefined ? { queueId: input.queueId } : {}),
+        ...(input?.serverId !== undefined ? { serverId: input.serverId } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async sweepMainChatIdleSubagents(
+    input?: {
+      dryRun?: boolean;
+      idleThresholdMinutes?: number;
+      limit?: number;
+    },
+    requestId?: string,
+  ): Promise<MainChatSweepIdleSubagentsResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.sweep_idle_subagents.response">({
+      requestId,
+      message: {
+        type: "main_chat.sweep_idle_subagents.request",
+        ...(input?.dryRun !== undefined ? { dryRun: input.dryRun } : {}),
+        ...(input?.idleThresholdMinutes !== undefined
+          ? { idleThresholdMinutes: input.idleThresholdMinutes }
+          : {}),
+        ...(input?.limit !== undefined ? { limit: input.limit } : {}),
+      },
+      timeout: 60000,
+    });
+  }
+
+  async listMainChatPromptLibrary(
+    requestId?: string,
+  ): Promise<MainChatListPromptLibraryResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.list_prompt_library.response">({
+      requestId,
+      message: {
+        type: "main_chat.list_prompt_library.request",
+      },
+      timeout: 30000,
+    });
+  }
+
+  async saveMainChatPromptTemplate(
+    template: MainChatPromptTemplateInput,
+    requestId?: string,
+  ): Promise<MainChatSavePromptTemplateResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.save_prompt_template.response">({
+      requestId,
+      message: {
+        type: "main_chat.save_prompt_template.request",
+        template,
+      },
+      timeout: 30000,
+    });
+  }
+
+  async deleteMainChatPromptTemplate(
+    input: {
+      id?: string;
+      slug?: string;
+    },
+    requestId?: string,
+  ): Promise<MainChatDeletePromptTemplateResponsePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"main_chat.delete_prompt_template.response">(
+      {
+        requestId,
+        message: {
+          type: "main_chat.delete_prompt_template.request",
+          ...(input.id !== undefined ? { id: input.id } : {}),
+          ...(input.slug !== undefined ? { slug: input.slug } : {}),
         },
         timeout: 30000,
       },

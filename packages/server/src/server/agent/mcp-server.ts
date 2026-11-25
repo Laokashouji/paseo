@@ -8,7 +8,7 @@ import type {
 
 import { addModelVisibleStructuredContent } from "./tools/paseo-tool-serialization.js";
 import { createPaseoToolCatalog, type PaseoToolHostDependencies } from "./tools/paseo-tools.js";
-import type { PaseoToolResult } from "./tools/types.js";
+import type { PaseoToolDefinition, PaseoToolResult } from "./tools/types.js";
 
 export type AgentMcpServerOptions = PaseoToolHostDependencies;
 
@@ -35,7 +35,10 @@ export async function createAgentMcpServer(options: AgentMcpServerOptions): Prom
     version: "2.0.0",
   });
 
-  for (const tool of catalog.tools.values()) {
+  const registeredNames = new Set<string>();
+  const registerCatalogTool = (tool: PaseoToolDefinition) => {
+    if (registeredNames.has(tool.name)) return;
+    registeredNames.add(tool.name);
     server.registerTool(
       tool.name,
       {
@@ -46,7 +49,28 @@ export async function createAgentMcpServer(options: AgentMcpServerOptions): Prom
       async (args: unknown, context?: McpToolContext) =>
         toMcpToolResult(await catalog.executeTool(tool.name, args, { signal: context?.signal })),
     );
+  };
+
+  for (const tool of catalog.tools.values()) {
+    registerCatalogTool(tool);
   }
+
+  catalog.subscribeToolsActivated?.((activatedTools) => {
+    let addedAny = false;
+    for (const tool of activatedTools) {
+      if (!registeredNames.has(tool.name)) {
+        registerCatalogTool(tool);
+        addedAny = true;
+      }
+    }
+    if (addedAny) {
+      try {
+        server.sendToolListChanged();
+      } catch {
+        // Ignore when MCP transport is not yet connected
+      }
+    }
+  });
 
   return server;
 }

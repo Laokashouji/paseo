@@ -87,6 +87,11 @@ import type { DraftCommandTarget } from "@/agent-commands";
 import { encodeImages } from "@/utils/encode-images";
 import { focusWithRetries } from "@/utils/web-focus";
 import {
+  DEFAULT_PROMPT_LIBRARY_TEMPLATES,
+  useMainChatPromptLibraryStore,
+} from "@/main-chat/prompt-library-store";
+import { expandPromptTemplateSubmissionText } from "@/main-chat/prompt-slash-commands";
+import {
   cancelComposerAgent,
   dispatchComposerAgentMessage,
   editQueuedComposerMessage,
@@ -1444,6 +1449,20 @@ function ComposerContentImpl({
     workspaceId,
     agentId,
   });
+  const storedPromptTemplates = useMainChatPromptLibraryStore(
+    (state) => state.templatesByServerId[serverId],
+  );
+  const isPromptLibraryLoaded = useMainChatPromptLibraryStore(
+    (state) => state.loadedByServerId[serverId],
+  );
+  const loadPromptLibrary = useMainChatPromptLibraryStore((state) => state.loadPromptLibrary);
+  const promptTemplates = storedPromptTemplates ?? DEFAULT_PROMPT_LIBRARY_TEMPLATES;
+  useEffect(() => {
+    if (!serverId || !client || !isConnected || isPromptLibraryLoaded) {
+      return;
+    }
+    void loadPromptLibrary(serverId, client);
+  }, [client, isConnected, isPromptLibraryLoaded, loadPromptLibrary, serverId]);
   const isComposerLocked = resolveIsComposerLocked(submitBehavior, isSubmitLoading);
   const keyboardHandlerIdRef = useRef(
     `message-input:${serverId}:${agentId}:${Math.random().toString(36).slice(2)}`,
@@ -1859,16 +1878,22 @@ function ComposerContentImpl({
         commands: pluginClientSlashCommands,
       });
       if (pluginSlashCommand && runPluginClientSlashCommand(pluginSlashCommand)) return;
+      const expandedPrompt = expandPromptTemplateSubmissionText({
+        text: payload.text,
+        templates: promptTemplates,
+        hasAttachments: outgoingAttachments.length > 0,
+      });
 
       if (blurOnSubmit) {
         messageInputRef.current?.blur();
       }
-      void sendMessageWithContent(payload.text, outgoingAttachments, payload.forceSend);
+      void sendMessageWithContent(expandedPrompt.text, outgoingAttachments, payload.forceSend);
     },
     [
       attachments,
       blurOnSubmit,
       buildOutgoingAttachments,
+      promptTemplates,
       runClientSlashCommand,
       pluginClientSlashCommands,
       runPluginClientSlashCommand,
@@ -2112,12 +2137,18 @@ function ComposerContentImpl({
         commands: pluginClientSlashCommands,
       });
       if (pluginSlashCommand && runPluginClientSlashCommand(pluginSlashCommand)) return;
-      queueMessage(payload.text, outgoingAttachments);
+      const expandedPrompt = expandPromptTemplateSubmissionText({
+        text: payload.text,
+        templates: promptTemplates,
+        hasAttachments: outgoingAttachments.length > 0,
+      });
+      queueMessage(expandedPrompt.text, outgoingAttachments);
     },
     [
       attachments,
       buildOutgoingAttachments,
       pluginClientSlashCommands,
+      promptTemplates,
       queueMessage,
       runClientSlashCommand,
       runPluginClientSlashCommand,

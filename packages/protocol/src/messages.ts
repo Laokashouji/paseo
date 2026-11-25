@@ -150,6 +150,18 @@ import {
   MainChatListNotificationReceiptsResponseSchema,
   MainChatAckNotificationReceiptRequestSchema,
   MainChatAckNotificationReceiptResponseSchema,
+  MainChatGetResourceAdmissionRequestSchema,
+  MainChatGetResourceAdmissionResponseSchema,
+  MainChatDrainAdmissionQueueRequestSchema,
+  MainChatDrainAdmissionQueueResponseSchema,
+  MainChatSweepIdleSubagentsRequestSchema,
+  MainChatSweepIdleSubagentsResponseSchema,
+  MainChatListPromptLibraryRequestSchema,
+  MainChatListPromptLibraryResponseSchema,
+  MainChatSavePromptTemplateRequestSchema,
+  MainChatSavePromptTemplateResponseSchema,
+  MainChatDeletePromptTemplateRequestSchema,
+  MainChatDeletePromptTemplateResponseSchema,
 } from "./main-chat.js";
 export {
   MainChatActivityEntrySchema,
@@ -4273,6 +4285,12 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   MainChatRetryTaskWithFallbackRequestSchema,
   MainChatListNotificationReceiptsRequestSchema,
   MainChatAckNotificationReceiptRequestSchema,
+  MainChatGetResourceAdmissionRequestSchema,
+  MainChatDrainAdmissionQueueRequestSchema,
+  MainChatSweepIdleSubagentsRequestSchema,
+  MainChatListPromptLibraryRequestSchema,
+  MainChatSavePromptTemplateRequestSchema,
+  MainChatDeletePromptTemplateRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -8423,6 +8441,12 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   MainChatRetryTaskWithFallbackResponseSchema,
   MainChatListNotificationReceiptsResponseSchema,
   MainChatAckNotificationReceiptResponseSchema,
+  MainChatGetResourceAdmissionResponseSchema,
+  MainChatDrainAdmissionQueueResponseSchema,
+  MainChatSweepIdleSubagentsResponseSchema,
+  MainChatListPromptLibraryResponseSchema,
+  MainChatSavePromptTemplateResponseSchema,
+  MainChatDeletePromptTemplateResponseSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

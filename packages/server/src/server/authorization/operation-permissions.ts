@@ -297,6 +297,12 @@ const INBOUND_PERMISSION = {
   "main_chat.retry_task_with_fallback.request": ["workspace.write", "hub.execute"],
   "main_chat.list_notification_receipts.request": "workspace.read",
   "main_chat.ack_notification_receipt.request": ["workspace.write", "hub.execute"],
+  "main_chat.get_resource_admission.request": "workspace.read",
+  "main_chat.drain_admission_queue.request": ["workspace.write", "hub.execute"],
+  "main_chat.sweep_idle_subagents.request": ["workspace.write", "hub.execute"],
+  "main_chat.list_prompt_library.request": "workspace.read",
+  "main_chat.save_prompt_template.request": ["workspace.write", "hub.execute"],
+  "main_chat.delete_prompt_template.request": ["workspace.write", "hub.execute"],
 } as const satisfies Record<InboundOperation, PermissionRequirement>;
 
 const OUTBOUND_PERMISSION = {
@@ -612,6 +618,12 @@ const OUTBOUND_PERMISSION = {
   "main_chat.retry_task_with_fallback.response": ["workspace.write", "hub.execute"],
   "main_chat.list_notification_receipts.response": "workspace.read",
   "main_chat.ack_notification_receipt.response": ["workspace.write", "hub.execute"],
+  "main_chat.get_resource_admission.response": "workspace.read",
+  "main_chat.drain_admission_queue.response": ["workspace.write", "hub.execute"],
+  "main_chat.sweep_idle_subagents.response": ["workspace.write", "hub.execute"],
+  "main_chat.list_prompt_library.response": "workspace.read",
+  "main_chat.save_prompt_template.response": ["workspace.write", "hub.execute"],
+  "main_chat.delete_prompt_template.response": ["workspace.write", "hub.execute"],
 } as const satisfies Record<OutboundOperation, PermissionRequirement>;
 
 export function requiredPermissionForInbound(operation: InboundOperation): PermissionRequirement {

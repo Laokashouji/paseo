@@ -4,7 +4,7 @@ import {
   scoreTextFields,
 } from "@getpaseo/protocol/search/text-match";
 
-type CommandAutocompleteSource = "provider" | "plugin" | "client";
+type CommandAutocompleteSource = "provider" | "plugin" | "prompt" | "client";
 
 interface CommandAutocompleteEntry {
   source: CommandAutocompleteSource;
@@ -21,7 +21,8 @@ interface CommandAutocompleteEntry {
 const EMPTY_QUERY_SOURCE_ORDER: Record<CommandAutocompleteSource, number> = {
   provider: 0,
   plugin: 1,
-  client: 2,
+  prompt: 2,
+  client: 3,
 };
 
 export type SlashCommandPosition = "start" | "inline";

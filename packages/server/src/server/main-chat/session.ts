@@ -69,6 +69,12 @@ export type MainChatSessionMessage = Extract<
   | { type: "main_chat.retry_task_with_fallback.request" }
   | { type: "main_chat.list_notification_receipts.request" }
   | { type: "main_chat.ack_notification_receipt.request" }
+  | { type: "main_chat.get_resource_admission.request" }
+  | { type: "main_chat.drain_admission_queue.request" }
+  | { type: "main_chat.sweep_idle_subagents.request" }
+  | { type: "main_chat.list_prompt_library.request" }
+  | { type: "main_chat.save_prompt_template.request" }
+  | { type: "main_chat.delete_prompt_template.request" }
 >;
 
 const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
@@ -127,6 +133,12 @@ const MAIN_CHAT_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set<
   "main_chat.retry_task_with_fallback.request",
   "main_chat.list_notification_receipts.request",
   "main_chat.ack_notification_receipt.request",
+  "main_chat.get_resource_admission.request",
+  "main_chat.drain_admission_queue.request",
+  "main_chat.sweep_idle_subagents.request",
+  "main_chat.list_prompt_library.request",
+  "main_chat.save_prompt_template.request",
+  "main_chat.delete_prompt_template.request",
 ]);
 
 export function isMainChatSessionMessage(
@@ -420,6 +432,62 @@ const UNCONFIGURED_RESPONSES: UnconfiguredResponseBuilderMap = {
       updatedCount: 0,
       receipts: [],
       summary: EMPTY_NOTIFICATION_SUMMARY,
+      error,
+    },
+  }),
+  "main_chat.get_resource_admission.request": (msg, error) => ({
+    type: "main_chat.get_resource_admission.response",
+    payload: {
+      requestId: msg.requestId,
+      snapshot: null,
+      error,
+    },
+  }),
+  "main_chat.drain_admission_queue.request": (msg, error) => ({
+    type: "main_chat.drain_admission_queue.response",
+    payload: {
+      requestId: msg.requestId,
+      action: msg.action ?? "drain",
+      dispatchedCount: 0,
+      removedCount: 0,
+      remainingCount: 0,
+      snapshot: null,
+      error,
+    },
+  }),
+  "main_chat.sweep_idle_subagents.request": (msg, error) => ({
+    type: "main_chat.sweep_idle_subagents.response",
+    payload: {
+      requestId: msg.requestId,
+      result: null,
+      error,
+    },
+  }),
+  "main_chat.list_prompt_library.request": (msg, error) => ({
+    type: "main_chat.list_prompt_library.response",
+    payload: {
+      requestId: msg.requestId,
+      templates: [],
+      builtinCount: 0,
+      customCount: 0,
+      error,
+    },
+  }),
+  "main_chat.save_prompt_template.request": (msg, error) => ({
+    type: "main_chat.save_prompt_template.response",
+    payload: {
+      requestId: msg.requestId,
+      template: null,
+      templates: [],
+      error,
+    },
+  }),
+  "main_chat.delete_prompt_template.request": (msg, error) => ({
+    type: "main_chat.delete_prompt_template.response",
+    payload: {
+      requestId: msg.requestId,
+      deleted: false,
+      templates: [],
       error,
     },
   }),
@@ -1979,6 +2047,196 @@ async function handleAckNotificationReceipt(
   }
 }
 
+async function handleGetResourceAdmission(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.get_resource_admission.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const snapshot = await service.getResourceAdmission({ forceRefresh: msg.forceRefresh });
+    send({
+      type: "main_chat.get_resource_admission.response",
+      payload: {
+        requestId: msg.requestId,
+        snapshot,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.get_resource_admission.response",
+      payload: {
+        requestId: msg.requestId,
+        snapshot: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleDrainAdmissionQueue(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.drain_admission_queue.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.drainAdmissionQueue({
+      action: msg.action,
+      queueId: msg.queueId,
+      serverId: msg.serverId,
+    });
+    send({
+      type: "main_chat.drain_admission_queue.response",
+      payload: {
+        requestId: msg.requestId,
+        action: result.action,
+        dispatchedCount: result.dispatchedCount,
+        removedCount: result.removedCount,
+        remainingCount: result.remainingCount,
+        snapshot: result.snapshot,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.drain_admission_queue.response",
+      payload: {
+        requestId: msg.requestId,
+        action: msg.action ?? "drain",
+        dispatchedCount: 0,
+        removedCount: 0,
+        remainingCount: 0,
+        snapshot: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleSweepIdleSubagents(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.sweep_idle_subagents.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.sweepIdleSubagents({
+      dryRun: msg.dryRun,
+      idleThresholdMinutes: msg.idleThresholdMinutes,
+      limit: msg.limit,
+      trigger: "manual",
+    });
+    send({
+      type: "main_chat.sweep_idle_subagents.response",
+      payload: {
+        requestId: msg.requestId,
+        result,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.sweep_idle_subagents.response",
+      payload: {
+        requestId: msg.requestId,
+        result: null,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleListPromptLibrary(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.list_prompt_library.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.listPromptLibrary();
+    send({
+      type: "main_chat.list_prompt_library.response",
+      payload: {
+        requestId: msg.requestId,
+        templates: result.templates,
+        builtinCount: result.builtinCount,
+        customCount: result.customCount,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.list_prompt_library.response",
+      payload: {
+        requestId: msg.requestId,
+        templates: [],
+        builtinCount: 0,
+        customCount: 0,
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleSavePromptTemplate(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.save_prompt_template.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.savePromptTemplate(msg.template);
+    send({
+      type: "main_chat.save_prompt_template.response",
+      payload: {
+        requestId: msg.requestId,
+        template: result.template,
+        templates: result.templates,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.save_prompt_template.response",
+      payload: {
+        requestId: msg.requestId,
+        template: null,
+        templates: [],
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
+async function handleDeletePromptTemplate(
+  service: MainChatService,
+  msg: Extract<MainChatSessionMessage, { type: "main_chat.delete_prompt_template.request" }>,
+  send: SendFn,
+): Promise<void> {
+  try {
+    const result = await service.deletePromptTemplate({
+      id: msg.id,
+      slug: msg.slug,
+    });
+    send({
+      type: "main_chat.delete_prompt_template.response",
+      payload: {
+        requestId: msg.requestId,
+        deleted: result.deleted,
+        templates: result.templates,
+        error: null,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "main_chat.delete_prompt_template.response",
+      payload: {
+        requestId: msg.requestId,
+        deleted: false,
+        templates: [],
+        error: errorMessage(error),
+      },
+    });
+  }
+}
+
 const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.ensure.request": handlePlanMessages,
   "main_chat.list_plans.request": handlePlanMessages,
@@ -2033,6 +2291,12 @@ const MAIN_CHAT_MESSAGE_HANDLERS: SessionHandlerMap = {
   "main_chat.retry_task_with_fallback.request": handleRetryTaskWithFallback,
   "main_chat.list_notification_receipts.request": handleListNotificationReceipts,
   "main_chat.ack_notification_receipt.request": handleAckNotificationReceipt,
+  "main_chat.get_resource_admission.request": handleGetResourceAdmission,
+  "main_chat.drain_admission_queue.request": handleDrainAdmissionQueue,
+  "main_chat.sweep_idle_subagents.request": handleSweepIdleSubagents,
+  "main_chat.list_prompt_library.request": handleListPromptLibrary,
+  "main_chat.save_prompt_template.request": handleSavePromptTemplate,
+  "main_chat.delete_prompt_template.request": handleDeletePromptTemplate,
 };
 
 export async function handleMainChatSessionMessage(
