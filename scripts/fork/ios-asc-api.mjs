@@ -303,9 +303,8 @@ export function createAscClient({
     },
 
     async ensurePushCapability(bundleIdResourceId) {
-      const res = await request("GET", `/bundleIds/${bundleIdResourceId}/bundleIdCapabilities`, {
-        query: { limit: 100 },
-      });
+      // Apple's bundleIdCapabilities relationship rejects the `limit` query parameter (400 PARAMETER_ERROR.ILLEGAL).
+      const res = await request("GET", `/bundleIds/${bundleIdResourceId}/bundleIdCapabilities`);
       const hasPush = (res?.data ?? []).some(
         (item) => item?.attributes?.capabilityType === "PUSH_NOTIFICATIONS",
       );
