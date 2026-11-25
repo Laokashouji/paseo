@@ -165,6 +165,7 @@ systemctl --user restart paseo-daemon.service
 ```
 
 完成切换后：
+
 - DevBox 显示与 Mac 桌面端完全一致的 Fork 版本号（如 `v0.17.519`）。
 - 后续每次发布新 `fork-v*` 版本，直接在 Paseo 应用的「Host 设置 → 更新 Daemon」点击 **「更新」** 即可自动从 `Laokashouji/paseo` 下载预编译包、校验 SHA-256、原子切换 `current` 软链并原地重启 Worker（保留运行中终端）。
 - 常用参数：
@@ -185,28 +186,80 @@ systemctl --user restart paseo-daemon.service
 systemctl --user restart paseo-daemon.service
 ```
 
+## 5.5 iPhone 私有 TestFlight 构建、安装与自动同步
+
+在已配置付费 Apple Developer 账号与 App Store Connect API Key（`APPLE_API_KEY`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`）的基础上，Fork 发布流水线（`.github/workflows/fork-release.yml`）支持在 `macos-latest` 上**零侵入上游文件、免 EAS 云构建、免手动维护 `.mobileprovision`**，自动构建蓝图蓝图标的原生 iOS App 并推送到你自己的 **TestFlight 内部测试组**（无需 Apple 审核，单个版本有效 90 天，可与官方 App Store 版并存）。
+
+### 步骤 A：一次性在 Apple Developer / App Store Connect 准备
+
+1. **注册个人 Bundle ID（App ID）**：打开 [developer.apple.com/account/resources/identifiers/list](https://developer.apple.com/account/resources/identifiers/list) → 点击 `+` → 选择 `App IDs` → `App` → 填写你的唯一 Bundle ID（推荐 `com.laokashouji.paseo`，不能使用上游的 `sh.paseo`）→ 勾选 **Push Notifications** 能力并保存。
+2. **准备 Apple Distribution 证书（`.p12`）**：在 [Certificates](https://developer.apple.com/account/resources/certificates/list) 创建一张 **Apple Distribution** 证书（注意与 macOS 的 `Developer ID Application` 不同），下载双击导入 Mac「钥匙串访问」，在「我的证书」中选中证书与私钥右键导出为 `.p12` 并设置导出密码。
+3. **在 App Store Connect 新建 App 占位并开启内部自动分发**：
+   - 打开 [appstoreconnect.apple.com](https://appstoreconnect.apple.com) → **App** → `+` → **新建 App**：平台勾选 `iOS`，套装 ID 选择刚创建的 `com.laokashouji.paseo`，SKU 填 `paseo-fork`，名称随意（例如 `Paseo Fork`；不需提交 App Store 审核）。
+   - 进入该 App 的 **TestFlight** → **内部测试** → 新建测试组（例如 `Personal`），勾选 **「启用自动分发」** 并把你自己的 Apple ID 加入组内。此后每次新构建处理完毕（约 5～15 分钟）都会自动出现在 iPhone 的 TestFlight 中一键更新。
+4. **Provisioning Profile 免手工维护**：CI 会在每次构建时通过 `scripts/fork/ios-asc-api.mjs` 使用你已配置的 App Store Connect API Key 自动查找或重建最新的 `IOS_APP_STORE` Provisioning Profile（自动对齐 `aps-environment` 权限、自动防重传 `CFBundleVersion` 撞号），无需手动下载或每年续期 `.mobileprovision`。
+
+### 步骤 B：上传 iOS TestFlight Secrets
+
+```bash
+./scripts/fork/setup-apple-secrets.sh \
+  --ios-p12 /path/to/AppleDistribution.p12 \
+  --ios-bundle-id com.laokashouji.paseo
+```
+
+检查配置状态：
+
+```bash
+./scripts/fork/setup-apple-secrets.sh --check
+```
+
+| 类别             | Secret / Variable 名称                                                      | 说明                                                                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 必填             | `IOS_DIST_CERTIFICATE`                                                      | Apple Distribution `.p12` 单行 base64                                                                                                                                                         |
+| 必填             | `IOS_DIST_CERTIFICATE_PASSWORD`                                             | `.p12` 导出密码                                                                                                                                                                               |
+| 必填             | `IOS_BUNDLE_ID`                                                             | 个人 iOS Bundle ID（如 `com.laokashouji.paseo`，支持 Secret 或 Repository Variable）                                                                                                          |
+| 复用已有         | `APPLE_TEAM_ID` / `APPLE_API_KEY` / `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | 复用第 2 节已配好的 Team ID 与 App Store Connect API Key                                                                                                                                      |
+| 可选             | `IOS_APP_NAME` / `IOS_URL_SCHEME`                                           | 桌面显示名（默认 `Paseo Fork`）与 URL Scheme（默认 `paseo-fork`，不与官方版 `paseo://` 冲突）                                                                                                 |
+| 可选             | `IOS_PROVISIONING_PROFILE`                                                  | 手动 `.mobileprovision` base64 兜底；留空则自动通过 ASC API 同步                                                                                                                              |
+| 可选（原生推送） | `IOS_EXPO_PROJECT_ID` / `IOS_EXPO_OWNER`                                    | 填写个人免费 Expo 账号的 EAS Project ID（并在 Expo 后台上传 APNs `.p8` Push Key）即可启用原生 APNs 推送；留空时自动剥离上游 `getpaseo` 项目 ID，不影响 App 正常使用（可由飞书机器人通知兜底） |
+| 可选             | `IOS_TESTFLIGHT_GROUPS`                                                     | 逗号分隔的 TestFlight 组名（已在 ASC 开启内部自动分发时可留空）                                                                                                                               |
+
+### 步骤 C：首次补发与后续自动三端齐发
+
+- **立即对已有版本补发一次 iOS TestFlight（不重复打 macOS / Daemon、不动 GitHub Release）**：
+
+```bash
+gh workflow run fork-release.yml \
+  --repo Laokashouji/paseo \
+  --ref fork \
+  -f tag=fork-v0.17.531 \
+  -f ios_only=true
+```
+
+- **后续所有发版**：当 iOS Secrets 配置齐全后，执行 `./scripts/fork/release.sh --push` 时，`build-ios` 会与 `build-macos`、`build-daemon` 并行执行，自动生成 1024×1024 无透明通道蓝图蓝图标、签名验包、上传 TestFlight 并同步 `FORK_CHANGELOG.md` 中文更新日志；若尚未配置 iOS Secrets，`build-ios` 自动温和跳过，绝不影响 macOS 与 Linux Daemon 发布。
+
 ## 6. 飞书工程文档与同步维护规范
 
 面向人阅读的工程全貌、能力对比、架构图与实机界面说明沉淀在飞书个人知识库（`my_library`，空间 ID `7643648852146343133`）→ `AI / 工具 / Paseo`（父节点 `VMKSwgYGFiqAgNkmjLscW2JQnMc`）下。仓库内文档（`FORK.md`、`CLAUDE.local.md`、`FORK_CHANGELOG.md`）负责面向开发与 AI 的硬规则、精确命令与发版公告；飞书文档负责动机、能力体验、架构图与演进脉络，两者不互相大段拷贝。
 
 ### 文档与分支映射表（SSOT）
 
-| 类别 | 飞书文档 | 绑定分支 / 目录 | Wiki `node_token` | `doc_id` |
-| --- | --- | --- | --- | --- |
-| 主文档 | [Paseo Fork — 工程总览](https://bytedance.larkoffice.com/wiki/Nq50wJhwkiRz2gkpNbDcwrjunnb) | 全局（`fork`） | `Nq50wJhwkiRz2gkpNbDcwrjunnb` | `Y5wsdWF18olzKzxEonVcv1qsnXg` |
-| 速览 A0 | [【速览】Paseo Fork 新增与修改能力汇总（实机红框图解）](https://bytedance.larkoffice.com/wiki/RDt9wdTcEiAFuZk6jCfc6VRhnNg) | 新人速览（全量 `fork` 能力） | `RDt9wdTcEiAFuZk6jCfc6VRhnNg` | `U3FidWxwFoIK5Rxim9pcUTaVndd` |
-| 能力 A2 | [【能力】原生无损分叉与分支管理](https://bytedance.larkoffice.com/wiki/BOsFwD4vFiRThrkqDJfcI7WPnib) | `feat/native-fork-and-branches` | `BOsFwD4vFiRThrkqDJfcI7WPnib` | `Ah7Kdn8tQobNzLxxXXmcMDuFnUc` |
-| 能力 A3 | [【能力】原生 `/btw` 旁路提问](https://bytedance.larkoffice.com/wiki/H2TBwgRevixWU0kN1O4ckgERnpd) | `feat/native-btw-side-question` | `H2TBwgRevixWU0kN1O4ckgERnpd` | `Symyd2lpDo0Z1Hx2n6xcoC85nAb` |
-| 能力 A4 | [【能力】插件扩展底座增强](https://bytedance.larkoffice.com/wiki/AfVfwyvXbi9YTakQlijcuZ8anbd) | `closeAgentTab`、`buildForkContext` | `AfVfwyvXbi9YTakQlijcuZ8anbd` | `MkT8dxyLxoLbuzxiivXcLOSMnIc` |
-| 能力 A5 | [【能力】一键对话归档（Session Archive）](https://bytedance.larkoffice.com/wiki/MGm8wtnd5is5SqkAt7bcci5Jntd) | `feat/session-archive` | `MGm8wtnd5is5SqkAt7bcci5Jntd` | `LQd3dhXgvoqdQIxGEVZcc40tnxh` |
-| 能力 A6 | [【能力】输入框 Markdown 实时语法样式与用户消息渲染](https://bytedance.larkoffice.com/wiki/XTqSwA5vXiswJ3kMTwTcsq3qnIe) | `feat/composer-markdown` | `XTqSwA5vXiswJ3kMTwTcsq3qnIe` | `D7NvdEldbolDPCxn3h2cZ15anPf` |
-| 能力 A7 | [【能力】双源更新公告（Fork + 上游混排）与发版联动](https://bytedance.larkoffice.com/wiki/EpHzwpv9EiI29tkVjmOcTYiAn4g) | `feat/fork-changelog`、`FORK_CHANGELOG.md` | `EpHzwpv9EiI29tkVjmOcTYiAn4g` | `XAm3dHuHhoDJKZx3HMGcTW29n3b` |
-| 能力 A8 | [【能力】原生主对话（Main Chat）](https://bytedance.larkoffice.com/wiki/CKnOwMZ4Ai9cGOkAFH0cOoIXnnh) | `feat/main-chat` | `CKnOwMZ4Ai9cGOkAFH0cOoIXnnh` | `OSZTdPGEDo8bLBx1xS3cUjZNnsf` |
-| 能力 A9 | [【能力】侧边栏导航区高度调节与溢出二级菜单](https://bytedance.larkoffice.com/wiki/VD1Nw6iMoiehUUkC316cZzyDnYc) | `feat/sidebar-nav-overflow` | `VD1Nw6iMoiehUUkC316cZzyDnYc` | `XtTRdcdoXoY4JPxw8xIcYlN0nyb` |
-| 能力 A10 | [【能力】对话交互式声明式卡片（正文围栏与 MCP 活卡片）](https://bytedance.larkoffice.com/wiki/Vxs2wdqfiixsw3k8sJdcjn0jncc) | `feat/interactive-cards`、`feat/main-chat` | `Vxs2wdqfiixsw3k8sJdcjn0jncc` | `O298dsqI1oYo5jxjKgLcy8ngn9g` |
-| 工程 B1 | [【工程】Fork 架构与上游同步机制](https://bytedance.larkoffice.com/wiki/DlKSwCe61iiBtGkI2ygcdpg9nJg) | `fork-infra`、`FORK.md` | `DlKSwCe61iiBtGkI2ygcdpg9nJg` | `O6IIdIOBEoDCwzxE1cvceaXZnuy` |
-| 指南 B2 | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre) | `scripts/fork/*`、`.github/workflows/fork-release.yml`、`feat/fork-daemon-self-update` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
-| 演进 B3 | [【演进】版本记录、路线图与文档维护规范](https://bytedance.larkoffice.com/wiki/SnOUwoR0miYuYVkt5ENcPU3Ynnd) | `fork-v*` 标签、`FORK_CHANGELOG.md`、路线图 | `SnOUwoR0miYuYVkt5ENcPU3Ynnd` | `VL42dzHpAor2OyxY4rdcd2cInwx` |
+| 类别     | 飞书文档                                                                                                                   | 绑定分支 / 目录                                                                        | Wiki `node_token`             | `doc_id`                      |
+| -------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ----------------------------- | ----------------------------- |
+| 主文档   | [Paseo Fork — 工程总览](https://bytedance.larkoffice.com/wiki/Nq50wJhwkiRz2gkpNbDcwrjunnb)                                 | 全局（`fork`）                                                                         | `Nq50wJhwkiRz2gkpNbDcwrjunnb` | `Y5wsdWF18olzKzxEonVcv1qsnXg` |
+| 速览 A0  | [【速览】Paseo Fork 新增与修改能力汇总（实机红框图解）](https://bytedance.larkoffice.com/wiki/RDt9wdTcEiAFuZk6jCfc6VRhnNg) | 新人速览（全量 `fork` 能力）                                                           | `RDt9wdTcEiAFuZk6jCfc6VRhnNg` | `U3FidWxwFoIK5Rxim9pcUTaVndd` |
+| 能力 A2  | [【能力】原生无损分叉与分支管理](https://bytedance.larkoffice.com/wiki/BOsFwD4vFiRThrkqDJfcI7WPnib)                        | `feat/native-fork-and-branches`                                                        | `BOsFwD4vFiRThrkqDJfcI7WPnib` | `Ah7Kdn8tQobNzLxxXXmcMDuFnUc` |
+| 能力 A3  | [【能力】原生 `/btw` 旁路提问](https://bytedance.larkoffice.com/wiki/H2TBwgRevixWU0kN1O4ckgERnpd)                          | `feat/native-btw-side-question`                                                        | `H2TBwgRevixWU0kN1O4ckgERnpd` | `Symyd2lpDo0Z1Hx2n6xcoC85nAb` |
+| 能力 A4  | [【能力】插件扩展底座增强](https://bytedance.larkoffice.com/wiki/AfVfwyvXbi9YTakQlijcuZ8anbd)                              | `closeAgentTab`、`buildForkContext`                                                    | `AfVfwyvXbi9YTakQlijcuZ8anbd` | `MkT8dxyLxoLbuzxiivXcLOSMnIc` |
+| 能力 A5  | [【能力】一键对话归档（Session Archive）](https://bytedance.larkoffice.com/wiki/MGm8wtnd5is5SqkAt7bcci5Jntd)               | `feat/session-archive`                                                                 | `MGm8wtnd5is5SqkAt7bcci5Jntd` | `LQd3dhXgvoqdQIxGEVZcc40tnxh` |
+| 能力 A6  | [【能力】输入框 Markdown 实时语法样式与用户消息渲染](https://bytedance.larkoffice.com/wiki/XTqSwA5vXiswJ3kMTwTcsq3qnIe)    | `feat/composer-markdown`                                                               | `XTqSwA5vXiswJ3kMTwTcsq3qnIe` | `D7NvdEldbolDPCxn3h2cZ15anPf` |
+| 能力 A7  | [【能力】双源更新公告（Fork + 上游混排）与发版联动](https://bytedance.larkoffice.com/wiki/EpHzwpv9EiI29tkVjmOcTYiAn4g)     | `feat/fork-changelog`、`FORK_CHANGELOG.md`                                             | `EpHzwpv9EiI29tkVjmOcTYiAn4g` | `XAm3dHuHhoDJKZx3HMGcTW29n3b` |
+| 能力 A8  | [【能力】原生主对话（Main Chat）](https://bytedance.larkoffice.com/wiki/CKnOwMZ4Ai9cGOkAFH0cOoIXnnh)                       | `feat/main-chat`                                                                       | `CKnOwMZ4Ai9cGOkAFH0cOoIXnnh` | `OSZTdPGEDo8bLBx1xS3cUjZNnsf` |
+| 能力 A9  | [【能力】侧边栏导航区高度调节与溢出二级菜单](https://bytedance.larkoffice.com/wiki/VD1Nw6iMoiehUUkC316cZzyDnYc)            | `feat/sidebar-nav-overflow`                                                            | `VD1Nw6iMoiehUUkC316cZzyDnYc` | `XtTRdcdoXoY4JPxw8xIcYlN0nyb` |
+| 能力 A10 | [【能力】对话交互式声明式卡片（正文围栏与 MCP 活卡片）](https://bytedance.larkoffice.com/wiki/Vxs2wdqfiixsw3k8sJdcjn0jncc) | `feat/interactive-cards`、`feat/main-chat`                                             | `Vxs2wdqfiixsw3k8sJdcjn0jncc` | `O298dsqI1oYo5jxjKgLcy8ngn9g` |
+| 工程 B1  | [【工程】Fork 架构与上游同步机制](https://bytedance.larkoffice.com/wiki/DlKSwCe61iiBtGkI2ygcdpg9nJg)                       | `fork-infra`、`FORK.md`                                                                | `DlKSwCe61iiBtGkI2ygcdpg9nJg` | `O6IIdIOBEoDCwzxE1cvceaXZnuy` |
+| 指南 B2  | [【指南】多端安装、使用与自动更新](https://bytedance.larkoffice.com/wiki/PCvMwImbPiyni9k5cWkc1I1Lnre)                      | `scripts/fork/*`、`.github/workflows/fork-release.yml`、`feat/fork-daemon-self-update` | `PCvMwImbPiyni9k5cWkc1I1Lnre` | `GBnAduH1lonWvVxZYDhcBdUknTg` |
+| 演进 B3  | [【演进】版本记录、路线图与文档维护规范](https://bytedance.larkoffice.com/wiki/SnOUwoR0miYuYVkt5ENcPU3Ynnd)                | `fork-v*` 标签、`FORK_CHANGELOG.md`、路线图                                            | `SnOUwoR0miYuYVkt5ENcPU3Ynnd` | `VL42dzHpAor2OyxY4rdcd2cInwx` |
 
 ### AI 同步维护规范（新增 / 修改 / 删除）
 
@@ -227,4 +280,3 @@ systemctl --user restart paseo-daemon.service
 4. **内容风格与验收底线**
    - **视觉优先、精炼克制**：优先用结构清晰、重点明确的飞书原生可编辑画板（`<whiteboard type="svg">`）和脱敏实机界面截图配少数说明文字，避免大段纯文字堆砌或粘贴大段源码。
    - **写后必验**：所有飞书写操作显式使用 `--as user`；写完必须用 `lark-cli docs +fetch --as user --doc <doc_id>` 回读确认内容和链接未降级；新增或改动画板必须执行 `lark-cli whiteboard +export --whiteboard-token <token> --output-type preview` 导出预览图并肉眼核验无文字截断或重叠。
-

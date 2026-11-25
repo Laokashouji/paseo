@@ -221,6 +221,24 @@ if [[ "$SKIP_SECRET_CHECK" != "true" ]] && command -v gh >/dev/null 2>&1; then
     echo ""
     echo "Apple signing secrets verified on $GH_REPO (notarization: $NOTARIZE_MODE)."
   fi
+
+  VARS="$(gh variable list --repo "$GH_REPO" 2>/dev/null | awk '{print $1}' || true)"
+  has_secret_or_var() {
+    has_secret "$1" || printf '%s\n' "$VARS" | grep -Fxq "$1"
+  }
+  IOS_MISSING=()
+  has_secret IOS_DIST_CERTIFICATE || IOS_MISSING+=(IOS_DIST_CERTIFICATE)
+  has_secret IOS_DIST_CERTIFICATE_PASSWORD || IOS_MISSING+=(IOS_DIST_CERTIFICATE_PASSWORD)
+  has_secret_or_var IOS_BUNDLE_ID || IOS_MISSING+=(IOS_BUNDLE_ID)
+  has_secret APPLE_TEAM_ID || IOS_MISSING+=(APPLE_TEAM_ID)
+  if ! has_secret APPLE_API_KEY || ! has_secret APPLE_API_KEY_ID || ! has_secret APPLE_API_ISSUER; then
+    IOS_MISSING+=(APPLE_API_KEY/ID/ISSUER)
+  fi
+  if (( ${#IOS_MISSING[@]} == 0 )); then
+    echo "iOS TestFlight secrets verified on $GH_REPO (build-ios will run in parallel)."
+  else
+    echo "iOS TestFlight: skipped (optional secrets not set: ${IOS_MISSING[*]})."
+  fi
 fi
 
 if [[ "$DO_PUSH" != "true" ]]; then
