@@ -79,6 +79,41 @@ export const MAIN_CHAT_CRITICAL_PASSTHROUGH_CATEGORIES = [
   "delivery_gate_blocked",
 ] as const;
 export const MAIN_CHAT_MAX_NOTIFICATION_RECEIPTS = 120;
+export const MAIN_CHAT_DEFAULT_MAX_CONCURRENT_PER_HOST = 6;
+export const MAIN_CHAT_MIN_CONCURRENT_PER_HOST = 1;
+export const MAIN_CHAT_MAX_CONCURRENT_PER_HOST = 64;
+export const MAIN_CHAT_DEFAULT_MAX_CPU_PERCENT = 85;
+export const MAIN_CHAT_MIN_CPU_PERCENT = 20;
+export const MAIN_CHAT_MAX_CPU_PERCENT = 100;
+export const MAIN_CHAT_DEFAULT_MIN_FREE_MEMORY_MB = 1024;
+export const MAIN_CHAT_MIN_FREE_MEMORY_MB = 128;
+export const MAIN_CHAT_MAX_FREE_MEMORY_MB = 262_144;
+export const MAIN_CHAT_MAX_ADMISSION_QUEUE = 100;
+export const MAIN_CHAT_TOOL_GROUP_IDS = [
+  "core",
+  "memory",
+  "lessons",
+  "routines",
+  "dag",
+  "settings",
+  "conversations",
+] as const;
+export const MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_THRESHOLD_MIN = 60;
+export const MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN = 5;
+export const MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN = 10_080;
+export const MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN = 15;
+export const MAIN_CHAT_MIN_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN = 5;
+export const MAIN_CHAT_MAX_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN = 1440;
+export const MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_MAX_PER_SWEEP = 10;
+export const MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP = 1;
+export const MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP = 50;
+export const MAIN_CHAT_MAX_IDLE_ARCHIVE_AUDIT_RECORDS = 100;
+export const MAIN_CHAT_MAX_CUSTOM_PROMPT_TEMPLATES = 80;
+export const MAIN_CHAT_PROMPT_SLUG_MAX_CHARS = 40;
+export const MAIN_CHAT_PROMPT_TITLE_MAX_CHARS = 60;
+export const MAIN_CHAT_PROMPT_DESC_MAX_CHARS = 160;
+export const MAIN_CHAT_PROMPT_CONTENT_MAX_CHARS = 4000;
+export const MAIN_CHAT_PROMPT_RESERVED_SLUGS = ["exit", "quit", "q", "clear", "new"] as const;
 
 export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "title",
@@ -114,6 +149,17 @@ export const MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS = [
   "notificationPolicy.categoryOverrides",
   "profile.aboutMe",
   "profile.ownerAliases",
+  "resourceAdmission.enabled",
+  "resourceAdmission.maxConcurrentPerHost",
+  "resourceAdmission.maxCpuPercent",
+  "resourceAdmission.minFreeMemoryMb",
+  "resourceAdmission.queueWhenPressured",
+  "statelessBackgroundSupervision",
+  "onDemandToolLoading",
+  "idleArchivePolicy.enabled",
+  "idleArchivePolicy.idleThresholdMinutes",
+  "idleArchivePolicy.sweepIntervalMinutes",
+  "idleArchivePolicy.maxArchivePerSweep",
 ] as const;
 export type MainChatProposableSettingKey = (typeof MAIN_CHAT_PROPOSABLE_SETTINGS_KEYS)[number];
 
@@ -680,6 +726,266 @@ export const MainChatRuleDiagnosticSchema = z.object({
 });
 export type MainChatRuleDiagnostic = z.infer<typeof MainChatRuleDiagnosticSchema>;
 
+// ============================================================================
+// P2-2 Cross-Host Resource Admission Schemas
+// ============================================================================
+
+export const MainChatResourceAdmissionPolicySchema = z.object({
+  enabled: z.boolean(),
+  maxConcurrentPerHost: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_CONCURRENT_PER_HOST)
+    .max(MAIN_CHAT_MAX_CONCURRENT_PER_HOST),
+  maxCpuPercent: z.number().int().min(MAIN_CHAT_MIN_CPU_PERCENT).max(MAIN_CHAT_MAX_CPU_PERCENT),
+  minFreeMemoryMb: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_FREE_MEMORY_MB)
+    .max(MAIN_CHAT_MAX_FREE_MEMORY_MB),
+  queueWhenPressured: z.boolean(),
+});
+export type MainChatResourceAdmissionPolicy = z.infer<typeof MainChatResourceAdmissionPolicySchema>;
+
+export const MainChatResourceAdmissionPolicyPatchSchema =
+  MainChatResourceAdmissionPolicySchema.partial();
+export type MainChatResourceAdmissionPolicyPatch = z.infer<
+  typeof MainChatResourceAdmissionPolicyPatchSchema
+>;
+
+export const MainChatResourcePressureReasonSchema = z.enum([
+  "concurrency_limit",
+  "cpu_high",
+  "memory_low",
+  "host_offline",
+  "host_degraded",
+]);
+export type MainChatResourcePressureReason = z.infer<typeof MainChatResourcePressureReasonSchema>;
+
+export const MainChatHostResourceStatusSchema = z.enum([
+  "healthy",
+  "pressured",
+  "offline",
+  "degraded",
+]);
+export type MainChatHostResourceStatus = z.infer<typeof MainChatHostResourceStatusSchema>;
+
+export const MainChatHostResourceSnapshotSchema = z.object({
+  serverId: z.string(),
+  hostLabel: z.string(),
+  isLocal: z.boolean(),
+  status: MainChatHostResourceStatusSchema,
+  cpuPercent: z.number().min(0).max(1000).nullable(),
+  loadAvg1m: z.number().min(0).nullable(),
+  cpuCores: z.number().int().positive().nullable(),
+  freeMemoryMb: z.number().min(0).nullable(),
+  totalMemoryMb: z.number().min(0).nullable(),
+  activeManagedAgents: z.number().int().nonnegative(),
+  maxConcurrent: z.number().int().positive(),
+  pressureReasons: z.array(MainChatResourcePressureReasonSchema),
+  pressureSummary: z.string().nullable(),
+  sampledAt: z.string(),
+});
+export type MainChatHostResourceSnapshot = z.infer<typeof MainChatHostResourceSnapshotSchema>;
+
+export const MainChatAdmissionQueueEntrySchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  planId: z.string().nullable(),
+  plannedTaskId: z.string().nullable(),
+  mainAgentId: z.string(),
+  conversationId: z.string().nullable(),
+  title: z.string(),
+  targetServerId: z.string(),
+  hostLabel: z.string(),
+  reasonCode: MainChatResourcePressureReasonSchema,
+  reason: z.string(),
+  suggestion: z.string().nullable(),
+  position: z.number().int().positive(),
+  enqueuedAt: z.string(),
+  attempts: z.number().int().nonnegative(),
+  lastEvaluatedAt: z.string(),
+});
+export type MainChatAdmissionQueueEntry = z.infer<typeof MainChatAdmissionQueueEntrySchema>;
+
+export const MainChatTaskAdmissionStatusSchema = z.enum(["queued", "rejected", "dispatched"]);
+export type MainChatTaskAdmissionStatus = z.infer<typeof MainChatTaskAdmissionStatusSchema>;
+
+export const MainChatTaskAdmissionStateSchema = z.object({
+  status: MainChatTaskAdmissionStatusSchema,
+  queueId: z.string().nullable(),
+  position: z.number().int().positive().nullable(),
+  targetServerId: z.string().nullable(),
+  hostLabel: z.string().nullable(),
+  reasonCode: MainChatResourcePressureReasonSchema.nullable(),
+  reason: z.string().nullable(),
+  suggestion: z.string().nullable(),
+  updatedAt: z.string(),
+});
+export type MainChatTaskAdmissionState = z.infer<typeof MainChatTaskAdmissionStateSchema>;
+
+export const MainChatResourceAdmissionSummarySchema = z.object({
+  enabled: z.boolean(),
+  totalHosts: z.number().int().nonnegative(),
+  healthyHosts: z.number().int().nonnegative(),
+  pressuredHosts: z.number().int().nonnegative(),
+  offlineHosts: z.number().int().nonnegative(),
+  queuedCount: z.number().int().nonnegative(),
+  totalActiveManagedAgents: z.number().int().nonnegative(),
+});
+export type MainChatResourceAdmissionSummary = z.infer<
+  typeof MainChatResourceAdmissionSummarySchema
+>;
+
+export const MainChatResourceAdmissionSnapshotSchema = z.object({
+  policy: MainChatResourceAdmissionPolicySchema,
+  hosts: z.array(MainChatHostResourceSnapshotSchema),
+  queue: z.array(MainChatAdmissionQueueEntrySchema),
+  summary: MainChatResourceAdmissionSummarySchema,
+  updatedAt: z.string(),
+});
+export type MainChatResourceAdmissionSnapshot = z.infer<
+  typeof MainChatResourceAdmissionSnapshotSchema
+>;
+
+export const MainChatDrainAdmissionActionSchema = z.enum([
+  "drain",
+  "force_dispatch",
+  "clear",
+  "remove",
+]);
+export type MainChatDrainAdmissionAction = z.infer<typeof MainChatDrainAdmissionActionSchema>;
+
+// ============================================================================
+// P2-3 Stateless Background Supervision & On-Demand Tool Loading Schemas
+// ============================================================================
+
+export const MainChatToolGroupIdSchema = z.enum(MAIN_CHAT_TOOL_GROUP_IDS);
+export type MainChatToolGroupId = z.infer<typeof MainChatToolGroupIdSchema>;
+
+export const MainChatStatelessSupervisionDecisionSchema = z.enum([
+  "silent",
+  "log_only",
+  "escalate_main",
+]);
+export type MainChatStatelessSupervisionDecision = z.infer<
+  typeof MainChatStatelessSupervisionDecisionSchema
+>;
+
+// ============================================================================
+// P2-4 Idle Subagent Auto-Archive & Prompt Library Schemas
+// ============================================================================
+
+export const MainChatIdleArchivePolicySchema = z.object({
+  enabled: z.boolean(),
+  idleThresholdMinutes: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN)
+    .max(MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN),
+  sweepIntervalMinutes: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN)
+    .max(MAIN_CHAT_MAX_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN),
+  maxArchivePerSweep: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP)
+    .max(MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP),
+});
+export type MainChatIdleArchivePolicy = z.infer<typeof MainChatIdleArchivePolicySchema>;
+
+export const MainChatIdleArchivePolicyPatchSchema = MainChatIdleArchivePolicySchema.partial();
+export type MainChatIdleArchivePolicyPatch = z.infer<typeof MainChatIdleArchivePolicyPatchSchema>;
+
+export const MainChatIdleArchiveRefusalCodeSchema = z.enum([
+  "is_main_chat",
+  "is_direction_leader",
+  "is_manual_session",
+  "already_archived",
+  "is_running",
+  "has_pending_permission",
+  "has_open_decision",
+  "has_unclosed_task",
+  "has_active_pr_followup",
+  "awaits_reply",
+  "below_idle_threshold",
+]);
+export type MainChatIdleArchiveRefusalCode = z.infer<typeof MainChatIdleArchiveRefusalCodeSchema>;
+
+export const MainChatIdleArchiveOutcomeSchema = z.enum([
+  "archived",
+  "eligible",
+  "refused",
+  "failed",
+]);
+export type MainChatIdleArchiveOutcome = z.infer<typeof MainChatIdleArchiveOutcomeSchema>;
+
+export const MainChatIdleArchiveAuditRecordSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  serverId: z.string(),
+  title: z.string(),
+  taskId: z.string().nullable(),
+  idleMinutes: z.number().nonnegative(),
+  outcome: MainChatIdleArchiveOutcomeSchema,
+  refusalCode: MainChatIdleArchiveRefusalCodeSchema.nullable(),
+  reason: z.string(),
+  sweptAt: z.string(),
+  trigger: z.enum(["scheduled", "manual"]),
+});
+export type MainChatIdleArchiveAuditRecord = z.infer<typeof MainChatIdleArchiveAuditRecordSchema>;
+
+export const MainChatIdleArchiveSweepResultSchema = z.object({
+  dryRun: z.boolean(),
+  evaluatedCount: z.number().int().nonnegative(),
+  eligibleCount: z.number().int().nonnegative(),
+  archivedCount: z.number().int().nonnegative(),
+  refusedCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  archived: z.array(MainChatIdleArchiveAuditRecordSchema),
+  eligible: z.array(MainChatIdleArchiveAuditRecordSchema),
+  refused: z.array(MainChatIdleArchiveAuditRecordSchema),
+  auditLog: z.array(MainChatIdleArchiveAuditRecordSchema),
+  sweptAt: z.string(),
+});
+export type MainChatIdleArchiveSweepResult = z.infer<typeof MainChatIdleArchiveSweepResultSchema>;
+
+export const MainChatPromptTemplateCategorySchema = z.enum([
+  "workflow",
+  "review",
+  "debug",
+  "planning",
+  "custom",
+]);
+export type MainChatPromptTemplateCategory = z.infer<typeof MainChatPromptTemplateCategorySchema>;
+
+export const MainChatPromptTemplateSchema = z.object({
+  id: z.string().min(1),
+  slug: z.string().min(1).max(MAIN_CHAT_PROMPT_SLUG_MAX_CHARS),
+  title: z.string().min(1).max(MAIN_CHAT_PROMPT_TITLE_MAX_CHARS),
+  description: z.string().max(MAIN_CHAT_PROMPT_DESC_MAX_CHARS),
+  content: z.string().min(1).max(MAIN_CHAT_PROMPT_CONTENT_MAX_CHARS),
+  argumentHint: z.string().max(80).nullable().optional(),
+  builtin: z.boolean(),
+  category: MainChatPromptTemplateCategorySchema.optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type MainChatPromptTemplate = z.infer<typeof MainChatPromptTemplateSchema>;
+
+export const MainChatPromptTemplateInputSchema = z.object({
+  id: z.string().min(1).optional(),
+  slug: z.string().trim().min(1).max(MAIN_CHAT_PROMPT_SLUG_MAX_CHARS),
+  title: z.string().trim().min(1).max(MAIN_CHAT_PROMPT_TITLE_MAX_CHARS),
+  description: z.string().trim().max(MAIN_CHAT_PROMPT_DESC_MAX_CHARS).optional(),
+  content: z.string().trim().min(1).max(MAIN_CHAT_PROMPT_CONTENT_MAX_CHARS),
+  argumentHint: z.string().trim().max(80).nullable().optional(),
+  category: MainChatPromptTemplateCategorySchema.optional(),
+});
+export type MainChatPromptTemplateInput = z.infer<typeof MainChatPromptTemplateInputSchema>;
+
 export const MainChatSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   autoCompactEnabled: z.boolean().optional(),
@@ -691,6 +997,10 @@ export const MainChatSettingsSchema = z.object({
     .optional(),
   modelConfig: MainChatModelConfigSchema.optional(),
   notificationPolicy: MainChatNotificationPolicySchema.optional(),
+  resourceAdmission: MainChatResourceAdmissionPolicySchema.optional(),
+  statelessBackgroundSupervision: z.boolean().optional(),
+  onDemandToolLoading: z.boolean().optional(),
+  idleArchivePolicy: MainChatIdleArchivePolicySchema.optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
   taskLessonsEnabled: z.boolean().optional(),
@@ -731,6 +1041,10 @@ export const MainChatSettingsPatchSchema = z.object({
     .optional(),
   modelConfig: MainChatModelConfigPatchSchema.optional(),
   notificationPolicy: MainChatNotificationPolicyPatchSchema.optional(),
+  resourceAdmission: MainChatResourceAdmissionPolicyPatchSchema.optional(),
+  statelessBackgroundSupervision: z.boolean().optional(),
+  onDemandToolLoading: z.boolean().optional(),
+  idleArchivePolicy: MainChatIdleArchivePolicyPatchSchema.optional(),
   mainBackgroundFolded: z.boolean().optional(),
   mainTasksQuiet: z.boolean().optional(),
   taskLessonsEnabled: z.boolean().optional(),
@@ -1755,6 +2069,254 @@ export function resolveMainChatNotificationPolicy(
   return normalizeMainChatNotificationPolicy(settings?.notificationPolicy);
 }
 
+export function createDefaultMainChatResourceAdmissionPolicy(): MainChatResourceAdmissionPolicy {
+  return {
+    enabled: false,
+    maxConcurrentPerHost: MAIN_CHAT_DEFAULT_MAX_CONCURRENT_PER_HOST,
+    maxCpuPercent: MAIN_CHAT_DEFAULT_MAX_CPU_PERCENT,
+    minFreeMemoryMb: MAIN_CHAT_DEFAULT_MIN_FREE_MEMORY_MB,
+    queueWhenPressured: true,
+  };
+}
+
+export function normalizeMainChatResourceAdmissionPolicy(
+  raw: Partial<MainChatResourceAdmissionPolicy> | null | undefined,
+): MainChatResourceAdmissionPolicy {
+  const defaults = createDefaultMainChatResourceAdmissionPolicy();
+  if (!raw) return defaults;
+  const clampInt = (value: unknown, min: number, max: number, fallback: number): number => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(value)));
+  };
+  return {
+    enabled: raw.enabled === true,
+    maxConcurrentPerHost: clampInt(
+      raw.maxConcurrentPerHost,
+      MAIN_CHAT_MIN_CONCURRENT_PER_HOST,
+      MAIN_CHAT_MAX_CONCURRENT_PER_HOST,
+      defaults.maxConcurrentPerHost,
+    ),
+    maxCpuPercent: clampInt(
+      raw.maxCpuPercent,
+      MAIN_CHAT_MIN_CPU_PERCENT,
+      MAIN_CHAT_MAX_CPU_PERCENT,
+      defaults.maxCpuPercent,
+    ),
+    minFreeMemoryMb: clampInt(
+      raw.minFreeMemoryMb,
+      MAIN_CHAT_MIN_FREE_MEMORY_MB,
+      MAIN_CHAT_MAX_FREE_MEMORY_MB,
+      defaults.minFreeMemoryMb,
+    ),
+    queueWhenPressured: raw.queueWhenPressured !== false,
+  };
+}
+
+export function resolveMainChatResourceAdmissionPolicy(
+  settings: Pick<MainChatSettings, "resourceAdmission"> | null | undefined,
+): MainChatResourceAdmissionPolicy {
+  return normalizeMainChatResourceAdmissionPolicy(settings?.resourceAdmission);
+}
+
+export function isMainChatStatelessBackgroundSupervisionEnabled(
+  settings: Pick<MainChatSettings, "statelessBackgroundSupervision"> | null | undefined,
+): boolean {
+  return settings?.statelessBackgroundSupervision === true;
+}
+
+export function isMainChatOnDemandToolLoadingEnabled(
+  settings: Pick<MainChatSettings, "onDemandToolLoading"> | null | undefined,
+): boolean {
+  return settings?.onDemandToolLoading === true;
+}
+
+export function createDefaultMainChatIdleArchivePolicy(): MainChatIdleArchivePolicy {
+  return {
+    enabled: false,
+    idleThresholdMinutes: MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_THRESHOLD_MIN,
+    sweepIntervalMinutes: MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+    maxArchivePerSweep: MAIN_CHAT_DEFAULT_IDLE_ARCHIVE_MAX_PER_SWEEP,
+  };
+}
+
+export function normalizeMainChatIdleArchivePolicy(
+  raw: Partial<MainChatIdleArchivePolicy> | null | undefined,
+): MainChatIdleArchivePolicy {
+  const defaults = createDefaultMainChatIdleArchivePolicy();
+  if (!raw) return defaults;
+  const clampInt = (value: unknown, min: number, max: number, fallback: number): number => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(value)));
+  };
+  return {
+    enabled: raw.enabled === true,
+    idleThresholdMinutes: clampInt(
+      raw.idleThresholdMinutes,
+      MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN,
+      MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN,
+      defaults.idleThresholdMinutes,
+    ),
+    sweepIntervalMinutes: clampInt(
+      raw.sweepIntervalMinutes,
+      MAIN_CHAT_MIN_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+      MAIN_CHAT_MAX_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+      defaults.sweepIntervalMinutes,
+    ),
+    maxArchivePerSweep: clampInt(
+      raw.maxArchivePerSweep,
+      MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP,
+      MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP,
+      defaults.maxArchivePerSweep,
+    ),
+  };
+}
+
+export function resolveMainChatIdleArchivePolicy(
+  settings: Pick<MainChatSettings, "idleArchivePolicy"> | null | undefined,
+): MainChatIdleArchivePolicy {
+  return normalizeMainChatIdleArchivePolicy(settings?.idleArchivePolicy);
+}
+
+const BUILTIN_PROMPT_EPOCH = "2026-01-01T00:00:00.000Z";
+
+export const BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES: readonly MainChatPromptTemplate[] = [
+  {
+    id: "builtin_review",
+    slug: "review",
+    title: "代码审阅与风险核查",
+    description: "针对指定改动或 PR 执行缺陷、边界与回归风险核查",
+    content:
+      "请对 {{arg}} 进行系统化代码审阅：按严重程度列出真实缺陷、边界条件与回归风险，给出具体文件行号和最小修复建议，不要泛泛点评风格。",
+    argumentHint: "<PR/分支/模块>",
+    builtin: true,
+    category: "review",
+    createdAt: BUILTIN_PROMPT_EPOCH,
+    updatedAt: BUILTIN_PROMPT_EPOCH,
+  },
+  {
+    id: "builtin_bugfix",
+    slug: "bugfix",
+    title: "根因定位与最小修复",
+    description: "先复现并确认根因，再实施最小范围修复与回归验证",
+    content:
+      "请排查并修复以下问题：{{arg}}。要求先用最小复现或测试定位根因，再执行最小侵入修复，并附上真实测试验证结果。",
+    argumentHint: "<故障现象或报错>",
+    builtin: true,
+    category: "debug",
+    createdAt: BUILTIN_PROMPT_EPOCH,
+    updatedAt: BUILTIN_PROMPT_EPOCH,
+  },
+  {
+    id: "builtin_plan",
+    slug: "plan",
+    title: "拆解可执行任务计划",
+    description: "将目标拆解为带验收标准和依赖顺序的任务切片",
+    content:
+      "请为以下目标拆解可执行计划：{{arg}}。明确每个子任务的目标、读写模式、依赖顺序与可验证验收标准，涉及改动先出计划卡待我确认。",
+    argumentHint: "<需求或重构目标>",
+    builtin: true,
+    category: "planning",
+    createdAt: BUILTIN_PROMPT_EPOCH,
+    updatedAt: BUILTIN_PROMPT_EPOCH,
+  },
+  {
+    id: "builtin_brief",
+    slug: "brief",
+    title: "全局态势与阻塞简报",
+    description: "汇总当前所有活跃任务、待拍板事项与优先下一步",
+    content:
+      "请给我一份精简的全局进展简报：列出当前所有活跃任务与会话状态、待我拍板或审批的阻塞点、以及你建议的下一步优先动作{{arg}}。",
+    argumentHint: "[聚焦范围]",
+    builtin: true,
+    category: "workflow",
+    createdAt: BUILTIN_PROMPT_EPOCH,
+    updatedAt: BUILTIN_PROMPT_EPOCH,
+  },
+  {
+    id: "builtin_qa",
+    slug: "qa",
+    title: "回归验证与证据清单",
+    description: "执行构建、类型检查、单测与端到端检查并逐条回报证据",
+    content:
+      "请围绕 {{arg}} 执行完整回归验收：运行类型检查、lint、相关单元与集成测试，逐条给出真实命令输出与遗留风险。",
+    argumentHint: "<改动模块或 PR>",
+    builtin: true,
+    category: "review",
+    createdAt: BUILTIN_PROMPT_EPOCH,
+    updatedAt: BUILTIN_PROMPT_EPOCH,
+  },
+];
+
+const RESERVED_PROMPT_SLUG_SET: ReadonlySet<string> = new Set(MAIN_CHAT_PROMPT_RESERVED_SLUGS);
+const BUILTIN_PROMPT_SLUG_SET: ReadonlySet<string> = new Set(
+  BUILTIN_MAIN_CHAT_PROMPT_TEMPLATES.map((item) => item.slug),
+);
+
+export function normalizeMainChatPromptSlug(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^\/+/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAIN_CHAT_PROMPT_SLUG_MAX_CHARS);
+}
+
+export function isReservedMainChatPromptSlug(slug: string): boolean {
+  return RESERVED_PROMPT_SLUG_SET.has(normalizeMainChatPromptSlug(slug));
+}
+
+export function isBuiltinMainChatPromptSlug(slug: string): boolean {
+  return BUILTIN_PROMPT_SLUG_SET.has(normalizeMainChatPromptSlug(slug));
+}
+
+const PROMPT_ARG_PLACEHOLDER_RE = /\{\{\s*arg\s*\}\}/gi;
+
+export function promptTemplateHasArgPlaceholder(content: string): boolean {
+  PROMPT_ARG_PLACEHOLDER_RE.lastIndex = 0;
+  return PROMPT_ARG_PLACEHOLDER_RE.test(content);
+}
+
+export function expandMainChatPromptTemplate(content: string, argText = ""): string {
+  const trimmedArg = argText.trim();
+  const hasPlaceholder = promptTemplateHasArgPlaceholder(content);
+  if (hasPlaceholder) {
+    return content
+      .replace(PROMPT_ARG_PLACEHOLDER_RE, trimmedArg)
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+  if (!trimmedArg) return content.trim();
+  return `${content.trim()}\n\n${trimmedArg}`;
+}
+
+export interface ResolvedPromptTemplateSlashInvocation {
+  template: MainChatPromptTemplate;
+  args: string;
+  expandedText: string;
+}
+
+export function resolvePromptTemplateSlashInvocation(input: {
+  text: string;
+  templates: readonly MainChatPromptTemplate[];
+  hasAttachments?: boolean;
+}): ResolvedPromptTemplateSlashInvocation | null {
+  const trimmed = input.text.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const match = /^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  if (!match) return null;
+  const slug = match[1]!.toLowerCase();
+  if (RESERVED_PROMPT_SLUG_SET.has(slug)) return null;
+  const matched = input.templates.find((item) => item.slug.toLowerCase() === slug);
+  if (!matched) return null;
+  const args = (match[2] ?? "").trim();
+  return {
+    template: matched,
+    args,
+    expandedText: expandMainChatPromptTemplate(matched.content, args),
+  };
+}
+
 export function createDefaultMainChatSettings(
   style: MainChatStyle = "conservative",
 ): MainChatSettings {
@@ -1767,6 +2329,10 @@ export function createDefaultMainChatSettings(
     limitFallbacks: [],
     modelConfig: createDefaultMainChatModelConfig(),
     notificationPolicy: createDefaultMainChatNotificationPolicy(),
+    resourceAdmission: createDefaultMainChatResourceAdmissionPolicy(),
+    statelessBackgroundSupervision: false,
+    onDemandToolLoading: false,
+    idleArchivePolicy: createDefaultMainChatIdleArchivePolicy(),
     mainBackgroundFolded: true,
     mainTasksQuiet: true,
     taskLessonsEnabled: true,
@@ -1837,6 +2403,8 @@ function resolveMergeBaseSettings(
   const currentLimitFallbacks = resolveMainChatLimitFallbacks(current);
   const currentModelConfig = resolveMainChatModelConfig(current);
   const currentNotificationPolicy = resolveMainChatNotificationPolicy(current);
+  const currentResourceAdmission = resolveMainChatResourceAdmissionPolicy(current);
+  const currentIdleArchivePolicy = resolveMainChatIdleArchivePolicy(current);
   const shared = {
     enabled: isMainChatEnabled(current),
     autoCompactEnabled: isMainChatAutoCompactEnabled(current),
@@ -1845,6 +2413,10 @@ function resolveMergeBaseSettings(
     limitFallbacks: currentLimitFallbacks,
     modelConfig: currentModelConfig,
     notificationPolicy: currentNotificationPolicy,
+    resourceAdmission: currentResourceAdmission,
+    statelessBackgroundSupervision: isMainChatStatelessBackgroundSupervisionEnabled(current),
+    onDemandToolLoading: isMainChatOnDemandToolLoadingEnabled(current),
+    idleArchivePolicy: currentIdleArchivePolicy,
     mainBackgroundFolded: isMainChatBackgroundFolded(current),
     mainTasksQuiet: isMainChatTasksQuiet(current),
     taskLessonsEnabled: isMainChatTaskLessonsEnabled(current),
@@ -1955,6 +2527,9 @@ function mergeMainChatToggleAndGovernanceFields(
     mainTasksQuiet: patch.mainTasksQuiet ?? base.mainTasksQuiet ?? true,
     taskLessonsEnabled: patch.taskLessonsEnabled ?? base.taskLessonsEnabled ?? true,
     deliveryGatePolicy: patch.deliveryGatePolicy ?? base.deliveryGatePolicy ?? "merged",
+    statelessBackgroundSupervision:
+      patch.statelessBackgroundSupervision ?? base.statelessBackgroundSupervision ?? false,
+    onDemandToolLoading: patch.onDemandToolLoading ?? base.onDemandToolLoading ?? false,
   };
 }
 
@@ -2236,6 +2811,51 @@ function mergeNotificationPolicy(
   });
 }
 
+function mergeResourceAdmissionPolicy(
+  base: MainChatSettings,
+  patch: MainChatSettingsPatch["resourceAdmission"],
+): MainChatResourceAdmissionPolicy {
+  const current = resolveMainChatResourceAdmissionPolicy(base);
+  if (!patch) return current;
+  return normalizeMainChatResourceAdmissionPolicy({
+    enabled: patch.enabled !== undefined ? patch.enabled : current.enabled,
+    maxConcurrentPerHost:
+      patch.maxConcurrentPerHost !== undefined
+        ? patch.maxConcurrentPerHost
+        : current.maxConcurrentPerHost,
+    maxCpuPercent: patch.maxCpuPercent !== undefined ? patch.maxCpuPercent : current.maxCpuPercent,
+    minFreeMemoryMb:
+      patch.minFreeMemoryMb !== undefined ? patch.minFreeMemoryMb : current.minFreeMemoryMb,
+    queueWhenPressured:
+      patch.queueWhenPressured !== undefined
+        ? patch.queueWhenPressured
+        : current.queueWhenPressured,
+  });
+}
+
+function mergeIdleArchivePolicy(
+  base: MainChatSettings,
+  patch: MainChatSettingsPatch["idleArchivePolicy"],
+): MainChatIdleArchivePolicy {
+  const current = resolveMainChatIdleArchivePolicy(base);
+  if (!patch) return current;
+  return normalizeMainChatIdleArchivePolicy({
+    enabled: patch.enabled !== undefined ? patch.enabled : current.enabled,
+    idleThresholdMinutes:
+      patch.idleThresholdMinutes !== undefined
+        ? patch.idleThresholdMinutes
+        : current.idleThresholdMinutes,
+    sweepIntervalMinutes:
+      patch.sweepIntervalMinutes !== undefined
+        ? patch.sweepIntervalMinutes
+        : current.sweepIntervalMinutes,
+    maxArchivePerSweep:
+      patch.maxArchivePerSweep !== undefined
+        ? patch.maxArchivePerSweep
+        : current.maxArchivePerSweep,
+  });
+}
+
 export function mergeMainChatSettings(
   current: MainChatSettings,
   patch: MainChatSettingsPatch,
@@ -2259,6 +2879,8 @@ export function mergeMainChatSettings(
     limitFallbacks: nextLimitFallbacks,
     modelConfig: mergeModelConfig(base, patch.modelConfig),
     notificationPolicy: mergeNotificationPolicy(base, patch.notificationPolicy),
+    resourceAdmission: mergeResourceAdmissionPolicy(base, patch.resourceAdmission),
+    idleArchivePolicy: mergeIdleArchivePolicy(base, patch.idleArchivePolicy),
     profile: mergeProfileConfig(current, base, patch.profile),
     title: patch.title?.trim() || base.title || MAIN_CHAT_DEFAULT_TITLE,
     style: patch.style ?? base.style,
@@ -2668,6 +3290,7 @@ export const MainChatTaskRecordSchema = z.object({
   lastModel: z.string().nullable().optional(),
   lastThinkingOptionId: z.string().nullable().optional(),
   lastRuleDiagnostic: MainChatRuleDiagnosticSchema.nullable().optional(),
+  admissionState: MainChatTaskAdmissionStateSchema.nullable().optional(),
 });
 export type MainChatTaskRecord = z.infer<typeof MainChatTaskRecordSchema>;
 
@@ -2779,6 +3402,12 @@ export const MainChatMetricsSchema = z.object({
   silentTurns: z.number().int().nonnegative().optional(),
   missingReplyRecoveries: z.number().int().nonnegative().optional(),
   compactions: z.number().int().nonnegative().optional(),
+  admissionQueued: z.number().int().nonnegative().optional(),
+  admissionRejected: z.number().int().nonnegative().optional(),
+  admissionDequeued: z.number().int().nonnegative().optional(),
+  statelessSupervisionRounds: z.number().int().nonnegative().optional(),
+  statelessSupervisionEscalations: z.number().int().nonnegative().optional(),
+  idleSubagentsArchived: z.number().int().nonnegative().optional(),
 });
 export type MainChatMetrics = z.infer<typeof MainChatMetricsSchema>;
 
@@ -2814,6 +3443,9 @@ export const MainChatOverviewSchema = z.object({
   projectLessons: z.array(MainChatProjectLessonSchema).optional(),
   notificationSummary: MainChatNotificationSummarySchema.optional(),
   recentNotificationReceipts: z.array(MainChatNotificationReceiptSchema).optional(),
+  resourceAdmission: MainChatResourceAdmissionSnapshotSchema.optional(),
+  idleArchiveAudit: z.array(MainChatIdleArchiveAuditRecordSchema).optional(),
+  promptLibraryCount: z.number().int().nonnegative().optional(),
 });
 export type MainChatOverview = z.infer<typeof MainChatOverviewSchema>;
 
@@ -4225,6 +4857,192 @@ export const MainChatAckNotificationReceiptResponseSchema = z.object({
 });
 export type MainChatAckNotificationReceiptResponse = z.infer<
   typeof MainChatAckNotificationReceiptResponseSchema
+>;
+
+// ============================================================================
+// P2-2 Cross-Host Resource Admission RPC Schemas
+// ============================================================================
+
+export const MainChatGetResourceAdmissionRequestSchema = z.object({
+  type: z.literal("main_chat.get_resource_admission.request"),
+  requestId: z.string(),
+  forceRefresh: z.boolean().optional(),
+});
+export type MainChatGetResourceAdmissionRequest = z.infer<
+  typeof MainChatGetResourceAdmissionRequestSchema
+>;
+
+export const MainChatGetResourceAdmissionResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  snapshot: MainChatResourceAdmissionSnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatGetResourceAdmissionResponsePayload = z.infer<
+  typeof MainChatGetResourceAdmissionResponsePayloadSchema
+>;
+
+export const MainChatGetResourceAdmissionResponseSchema = z.object({
+  type: z.literal("main_chat.get_resource_admission.response"),
+  payload: MainChatGetResourceAdmissionResponsePayloadSchema,
+});
+export type MainChatGetResourceAdmissionResponse = z.infer<
+  typeof MainChatGetResourceAdmissionResponseSchema
+>;
+
+export const MainChatDrainAdmissionQueueRequestSchema = z.object({
+  type: z.literal("main_chat.drain_admission_queue.request"),
+  requestId: z.string(),
+  action: MainChatDrainAdmissionActionSchema.optional(),
+  queueId: z.string().min(1).optional(),
+  serverId: z.string().min(1).optional(),
+});
+export type MainChatDrainAdmissionQueueRequest = z.infer<
+  typeof MainChatDrainAdmissionQueueRequestSchema
+>;
+
+export const MainChatDrainAdmissionQueueResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  action: MainChatDrainAdmissionActionSchema,
+  dispatchedCount: z.number().int().nonnegative(),
+  removedCount: z.number().int().nonnegative(),
+  remainingCount: z.number().int().nonnegative(),
+  snapshot: MainChatResourceAdmissionSnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatDrainAdmissionQueueResponsePayload = z.infer<
+  typeof MainChatDrainAdmissionQueueResponsePayloadSchema
+>;
+
+export const MainChatDrainAdmissionQueueResponseSchema = z.object({
+  type: z.literal("main_chat.drain_admission_queue.response"),
+  payload: MainChatDrainAdmissionQueueResponsePayloadSchema,
+});
+export type MainChatDrainAdmissionQueueResponse = z.infer<
+  typeof MainChatDrainAdmissionQueueResponseSchema
+>;
+
+// ============================================================================
+// P2-4 Idle Subagent Auto-Archive & Prompt Library RPC Schemas
+// ============================================================================
+
+export const MainChatSweepIdleSubagentsRequestSchema = z.object({
+  type: z.literal("main_chat.sweep_idle_subagents.request"),
+  requestId: z.string(),
+  dryRun: z.boolean().optional(),
+  idleThresholdMinutes: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN)
+    .max(MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN)
+    .optional(),
+  limit: z
+    .number()
+    .int()
+    .min(MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP)
+    .max(MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP)
+    .optional(),
+});
+export type MainChatSweepIdleSubagentsRequest = z.infer<
+  typeof MainChatSweepIdleSubagentsRequestSchema
+>;
+
+export const MainChatSweepIdleSubagentsResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  result: MainChatIdleArchiveSweepResultSchema.nullable(),
+  error: z.string().nullable(),
+});
+export type MainChatSweepIdleSubagentsResponsePayload = z.infer<
+  typeof MainChatSweepIdleSubagentsResponsePayloadSchema
+>;
+
+export const MainChatSweepIdleSubagentsResponseSchema = z.object({
+  type: z.literal("main_chat.sweep_idle_subagents.response"),
+  payload: MainChatSweepIdleSubagentsResponsePayloadSchema,
+});
+export type MainChatSweepIdleSubagentsResponse = z.infer<
+  typeof MainChatSweepIdleSubagentsResponseSchema
+>;
+
+export const MainChatListPromptLibraryRequestSchema = z.object({
+  type: z.literal("main_chat.list_prompt_library.request"),
+  requestId: z.string(),
+});
+export type MainChatListPromptLibraryRequest = z.infer<
+  typeof MainChatListPromptLibraryRequestSchema
+>;
+
+export const MainChatListPromptLibraryResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  templates: z.array(MainChatPromptTemplateSchema),
+  builtinCount: z.number().int().nonnegative(),
+  customCount: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type MainChatListPromptLibraryResponsePayload = z.infer<
+  typeof MainChatListPromptLibraryResponsePayloadSchema
+>;
+
+export const MainChatListPromptLibraryResponseSchema = z.object({
+  type: z.literal("main_chat.list_prompt_library.response"),
+  payload: MainChatListPromptLibraryResponsePayloadSchema,
+});
+export type MainChatListPromptLibraryResponse = z.infer<
+  typeof MainChatListPromptLibraryResponseSchema
+>;
+
+export const MainChatSavePromptTemplateRequestSchema = z.object({
+  type: z.literal("main_chat.save_prompt_template.request"),
+  requestId: z.string(),
+  template: MainChatPromptTemplateInputSchema,
+});
+export type MainChatSavePromptTemplateRequest = z.infer<
+  typeof MainChatSavePromptTemplateRequestSchema
+>;
+
+export const MainChatSavePromptTemplateResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  template: MainChatPromptTemplateSchema.nullable(),
+  templates: z.array(MainChatPromptTemplateSchema),
+  error: z.string().nullable(),
+});
+export type MainChatSavePromptTemplateResponsePayload = z.infer<
+  typeof MainChatSavePromptTemplateResponsePayloadSchema
+>;
+
+export const MainChatSavePromptTemplateResponseSchema = z.object({
+  type: z.literal("main_chat.save_prompt_template.response"),
+  payload: MainChatSavePromptTemplateResponsePayloadSchema,
+});
+export type MainChatSavePromptTemplateResponse = z.infer<
+  typeof MainChatSavePromptTemplateResponseSchema
+>;
+
+export const MainChatDeletePromptTemplateRequestSchema = z.object({
+  type: z.literal("main_chat.delete_prompt_template.request"),
+  requestId: z.string(),
+  id: z.string().min(1).optional(),
+  slug: z.string().min(1).optional(),
+});
+export type MainChatDeletePromptTemplateRequest = z.infer<
+  typeof MainChatDeletePromptTemplateRequestSchema
+>;
+
+export const MainChatDeletePromptTemplateResponsePayloadSchema = z.object({
+  requestId: z.string(),
+  deleted: z.boolean(),
+  templates: z.array(MainChatPromptTemplateSchema),
+  error: z.string().nullable(),
+});
+export type MainChatDeletePromptTemplateResponsePayload = z.infer<
+  typeof MainChatDeletePromptTemplateResponsePayloadSchema
+>;
+
+export const MainChatDeletePromptTemplateResponseSchema = z.object({
+  type: z.literal("main_chat.delete_prompt_template.response"),
+  payload: MainChatDeletePromptTemplateResponsePayloadSchema,
+});
+export type MainChatDeletePromptTemplateResponse = z.infer<
+  typeof MainChatDeletePromptTemplateResponseSchema
 >;
 
 export interface MainChatTaskLabelsMeta {

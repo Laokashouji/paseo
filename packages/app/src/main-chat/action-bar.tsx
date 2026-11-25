@@ -56,6 +56,7 @@ import {
   type ActionBarTaskItem,
   type CompactDockEntry,
 } from "./action-bar-model";
+import { deriveTaskAdmissionBadge } from "./admission-ui";
 import { ChildPermissionWrapper } from "./child-permission-wrapper";
 import { MainChatDecisionCard } from "./decision-card";
 import { useIsCompactMainChatLayout, useOpenMainChatTaskTarget } from "./open-task-target";
@@ -371,10 +372,19 @@ const CapsuleButton = memo(function CapsuleButton({
 function resolveCompactDockStatusLabel(
   entry: CompactDockEntry,
   dockGateBadge: ReturnType<typeof deriveDeliveryGateBadge>,
-  t: (key: string) => string,
+  dockAdmissionBadge: ReturnType<typeof deriveTaskAdmissionBadge>,
+  t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
   if (entry.kind === "needsYou") {
     return t(resolveNeedsYouKindKey(entry.item));
+  }
+  if (dockAdmissionBadge?.status === "queued") {
+    return t("mainChat.resourceAdmission.queuedBadge", {
+      position: dockAdmissionBadge.position ?? 1,
+    });
+  }
+  if (dockAdmissionBadge?.status === "rejected") {
+    return t("mainChat.resourceAdmission.rejectedBadge");
   }
   if (entry.item.dependencyState === "blocked") {
     return t("mainChat.taskDag.blockedBadge");
@@ -401,6 +411,9 @@ function renderCompactDockLeadingIndicator(
         <View style={isFailed ? styles.haloFailedInner : styles.haloNeedsYouInner} />
       </View>
     );
+  }
+  if (entry.item.admissionState?.status === "queued") {
+    return <ThemedClockIcon size={12} uniProps={warningIconMapping} />;
   }
   if (entry.item.dependencyState === "blocked") {
     return <ThemedLockIcon size={12} uniProps={warningIconMapping} />;
@@ -479,6 +492,9 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
   const dockGateBadge = inProgressItem
     ? deriveDeliveryGateBadge(inProgressItem.deliveryGate)
     : null;
+  const dockAdmissionBadge = inProgressItem
+    ? deriveTaskAdmissionBadge(inProgressItem.admissionState)
+    : null;
   const dockRuleBadge = deriveZeroTokenDiagnosticBadge(resolveDockRuleDiagnostic(entry));
   const title = entry.item.title;
   const secondaryText = useMemo(() => {
@@ -486,6 +502,9 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
     if (entry.kind === "needsYou") {
       const candidate = entry.item.reason ?? entry.item.hostLabel;
       return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
+    }
+    if (entry.item.admissionState?.status === "queued" && entry.item.admissionState.reason) {
+      return entry.item.admissionState.reason.replace(/\s+/g, " ").trim();
     }
     if (entry.item.dependencyState === "blocked" && entry.item.blockedByTitles.length > 0) {
       return t("mainChat.taskDag.blockedMeta", {
@@ -496,7 +515,7 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
     return candidate ? candidate.replace(/\s+/g, " ").trim() : null;
   }, [entry, isCompact, t]);
 
-  const statusLabel = resolveCompactDockStatusLabel(entry, dockGateBadge, t);
+  const statusLabel = resolveCompactDockStatusLabel(entry, dockGateBadge, dockAdmissionBadge, t);
   const leadingIndicator = renderCompactDockLeadingIndicator(entry, isFailed);
   const retryLabel = resolveDockRetryButtonLabel(isRetrying, isCompact, t);
 
@@ -510,10 +529,17 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
       isNeedsYou && (isFailed ? styles.compactDockStatusFailed : styles.compactDockStatusNeedsYou),
       !isNeedsYou && dockGateBadge?.isBlocked && styles.compactDockStatusFailed,
       !isNeedsYou &&
-        inProgressItem?.dependencyState === "blocked" &&
+        (inProgressItem?.dependencyState === "blocked" ||
+          dockAdmissionBadge?.status === "queued") &&
         styles.compactDockStatusNeedsYou,
     ],
-    [dockGateBadge?.isBlocked, inProgressItem?.dependencyState, isFailed, isNeedsYou],
+    [
+      dockAdmissionBadge?.status,
+      dockGateBadge?.isBlocked,
+      inProgressItem?.dependencyState,
+      isFailed,
+      isNeedsYou,
+    ],
   );
 
   return (
@@ -559,9 +585,15 @@ const CompactStatusDockRow = memo(function CompactStatusDockRow({
               label={`${dockGateBadge.prRef} ${t(dockGateBadge.statusKey)}`}
             />
           ) : null}
-          <Text style={statusTextStyle} numberOfLines={1}>
-            {statusLabel}
-          </Text>
+          {dockAdmissionBadge ? (
+            <View testID={`main-chat-compact-dock-admission-badge-${entry.item.id}`}>
+              <StatusBadge size="xs" variant={dockAdmissionBadge.variant} label={statusLabel} />
+            </View>
+          ) : (
+            <Text style={statusTextStyle} numberOfLines={1}>
+              {statusLabel}
+            </Text>
+          )}
           {hiddenCountBadge > 0 ? (
             <Text style={styles.compactDockMore} numberOfLines={1}>
               {t("mainChat.actionBar.compactDockMore", { count: hiddenCountBadge })}
@@ -1143,6 +1175,9 @@ function renderTaskBucketLeadingMark(
   item: ActionBarTaskItem,
 ): ReactElement {
   if (bucket === "inProgress") {
+    if (item.admissionState?.status === "queued") {
+      return <ThemedClockIcon size={13} uniProps={warningIconMapping} />;
+    }
     if (item.dependencyState === "blocked") {
       return <ThemedLockIcon size={13} uniProps={warningIconMapping} />;
     }
@@ -1176,9 +1211,25 @@ const TaskBucketRowBadges = memo(function TaskBucketRowBadges({
   const { t } = useTranslation();
   const gateBadge = deriveDeliveryGateBadge(item.deliveryGate);
   const ruleBadge = deriveZeroTokenDiagnosticBadge(item.ruleDiagnostic);
+  const admissionBadge = deriveTaskAdmissionBadge(item.admissionState);
 
   return (
     <>
+      {admissionBadge ? (
+        <View testID={`main-chat-action-task-admission-badge-${item.id}`}>
+          <StatusBadge
+            size="xs"
+            variant={admissionBadge.variant}
+            label={
+              admissionBadge.status === "queued"
+                ? t("mainChat.resourceAdmission.queuedBadge", {
+                    position: admissionBadge.position ?? 1,
+                  })
+                : t("mainChat.resourceAdmission.rejectedBadge")
+            }
+          />
+        </View>
+      ) : null}
       {ruleBadge ? (
         <View testID={`main-chat-action-task-rule-badge-${item.id}`}>
           <StatusBadge size="xs" variant={ruleBadge.variant} label={t(ruleBadge.labelKey)} />

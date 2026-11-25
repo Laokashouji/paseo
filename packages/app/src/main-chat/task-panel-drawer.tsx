@@ -952,6 +952,7 @@ function useTaskDrawerMutations({
   const reviewTask = useMainChatOverviewStore((state) => state.reviewTask);
   const startReadyTask = useMainChatOverviewStore((state) => state.startReadyTask);
   const retryTaskWithFallback = useMainChatOverviewStore((state) => state.retryTaskWithFallback);
+  const loadOverview = useMainChatOverviewStore((state) => state.loadOverview);
   const [reworkOpen, setReworkOpen] = useState(false);
   const [reworkDraft, setReworkDraft] = useState("");
   const [bypassOpen, setBypassOpen] = useState(false);
@@ -1170,6 +1171,32 @@ function useTaskDrawerMutations({
     ],
   );
 
+  const handleReleaseQueuedTask = useCallback(
+    (queueId: string) => {
+      if (!mainClient || !mainAgentId || isMutatingTask) return;
+      setIsMutatingTask(true);
+      void mainClient
+        .drainMainChatAdmissionQueue({ action: "force_dispatch", queueId })
+        .then(async (res) => {
+          if (res.error) {
+            throw new Error(res.error);
+          }
+          await loadOverview(resolvedMainServerId, mainAgentId, mainClient);
+          toast.show(t("mainChat.resourceAdmission.forceDispatchedToast"), { variant: "success" });
+          return null;
+        })
+        .catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : t("mainChat.resourceAdmission.actionFailed"),
+          );
+        })
+        .finally(() => {
+          setIsMutatingTask(false);
+        });
+    },
+    [isMutatingTask, loadOverview, mainAgentId, mainClient, resolvedMainServerId, t, toast],
+  );
+
   return {
     reworkOpen,
     reworkDraft,
@@ -1186,6 +1213,7 @@ function useTaskDrawerMutations({
     handleConfirmRework,
     handleStartReadyTask,
     handleRetryWithFallback,
+    handleReleaseQueuedTask,
   };
 }
 
@@ -1469,6 +1497,9 @@ export const TaskPanelDrawer = memo(function TaskPanelDrawer({
           onStartReadyTask={mutations.handleStartReadyTask}
           onRetryWithFallback={
             mainClient && mainAgentId ? mutations.handleRetryWithFallback : undefined
+          }
+          onReleaseQueuedTask={
+            mainClient && mainAgentId ? mutations.handleReleaseQueuedTask : undefined
           }
           onSelectRelatedTask={handleSelectRelatedTask}
         />

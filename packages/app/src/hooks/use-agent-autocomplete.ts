@@ -45,7 +45,17 @@ import {
   type MainChatContextMentionAutocompleteOption,
   type MainChatTaskAutocompleteOption,
 } from "@/main-chat/autocomplete-tasks";
+import type { MainChatPromptTemplate } from "@getpaseo/protocol/main-chat";
 import type { MainChatDockTaskItem } from "@/main-chat/selectors";
+import {
+  DEFAULT_PROMPT_LIBRARY_TEMPLATES,
+  useMainChatPromptLibraryStore,
+} from "@/main-chat/prompt-library-store";
+import {
+  applyPromptTemplateAutocompleteReplacement,
+  buildPromptSlashCommandEntries,
+  type PromptSlashCommandEntry,
+} from "@/main-chat/prompt-slash-commands";
 
 interface UseAgentAutocompleteInput {
   userInput: string;
@@ -77,6 +87,7 @@ type AgentAutocompleteOption =
       type: "plugin_command";
       command: PluginClientSlashCommand;
     })
+  | (AutocompleteOption & { type: "prompt_template"; template: MainChatPromptTemplate })
   | (AutocompleteOption & { type: "provider_command" })
   | MainChatTaskAutocompleteOption
   | MainChatContextMentionAutocompleteOption
@@ -134,6 +145,7 @@ interface DirectorySuggestionEntry {
 type AvailableCommand =
   | { source: "client"; command: ClientSlashCommand }
   | { source: "plugin"; command: PluginClientSlashCommand }
+  | { source: "prompt"; command: PromptSlashCommandEntry }
   | { source: "provider"; command: AgentSlashCommand };
 
 function resolveDraftQueryConfig(draft?: DraftCommandTarget): DraftCommandConfig | undefined {
@@ -228,6 +240,16 @@ function mapCommandToOption(
       tag: context.pluginNames.get(entry.command.pluginId) ?? entry.command.pluginId,
     };
   }
+  if (entry.source === "prompt") {
+    return {
+      ...base,
+      type: "prompt_template",
+      template: entry.command.template,
+      icon: "skill",
+      description: entry.command.description,
+      tag: context.t("mainChat.promptLibrary.autocompleteTag"),
+    };
+  }
   const isSkill = entry.command.kind === "skill";
   return {
     ...base,
@@ -245,6 +267,7 @@ interface BuildAutocompleteOptionsInput {
   commands: AgentSlashCommand[];
   pluginCommands: readonly PluginClientSlashCommand[];
   pluginNames: ReadonlyMap<string, string>;
+  promptTemplates: readonly MainChatPromptTemplate[];
   isDraftContext: boolean;
   commandFilterQuery: string;
   activeSlashCommand: SlashCommandRange | null;
@@ -276,10 +299,19 @@ function buildAutocompleteOptions(input: BuildAutocompleteOptionsInput): AgentAu
         if (entry.source === "built-in") return { source: "client", command: entry.command };
         return entry;
       });
+    const claimedCommandNames = new Set(
+      rootCommands.map((entry) => entry.command.name.toLowerCase()),
+    );
+    const promptCommands: AvailableCommand[] = buildPromptSlashCommandEntries(input.promptTemplates)
+      .filter((entry) => !claimedCommandNames.has(entry.name.toLowerCase()))
+      .map((command) => ({
+        source: "prompt" as const,
+        command,
+      }));
     const availableCommands: AvailableCommand[] =
       input.activeSlashCommand?.position === "inline"
-        ? filterInlineSkillCommandEntries(providerCommands)
-        : rootCommands;
+        ? [...filterInlineSkillCommandEntries(providerCommands), ...promptCommands]
+        : [...rootCommands, ...promptCommands];
     const matches = filterAndRankCommandAutocompleteEntries(
       availableCommands,
       input.commandFilterQuery,
@@ -521,6 +553,53 @@ function resolveCommandsEmptyText(args: {
   return args.t("agentAutocomplete.noCommands");
 }
 
+function applyFileMentionAutocompleteSelection(input: {
+  selected: Exclude<
+    AgentAutocompleteOption,
+    | { type: "client_command" }
+    | { type: "plugin_command" }
+    | { type: "provider_command" }
+    | { type: "prompt_template" }
+  >;
+  text: string;
+  mention: FileMentionRange;
+  serverId: string;
+  agentId: string;
+  setUserInput: (next: string) => void;
+  onAutocompleteApplied?: () => void;
+}): void {
+  const { selected } = input;
+  if (selected.type === "main_chat_task") {
+    applyMainChatTaskMentionSelection({
+      serverId: input.serverId,
+      agentId: input.agentId,
+      option: selected,
+      text: input.text,
+      mention: input.mention,
+      setUserInput: input.setUserInput,
+      onAutocompleteApplied: input.onAutocompleteApplied,
+    });
+    return;
+  }
+  if (selected.type === "main_chat_mention") {
+    applyMainChatContextMentionSelection({
+      option: selected,
+      text: input.text,
+      mention: input.mention,
+      setUserInput: input.setUserInput,
+      onAutocompleteApplied: input.onAutocompleteApplied,
+    });
+    return;
+  }
+  const nextInput = applyFileMentionReplacement({
+    text: input.text,
+    mention: input.mention,
+    relativePath: selected.entryPath,
+  });
+  input.setUserInput(nextInput);
+  input.onAutocompleteApplied?.();
+}
+
 function applyAgentAutocompleteOptionSelection(input: {
   selected: AgentAutocompleteOption;
   current: ReturnType<typeof resolveAgentAutocompleteSnapshot>;
@@ -533,68 +612,54 @@ function applyAgentAutocompleteOptionSelection(input: {
   onAutocompleteApplied?: () => void;
 }): void {
   const { selected, current } = input;
-  const selectedIsCommand =
-    selected.type === "client_command" ||
-    selected.type === "plugin_command" ||
-    selected.type === "provider_command";
-  if (input.hasSnapshot && selectedIsCommand && !current.slashCommand) return;
-  if (
-    selected.type === "client_command" &&
-    selected.command.execution === "immediate" &&
-    input.canExecuteClientSlashCommand &&
-    input.onClientSlashCommand
-  ) {
-    input.onClientSlashCommand(selected.command);
-    return;
-  }
-
-  if (selectedIsCommand) {
-    if (!current.slashCommand) {
-      input.setUserInput(`/${selected.id} `);
-      input.onAutocompleteApplied?.();
-      return;
-    }
-
-    const nextInput = applySlashCommandReplacement({
+  if (selected.type === "prompt_template") {
+    if (input.hasSnapshot && !current.slashCommand) return;
+    const nextInput = applyPromptTemplateAutocompleteReplacement({
       text: current.text,
       command: current.slashCommand,
-      commandName: selected.id,
+      template: selected.template,
     });
+    input.setUserInput(nextInput);
+    input.onAutocompleteApplied?.();
+    return;
+  }
+  if (
+    selected.type === "client_command" ||
+    selected.type === "plugin_command" ||
+    selected.type === "provider_command"
+  ) {
+    if (input.hasSnapshot && !current.slashCommand) return;
+    if (
+      selected.type === "client_command" &&
+      selected.command.execution === "immediate" &&
+      input.canExecuteClientSlashCommand &&
+      input.onClientSlashCommand
+    ) {
+      input.onClientSlashCommand(selected.command);
+      return;
+    }
+    const nextInput = current.slashCommand
+      ? applySlashCommandReplacement({
+          text: current.text,
+          command: current.slashCommand,
+          commandName: selected.id,
+        })
+      : `/${selected.id} `;
     input.setUserInput(nextInput);
     input.onAutocompleteApplied?.();
     return;
   }
 
   if (!current.fileMention) return;
-  if (selected.type === "main_chat_task") {
-    applyMainChatTaskMentionSelection({
-      serverId: input.serverId,
-      agentId: input.agentId,
-      option: selected,
-      text: current.text,
-      mention: current.fileMention,
-      setUserInput: input.setUserInput,
-      onAutocompleteApplied: input.onAutocompleteApplied,
-    });
-    return;
-  }
-  if (selected.type === "main_chat_mention") {
-    applyMainChatContextMentionSelection({
-      option: selected,
-      text: current.text,
-      mention: current.fileMention,
-      setUserInput: input.setUserInput,
-      onAutocompleteApplied: input.onAutocompleteApplied,
-    });
-    return;
-  }
-  const nextInput = applyFileMentionReplacement({
+  applyFileMentionAutocompleteSelection({
+    selected,
     text: current.text,
     mention: current.fileMention,
-    relativePath: selected.entryPath,
+    serverId: input.serverId,
+    agentId: input.agentId,
+    setUserInput: input.setUserInput,
+    onAutocompleteApplied: input.onAutocompleteApplied,
   });
-  input.setUserInput(nextInput);
-  input.onAutocompleteApplied?.();
 }
 
 function countAvailableMainChatMentions(
@@ -709,6 +774,14 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
 
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
+  const storedPromptTemplates = useMainChatPromptLibraryStore(
+    (state) => state.templatesByServerId[serverId],
+  );
+  const isPromptLibraryLoaded = useMainChatPromptLibraryStore(
+    (state) => state.loadedByServerId[serverId],
+  );
+  const loadPromptLibrary = useMainChatPromptLibraryStore((state) => state.loadPromptLibrary);
+  const promptTemplates = storedPromptTemplates ?? DEFAULT_PROMPT_LIBRARY_TEMPLATES;
 
   const mode = resolveAutocompleteMode({ showFileAutocomplete, showCommandAutocomplete });
   const mainChatTasks = useMainChatAutocompleteTasks({
@@ -755,6 +828,12 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     isError: commandsQuery.isError,
   });
   const isCommandMenuOpen = mode === "command" && canShowAutocomplete;
+  useEffect(() => {
+    if (!isCommandMenuOpen || !serverId || !client || !isConnected || isPromptLibraryLoaded) {
+      return;
+    }
+    void loadPromptLibrary(serverId, client);
+  }, [client, isCommandMenuOpen, isConnected, isPromptLibraryLoaded, loadPromptLibrary, serverId]);
   const isLoadingRevealed = useLoadingRevealed(isCommandMenuOpen);
   const isVisible = resolveMenuVisibility({
     canShowAutocomplete,
@@ -825,6 +904,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         commands: commandsQuery.commands,
         pluginCommands: pluginClientSlashCommands,
         pluginNames,
+        promptTemplates,
         activeSlashCommand,
         fileSuggestions: fileSuggestionsQuery.data ?? [],
         mainChatTasks,
@@ -880,6 +960,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     mode,
     pluginClientSlashCommands,
     pluginNames,
+    promptTemplates,
     providerLabel,
     retryCommands,
     t,

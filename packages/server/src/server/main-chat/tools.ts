@@ -24,6 +24,7 @@ import {
   MainChatTaskRecordSchema,
   MainChatTaskReviewVerdictSchema,
   isMainChatLabels,
+  isMainChatOnDemandToolLoadingEnabled,
 } from "@getpaseo/protocol/main-chat";
 import { ScheduleCadenceSchema } from "@getpaseo/protocol/schedule/types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
@@ -35,6 +36,7 @@ import type { PaseoToolDefinition } from "../agent/tools/types.js";
 import { getMainChatConversationMetaFromLabels } from "./conversations.js";
 import { formatEscalatedDecisionReason, registerLeaderConversationTools } from "./leader-tools.js";
 import type { MainChatService } from "./service.js";
+import { applyMainChatOnDemandToolLoading } from "./tool-loading.js";
 
 const TaskPlanItemInputSchema = z.object({
   title: z.string().trim().min(1).describe("简短明确的中文任务标题（建议 15 字以内）。"),
@@ -141,13 +143,27 @@ export function registerMainChatTools(options: {
   tools: Map<string, PaseoToolDefinition>;
   builtinNames: Set<string>;
   policy?: ProviderPaseoToolsPolicy;
+  onToolsActivated?: (activatedTools: readonly PaseoToolDefinition[]) => void;
 }): void {
-  const { agentManager, mainChatService, callerAgentId, scope, tools, builtinNames, policy } =
-    options;
+  const {
+    agentManager,
+    mainChatService,
+    callerAgentId,
+    scope,
+    tools,
+    builtinNames,
+    policy,
+    onToolsActivated,
+  } = options;
   if (!mainChatService || scope !== "agent" || !callerAgentId) return;
 
   const caller = agentManager.getAgent(callerAgentId);
   if (!caller) return;
+
+  const conversationMeta = getMainChatConversationMetaFromLabels(caller.labels);
+  const isLeaderCaller = conversationMeta?.kind === "leader";
+  const isMainOrLeader = isMainChatLabels(caller.labels) || isLeaderCaller;
+  const candidateTools = new Map<string, PaseoToolDefinition>();
 
   const conversationManager = mainChatService.getConversationManager();
   registerLeaderConversationTools({
@@ -155,7 +171,7 @@ export function registerMainChatTools(options: {
     conversationManager,
     callerAgentId,
     scope,
-    tools,
+    tools: isMainOrLeader ? candidateTools : tools,
     builtinNames,
     policy,
     reportLeaderProgress: (input) => mainChatService.reportLeaderProgress(input),
@@ -178,14 +194,12 @@ export function registerMainChatTools(options: {
     },
   });
 
-  const conversationMeta = getMainChatConversationMetaFromLabels(caller.labels);
-  const isLeaderCaller = conversationMeta?.kind === "leader";
-  if (!isMainChatLabels(caller.labels) && !isLeaderCaller) return;
+  if (!isMainOrLeader) return;
 
   const register = (def: PaseoToolDefinition) => {
     builtinNames.add(def.name);
     if (!isPaseoToolEnabled(policy, def.name)) return;
-    tools.set(def.name, def);
+    candidateTools.set(def.name, def);
   };
 
   register({
@@ -1048,4 +1062,18 @@ export function registerMainChatTools(options: {
       },
     });
   }
+
+  const currentSettings = mainChatService.getCurrentSettings();
+  const onDemandEnabled = isMainChatOnDemandToolLoadingEnabled(currentSettings);
+  applyMainChatOnDemandToolLoading({
+    callerAgentId,
+    isLeaderCaller,
+    onDemandEnabled,
+    candidates: candidateTools,
+    tools,
+    builtinNames,
+    registry: mainChatService.getToolLoaderRegistry(),
+    isToolAllowed: (name) => isPaseoToolEnabled(policy, name),
+    onToolsActivated,
+  });
 }

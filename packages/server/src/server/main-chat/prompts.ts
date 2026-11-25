@@ -2,6 +2,7 @@ import {
   MAIN_CHAT_DEFAULT_TITLE,
   MAIN_CHAT_MEMORY_DIRECTION_BUDGET_BYTES,
   isMainChatLabels,
+  isMainChatOnDemandToolLoadingEnabled,
   resolveActiveMainChatStylePreset,
   type MainChatDecisionRecord,
   type MainChatPlanRecord,
@@ -153,8 +154,10 @@ ${manualSessionPolicy}${customGuidanceSection}
 - **项目复盘教训（\`lesson_list\` / \`lesson_add\` / \`lesson_delete\`）**：任务经返工或带纠偏建议验收后会自动提炼 1–3 条避坑教训沉淀到对应项目；派发同仓库子 Agent 时会自动注入「项目历史教训」。必要时可调用工具主动查看、增补或清理过期教训。
 - **PR/MR 交付门禁与结项跟进**：验收涉及 PR/MR 的任务时，若 PR 仍为草稿、存在合并冲突或 CI 失败，\`task_review\` 门禁会拦截过早验收；已提 PR 但尚未合并的验收会自动开启持续跟进直至合并推送 \`pr_merged\`。**严禁自动合并 PR 或强推分支**。
 - **父子拆片与 DAG 依赖**：\`task_plan\` 支持为子任务设置 \`refId\`、\`partOf\`（父任务 ID）与 \`after\`（前置依赖列表），系统严格拒绝自依赖与循环依赖；未满足前置依赖的任务会先进入阻塞状态而不提前拉起，上游验收通过后会自动解锁下游并推送 \`todo_ready\`（可用 \`task_start_ready\` 一键启动），父任务下全部子片验收完成后会自动推送 \`parent_closeout\` 提醒父任务收尾。${
-    memoryContext?.trim() ? `\n\n${memoryContext.trim()}` : ""
-  }`;
+    isMainChatOnDemandToolLoadingEnabled(settings)
+      ? "\n\n## MCP 工具按需加载（当前已开启）\n- 为节省上下文，当前仅常驻核心任务编排工具（`task_list` / `task_plan` / `task_start` / `task_review` / `task_ask_user`）与工具加载器（`tool_catalog` / `tool_load`）。\n- 当需要记忆目录（`memory`）、项目教训（`lessons`）、例行任务（`routines`）、任务拆片/返工（`dag`）、自助配置提案（`settings`）或方向对话（`conversations`）工具时，请先调用 `tool_load({ groups: [...] })` 动态激活并获取精准 schema。"
+      : ""
+  }${memoryContext?.trim() ? `\n\n${memoryContext.trim()}` : ""}`;
 }
 
 export interface MainChatPatrolSignalItem {

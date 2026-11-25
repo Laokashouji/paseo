@@ -7,6 +7,7 @@ import {
   isMainChatTasksQuiet,
   resolveMainChatNightMode,
   type MainChatBackgroundModelMode,
+  type MainChatIdleArchiveAuditRecord,
   type MainChatIntervals,
   type MainChatLimitFallbackEvent,
   type MainChatMetrics,
@@ -57,12 +58,14 @@ import { settingsStyles } from "@/styles/settings";
 import type { Theme } from "@/styles/theme";
 import { buildMainChatRoute } from "@/utils/host-routes";
 import { MainChatCostControlPanel } from "./cost-control-panel";
+import { MainChatIdleArchiveAndPromptsPanel } from "./idle-archive-and-prompts-panel";
 import { MainChatLimitFallbacksPanel } from "./limit-fallbacks-panel";
 import { MainChatMemoryProfilePanel } from "./memory-profile-panel";
 import { MainChatModelProfilesPanel } from "./model-profiles-panel";
 import { MainChatNightModePanel } from "./night-mode-panel";
 import { MainChatNotificationPolicyPanel } from "./notification-policy-panel";
 import { MainChatProjectLessonsPanel } from "./project-lessons-panel";
+import { MainChatResourceAdmissionPanel } from "./resource-admission-panel";
 import { MainChatRoutinesPanel } from "./routines-panel";
 import { MainChatStylePresetPanel } from "./style-preset-panel";
 import { MainChatTokenUsagePanel } from "./token-usage-panel";
@@ -210,6 +213,7 @@ const patrolIconBusy = <ThemedSpinner size="small" uniProps={mutedIconMapping} /
 const EXPANDED_STATE = { expanded: true } as const;
 const COLLAPSED_STATE = { expanded: false } as const;
 const EMPTY_LIMIT_FALLBACK_EVENTS: readonly MainChatLimitFallbackEvent[] = [];
+const EMPTY_IDLE_ARCHIVE_AUDIT: readonly MainChatIdleArchiveAuditRecord[] = [];
 
 function useMainChatSettingsHostState() {
   const hosts = useHosts();
@@ -437,6 +441,7 @@ function useMainChatSettingsOverviewMetrics(input: {
   mainChatAgentId: string | null;
   supervisorMetrics: MainChatMetrics | null;
   recentLimitFallbacks: readonly MainChatLimitFallbackEvent[];
+  idleArchiveAudit: readonly MainChatIdleArchiveAuditRecord[];
   refreshOverview: (targetAgentId?: string | null) => void;
 } {
   const { selectedServerId, mainChatEnabled, client } = input;
@@ -478,6 +483,7 @@ function useMainChatSettingsOverviewMetrics(input: {
     mainChatAgentId,
     supervisorMetrics: overview?.metrics ?? null,
     recentLimitFallbacks: overview?.recentLimitFallbacks ?? EMPTY_LIMIT_FALLBACK_EVENTS,
+    idleArchiveAudit: overview?.idleArchiveAudit ?? EMPTY_IDLE_ARCHIVE_AUDIT,
     refreshOverview,
   };
 }
@@ -1061,12 +1067,17 @@ export function MainChatSettingsSection(): ReactElement {
 
   const mainChatEnabled = isMainChatEnabled(settings);
   const nightModeConfig = useMemo(() => resolveMainChatNightMode(settings), [settings]);
-  const { mainChatAgentId, supervisorMetrics, recentLimitFallbacks, refreshOverview } =
-    useMainChatSettingsOverviewMetrics({
-      selectedServerId,
-      mainChatEnabled,
-      client,
-    });
+  const {
+    mainChatAgentId,
+    supervisorMetrics,
+    recentLimitFallbacks,
+    idleArchiveAudit,
+    refreshOverview,
+  } = useMainChatSettingsOverviewMetrics({
+    selectedServerId,
+    mainChatEnabled,
+    client,
+  });
 
   const [titleDraft, setTitleDraft] = useState(settings.title);
   const [intervalDrafts, setIntervalDrafts] = useState<Record<IntervalFieldKey, string>>(() =>
@@ -1544,6 +1555,36 @@ export function MainChatSettingsSection(): ReactElement {
               serverId={selectedServerId}
               settings={settings}
               recentEvents={recentLimitFallbacks}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.resourceAdmission.sectionTitle")}
+            info={t("mainChat.resourceAdmission.sectionDescription")}
+            testID="settings-main-chat-resource-admission"
+          >
+            <MainChatResourceAdmissionPanel
+              serverId={selectedServerId}
+              client={client}
+              settings={settings}
+              metrics={supervisorMetrics}
+              disabled={saving}
+              onApplyPatch={applyPatch}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            title={t("mainChat.idleArchive.sectionTitle")}
+            info={t("mainChat.idleArchive.sectionDescription")}
+            testID="settings-main-chat-idle-archive-prompts"
+          >
+            <MainChatIdleArchiveAndPromptsPanel
+              serverId={selectedServerId}
+              client={client}
+              settings={settings}
+              initialAuditLog={idleArchiveAudit}
               disabled={saving}
               onApplyPatch={applyPatch}
             />

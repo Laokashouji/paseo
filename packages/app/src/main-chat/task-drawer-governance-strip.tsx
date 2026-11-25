@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   BookOpen,
   CheckCircle2,
+  Clock,
   CornerDownRight,
   GitPullRequest,
   Lock,
@@ -24,6 +25,7 @@ import { PressHighlight } from "@/components/ui/press-highlight";
 import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
+import { deriveTaskAdmissionBadge, type TaskAdmissionBadgeDescriptor } from "./admission-ui";
 import {
   countProjectLessonsForTask,
   deriveDeliveryGateBadge,
@@ -40,6 +42,7 @@ import {
 const ThemedAlert = withUnistyles(AlertTriangle);
 const ThemedBook = withUnistyles(BookOpen);
 const ThemedCheck = withUnistyles(CheckCircle2);
+const ThemedClock = withUnistyles(Clock);
 const ThemedBranch = withUnistyles(CornerDownRight);
 const ThemedPr = withUnistyles(GitPullRequest);
 const ThemedLock = withUnistyles(Lock);
@@ -52,6 +55,7 @@ const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarnin
 const dangerIconMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 const successIconMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
 
+const CLOCK_WARNING_LEADING_ICON = <ThemedClock size={11} uniProps={warningIconMapping} />;
 const LOCK_LEADING_ICON = <ThemedLock size={11} uniProps={warningIconMapping} />;
 const PLAY_LEADING_ICON = <ThemedPlay size={11} uniProps={successIconMapping} />;
 const PR_DANGER_LEADING_ICON = <ThemedPr size={11} uniProps={dangerIconMapping} />;
@@ -92,6 +96,7 @@ export interface TaskDrawerGovernanceStripProps {
   isMutatingTask: boolean;
   onStartReadyTask: (taskId: string) => void;
   onRetryWithFallback?: (taskId: string) => void;
+  onReleaseQueuedTask?: (queueId: string) => void;
   onSelectRelatedTask: (task: MainChatTaskRecord) => void;
 }
 
@@ -181,10 +186,35 @@ const ChildSliceRow = memo(function ChildSliceRow({
   );
 });
 
+const GovernanceAdmissionBadge = memo(function GovernanceAdmissionBadge({
+  admissionBadge,
+}: {
+  admissionBadge: TaskAdmissionBadgeDescriptor;
+}): ReactElement {
+  const { t } = useTranslation();
+  const isQueued = admissionBadge.status === "queued";
+  const label = isQueued
+    ? t("mainChat.resourceAdmission.queuedBadge", {
+        position: admissionBadge.position ?? 1,
+      })
+    : t("mainChat.resourceAdmission.rejectedBadge");
+  return (
+    <View testID="main-chat-task-drawer-admission-badge">
+      <StatusBadge
+        size="xs"
+        variant={admissionBadge.variant}
+        leading={isQueued ? CLOCK_WARNING_LEADING_ICON : RULE_WARNING_LEADING_ICON}
+        label={label}
+      />
+    </View>
+  );
+});
+
 const GovernanceHeaderBadges = memo(function GovernanceHeaderBadges({
   dag,
   gateBadge,
   diagnosticBadge,
+  admissionBadge,
   matchedLessonCount,
   onOpenParent,
   onOpenLessons,
@@ -192,6 +222,7 @@ const GovernanceHeaderBadges = memo(function GovernanceHeaderBadges({
   dag: TaskDagSummary;
   gateBadge: DeliveryGateBadgeDescriptor | null;
   diagnosticBadge: ZeroTokenDiagnosticBadgeDescriptor | null;
+  admissionBadge: TaskAdmissionBadgeDescriptor | null;
   matchedLessonCount: number;
   onOpenParent: () => void;
   onOpenLessons: () => void;
@@ -268,6 +299,8 @@ const GovernanceHeaderBadges = memo(function GovernanceHeaderBadges({
         {gateBadge?.followUpActive && !gateBadge.isMerged ? (
           <StatusBadge size="xs" variant="muted" label={t("mainChat.deliveryGate.followUpBadge")} />
         ) : null}
+
+        {admissionBadge ? <GovernanceAdmissionBadge admissionBadge={admissionBadge} /> : null}
 
         {diagnosticBadge ? (
           <View testID={`main-chat-task-drawer-rule-badge-${diagnosticBadge.kind}`}>
@@ -387,6 +420,84 @@ const GovernanceDiagnosticDetail = memo(function GovernanceDiagnosticDetail({
   );
 });
 
+const GovernanceAdmissionDetail = memo(function GovernanceAdmissionDetail({
+  admissionBadge,
+  isMutatingTask,
+  onReleaseQueuedTask,
+}: {
+  admissionBadge: TaskAdmissionBadgeDescriptor;
+  isMutatingTask: boolean;
+  onReleaseQueuedTask?: (queueId: string) => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  const isDanger = admissionBadge.variant === "error";
+  const boxStyle = useMemo(
+    () => [
+      styles.diagnosticBox,
+      isDanger ? styles.diagnosticBoxDanger : styles.diagnosticBoxWarning,
+    ],
+    [isDanger],
+  );
+  const queueId = admissionBadge.queueId;
+  const handleRelease = useCallback(() => {
+    if (queueId && onReleaseQueuedTask) {
+      onReleaseQueuedTask(queueId);
+    }
+  }, [onReleaseQueuedTask, queueId]);
+
+  const badgeTitle =
+    admissionBadge.status === "queued"
+      ? t("mainChat.resourceAdmission.queuedBadge", {
+          position: admissionBadge.position ?? 1,
+        })
+      : t("mainChat.resourceAdmission.rejectedBadge");
+  const titleText = admissionBadge.hostLabel
+    ? `${badgeTitle} · ${admissionBadge.hostLabel}`
+    : badgeTitle;
+
+  return (
+    <View style={boxStyle} testID="main-chat-task-drawer-admission-detail">
+      <View style={styles.admissionHeaderRow}>
+        <View style={styles.diagnosticHeaderLine}>
+          {admissionBadge.status === "queued"
+            ? CLOCK_WARNING_LEADING_ICON
+            : RULE_WARNING_LEADING_ICON}
+          <Text
+            style={isDanger ? styles.diagnosticTitleDanger : styles.diagnosticTitleWarning}
+            numberOfLines={2}
+          >
+            {titleText}
+          </Text>
+        </View>
+        {admissionBadge.status === "queued" && queueId && onReleaseQueuedTask ? (
+          <Button
+            variant="outline"
+            size="sm"
+            loading={isMutatingTask}
+            disabled={isMutatingTask}
+            onPress={handleRelease}
+            testID="main-chat-task-drawer-admission-release"
+          >
+            {t("mainChat.resourceAdmission.forceDispatchAction")}
+          </Button>
+        ) : null}
+      </View>
+      {admissionBadge.reason ? (
+        <Text style={styles.diagnosticMetaText} numberOfLines={2}>
+          {admissionBadge.reason}
+        </Text>
+      ) : null}
+      {admissionBadge.suggestion ? (
+        <Text style={styles.diagnosticMetaText} numberOfLines={2}>
+          {t("mainChat.resourceAdmission.suggestionPrefix", {
+            suggestion: admissionBadge.suggestion,
+          })}
+        </Text>
+      ) : null}
+    </View>
+  );
+});
+
 export const TaskDrawerGovernanceStrip = memo(function TaskDrawerGovernanceStrip({
   task,
   allTasks,
@@ -396,6 +507,7 @@ export const TaskDrawerGovernanceStrip = memo(function TaskDrawerGovernanceStrip
   isMutatingTask,
   onStartReadyTask,
   onRetryWithFallback,
+  onReleaseQueuedTask,
   onSelectRelatedTask,
 }: TaskDrawerGovernanceStripProps): ReactElement {
   const { t } = useTranslation();
@@ -404,6 +516,10 @@ export const TaskDrawerGovernanceStrip = memo(function TaskDrawerGovernanceStrip
   const diagnosticBadge = useMemo(
     () => deriveZeroTokenDiagnosticBadge(ruleDiagnostic ?? task.lastRuleDiagnostic),
     [ruleDiagnostic, task.lastRuleDiagnostic],
+  );
+  const admissionBadge = useMemo(
+    () => deriveTaskAdmissionBadge(task.admissionState),
+    [task.admissionState],
   );
   const canRetry = useMemo(
     () => Boolean(onRetryWithFallback) && canRetryManagedFailedTask(task, isFailed),
@@ -442,10 +558,19 @@ export const TaskDrawerGovernanceStrip = memo(function TaskDrawerGovernanceStrip
         dag={dag}
         gateBadge={gateBadge}
         diagnosticBadge={diagnosticBadge}
+        admissionBadge={admissionBadge}
         matchedLessonCount={matchedLessonCount}
         onOpenParent={handleOpenParent}
         onOpenLessons={handleOpenLessons}
       />
+
+      {admissionBadge ? (
+        <GovernanceAdmissionDetail
+          admissionBadge={admissionBadge}
+          isMutatingTask={isMutatingTask}
+          onReleaseQueuedTask={onReleaseQueuedTask}
+        />
+      ) : null}
 
       {canRetry ? (
         <View style={styles.retryBanner} testID="main-chat-task-drawer-retry-banner">
@@ -708,6 +833,15 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "flex-start",
     gap: theme.spacing[1.5],
+    flex: 1,
+    minWidth: 0,
+  },
+  admissionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
   },
   diagnosticTitleDanger: {
     flex: 1,

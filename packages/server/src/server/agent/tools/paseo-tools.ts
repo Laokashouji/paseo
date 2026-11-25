@@ -851,6 +851,14 @@ function createToolCatalog(
       handler: handler as PaseoToolDefinition["handler"],
     });
   };
+  const toolsActivatedListeners = new Set<
+    (activatedTools: readonly PaseoToolDefinition[]) => void
+  >();
+  const notifyToolsActivated = (activatedTools: readonly PaseoToolDefinition[]) => {
+    for (const listener of toolsActivatedListeners) {
+      listener(activatedTools);
+    }
+  };
   const toCatalog = (): PaseoToolCatalog => ({
     tools,
     getTool(name: string): PaseoToolDefinition | undefined {
@@ -866,6 +874,12 @@ function createToolCatalog(
         throw new PaseoToolInputError(`Paseo tool not found: ${name}`);
       }
       return tool.handler(await parseToolInput(tool, input), context);
+    },
+    subscribeToolsActivated(listener) {
+      toolsActivatedListeners.add(listener);
+      return () => {
+        toolsActivatedListeners.delete(listener);
+      };
     },
   });
 
@@ -3411,6 +3425,7 @@ function createToolCatalog(
     tools,
     builtinNames,
     policy: options.paseoToolPolicy,
+    onToolsActivated: notifyToolsActivated,
   });
   registerPluginTools({
     agentManager,

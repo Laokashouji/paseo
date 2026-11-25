@@ -76,6 +76,11 @@ import {
   type SignalRevalidationOutcome,
 } from "./signal-queue.js";
 import type { MainChatStore } from "./store.js";
+import {
+  runStatelessBackgroundSupervisionRound,
+  shouldRunStatelessSupervisionRound,
+  type StatelessSupervisionRunner,
+} from "./stateless-supervision.js";
 import type { MainChatTurnQueue } from "./turn-queue.js";
 import {
   classifyMainChatTurnError,
@@ -136,6 +141,7 @@ export interface MainChatSupervisorDependencies {
     response: AgentPermissionResponse,
   ) => Promise<void>;
   semanticTriageRunner?: (input: RunSemanticTriageInput) => Promise<SemanticTriageOutput | null>;
+  statelessSupervisionRunner?: StatelessSupervisionRunner;
   transientRetryDelayMs?: number;
   maxTransientAutoRetries?: number;
   usageLimitRetryDelayMs?: number;
@@ -844,6 +850,143 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
     return power.allowProactiveWakeup;
   }
 
+  async function tryHandleBatchWithStatelessRound(input: {
+    batch: DeliverSupervisionBatchPayload;
+    target: { agentId: string; label?: string | null };
+    settings: ReturnType<MainChatStore["getSettings"]>;
+  }): Promise<
+    | { handled: true; delivered: boolean }
+    | { handled: false; signalIds: string[]; escalationPreface: string }
+  > {
+    const validSignals: MainChatSupervisionSignal[] = [];
+    for (const sig of input.batch.signals) {
+      const outcome = await revalidateSignalLive(sig);
+      const isValid = typeof outcome === "boolean" ? outcome : outcome.valid;
+      if (isValid) validSignals.push(sig);
+    }
+    if (validSignals.length === 0) {
+      return { handled: true, delivered: false };
+    }
+
+    const targetAgent = deps.agentManager.getAgent(input.target.agentId);
+    const cwd = targetAgent?.cwd || process.cwd();
+    const relatedTaskIds = new Set(
+      validSignals.map((sig) => sig.taskId).filter((id): id is string => Boolean(id)),
+    );
+    const relatedAgentIds = new Set(
+      validSignals.map((sig) => sig.agentId).filter((id): id is string => Boolean(id)),
+    );
+    const relatedTasks = deps.store
+      .listTasks({ includeCompleted: true })
+      .filter(
+        (task) =>
+          relatedTaskIds.has(task.id) ||
+          (task.activeAgentId !== null && relatedAgentIds.has(task.activeAgentId)) ||
+          task.agentIds.some((id) => relatedAgentIds.has(id)),
+      );
+
+    const allAgents = deps.agentManager.listAgents().filter((a) => !a.background && !a.internal);
+    const fleetCounts = {
+      totalActive: allAgents.length,
+      running: allAgents.filter((a) => a.lifecycle === "running").length,
+      needsYou: allAgents.filter(
+        (a) => a.pendingPermissions.size > 0 || a.attention.requiresAttention,
+      ).length,
+      problematic: allAgents.filter((a) => a.lifecycle === "error").length,
+    };
+
+    const providers = targetAgent
+      ? await resolveSemanticTriageProviders(targetAgent, input.settings)
+      : [];
+    const roundResult = await runStatelessBackgroundSupervisionRound({
+      agentManager: deps.agentManager,
+      cwd,
+      signals: validSignals,
+      relatedTasks,
+      conversationLabel: input.target.label,
+      fleetCounts,
+      providers,
+      runner: deps.statelessSupervisionRunner,
+      logger: deps.logger,
+      onUsage: (usage, meta) => {
+        void deps.store
+          .recordTokenUsage({
+            source: "triage",
+            provider: meta.provider,
+            model: meta.model,
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+            outputTokens: usage.outputTokens,
+            costUsd: usage.totalCostUsd,
+            atMs: getNowMs(),
+          })
+          .catch(() => undefined);
+      },
+    });
+
+    const completedAt = new Date(getNowMs()).toISOString();
+    await deps.store.incrementMetric("statelessSupervisionRounds");
+    const escalated = roundResult.outcome.decision === "escalate_main";
+    if (escalated) {
+      await deps.store.incrementMetric("statelessSupervisionEscalations");
+    }
+
+    await deps.store.appendActivity({
+      id: `act_ss_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      mainAgentId: input.target.agentId,
+      kind: roundResult.outcome.decision === "silent" ? "silent_turn" : "background_turn",
+      trigger: "stateless_supervision",
+      summary: `[无状态督办·${roundResult.outcome.decision}] ${roundResult.outcome.summary}`,
+      silent: !escalated,
+      status: "completed",
+      createdAt: completedAt,
+      completedAt,
+      relatedAgentId: validSignals[0]?.agentId ?? null,
+      detail: JSON.stringify({
+        mode: "stateless_single_round",
+        decision: roundResult.outcome.decision,
+        source: roundResult.source,
+        packetChars: roundResult.packetChars,
+        escalationReason: roundResult.outcome.escalationReason ?? null,
+        recommendedAction: roundResult.outcome.recommendedAction ?? null,
+        signalIds: validSignals.map((sig) => sig.id),
+        dispositions: roundResult.outcome.signalDispositions ?? [],
+      }),
+    });
+
+    if (!escalated) {
+      await deps.store.incrementMetric("supervisorHeld");
+      for (const sig of validSignals) {
+        const receiptId = receiptIdBySignalId.get(sig.id);
+        receiptIdBySignalId.delete(sig.id);
+        passthroughSignalIds.delete(sig.id);
+        if (receiptId) {
+          await deps.store
+            .updateNotificationReceiptStatus(receiptId, {
+              status: "acknowledged",
+              acknowledgedAt: completedAt,
+              updatedAt: completedAt,
+              reason: `无状态单轮督办已处理（${roundResult.outcome.decision}）`,
+            })
+            .catch(() => undefined);
+        }
+      }
+      return { handled: true, delivered: true };
+    }
+
+    const reasonLine = roundResult.outcome.escalationReason
+      ? `升级原因：${roundResult.outcome.escalationReason}`
+      : `无状态评估摘要：${roundResult.outcome.summary}`;
+    const actionLine = roundResult.outcome.recommendedAction
+      ? `\n建议动作：${roundResult.outcome.recommendedAction}`
+      : "";
+    return {
+      handled: false,
+      signalIds: validSignals.map((sig) => sig.id),
+      escalationPreface: `【无状态单轮后台督办升级】${reasonLine}${actionLine}`,
+    };
+  }
+
   async function deliverSupervisionBatch(batch: DeliverSupervisionBatchPayload): Promise<boolean> {
     const settings = deps.store.getSettings();
     const forced = manualFlushActive;
@@ -865,6 +1008,23 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
       : `后台督办唤醒（${batch.signals.length} 条动态）`;
 
     let dispatchedSignalIds: string[] = batch.signals.map((sig) => sig.id);
+    let statelessEscalationPreface: string | null = null;
+
+    const statelessCheck = shouldRunStatelessSupervisionRound({
+      settings,
+      signals: batch.signals,
+      forced,
+      hasPassthroughSignal,
+    });
+
+    if (statelessCheck.eligible) {
+      const statelessResult = await tryHandleBatchWithStatelessRound({ batch, target, settings });
+      if (statelessResult.handled) {
+        return statelessResult.delivered;
+      }
+      dispatchedSignalIds = statelessResult.signalIds;
+      statelessEscalationPreface = statelessResult.escalationPreface;
+    }
 
     try {
       const queued = await deps.turnQueue.enqueueBackground({
@@ -893,7 +1053,7 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
             finalValid.length > 0
               ? formatSupervisionDigest(finalValid, { conversationLabel: target.label })
               : null;
-          return buildMainChatSupervisionWakeupPrompt({
+          const basePrompt = buildMainChatSupervisionWakeupPrompt({
             settings: latestSettings,
             signals: finalValid,
             digest,
@@ -901,6 +1061,9 @@ export function createMainChatSupervisor(deps: MainChatSupervisorDependencies): 
             manualTrigger: forced,
             conversationLabel: target.label,
           });
+          return statelessEscalationPreface
+            ? `${statelessEscalationPreface}\n\n${basePrompt}`
+            : basePrompt;
         },
         onDispatched: async () => {
           const deliveredAt = new Date(getNowMs()).toISOString();

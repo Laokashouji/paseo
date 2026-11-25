@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,6 +17,19 @@ const generatedWSOutboundPath = resolve(
   protocolRoot,
   "src/generated/validation/ws-outbound.aot.ts",
 );
+
+async function readGeneratedWSOutboundChunks(): Promise<Array<{ name: string; content: string }>> {
+  const dir = dirname(generatedWSOutboundPath);
+  const chunkNames = (await readdir(dir))
+    .filter((name) => /^ws-outbound\.chunk-\d+\.aot\.ts$/.test(name))
+    .sort();
+  return Promise.all(
+    chunkNames.map(async (name) => ({
+      name,
+      content: await readFile(join(dir, name), "utf8"),
+    })),
+  );
+}
 const require = createRequire(import.meta.url);
 
 async function compileInlineSchema(sourceSchema: string): Promise<GeneratedSchema> {
@@ -261,8 +274,28 @@ const SourceSchema = z.object({
   });
 
   it("emits runtime imports with .js extensions", async () => {
-    const generated = await readFile(generatedWSOutboundPath, "utf8");
-    expect(generated).toContain('from "./ws-outbound-schema-metadata.js"');
+    const entry = await readFile(generatedWSOutboundPath, "utf8");
+    const chunks = await readGeneratedWSOutboundChunks();
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(entry).toContain('from "./ws-outbound.chunk-00.aot.js"');
+    const entryRelativeImports = [...entry.matchAll(/from "(\.[^"]+)"/g)].map((match) => match[1]);
+    expect(entryRelativeImports.length).toBe(chunks.length);
+    for (const specifier of entryRelativeImports) {
+      expect(specifier.endsWith(".js")).toBe(true);
+    }
+
+    expect(
+      chunks.some((chunk) => chunk.content.includes('from "./ws-outbound-schema-metadata.js"')),
+    ).toBe(true);
+    for (const chunk of chunks) {
+      const relativeImports = [...chunk.content.matchAll(/from "(\.[^"]+)"/g)].map(
+        (match) => match[1],
+      );
+      for (const specifier of relativeImports) {
+        expect(specifier.endsWith(".js")).toBe(true);
+      }
+    }
   });
 
   it("accepts a forge.search.response envelope", () => {
@@ -319,11 +352,25 @@ const SourceSchema = z.object({
     expect(result.success).toBe(true);
   });
 
-  it("keeps each generated validator function small", async () => {
-    // A single function for the whole protocol made V8's Maglev tier spend ~800 MB and seconds compiling it.
-    const generated = await readFile(generatedWSOutboundPath, "utf8");
-    const starts = [...generated.matchAll(/function safeParse_\w+\(/g)].map((match) => match.index);
-    const sizes = starts.map((start, index) => (starts[index + 1] ?? generated.length) - start);
+  it("keeps each generated validator function and chunk file small", async () => {
+    // A single function for the whole protocol made V8's Maglev tier spend ~800 MB and seconds compiling it,
+    // and a monolithic generated module made Metro's Babel workers OOM when bundling web builds.
+    const entry = await readFile(generatedWSOutboundPath, "utf8");
+    const chunks = await readGeneratedWSOutboundChunks();
+
+    expect(Buffer.byteLength(entry, "utf8")).toBeLessThan(100_000);
+    expect(chunks.length).toBeGreaterThan(1);
+
+    const sizes: number[] = [];
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk.content, "utf8")).toBeLessThan(1_200_000);
+      const starts = [...chunk.content.matchAll(/function safeParse_\w+\(/g)].map(
+        (match) => match.index,
+      );
+      for (let index = 0; index < starts.length; index++) {
+        sizes.push((starts[index + 1] ?? chunk.content.length) - starts[index]);
+      }
+    }
 
     expect(Math.max(...sizes)).toBeLessThan(1_000_000);
     expect(sizes.length).toBeGreaterThan(1);

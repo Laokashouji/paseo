@@ -3,11 +3,23 @@ import {
   MAIN_CHAT_MAX_CACHE_KEEPALIVE_INTERVAL_MIN,
   MAIN_CHAT_MAX_CACHE_KEEPALIVE_MAX_REQUESTS,
   MAIN_CHAT_MAX_COMPACT_WINDOW_CAP_TOKENS,
+  MAIN_CHAT_MAX_CONCURRENT_PER_HOST,
+  MAIN_CHAT_MAX_CPU_PERCENT,
+  MAIN_CHAT_MAX_FREE_MEMORY_MB,
+  MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP,
+  MAIN_CHAT_MAX_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+  MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN,
   MAIN_CHAT_MAX_IDLE_PRECOMPACT_MINUTES,
   MAIN_CHAT_MAX_LIMIT_FALLBACKS,
   MAIN_CHAT_MIN_CACHE_KEEPALIVE_INTERVAL_MIN,
   MAIN_CHAT_MIN_CACHE_KEEPALIVE_MAX_REQUESTS,
   MAIN_CHAT_MIN_COMPACT_WINDOW_CAP_TOKENS,
+  MAIN_CHAT_MIN_CONCURRENT_PER_HOST,
+  MAIN_CHAT_MIN_CPU_PERCENT,
+  MAIN_CHAT_MIN_FREE_MEMORY_MB,
+  MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP,
+  MAIN_CHAT_MIN_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+  MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN,
   MAIN_CHAT_MIN_IDLE_PRECOMPACT_MINUTES,
   MAIN_CHAT_MODEL_PURPOSES,
   MAIN_CHAT_NOTIFICATION_CATEGORIES,
@@ -23,6 +35,8 @@ import {
   isCriticalPassthroughNotificationCategory,
   isMainChatAutoCompactEnabled,
   isMainChatBackgroundFolded,
+  isMainChatOnDemandToolLoadingEnabled,
+  isMainChatStatelessBackgroundSupervisionEnabled,
   isMainChatTaskLessonsEnabled,
   isMainChatTasksQuiet,
   normalizeMainChatLimitFallbacks,
@@ -30,11 +44,13 @@ import {
   resolveMainChatCacheKeepaliveConfig,
   resolveMainChatCompactionConfig,
   resolveMainChatDeliveryGatePolicy,
+  resolveMainChatIdleArchivePolicy,
   resolveMainChatLimitFallbacks,
   resolveMainChatModelConfig,
   resolveMainChatNightMode,
   resolveMainChatNotificationPolicy,
   resolveMainChatProfile,
+  resolveMainChatResourceAdmissionPolicy,
   type MainChatDeliveryGatePolicy,
   type MainChatLimitFallbackEntry,
   type MainChatModelSlots,
@@ -785,6 +801,112 @@ const SETTING_KEY_HANDLERS: Record<MainChatProposableSettingKey, SettingKeyHandl
     };
   },
   "profile.ownerAliases": validateOwnerAliasesSetting,
+  "resourceAdmission.enabled": buildBoolHandler({
+    key: "resourceAdmission.enabled",
+    label: "跨主机资源准入门禁",
+    readCurrent: (current) => resolveMainChatResourceAdmissionPolicy(current).enabled,
+    assign: (patch, next) => {
+      patch.resourceAdmission = { ...patch.resourceAdmission, enabled: next };
+    },
+  }),
+  "resourceAdmission.maxConcurrentPerHost": buildIntRangeHandler({
+    key: "resourceAdmission.maxConcurrentPerHost",
+    label: "单机最大受管并发数",
+    min: MAIN_CHAT_MIN_CONCURRENT_PER_HOST,
+    max: MAIN_CHAT_MAX_CONCURRENT_PER_HOST,
+    unit: "个任务",
+    readCurrent: (current) => resolveMainChatResourceAdmissionPolicy(current).maxConcurrentPerHost,
+    assign: (patch, next) => {
+      patch.resourceAdmission = { ...patch.resourceAdmission, maxConcurrentPerHost: next };
+    },
+  }),
+  "resourceAdmission.maxCpuPercent": buildIntRangeHandler({
+    key: "resourceAdmission.maxCpuPercent",
+    label: "CPU 准入上限阈值",
+    min: MAIN_CHAT_MIN_CPU_PERCENT,
+    max: MAIN_CHAT_MAX_CPU_PERCENT,
+    unit: "%",
+    readCurrent: (current) => resolveMainChatResourceAdmissionPolicy(current).maxCpuPercent,
+    assign: (patch, next) => {
+      patch.resourceAdmission = { ...patch.resourceAdmission, maxCpuPercent: next };
+    },
+  }),
+  "resourceAdmission.minFreeMemoryMb": buildIntRangeHandler({
+    key: "resourceAdmission.minFreeMemoryMb",
+    label: "最低可用内存下限",
+    min: MAIN_CHAT_MIN_FREE_MEMORY_MB,
+    max: MAIN_CHAT_MAX_FREE_MEMORY_MB,
+    unit: "MB",
+    readCurrent: (current) => resolveMainChatResourceAdmissionPolicy(current).minFreeMemoryMb,
+    assign: (patch, next) => {
+      patch.resourceAdmission = { ...patch.resourceAdmission, minFreeMemoryMb: next };
+    },
+  }),
+  "resourceAdmission.queueWhenPressured": buildBoolHandler({
+    key: "resourceAdmission.queueWhenPressured",
+    label: "资源受压时自动排队放行",
+    readCurrent: (current) => resolveMainChatResourceAdmissionPolicy(current).queueWhenPressured,
+    assign: (patch, next) => {
+      patch.resourceAdmission = { ...patch.resourceAdmission, queueWhenPressured: next };
+    },
+  }),
+  statelessBackgroundSupervision: buildBoolHandler({
+    key: "statelessBackgroundSupervision",
+    label: "无状态单轮后台督办",
+    readCurrent: (current) => isMainChatStatelessBackgroundSupervisionEnabled(current),
+    assign: (patch, next) => {
+      patch.statelessBackgroundSupervision = next;
+    },
+  }),
+  onDemandToolLoading: buildBoolHandler({
+    key: "onDemandToolLoading",
+    label: "MCP 工具按需延迟加载",
+    readCurrent: (current) => isMainChatOnDemandToolLoadingEnabled(current),
+    assign: (patch, next) => {
+      patch.onDemandToolLoading = next;
+    },
+  }),
+  "idleArchivePolicy.enabled": buildBoolHandler({
+    key: "idleArchivePolicy.enabled",
+    label: "闲置子会话自动清理归档",
+    readCurrent: (current) => resolveMainChatIdleArchivePolicy(current).enabled,
+    assign: (patch, next) => {
+      patch.idleArchivePolicy = { ...patch.idleArchivePolicy, enabled: next };
+    },
+  }),
+  "idleArchivePolicy.idleThresholdMinutes": buildIntRangeHandler({
+    key: "idleArchivePolicy.idleThresholdMinutes",
+    label: "子会话闲置自动归档阈值",
+    min: MAIN_CHAT_MIN_IDLE_ARCHIVE_THRESHOLD_MIN,
+    max: MAIN_CHAT_MAX_IDLE_ARCHIVE_THRESHOLD_MIN,
+    unit: "分钟",
+    readCurrent: (current) => resolveMainChatIdleArchivePolicy(current).idleThresholdMinutes,
+    assign: (patch, next) => {
+      patch.idleArchivePolicy = { ...patch.idleArchivePolicy, idleThresholdMinutes: next };
+    },
+  }),
+  "idleArchivePolicy.sweepIntervalMinutes": buildIntRangeHandler({
+    key: "idleArchivePolicy.sweepIntervalMinutes",
+    label: "闲置归档巡扫间隔",
+    min: MAIN_CHAT_MIN_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+    max: MAIN_CHAT_MAX_IDLE_ARCHIVE_SWEEP_INTERVAL_MIN,
+    unit: "分钟",
+    readCurrent: (current) => resolveMainChatIdleArchivePolicy(current).sweepIntervalMinutes,
+    assign: (patch, next) => {
+      patch.idleArchivePolicy = { ...patch.idleArchivePolicy, sweepIntervalMinutes: next };
+    },
+  }),
+  "idleArchivePolicy.maxArchivePerSweep": buildIntRangeHandler({
+    key: "idleArchivePolicy.maxArchivePerSweep",
+    label: "单次清扫最多归档数量",
+    min: MAIN_CHAT_MIN_IDLE_ARCHIVE_MAX_PER_SWEEP,
+    max: MAIN_CHAT_MAX_IDLE_ARCHIVE_MAX_PER_SWEEP,
+    unit: "个会话",
+    readCurrent: (current) => resolveMainChatIdleArchivePolicy(current).maxArchivePerSweep,
+    assign: (patch, next) => {
+      patch.idleArchivePolicy = { ...patch.idleArchivePolicy, maxArchivePerSweep: next };
+    },
+  }),
 };
 
 function validateAndDiffSettingKey(

@@ -990,6 +990,8 @@ describe("main-chat service, tools, and session", () => {
       "task_scope",
       "task_start",
       "task_start_ready",
+      "tool_catalog",
+      "tool_load",
     ]);
 
     const planToolResult = await mainTools.get("task_plan")!.handler(
@@ -1059,6 +1061,26 @@ describe("main-chat service, tools, and session", () => {
       builtinNames: new Set(),
     });
     expect(childTools.size).toBe(0);
+
+    await service.updateSettings({ onDemandToolLoading: true });
+    const onDemandMainTools = new Map<string, PaseoToolDefinition>();
+    registerMainChatTools({
+      agentManager,
+      mainChatService: service,
+      callerAgentId: mainAgentId,
+      scope: "agent",
+      tools: onDemandMainTools,
+      builtinNames: new Set(),
+    });
+    expect(Array.from(onDemandMainTools.keys()).sort()).toEqual([
+      "task_ask_user",
+      "task_list",
+      "task_plan",
+      "task_review",
+      "task_start",
+      "tool_catalog",
+      "tool_load",
+    ]);
 
     service.stop();
   });
