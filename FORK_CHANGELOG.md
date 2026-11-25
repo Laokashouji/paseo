@@ -2,6 +2,13 @@
 
 记录个人 Fork（`Laokashouji/paseo`）相对上游 `getpaseo/paseo` 的独立更新内容。应用内「新功能」弹窗会按发布日期将本文件与上游 `CHANGELOG.md` 混排展示，GitHub Release 也会自动同步对应版本说明。
 
+## 0.17.530 - 2026-11-25
+
+- **插件化飞书机器人通知与审批卡片双向桥接（P2-1）**：新增内置隔离插件 `feishu-bot-bridge`，并通过主对话薄桥接缝（`feishu-bridge-seam`）双向联动，默认保守关闭且零外发流量；开启并配置凭据后，可按通知分级（`critical` / `actionable` / `digest`）并遵循低打扰静默与关键直通策略，向飞书群聊或私聊（`chat_id` / `open_id` / `user_id`）自动推送权限审批互动卡、拍板决策卡、分级通知卡与测试卡；支持通过入站回调 `POST /api/plugins/feishu-bot-bridge/webhook` 完成 URL `challenge` 校验、在飞书卡片远程点击「允许 / 拒绝」或拍板选项并回写主对话，同时原位更新飞书卡片终态，防止 Paseo 端内与飞书端重复审批；原生主对话 P0 / P1 / P2 全部 15 项演进需求至此全量收官。
+- **配置管理面板、5 个 WebSocket RPC 与回执审计**：在「设置 → 对话管理」新增「飞书机器人桥接」面板（并提供独立插件设置页），支持 Feishu / Lark / 自定义域名选择、目标会话与操作者白名单管理、转发分级与低打扰选项、Webhook 地址展示、一键连通性测试、发送测试卡片及最近 100 条出站/入站/系统审计账本查看；新增 5 个 WebSocket RPC（`main_chat.feishu_bridge_get_state` / `main_chat.feishu_bridge_update_config` / `main_chat.feishu_bridge_test_connection` / `main_chat.feishu_bridge_send_test_card` / `main_chat.feishu_bridge_list_audit`）与 8 个插件内部 RPC，主对话总 RPC 组数扩展至 64 组。
+- **0600 脱敏持久化与多层回调安全防线**：插件运行状态采用 `0o700` 数据目录与 `0o600` 原子文件持久化，App Secret / Verification Token / Encrypt Key 仅支持写入与清除、永不在读取接口/审计记录/错误日志中回显明文（自动掩码与正则脱敏）；内置 `tenant_access_token` 内存缓存与过期前自动刷新，自定义 API 地址强制校验 `https://`（仅本地回环地址允许测试 `http://`）；入站 Webhook 强制执行 AES-256-CBC 加密体解密、SHA-256 `X-Lark-Signature` 签名校验、可配置防重放时间窗口（默认 300s）、`open_id` 操作者白名单与 `action_id` / `event_id` 幂等去重；保守模式 A 下严禁通过飞书回调向用户手动会话下发业务命令，且红线高危审批强制保留在 Paseo 端内人工确认。
+- **联调说明**：当前已完成本地 Mock HTTP 飞书 OpenAPI 与 Webhook 双向全链路自动化集成验证及浏览器设置面板验证；线上真实飞书企业自建应用与真实群聊/私聊卡片联调待用户在本地配置真实 App ID、App Secret 等凭据后实测确认。
+
 ## 0.17.529 - 2026-11-25
 
 - **跨主机资源准入门禁与受压排队**：「设置 → 对话管理」新增「跨主机资源准入与受压排队」面板，支持按单机最大受管并发数（默认 6）、CPU 占用上限（默认 85%）、最小可用内存（默认 1024 MB）与受压排队策略（门禁默认保守关闭，按需开启）实时评估本机及远端多 Host 资源态势；目标主机受压或离线时将新派发任务有序写入持久化准入队列（最多 100 条），在主对话顶部动作条与任务抽屉展示受压告警、排队位次与原因，并在资源恢复后自动或手动出队派发（支持单条出队/取消与全量出队）；新增 2 个 WebSocket RPC（`main_chat.get_resource_admission` / `main_chat.drain_admission_queue`）并向 `settings_propose_patch` 开放 `resourceAdmission.*` 自助提议。
