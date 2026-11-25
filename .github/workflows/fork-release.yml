@@ -35,9 +35,28 @@ on:
         required: false
         default: "0"
         type: string
+      include_ios:
+        description: "Build & upload personal iOS TestFlight IPA (auto = build when iOS secrets are configured)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - "true"
+          - "false"
+      ios_only:
+        description: "Only run iOS TestFlight build (skip macOS Desktop, Linux Daemon, and GitHub Release)"
+        required: false
+        default: false
+        type: boolean
+      ios_build_number:
+        description: "Optional explicit iOS CFBundleVersion override (auto collision-checked if empty)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: fork-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: fork-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}-${{ github.event_name == 'workflow_dispatch' && inputs.ios_only && 'ios' || 'all' }}
   cancel-in-progress: false
 
 env:
@@ -46,6 +65,9 @@ env:
   SHOULD_SIGN: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
   SHOULD_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
   INCLUDE_INTEL: ${{ github.event_name == 'workflow_dispatch' && inputs.include_intel }}
+  INCLUDE_IOS: ${{ github.event_name == 'workflow_dispatch' && inputs.include_ios || 'auto' }}
+  IOS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.ios_only }}
+  IOS_BUILD_NUMBER_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.ios_build_number || '' }}
   RUN_SMOKE: ${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}
   ROLLOUT_HOURS: ${{ github.event_name == 'workflow_dispatch' && inputs.rollout_hours || '0' }}
   DESKTOP_PACKAGE_PATH: "packages/desktop"
@@ -62,6 +84,8 @@ jobs:
       release_channel: ${{ steps.meta.outputs.release_channel }}
       resolved_sha: ${{ steps.meta.outputs.resolved_sha }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      should_build_desktop: ${{ steps.targets.outputs.should_build_desktop }}
+      should_build_ios: ${{ steps.targets.outputs.should_build_ios }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,7 +115,7 @@ jobs:
           echo "resolved_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Verify Apple signing secrets before launching macOS runner
-        if: env.SHOULD_SIGN == 'true'
+        if: env.SHOULD_SIGN == 'true' && env.IOS_ONLY != 'true'
         shell: bash
         env:
           CHECK_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -143,6 +167,57 @@ jobs:
             echo "Apple signing secrets verified (notarization mode: Apple ID)."
           fi
 
+      - name: Resolve desktop and iOS TestFlight build targets
+        id: targets
+        shell: bash
+        env:
+          CHECK_IOS_DIST_CERTIFICATE: ${{ secrets.IOS_DIST_CERTIFICATE }}
+          CHECK_IOS_DIST_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+          CHECK_IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID || vars.IOS_BUNDLE_ID }}
+          CHECK_IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          CHECK_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CHECK_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          CHECK_APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          CHECK_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          should_build_desktop=true
+          if [[ "$IOS_ONLY" == "true" ]]; then
+            should_build_desktop=false
+          fi
+
+          ios_requested="$INCLUDE_IOS"
+          if [[ "$IOS_ONLY" == "true" ]]; then
+            ios_requested="true"
+          fi
+
+          ios_missing=()
+          [[ -n "$CHECK_IOS_DIST_CERTIFICATE" ]] || ios_missing+=(IOS_DIST_CERTIFICATE)
+          [[ -n "$CHECK_IOS_DIST_CERTIFICATE_PASSWORD" ]] || ios_missing+=(IOS_DIST_CERTIFICATE_PASSWORD)
+          [[ -n "$CHECK_IOS_BUNDLE_ID" ]] || ios_missing+=(IOS_BUNDLE_ID)
+          [[ -n "$CHECK_APPLE_TEAM_ID" ]] || ios_missing+=(APPLE_TEAM_ID)
+          if [[ -z "$CHECK_IOS_PROVISIONING_PROFILE" || "$SHOULD_PUBLISH" == "true" ]]; then
+            [[ -n "$CHECK_APPLE_API_KEY" ]] || ios_missing+=(APPLE_API_KEY)
+            [[ -n "$CHECK_APPLE_API_KEY_ID" ]] || ios_missing+=(APPLE_API_KEY_ID)
+            [[ -n "$CHECK_APPLE_API_ISSUER" ]] || ios_missing+=(APPLE_API_ISSUER)
+          fi
+
+          should_build_ios=false
+          if [[ "$ios_requested" == "false" ]]; then
+            echo "iOS TestFlight build explicitly disabled (include_ios=false)."
+          elif (( ${#ios_missing[@]} == 0 )); then
+            should_build_ios=true
+            echo "iOS TestFlight signing secrets verified; enabling build-ios job."
+          elif [[ "$ios_requested" == "true" ]]; then
+            echo "::error::iOS TestFlight build requested, but required GitHub Secrets are missing: ${ios_missing[*]}. Run ./scripts/fork/setup-apple-secrets.sh --check to inspect."
+            exit 1
+          else
+            echo "::notice::Skipping iOS TestFlight build (optional secrets not configured: ${ios_missing[*]}). Configure them via ./scripts/fork/setup-apple-secrets.sh to enable automatic TestFlight builds."
+          fi
+
+          echo "should_build_desktop=${should_build_desktop}" >> "$GITHUB_OUTPUT"
+          echo "should_build_ios=${should_build_ios}" >> "$GITHUB_OUTPUT"
+
       - name: Build macOS runner matrix
         id: matrix
         shell: bash
@@ -155,7 +230,7 @@ jobs:
           fi
 
       - name: Create or update draft GitHub release
-        if: env.SHOULD_PUBLISH == 'true'
+        if: env.SHOULD_PUBLISH == 'true' && env.IOS_ONLY != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -202,6 +277,7 @@ jobs:
 
   build-macos:
     needs: [prepare]
+    if: needs.prepare.outputs.should_build_desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -457,6 +533,7 @@ jobs:
 
   build-daemon:
     needs: [prepare]
+    if: needs.prepare.outputs.should_build_desktop == 'true'
     permissions:
       contents: write
       packages: read
@@ -560,7 +637,7 @@ jobs:
 
   publish-release:
     needs: [prepare, build-macos, build-daemon]
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
+    if: ${{ needs.prepare.outputs.should_build_desktop == 'true' && (github.event_name != 'workflow_dispatch' || inputs.sign) }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -659,3 +736,97 @@ jobs:
             --draft=false \
             --latest \
             --repo "${{ github.repository }}"
+
+  build-ios:
+    needs: [prepare]
+    if: needs.prepare.outputs.should_build_ios == 'true'
+    permissions:
+      contents: read
+      packages: read
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      FORK_VERSION: ${{ needs.prepare.outputs.fork_version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.resolved_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Cache CocoaPods download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: cocoapods-${{ runner.os }}-${{ hashFiles('package-lock.json', 'packages/app/package.json') }}
+          restore-keys: |
+            cocoapods-${{ runner.os }}-
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ONNXRUNTIME_NODE_INSTALL: skip
+
+      - name: Ephemerally apply fork version across workspaces
+        shell: bash
+        run: node scripts/fork/version-utils.mjs apply --version "$FORK_VERSION"
+
+      - name: Build, sign, verify, and upload iOS TestFlight IPA
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          IOS_DIST_CERTIFICATE: ${{ secrets.IOS_DIST_CERTIFICATE }}
+          IOS_DIST_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID || vars.IOS_BUNDLE_ID }}
+          IOS_APP_NAME: ${{ secrets.IOS_APP_NAME || vars.IOS_APP_NAME || 'Paseo Fork' }}
+          IOS_URL_SCHEME: ${{ secrets.IOS_URL_SCHEME || vars.IOS_URL_SCHEME || 'paseo-fork' }}
+          IOS_EXPO_PROJECT_ID: ${{ secrets.IOS_EXPO_PROJECT_ID || vars.IOS_EXPO_PROJECT_ID }}
+          IOS_EXPO_OWNER: ${{ secrets.IOS_EXPO_OWNER || vars.IOS_EXPO_OWNER }}
+          IOS_TESTFLIGHT_GROUPS: ${{ secrets.IOS_TESTFLIGHT_GROUPS || vars.IOS_TESTFLIGHT_GROUPS }}
+          IOS_BUILD_NUMBER: ${{ env.IOS_BUILD_NUMBER_OVERRIDE }}
+          EXPO_PUBLIC_FORK_CHANGELOG_URL: https://raw.githubusercontent.com/${{ github.repository }}/fork/FORK_CHANGELOG.md
+          EXPO_PUBLIC_CHANGELOG_WEB_URL: https://github.com/${{ github.repository }}/releases
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          set -euo pipefail
+          args=(--version "$FORK_VERSION" --output-dir release-ios)
+          if [[ "$SHOULD_PUBLISH" == "true" ]]; then
+            args+=(--upload)
+          fi
+          ./scripts/fork/build-ios-ipa.sh "${args[@]}"
+
+      - name: Upload iOS build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-ios-build-logs-${{ needs.prepare.outputs.fork_version }}
+          path: |
+            release-ios/*.log
+            release-ios/ios-build-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload dry-run signed IPA artifact
+        if: env.SHOULD_PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-ios-ipa-${{ needs.prepare.outputs.fork_version }}
+          path: |
+            release-ios/*.ipa
+            release-ios/ios-build-summary.json
+          retention-days: 7
