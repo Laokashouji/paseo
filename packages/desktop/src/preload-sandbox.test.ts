@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { PASEO_BROWSER_PROFILE_PARTITION } from "./features/browser-profile.js";
-import { PERSONA_WEBVIEW_PARTITION } from "./features/persona-webview/policy.js";
+import {
+  PERSONA_WEBVIEW_PARTITION,
+  PERSONA_WEBVIEW_PARTITION_PREFIX,
+} from "./features/persona-webview/policy.js";
 
 // The preload runs inside Electron's sandbox and is tsc-compiled (not bundled), so at
 // runtime it may only load Electron's sandbox allowlist. Any other module (local or
@@ -104,7 +107,7 @@ describe("preload sandbox safety", () => {
     expect(match![1]).toBe(PASEO_BROWSER_PROFILE_PARTITION);
   });
 
-  it("inlines the persona webview partition instead of importing it", () => {
+  it("inlines the persona webview partition constants instead of importing them", () => {
     const source = readFileSync(preloadPath, "utf8");
     const match = source.match(/const\s+PERSONA_WEBVIEW_PARTITION\s*=\s*"([^"]+)"/);
     expect(
@@ -112,6 +115,13 @@ describe("preload sandbox safety", () => {
       "PERSONA_WEBVIEW_PARTITION not found as a double-quoted string literal in preload.ts",
     ).not.toBeNull();
     expect(match![1]).toBe(PERSONA_WEBVIEW_PARTITION);
+
+    const prefixMatch = source.match(/const\s+PERSONA_WEBVIEW_PARTITION_PREFIX\s*=\s*"([^"]+)"/);
+    expect(
+      prefixMatch,
+      "PERSONA_WEBVIEW_PARTITION_PREFIX not found as a double-quoted string literal in preload.ts",
+    ).not.toBeNull();
+    expect(prefixMatch![1]).toBe(PERSONA_WEBVIEW_PARTITION_PREFIX);
   });
 
   it("keeps persona guest-preload.ts restricted to Electron's sandbox allowlist", () => {

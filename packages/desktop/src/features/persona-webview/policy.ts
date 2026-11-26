@@ -1,4 +1,6 @@
 export const PERSONA_WEBVIEW_PARTITION = "persist:persona";
+export const PERSONA_WEBVIEW_PARTITION_PREFIX = "persist:persona-";
+export const DEFAULT_PERSONA_HUB_ID = "hub-default";
 export const PERSONA_OPEN_SESSION_EVENT_NAME = "persona-open-session";
 export const PERSONA_OPEN_SESSION_EVENT = `paseo:event:${PERSONA_OPEN_SESSION_EVENT_NAME}`;
 export const PERSONA_SESSION_METADATA_RESULT_EVENT_NAME = "persona-session-metadata-result";
@@ -22,6 +24,11 @@ export interface PersonaWebviewAttachParams {
   partition?: string;
 }
 
+export interface PersonaHubPartitionEntry {
+  partition: string;
+  hubUrl: string;
+}
+
 export interface NormalizedPersonaHubUrl {
   url: string;
   origin: string;
@@ -31,7 +38,49 @@ export interface NormalizedPersonaHubUrl {
 
 const PERSONA_ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const PERSONA_HEALTH_ENDPOINT_SUFFIX = "/api/v1/health";
+const PERSONA_HUB_PARTITION_SUFFIX_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 export const MAX_PERSONA_HUB_URLS = 32;
+
+/**
+ * Validates that a Chromium partition name belongs strictly to Persona:
+ * - Legacy/default Hub partition: `persist:persona`
+ * - Additional per-Hub isolated partition: `persist:persona-<id>` with safe ASCII slug
+ */
+export function isPersonaWebviewPartition(partition: unknown): partition is string {
+  if (typeof partition !== "string") {
+    return false;
+  }
+  if (partition === PERSONA_WEBVIEW_PARTITION) {
+    return true;
+  }
+  if (!partition.startsWith(PERSONA_WEBVIEW_PARTITION_PREFIX)) {
+    return false;
+  }
+  const suffix = partition.slice(PERSONA_WEBVIEW_PARTITION_PREFIX.length);
+  return PERSONA_HUB_PARTITION_SUFFIX_PATTERN.test(suffix);
+}
+
+/**
+ * Maps a Persona Hub ID to its persistent Electron session partition:
+ * - `hub-default` (migrated from 0.17.534) stays on `persist:persona` to preserve login state.
+ * - Any other valid Hub ID receives an isolated `persist:persona-<id>` partition.
+ */
+export function resolvePersonaHubPartition(hubId: string | undefined | null): string | null {
+  if (typeof hubId !== "string") {
+    return null;
+  }
+  const trimmed = hubId.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed === DEFAULT_PERSONA_HUB_ID) {
+    return PERSONA_WEBVIEW_PARTITION;
+  }
+  if (!PERSONA_HUB_PARTITION_SUFFIX_PATTERN.test(trimmed)) {
+    return null;
+  }
+  return `${PERSONA_WEBVIEW_PARTITION_PREFIX}${trimmed}`;
+}
 
 function parseUrl(value: string | undefined | null): URL | null {
   if (typeof value !== "string") {
@@ -110,6 +159,112 @@ export function normalizePersonaHubUrlList(values: unknown): string[] | null {
     }
   }
   return uniqueUrls;
+}
+
+/**
+ * Normalizes a host window's per-partition Persona Hub allowlist.
+ * Returns `[]` for null/undefined/empty arrays, deduplicates identical `(partition, hubUrl)` pairs,
+ * and returns `null` (fail-closed) if any entry has an invalid partition, invalid Hub URL,
+ * exceeds the cap, or binds the same partition to two different Hub URLs.
+ */
+export function normalizePersonaHubEntries(values: unknown): PersonaHubPartitionEntry[] | null {
+  if (values === null || values === undefined) {
+    return [];
+  }
+  if (!Array.isArray(values) || values.length > MAX_PERSONA_HUB_URLS) {
+    return null;
+  }
+  const entries: PersonaHubPartitionEntry[] = [];
+  const urlByPartition = new Map<string, string>();
+  for (const item of values) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return null;
+    }
+    const record = item as { partition?: unknown; hubUrl?: unknown };
+    if (!isPersonaWebviewPartition(record.partition)) {
+      return null;
+    }
+    if (typeof record.hubUrl !== "string") {
+      return null;
+    }
+    const normalized = normalizePersonaHubUrl(record.hubUrl);
+    if (!normalized) {
+      return null;
+    }
+    const existingUrl = urlByPartition.get(record.partition);
+    if (existingUrl !== undefined) {
+      if (existingUrl !== normalized.url) {
+        return null;
+      }
+      continue;
+    }
+    urlByPartition.set(record.partition, normalized.url);
+    entries.push({ partition: record.partition, hubUrl: normalized.url });
+  }
+  return entries;
+}
+
+function collectNormalizedHubEntries(
+  configuredHubs:
+    | string
+    | readonly string[]
+    | readonly PersonaHubPartitionEntry[]
+    | null
+    | undefined,
+): Array<{ partition: string; hub: NormalizedPersonaHubUrl }> {
+  if (typeof configuredHubs === "string") {
+    const normalized = normalizePersonaHubUrl(configuredHubs);
+    return normalized ? [{ partition: PERSONA_WEBVIEW_PARTITION, hub: normalized }] : [];
+  }
+  if (!Array.isArray(configuredHubs) || configuredHubs.length === 0) {
+    return [];
+  }
+  if (typeof configuredHubs[0] === "string") {
+    // Legacy unpartitioned string list: only a single unique URL can safely bind to persist:persona.
+    const uniqueUrls: NormalizedPersonaHubUrl[] = [];
+    const seen = new Set<string>();
+    for (const rawUrl of configuredHubs) {
+      if (typeof rawUrl !== "string") {
+        return [];
+      }
+      const normalized = normalizePersonaHubUrl(rawUrl);
+      if (!normalized) {
+        return [];
+      }
+      if (!seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        uniqueUrls.push(normalized);
+      }
+    }
+    return uniqueUrls.length === 1
+      ? [{ partition: PERSONA_WEBVIEW_PARTITION, hub: uniqueUrls[0] }]
+      : [];
+  }
+
+  const normalizedEntries: Array<{ partition: string; hub: NormalizedPersonaHubUrl }> = [];
+  const urlByPartition = new Map<string, string>();
+  for (const item of configuredHubs) {
+    if (!item || typeof item !== "object" || !("partition" in item) || !("hubUrl" in item)) {
+      return [];
+    }
+    if (!isPersonaWebviewPartition(item.partition)) {
+      return [];
+    }
+    const normalized = normalizePersonaHubUrl(item.hubUrl);
+    if (!normalized) {
+      return [];
+    }
+    const existingUrl = urlByPartition.get(item.partition);
+    if (existingUrl !== undefined) {
+      if (existingUrl !== normalized.url) {
+        return [];
+      }
+      continue;
+    }
+    urlByPartition.set(item.partition, normalized.url);
+    normalizedEntries.push({ partition: item.partition, hub: normalized });
+  }
+  return normalizedEntries;
 }
 
 function collectNormalizedHubs(
@@ -228,19 +383,24 @@ export function isAllowedPersonaTargetOrigin(
 }
 
 /**
- * Matches a `<webview>` attachment request against a single Hub URL or multi-Hub allowlist.
- * Returns the specific registered Hub URL that authorizes this guest (longest basePath match on
- * the same HTTP(S) origin), or `null` when unauthorized.
+ * Matches a `<webview>` attachment request strictly by its isolated Persona partition
+ * (`persist:persona` or `persist:persona-<id>`) against the host window's partition-bound Hub
+ * allowlist. Returns the single Hub URL bound to that partition when `src` matches its origin
+ * and reverse-proxy basePath, or `null` (fail-closed) when unauthorized.
  */
 export function matchPersonaWebviewAttachHubUrl(
   params: PersonaWebviewAttachParams,
-  configuredHubUrls?: string | readonly string[] | null,
+  configuredHubs?: string | readonly string[] | readonly PersonaHubPartitionEntry[] | null,
 ): string | null {
-  if (params.partition !== PERSONA_WEBVIEW_PARTITION) {
+  if (!isPersonaWebviewPartition(params.partition)) {
     return null;
   }
-  const hubs = collectNormalizedHubs(configuredHubUrls);
-  if (hubs.length === 0) {
+  const entries = collectNormalizedHubEntries(configuredHubs);
+  if (entries.length === 0) {
+    return null;
+  }
+  const entry = entries.find((item) => item.partition === params.partition);
+  if (!entry) {
     return null;
   }
   const candidate = parseUrl(params.src);
@@ -250,35 +410,25 @@ export function matchPersonaWebviewAttachHubUrl(
   if (candidate.username || candidate.password) {
     return null;
   }
-
-  const sameOriginHubs = hubs.filter((hub) => hub.origin === candidate.origin);
-  if (sameOriginHubs.length === 0) {
+  if (candidate.origin !== entry.hub.origin) {
     return null;
   }
-
-  // Prefer the longest matching reverse-proxy basePath when multiple Hubs share an origin.
-  const basePathMatches = sameOriginHubs
-    .filter((hub) => matchesHubBasePath(candidate.pathname, hub.basePath))
-    .sort((left, right) => right.basePath.length - left.basePath.length);
-  if (basePathMatches.length > 0) {
-    return basePathMatches[0].url;
+  if (!matchesHubBasePath(candidate.pathname, entry.hub.basePath)) {
+    return null;
   }
-
-  // If a single Hub on this origin has a custom basePath and the initial src targets a root
-  // path on that same origin (e.g. login redirect), allow only when no other Hub conflicts.
-  return sameOriginHubs.length === 1 ? sameOriginHubs[0].url : null;
+  return entry.hub.url;
 }
 
 /**
- * Validates `<webview>` attachment for the isolated `persist:persona` partition.
- * Requires a pre-registered valid HTTP(S) Hub URL (or allowlist) and a same-origin HTTP(S) `src`.
- * Refuses attachment before a trusted host has registered an enabled Hub.
+ * Validates `<webview>` attachment for an isolated Persona partition (`persist:persona` or
+ * `persist:persona-<id>`). Requires a pre-registered valid HTTP(S) Hub bound to that exact
+ * partition and a matching same-origin HTTP(S) `src`. Refuses attachment fail-closed otherwise.
  */
 export function isPersonaWebviewAttach(
   params: PersonaWebviewAttachParams,
-  configuredHubUrls?: string | readonly string[] | null,
+  configuredHubs?: string | readonly string[] | readonly PersonaHubPartitionEntry[] | null,
 ): boolean {
-  return matchPersonaWebviewAttachHubUrl(params, configuredHubUrls) !== null;
+  return matchPersonaWebviewAttachHubUrl(params, configuredHubs) !== null;
 }
 
 /**

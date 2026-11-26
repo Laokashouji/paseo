@@ -1,16 +1,21 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
-import type { PersonaHealthCheckResult } from "./features/persona-webview/index.js";
+import type {
+  PersonaHealthCheckResult,
+  PersonaHubPartitionEntry,
+} from "./features/persona-webview/index.js";
 import type { DesktopWindowChromeMode } from "./window/chrome.js";
 
 // This preload runs in Electron's sandbox and is tsc-compiled (not bundled), so it MUST
 // NOT emit any runtime module load other than "electron" — a require() of a local or
 // third-party module throws and aborts the preload before exposeInMainWorld runs, leaving
-// window.paseoDesktop undefined (the 0.1.108 regression, #2103). Keep this literal in sync
-// with PASEO_BROWSER_PROFILE_PARTITION in features/browser-profile.ts; preload-sandbox.test.ts
-// guards both the no-local-import rule and this drift. Type-only imports are fine (erased at emit).
+// window.paseoDesktop undefined (the 0.1.108 regression, #2103). Keep these literals in sync
+// with PASEO_BROWSER_PROFILE_PARTITION in features/browser-profile.ts and the persona partition
+// constants in features/persona-webview/policy.ts; preload-sandbox.test.ts guards both the
+// no-local-import rule and this drift. Type-only imports are fine (erased at emit).
 const PASEO_BROWSER_PROFILE_PARTITION = "persist:paseo-browser";
 const PERSONA_WEBVIEW_PARTITION = "persist:persona";
+const PERSONA_WEBVIEW_PARTITION_PREFIX = "persist:persona-";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -148,14 +153,18 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
   },
   persona: {
     partition: PERSONA_WEBVIEW_PARTITION,
+    partitionPrefix: PERSONA_WEBVIEW_PARTITION_PREFIX,
+    supportsPerHubPartitions: true,
+    setHubEntries: (entries: PersonaHubPartitionEntry[] | null, options?: { enabled?: boolean }) =>
+      ipcRenderer.invoke("paseo:persona:set-hub-entries", entries, options) as Promise<boolean>,
     setHubUrls: (hubUrls: string[] | null, options?: { enabled?: boolean }) =>
       ipcRenderer.invoke("paseo:persona:set-hub-urls", hubUrls, options) as Promise<boolean>,
     setHubUrl: (hubUrl: string | null, options?: { enabled?: boolean }) =>
       ipcRenderer.invoke("paseo:persona:set-hub-url", hubUrl, options) as Promise<boolean>,
     checkHealth: (hubUrl?: string) =>
       ipcRenderer.invoke("paseo:persona:check-health", hubUrl) as Promise<PersonaHealthCheckResult>,
-    clearSession: (hubUrl?: string) =>
-      ipcRenderer.invoke("paseo:persona:clear-session", hubUrl) as Promise<void>,
+    clearSession: (target?: string | { hubUrl?: string; partition?: string }) =>
+      ipcRenderer.invoke("paseo:persona:clear-session", target) as Promise<void>,
     openDevTools: (webContentsId: number) =>
       ipcRenderer.invoke("paseo:persona:open-devtools", webContentsId) as Promise<boolean>,
   },

@@ -7,8 +7,10 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   clearPersonaWebviewSession,
+  configurePersonaWebviewSession,
   createPersonaHostHubRegistry,
   getPersonaWebviewSession,
+  installPersonaWebviewFailClosedGuards,
   isTrustedPersonaGuestMainFrameIpcEvent,
   isTrustedPersonaHostIpcEvent,
   listPersonaWebviewGuests,
@@ -20,11 +22,13 @@ import {
   probePersonaHubHealth,
   registerPersonaWebviewGuestIpcBridge,
   registerPersonaWebviewNavigationGuards,
+  resolvePersonaHubPartition,
   type PersonaGuardableWebContents,
   type PersonaGuestFrameLike,
   type PersonaGuestIpcMainEventLike,
   type PersonaGuestIpcWebContentsLike,
   type PersonaNavigationEvent,
+  type PersonaWebviewSession,
   type PersonaWindowOpenSessionPayload,
 } from "./index.js";
 
@@ -1335,41 +1339,111 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
     }
   });
 
-  it("pins each guest in a multi-Hub host window strictly to its own single origin and revokes removed Hubs independently", () => {
+  it("deterministically binds concurrent empty-URL out-of-order guests by session partition and fails closed on unknown partitions", () => {
     const registry = createPersonaHostHubRegistry();
     const hostId = 10;
-    const hubA = "http://10.37.217.3:18660";
+    const hubA = "http://127.0.0.1:18660";
     const hubB = "http://127.0.0.1:18661";
+    const partitionA = resolvePersonaHubPartition("hub-default")!;
+    const partitionB = resolvePersonaHubPartition("hub-b")!;
+    expect(partitionA).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(partitionB).toBe("persist:persona-hub-b");
 
-    expect(registry.setHostHubUrls(hostId, [hubA, hubB], { enabled: true })).toBe(true);
+    // Unpartitioned multi-Hub array fails closed
+    expect(registry.setHostHubUrls(hostId, [hubA, hubB], { enabled: true })).toBe(false);
+
+    // Partition-bound multi-Hub registration succeeds
+    expect(
+      registry.setHostHubEntries(
+        hostId,
+        [
+          { partition: partitionA, hubUrl: hubA },
+          { partition: partitionB, hubUrl: hubB },
+        ],
+        { enabled: true },
+      ),
+    ).toBe(true);
     expect(registry.getHostHubState(hostId)).toEqual({
       enabled: true,
+      entries: [
+        { partition: partitionA, hubUrl: hubA },
+        { partition: partitionB, hubUrl: hubB },
+      ],
       hubUrls: [hubA, hubB],
     });
 
-    // Attach two guests concurrently for Hub A and Hub B
-    const matchedA = registry.authorizeWebviewAttach(hostId, {
-      partition: PERSONA_WEBVIEW_PARTITION,
-      src: `${hubA}/`,
-    });
-    const matchedB = registry.authorizeWebviewAttach(hostId, {
-      partition: PERSONA_WEBVIEW_PARTITION,
-      src: `${hubB}/`,
-    });
-    expect(matchedA).toBe(hubA);
-    expect(matchedB).toBe(hubB);
+    // Authorize A then B in will-attach-webview
+    expect(
+      registry.authorizeWebviewAttach(hostId, { partition: partitionA, src: `${hubA}/` }),
+    ).toEqual({ partition: partitionA, hubUrl: hubA });
+    expect(
+      registry.authorizeWebviewAttach(hostId, { partition: partitionB, src: `${hubB}/` }),
+    ).toEqual({ partition: partitionB, hubUrl: hubB });
 
-    // Unregistered Hub C is rejected even while Hub A and Hub B are authorized
+    // Cross-partition or unknown-partition attach is rejected fail-closed
+    expect(
+      registry.authorizeWebviewAttach(hostId, { partition: partitionA, src: `${hubB}/` }),
+    ).toBeNull();
     expect(
       registry.authorizeWebviewAttach(hostId, {
-        partition: PERSONA_WEBVIEW_PARTITION,
-        src: "https://hub-c.example.com/",
+        partition: "persist:persona-unregistered",
+        src: `${hubA}/`,
       }),
     ).toBeNull();
 
-    // Even if did-attach-webview fires out-of-order, initial URL matches the right pending Hub
-    expect(registry.bindAttachedGuest(hostId, 202, `${hubB}/`)).toBe(hubB);
-    expect(registry.bindAttachedGuest(hostId, 101, `${hubA}/`)).toBe(hubA);
+    // Simulate Electron Session singletons per partition
+    const sessionByPartition = new Map<string, object>();
+    const resolvePartitionSession = (partition: string): object => {
+      let existing = sessionByPartition.get(partition);
+      if (!existing) {
+        existing = { partition };
+        sessionByPartition.set(partition, existing);
+      }
+      return existing;
+    };
+    const sessionA = resolvePartitionSession(partitionA);
+    const sessionB = resolvePartitionSession(partitionB);
+    const unknownSession = { partition: "persist:persona-rogue" };
+
+    // Out-of-order did-attach-webview with EMPTY initial URLs (""):
+    // Guest 202 (Hub B) attaches BEFORE Guest 101 (Hub A) — zero FIFO guessing, zero misbinding!
+    expect(
+      registry.bindAttachedGuestBySession({
+        hostWebContentsId: hostId,
+        guestWebContentsId: 202,
+        guestSession: sessionB,
+        resolvePartitionSession,
+      }),
+    ).toEqual({ partition: partitionB, hubUrl: hubB });
+    expect(
+      registry.bindAttachedGuestBySession({
+        hostWebContentsId: hostId,
+        guestWebContentsId: 101,
+        guestSession: sessionA,
+        resolvePartitionSession,
+      }),
+    ).toEqual({ partition: partitionA, hubUrl: hubA });
+
+    // Unknown partition in did-attach-webview fails closed (returns null and never binds)
+    expect(
+      registry.bindAttachedGuestBySession({
+        hostWebContentsId: hostId,
+        guestWebContentsId: 999,
+        guestSession: unknownSession,
+        resolvePartitionSession,
+      }),
+    ).toBeNull();
+    expect(registry.getGuestAuthorizedHubUrl(999)).toBe("");
+    expect(registry.getGuestPartition(999)).toBeNull();
+
+    // Unknown partition fail-closed guards block all navigations, deny popups, and stop load
+    const rogueGuest = createMockWebContents("");
+    const stopSpy = vi.fn();
+    rogueGuest.contents.stop = stopSpy;
+    installPersonaWebviewFailClosedGuards(rogueGuest.contents);
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(rogueGuest.emitNavigation("will-navigate", `${hubA}/`).prevented).toBe(true);
+    expect(rogueGuest.triggerWindowOpen(`${hubA}/s/m1/s1`)).toEqual({ action: "deny" });
 
     // Each guest's navigation guard is strictly locked to its OWN single Hub origin
     const guestA = createMockWebContents(`${hubA}/`);
@@ -1391,7 +1465,7 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
       },
     });
 
-    // Guest A navigating to Hub A stays inside; navigating to Hub B (even though registered on host!) is BLOCKED
+    // Guest A navigating to Hub A stays inside; navigating to Hub B (even on same host 127.0.0.1!) is BLOCKED
     expect(guestA.emitNavigation("will-navigate", `${hubA}/s/m1/s1`).prevented).toBe(false);
     expect(guestA.emitNavigation("will-navigate", `${hubB}/s/m2/s2`).prevented).toBe(true);
     expect(externalOpenedA).toEqual([`${hubB}/s/m2/s2`]);
@@ -1402,14 +1476,22 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
     expect(externalOpenedB).toEqual([`${hubA}/s/m1/s1`]);
 
     // Removing Hub A from host allowlist revokes ONLY Guest A while Guest B stays authorized
-    expect(registry.setHostHubUrls(hostId, [hubB], { enabled: true })).toBe(true);
+    expect(
+      registry.setHostHubEntries(hostId, [{ partition: partitionB, hubUrl: hubB }], {
+        enabled: true,
+      }),
+    ).toBe(true);
     expect(registry.getGuestAuthorizedHubUrl(101)).toBe("");
     expect(registry.getGuestAuthorizedHubUrl(202)).toBe(hubB);
     expect(guestA.emitNavigation("will-navigate", `${hubA}/next`).prevented).toBe(true);
     expect(guestB.emitNavigation("will-navigate", `${hubB}/next`).prevented).toBe(false);
 
     // Disabling Persona revokes remaining Guest B
-    expect(registry.setHostHubUrls(hostId, [hubB], { enabled: false })).toBe(true);
+    expect(
+      registry.setHostHubEntries(hostId, [{ partition: partitionB, hubUrl: hubB }], {
+        enabled: false,
+      }),
+    ).toBe(true);
     expect(registry.getGuestAuthorizedHubUrl(202)).toBe("");
 
     // Removing host cleans up all guest bindings
@@ -1419,22 +1501,40 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
     expect(registry.getGuestPinnedHubUrl(202)).toBeNull();
   });
 
-  it("isolates per-Hub health-check targets (SSRF-safe) and origin-scoped session clearing", async () => {
+  it("isolates per-Hub session clearing across same-host different-port and same-origin different-path Hubs and enforces per-partition permissions", async () => {
     const registry = createPersonaHostHubRegistry();
     const hostId = 20;
-    const hubA = "http://10.37.217.3:18660";
-    const hubB = "https://hub-b.example.com/persona";
+    const hubPortA = "http://127.0.0.1:18660";
+    const hubPortB = "http://127.0.0.1:18661";
+    const hubPathA = "https://proxy.example.com/hub-a";
+    const hubPathB = "https://proxy.example.com/hub-b";
 
-    expect(registry.setHostHubUrls(hostId, [hubA, hubB], { enabled: true })).toBe(true);
+    const partPortA = PERSONA_WEBVIEW_PARTITION;
+    const partPortB = "persist:persona-hub-port-b";
+    const partPathA = "persist:persona-hub-path-a";
+    const partPathB = "persist:persona-hub-path-b";
+
+    expect(
+      registry.setHostHubEntries(
+        hostId,
+        [
+          { partition: partPortA, hubUrl: hubPortA },
+          { partition: partPortB, hubUrl: hubPortB },
+          { partition: partPathA, hubUrl: hubPathA },
+          { partition: partPathB, hubUrl: hubPathB },
+        ],
+        { enabled: true },
+      ),
+    ).toBe(true);
 
     // Health check resolves each registered Hub target and blocks unregistered / invalid URLs
-    expect(registry.resolveHealthCheckTarget(hostId, `${hubB}/`)).toEqual({
+    expect(registry.resolveHealthCheckTarget(hostId, `${hubPathB}/`)).toEqual({
       ok: true,
-      hubUrl: hubB,
+      hubUrl: hubPathB,
     });
     expect(registry.resolveHealthCheckTarget(hostId)).toEqual({
       ok: true,
-      hubUrl: hubA,
+      hubUrl: hubPortA,
     });
     expect(registry.resolveHealthCheckTarget(hostId, "http://169.254.169.254/")).toEqual({
       ok: false,
@@ -1447,61 +1547,228 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
       error: "Invalid Persona Hub URL",
     });
 
-    // Clear session target resolution rejects unregistered URLs
-    expect(registry.resolveClearSessionTarget(hostId, hubB)).toEqual({
+    // Clear session target resolution supports explicit partition+url, rejects mismatched or unregistered
+    expect(
+      registry.resolveClearSessionTarget(hostId, { partition: partPortB, hubUrl: hubPortB }),
+    ).toEqual({
       ok: true,
-      targetHubUrl: hubB,
+      mode: "single",
+      partition: partPortB,
+      hubUrl: hubPortB,
+    });
+    expect(
+      registry.resolveClearSessionTarget(hostId, { partition: partPortB, hubUrl: hubPortA }),
+    ).toEqual({
+      ok: false,
+      error: "Persona Hub URL does not match partition",
+    });
+    expect(
+      registry.resolveClearSessionTarget(hostId, { partition: "persist:persona-rogue" }),
+    ).toEqual({
+      ok: false,
+      error: "Persona partition is not registered",
     });
     expect(registry.resolveClearSessionTarget(hostId, "https://other.example.com")).toEqual({
       ok: false,
       error: "Persona Hub URL is not registered",
     });
+    expect(registry.resolveClearSessionTarget(hostId)).toEqual({
+      ok: true,
+      mode: "all",
+      partitions: [partPortA, partPortB, partPathA, partPathB],
+    });
 
-    // Clear session scoped to Hub B clears ONLY Hub B's origin storage and reloads ONLY Hub B's guest
-    const clearStorageData = vi.fn(async () => undefined);
-    const clearCache = vi.fn(async () => undefined);
-    const clearAuthCache = vi.fn(async () => undefined);
-    const guestA = { id: 301, isDestroyed: () => false, reload: vi.fn(), getURL: () => `${hubA}/` };
-    const guestB = { id: 302, isDestroyed: () => false, reload: vi.fn(), getURL: () => `${hubB}/` };
-    const pinnedMap = new Map<number, string>([
-      [301, hubA],
-      [302, hubB],
+    // Create distinct mock Electron sessions per partition (with permission hooks!)
+    const makeMockSession = () => {
+      let reqHandler: Parameters<
+        NonNullable<PersonaWebviewSession["setPermissionRequestHandler"]>
+      >[0] = null;
+      let checkHandler: Parameters<
+        NonNullable<PersonaWebviewSession["setPermissionCheckHandler"]>
+      >[0] = null;
+      const s: PersonaWebviewSession = {
+        clearStorageData: vi.fn(async () => undefined),
+        clearCache: vi.fn(async () => undefined),
+        clearAuthCache: vi.fn(async () => undefined),
+        setPermissionRequestHandler: vi.fn((handler) => {
+          reqHandler = handler;
+        }),
+        setPermissionCheckHandler: vi.fn((handler) => {
+          checkHandler = handler;
+        }),
+      };
+      return {
+        session: s,
+        requestPermission(
+          webContents: { id: number; getURL: () => string },
+          permission: string,
+          requestingUrl?: string,
+        ) {
+          let granted: boolean | null = null;
+          reqHandler?.(
+            webContents,
+            permission,
+            (value) => {
+              granted = value;
+            },
+            requestingUrl ? { requestingUrl } : undefined,
+          );
+          return granted;
+        },
+        checkPermission(
+          webContents: { id: number; getURL: () => string } | null,
+          permission: string,
+          requestingOrigin: string,
+        ) {
+          return checkHandler?.(webContents, permission, requestingOrigin) ?? false;
+        },
+      };
+    };
+
+    const sessionsByPartition = new Map<string, ReturnType<typeof makeMockSession>>([
+      [partPortA, makeMockSession()],
+      [partPortB, makeMockSession()],
+      [partPathA, makeMockSession()],
+      [partPathB, makeMockSession()],
     ]);
+    const resolvePartitionSession = (partition: string) =>
+      sessionsByPartition.get(partition)!.session;
 
-    await clearPersonaWebviewSession({
-      personaSession: { clearStorageData, clearCache, clearAuthCache },
-      targetHubUrl: hubB,
-      getGuestHubUrl: (guest) => pinnedMap.get(guest.id) ?? null,
-      listGuests: () => [guestA, guestB],
-      logReloadError: vi.fn(),
+    // Bind guests to their dedicated partitions and apply per-partition session security
+    for (const [guestId, partition] of [
+      [301, partPortA],
+      [302, partPortB],
+      [303, partPathA],
+      [304, partPathB],
+    ] as const) {
+      registry.bindAttachedGuestBySession({
+        hostWebContentsId: hostId,
+        guestWebContentsId: guestId,
+        guestSession: resolvePartitionSession(partition),
+        resolvePartitionSession,
+      });
+      configurePersonaWebviewSession(resolvePartitionSession(partition), {
+        partition,
+        getAuthorizedHubUrlForWebContents: (id) => registry.getGuestAuthorizedHubUrl(id),
+        isOriginAuthorizedForPartition: (p, origin) =>
+          registry.isOriginAuthorizedForPartition(p, origin),
+      });
+    }
+
+    // Verify per-partition permission policies: allow safe permission on own Hub origin only, deny cross-Hub/dangerous
+    const portBSessionMock = sessionsByPartition.get(partPortB)!;
+    expect(
+      portBSessionMock.requestPermission(
+        { id: 302, getURL: () => `${hubPortB}/chat` },
+        "clipboard-sanitized-write",
+        `${hubPortB}/chat`,
+      ),
+    ).toBe(true);
+    expect(
+      portBSessionMock.requestPermission(
+        { id: 302, getURL: () => `${hubPortB}/chat` },
+        "geolocation",
+        `${hubPortB}/chat`,
+      ),
+    ).toBe(false);
+    expect(
+      portBSessionMock.requestPermission(
+        { id: 302, getURL: () => `${hubPortA}/chat` },
+        "clipboard-sanitized-write",
+        `${hubPortA}/chat`,
+      ),
+    ).toBe(false);
+    expect(portBSessionMock.checkPermission(null, "clipboard-read", hubPortB)).toBe(true);
+    expect(portBSessionMock.checkPermission(null, "clipboard-read", hubPortA)).toBe(false);
+
+    const guests = [
+      {
+        id: 301,
+        session: resolvePartitionSession(partPortA),
+        getType: () => "webview",
+        isDestroyed: () => false,
+        reload: vi.fn(),
+        getURL: () => `${hubPortA}/`,
+      },
+      {
+        id: 302,
+        session: resolvePartitionSession(partPortB),
+        getType: () => "webview",
+        isDestroyed: () => false,
+        reload: vi.fn(),
+        getURL: () => `${hubPortB}/`,
+      },
+      {
+        id: 303,
+        session: resolvePartitionSession(partPathA),
+        getType: () => "webview",
+        isDestroyed: () => false,
+        reload: vi.fn(),
+        getURL: () => `${hubPathA}/`,
+      },
+      {
+        id: 304,
+        session: resolvePartitionSession(partPathB),
+        getType: () => "webview",
+        isDestroyed: () => false,
+        reload: vi.fn(),
+        getURL: () => `${hubPathB}/`,
+      },
+    ];
+
+    // 1. Same-host different-port isolation: clearing 127.0.0.1:18661 clears ONLY partPortB session & reloads ONLY guest 302
+    const targetPortB = registry.resolveClearSessionTarget(hostId, {
+      partition: partPortB,
+      hubUrl: hubPortB,
     });
-
-    expect(clearStorageData).toHaveBeenCalledTimes(1);
-    expect(clearStorageData).toHaveBeenCalledWith({
-      origin: "https://hub-b.example.com",
-      storages: [
-        "cookies",
-        "filesystem",
-        "indexdb",
-        "localstorage",
-        "serviceworkers",
-        "cachestorage",
-        "shadercache",
-      ],
-    });
-    expect(clearCache).not.toHaveBeenCalled();
-    expect(clearAuthCache).not.toHaveBeenCalled();
-    expect(guestA.reload).not.toHaveBeenCalled();
-    expect(guestB.reload).toHaveBeenCalledTimes(1);
-
-    // Invalid targetHubUrl throws fail-closed instead of wiping all origins
-    await expect(
-      clearPersonaWebviewSession({
-        personaSession: { clearStorageData, clearCache, clearAuthCache },
-        targetHubUrl: "javascript:bad",
-        listGuests: () => [guestA, guestB],
+    expect(targetPortB.ok && targetPortB.mode === "single").toBe(true);
+    if (targetPortB.ok && targetPortB.mode === "single") {
+      const targetSession = getPersonaWebviewSession(
+        { fromPartition: resolvePartitionSession },
+        targetPortB.partition,
+      );
+      await clearPersonaWebviewSession({
+        personaSession: targetSession,
+        listGuests: () =>
+          listPersonaWebviewGuests({ personaSession: targetSession, webContents: guests }),
         logReloadError: vi.fn(),
-      }),
-    ).rejects.toThrow("Invalid Persona Hub URL");
+      });
+    }
+    expect(sessionsByPartition.get(partPortB)!.session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(sessionsByPartition.get(partPortB)!.session.clearCache).toHaveBeenCalledTimes(1);
+    expect(sessionsByPartition.get(partPortB)!.session.clearAuthCache).toHaveBeenCalledTimes(1);
+    expect(sessionsByPartition.get(partPortA)!.session.clearStorageData).not.toHaveBeenCalled();
+    expect(guests[0].reload).not.toHaveBeenCalled();
+    expect(guests[1].reload).toHaveBeenCalledTimes(1);
+    expect(guests[2].reload).not.toHaveBeenCalled();
+    expect(guests[3].reload).not.toHaveBeenCalled();
+
+    // 2. Same-origin different-path isolation: clearing https://proxy.example.com/hub-b clears ONLY partPathB & reloads ONLY guest 304
+    const targetPathB = registry.resolveClearSessionTarget(hostId, {
+      partition: partPathB,
+      hubUrl: hubPathB,
+    });
+    expect(targetPathB.ok && targetPathB.mode === "single").toBe(true);
+    if (targetPathB.ok && targetPathB.mode === "single") {
+      const targetSession = getPersonaWebviewSession(
+        { fromPartition: resolvePartitionSession },
+        targetPathB.partition,
+      );
+      await clearPersonaWebviewSession({
+        personaSession: targetSession,
+        listGuests: () =>
+          listPersonaWebviewGuests({ personaSession: targetSession, webContents: guests }),
+        logReloadError: vi.fn(),
+      });
+    }
+    expect(sessionsByPartition.get(partPathB)!.session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(sessionsByPartition.get(partPathA)!.session.clearStorageData).not.toHaveBeenCalled();
+    expect(guests[2].reload).not.toHaveBeenCalled();
+    expect(guests[3].reload).toHaveBeenCalledTimes(1);
+
+    // Invalid partition fails closed
+    expect(() =>
+      getPersonaWebviewSession({ fromPartition: resolvePartitionSession }, "persist:paseo-browser"),
+    ).toThrow("Invalid Persona partition");
   });
 });
