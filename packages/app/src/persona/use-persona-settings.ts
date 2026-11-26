@@ -11,12 +11,17 @@ import {
 
 const APP_SETTINGS_KEY_HEAD = APP_SETTINGS_QUERY_KEY[0];
 
+export interface PersonaEmbedSettingsState {
+  settings: PersonaEmbedSettings;
+  isLoaded: boolean;
+}
+
 /**
- * Reads Persona embed settings reactively from the active QueryClient cache.
- * Falls back safely to `appQueryClient` without triggering AsyncStorage reads when a
- * component is rendered in an isolated unit test without a `<QueryClientProvider>`.
+ * Reads Persona embed settings together with whether AppSettings have finished hydrating
+ * into the active QueryClient cache. Used by route/surface gates to avoid mounting before
+ * persisted `enabled` state is known.
  */
-export function usePersonaEmbedSettings(): PersonaEmbedSettings {
+export function usePersonaEmbedSettingsState(): PersonaEmbedSettingsState {
   const contextClient = useContext(QueryClientContext);
   const queryClient = contextClient ?? appQueryClient;
 
@@ -47,16 +52,29 @@ export function usePersonaEmbedSettings(): PersonaEmbedSettings {
   );
 
   const getSnapshot = useCallback(
-    () => queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona,
+    () => queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY),
     [queryClient],
   );
 
-  const rawPersona = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const rawAppSettings = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const isLoaded = rawAppSettings !== undefined;
+  const rawPersona = rawAppSettings?.persona;
 
-  return useMemo(
+  const settings = useMemo(
     () => (rawPersona ? normalizePersonaEmbedSettings(rawPersona) : DEFAULT_PERSONA_EMBED_SETTINGS),
     [rawPersona],
   );
+
+  return useMemo(() => ({ settings, isLoaded }), [isLoaded, settings]);
+}
+
+/**
+ * Reads Persona embed settings reactively from the active QueryClient cache.
+ * Falls back safely to `appQueryClient` without triggering AsyncStorage reads when a
+ * component is rendered in an isolated unit test without a `<QueryClientProvider>`.
+ */
+export function usePersonaEmbedSettings(): PersonaEmbedSettings {
+  return usePersonaEmbedSettingsState().settings;
 }
 
 /**

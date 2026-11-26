@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPersonaHealthCheckUrl,
+  isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
   isPersonaWebviewAttach,
+  isValidPersonaHubUrl,
+  normalizePersonaHubUrl,
   parsePersonaSessionPath,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_WEBVIEW_PARTITION,
@@ -14,8 +18,8 @@ describe("persona-webview policy", () => {
     expect(PERSONA_OPEN_SESSION_EVENT).toBe("paseo:event:persona-open-session");
   });
 
-  it("only allows http, https, and about:blank URLs", () => {
-    expect(isAllowedPersonaWebviewUrl("http://10.37.217.3:18660")).toBe(true);
+  it("only allows http, https, and about:blank URLs for webview navigation", () => {
+    expect(isAllowedPersonaWebviewUrl("http://127.0.0.1:18660")).toBe(true);
     expect(isAllowedPersonaWebviewUrl("https://persona.example.com/app")).toBe(true);
     expect(isAllowedPersonaWebviewUrl("about:blank")).toBe(true);
 
@@ -29,48 +33,107 @@ describe("persona-webview policy", () => {
     expect(isAllowedPersonaWebviewUrl("not-a-url")).toBe(false);
   });
 
-  it("validates attach partition, protocol, and optional configured hub origin", () => {
+  it("normalizes valid Hub URLs and rejects about:blank, unsafe schemes, and credentials", () => {
+    expect(normalizePersonaHubUrl("http://127.0.0.1:18660/")).toEqual({
+      url: "http://127.0.0.1:18660",
+      origin: "http://127.0.0.1:18660",
+      basePath: "",
+      displayHost: "127.0.0.1:18660",
+    });
+    expect(normalizePersonaHubUrl("https://hub.example.com/persona///")).toEqual({
+      url: "https://hub.example.com/persona",
+      origin: "https://hub.example.com",
+      basePath: "/persona",
+      displayHost: "hub.example.com/persona",
+    });
+
+    expect(isValidPersonaHubUrl("about:blank")).toBe(false);
+    expect(isValidPersonaHubUrl("file:///etc/passwd")).toBe(false);
+    expect(isValidPersonaHubUrl("http://user:pass@127.0.0.1:18660")).toBe(false);
+    expect(isValidPersonaHubUrl("")).toBe(false);
+  });
+
+  it("refuses persist:persona attach before a valid Hub is registered and enforces origin allowlisting", () => {
+    // Unregistered Hub URL MUST be rejected (fail-closed)
     expect(
       isPersonaWebviewAttach({
         partition: PERSONA_WEBVIEW_PARTITION,
-        src: "http://10.37.217.3:18660/",
+        src: "http://127.0.0.1:18660/",
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(
       isPersonaWebviewAttach(
         {
           partition: PERSONA_WEBVIEW_PARTITION,
-          src: "http://10.37.217.3:18660/persona",
+          src: "http://127.0.0.1:18660/",
         },
-        "http://10.37.217.3:18660",
+        null,
+      ),
+    ).toBe(false);
+
+    expect(
+      isPersonaWebviewAttach(
+        {
+          partition: PERSONA_WEBVIEW_PARTITION,
+          src: "http://127.0.0.1:18660/",
+        },
+        "about:blank",
+      ),
+    ).toBe(false);
+
+    // Same-origin HTTP(S) src with a registered Hub is allowed
+    expect(
+      isPersonaWebviewAttach(
+        {
+          partition: PERSONA_WEBVIEW_PARTITION,
+          src: "http://127.0.0.1:18660/persona",
+        },
+        "http://127.0.0.1:18660",
       ),
     ).toBe(true);
 
+    // about:blank and embedded credentials cannot attach the privileged preload
     expect(
       isPersonaWebviewAttach(
         {
           partition: PERSONA_WEBVIEW_PARTITION,
           src: "about:blank",
         },
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660",
       ),
-    ).toBe(true);
+    ).toBe(false);
+
+    expect(
+      isPersonaWebviewAttach(
+        {
+          partition: PERSONA_WEBVIEW_PARTITION,
+          src: "http://user:pass@127.0.0.1:18660/",
+        },
+        "http://127.0.0.1:18660",
+      ),
+    ).toBe(false);
 
     // Rejects wrong partition
     expect(
-      isPersonaWebviewAttach({
-        partition: "persist:paseo-browser",
-        src: "http://10.37.217.3:18660/",
-      }),
+      isPersonaWebviewAttach(
+        {
+          partition: "persist:paseo-browser",
+          src: "http://127.0.0.1:18660/",
+        },
+        "http://127.0.0.1:18660",
+      ),
     ).toBe(false);
 
     // Rejects wrong protocol
     expect(
-      isPersonaWebviewAttach({
-        partition: PERSONA_WEBVIEW_PARTITION,
-        src: "file:///tmp/test.html",
-      }),
+      isPersonaWebviewAttach(
+        {
+          partition: PERSONA_WEBVIEW_PARTITION,
+          src: "file:///tmp/test.html",
+        },
+        "http://127.0.0.1:18660",
+      ),
     ).toBe(false);
 
     // Rejects mismatched origin when configuredHubUrl is known
@@ -80,32 +143,63 @@ describe("persona-webview policy", () => {
           partition: PERSONA_WEBVIEW_PARTITION,
           src: "https://evil.example.com/",
         },
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660",
       ),
     ).toBe(false);
   });
 
-  it("checks target origin strictly", () => {
+  it("checks target origin and fixed health-check paths strictly", () => {
     expect(
       isAllowedPersonaTargetOrigin(
-        "http://10.37.217.3:18660/s/n37-217-003/paseo-ag1",
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660/s/n37-217-003/paseo-ag1",
+        "http://127.0.0.1:18660",
       ),
     ).toBe(true);
-    expect(isAllowedPersonaTargetOrigin("about:blank", "http://10.37.217.3:18660")).toBe(true);
+    expect(isAllowedPersonaTargetOrigin("about:blank", "http://127.0.0.1:18660")).toBe(true);
+    expect(isAllowedPersonaTargetOrigin("https://127.0.0.1:18662/", "http://127.0.0.1:18660")).toBe(
+      false,
+    );
+    expect(isAllowedPersonaTargetOrigin("http://localhost:18660/", "http://127.0.0.1:18660")).toBe(
+      false,
+    );
+
+    expect(buildPersonaHealthCheckUrl("https://hub.example.com/persona/")).toBe(
+      "https://hub.example.com/persona/api/v1/health",
+    );
+    expect(buildPersonaHealthCheckUrl("about:blank")).toBeNull();
+
     expect(
-      isAllowedPersonaTargetOrigin("https://10.37.217.3:18662/", "http://10.37.217.3:18660"),
+      isAllowedPersonaHealthCheckTarget(
+        "https://hub.example.com/persona/api/v1/health",
+        "https://hub.example.com/persona",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedPersonaHealthCheckTarget(
+        "https://hub.example.com/persona/api/v1/health/",
+        "https://hub.example.com/persona",
+      ),
+    ).toBe(true);
+    // Rejects off-origin or arbitrary paths on redirect
+    expect(
+      isAllowedPersonaHealthCheckTarget(
+        "https://evil.example.com/persona/api/v1/health",
+        "https://hub.example.com/persona",
+      ),
     ).toBe(false);
     expect(
-      isAllowedPersonaTargetOrigin("http://127.0.0.1:18660/", "http://10.37.217.3:18660"),
+      isAllowedPersonaHealthCheckTarget(
+        "https://hub.example.com/persona/api/v1/sessions",
+        "https://hub.example.com/persona",
+      ),
     ).toBe(false);
   });
 
   it("parses /s/:mid/:sid session paths with subpaths, query view, and encoded IDs", () => {
     expect(
       parsePersonaSessionPath(
-        "http://10.37.217.3:18660/s/n37-217-003/paseo-ag_123?view=chat&work=1",
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_123?view=chat&work=1",
+        "http://127.0.0.1:18660",
       ),
     ).toEqual({
       machineId: "n37-217-003",
@@ -127,8 +221,8 @@ describe("persona-webview policy", () => {
     // Supports /t/:mid/:space/:slot/:sid when sid is present
     expect(
       parsePersonaSessionPath(
-        "http://10.37.217.3:18660/t/n37-217-003/default/slot-1/paseo-ag_9",
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660/t/n37-217-003/default/slot-1/paseo-ag_9",
+        "http://127.0.0.1:18660",
       ),
     ).toEqual({
       machineId: "n37-217-003",
@@ -137,25 +231,23 @@ describe("persona-webview policy", () => {
   });
 
   it("returns null for non-session Persona paths, wrong origins, or malformed encodings", () => {
+    expect(parsePersonaSessionPath("http://127.0.0.1:18660/", "http://127.0.0.1:18660")).toBeNull();
     expect(
-      parsePersonaSessionPath("http://10.37.217.3:18660/", "http://10.37.217.3:18660"),
+      parsePersonaSessionPath("http://127.0.0.1:18660/persona/abc", "http://127.0.0.1:18660"),
     ).toBeNull();
     expect(
-      parsePersonaSessionPath("http://10.37.217.3:18660/persona/abc", "http://10.37.217.3:18660"),
-    ).toBeNull();
-    expect(
-      parsePersonaSessionPath("http://10.37.217.3:18660/settings", "http://10.37.217.3:18660"),
+      parsePersonaSessionPath("http://127.0.0.1:18660/settings", "http://127.0.0.1:18660"),
     ).toBeNull();
     expect(
       parsePersonaSessionPath(
         "https://other.example.com/s/n37-217-003/paseo-1",
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660",
       ),
     ).toBeNull();
     expect(
       parsePersonaSessionPath(
-        "http://10.37.217.3:18660/s/n37-217-003/%E0%A4%A",
-        "http://10.37.217.3:18660",
+        "http://127.0.0.1:18660/s/n37-217-003/%E0%A4%A",
+        "http://127.0.0.1:18660",
       ),
     ).toBeNull();
     expect(

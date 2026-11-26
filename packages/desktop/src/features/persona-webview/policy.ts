@@ -13,7 +13,15 @@ export interface PersonaWebviewAttachParams {
   partition?: string;
 }
 
+export interface NormalizedPersonaHubUrl {
+  url: string;
+  origin: string;
+  basePath: string;
+  displayHost: string;
+}
+
 const PERSONA_ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+const PERSONA_HEALTH_ENDPOINT_SUFFIX = "/api/v1/health";
 
 function parseUrl(value: string | undefined | null): URL | null {
   if (typeof value !== "string") {
@@ -33,6 +41,69 @@ function parseUrl(value: string | undefined | null): URL | null {
 function normalizeBasePath(pathname: string): string {
   const trimmed = pathname.replace(/\/+$/, "");
   return trimmed === "" || trimmed === "/" ? "" : trimmed;
+}
+
+/**
+ * Normalizes a configured Persona Hub base URL.
+ * Rejects empty values, non-HTTP(S) schemes (including about:blank), and embedded credentials.
+ */
+export function normalizePersonaHubUrl(
+  value: string | undefined | null,
+): NormalizedPersonaHubUrl | null {
+  const parsed = parseUrl(value);
+  if (!parsed || !PERSONA_ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+    return null;
+  }
+  if (parsed.username || parsed.password) {
+    return null;
+  }
+  const basePath = normalizeBasePath(parsed.pathname);
+  const url = `${parsed.origin}${basePath}`;
+  const displayHost = basePath ? `${parsed.host}${basePath}` : parsed.host;
+  return {
+    url,
+    origin: parsed.origin,
+    basePath,
+    displayHost,
+  };
+}
+
+export function isValidPersonaHubUrl(value: string | undefined | null): boolean {
+  return normalizePersonaHubUrl(value) !== null;
+}
+
+export function buildPersonaHealthCheckUrl(
+  configuredHubUrl: string | undefined | null,
+): string | null {
+  const hub = normalizePersonaHubUrl(configuredHubUrl);
+  if (!hub) {
+    return null;
+  }
+  return `${hub.url}${PERSONA_HEALTH_ENDPOINT_SUFFIX}`;
+}
+
+/**
+ * Validates that a health-check request or redirect target stays on the configured Hub's origin
+ * and fixed `/api/v1/health` path, without credentials.
+ */
+export function isAllowedPersonaHealthCheckTarget(
+  targetUrl: string | undefined | null,
+  configuredHubUrl: string | undefined | null,
+): boolean {
+  const hub = normalizePersonaHubUrl(configuredHubUrl);
+  const candidate = parseUrl(targetUrl);
+  if (!hub || !candidate || !PERSONA_ALLOWED_PROTOCOLS.has(candidate.protocol)) {
+    return false;
+  }
+  if (candidate.username || candidate.password) {
+    return false;
+  }
+  if (candidate.origin !== hub.origin) {
+    return false;
+  }
+  const expectedPath = `${hub.basePath}${PERSONA_HEALTH_ENDPOINT_SUFFIX}`;
+  const candidatePath = candidate.pathname.replace(/\/+$/, "");
+  return candidatePath === expectedPath;
 }
 
 function safeDecodeSegment(raw: string): string | null {
@@ -80,8 +151,8 @@ export function isAllowedPersonaTargetOrigin(
   if (!PERSONA_ALLOWED_PROTOCOLS.has(candidate.protocol)) {
     return false;
   }
-  const hub = parseUrl(configuredHubUrl);
-  if (!hub || !PERSONA_ALLOWED_PROTOCOLS.has(hub.protocol)) {
+  const hub = normalizePersonaHubUrl(configuredHubUrl);
+  if (!hub) {
     return false;
   }
   return candidate.origin === hub.origin;
@@ -89,7 +160,8 @@ export function isAllowedPersonaTargetOrigin(
 
 /**
  * Validates `<webview>` attachment for the isolated `persist:persona` partition.
- * When `configuredHubUrl` is known, enforces origin allowlisting in addition to protocol checks.
+ * Requires a pre-registered valid HTTP(S) Hub URL and a same-origin HTTP(S) initial `src`.
+ * Refuses attachment before a trusted host has registered an enabled Hub.
  */
 export function isPersonaWebviewAttach(
   params: PersonaWebviewAttachParams,
@@ -98,13 +170,18 @@ export function isPersonaWebviewAttach(
   if (params.partition !== PERSONA_WEBVIEW_PARTITION) {
     return false;
   }
-  if (!isAllowedPersonaWebviewUrl(params.src)) {
+  const hub = normalizePersonaHubUrl(configuredHubUrl);
+  if (!hub) {
     return false;
   }
-  if (configuredHubUrl && configuredHubUrl.trim().length > 0) {
-    return isAllowedPersonaTargetOrigin(params.src, configuredHubUrl);
+  const candidate = parseUrl(params.src);
+  if (!candidate || !PERSONA_ALLOWED_PROTOCOLS.has(candidate.protocol)) {
+    return false;
   }
-  return true;
+  if (candidate.username || candidate.password) {
+    return false;
+  }
+  return candidate.origin === hub.origin;
 }
 
 /**

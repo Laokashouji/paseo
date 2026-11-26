@@ -33,8 +33,10 @@ import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import { createAppOpenPersonaSessionDeps, openPersonaSession } from "./open-persona-session";
 import {
+  disableResidentPersonaWebview,
   ensureResidentPersonaWebview,
   getResidentPersonaWebview,
+  lookupPersonaGuestSessionMetadata,
   parkResidentPersonaWebview,
   presentResidentPersonaWebview,
   sendPersonaGuestAllowOnce,
@@ -43,8 +45,15 @@ import {
   type PersonaElectronWebviewElement,
   type PersonaGuestConfigMessage,
 } from "./resident-persona-webview.electron";
-import { normalizePersonaHubUrl, parsePersonaEmbedSessionRoute } from "./settings";
-import { usePersonaEmbedSettings, useUpdatePersonaEmbedSettings } from "./use-persona-settings";
+import {
+  normalizePersonaHubUrl,
+  parsePersonaEmbedSessionRoute,
+  validatePersonaGuestOpenSessionPayload,
+} from "./settings";
+import {
+  usePersonaEmbedSettingsState,
+  useUpdatePersonaEmbedSettings,
+} from "./use-persona-settings";
 
 const ThemedHome = withUnistyles(Home);
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
@@ -70,11 +79,13 @@ interface WebviewFailLoadEvent extends Event {
 
 interface WebviewNavigateEvent extends Event {
   url?: string;
+  isMainFrame?: boolean;
 }
 
 interface WebviewIpcMessageEvent extends Event {
   channel?: string;
   args?: unknown[];
+  isMainFrame?: boolean;
 }
 
 interface LoadErrorState {
@@ -85,11 +96,105 @@ interface LoadErrorState {
 
 const ERR_ABORTED = -3;
 
+function readWebviewUrlSafely(
+  webview: PersonaElectronWebviewElement | null | undefined,
+  fallback: string,
+): string {
+  if (!webview) {
+    return fallback;
+  }
+  try {
+    const live = webview.getURL?.();
+    if (typeof live === "string" && live.trim().length > 0) {
+      return live;
+    }
+  } catch {
+    // Electron throws before dom-ready/attach finishes; fall back to src or known Hub URL.
+  }
+  if (typeof webview.src === "string" && webview.src.trim().length > 0) {
+    return webview.src;
+  }
+  return fallback;
+}
+
+function isSameOriginUrl(candidateUrl: string, expectedOrigin: string): boolean {
+  try {
+    const parsed = new URL(candidateUrl);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.origin === expectedOrigin
+    );
+  } catch {
+    return false;
+  }
+}
+
+function PersonaSurfaceOverlay(input: {
+  validHubUrl: string | null;
+  mountRejected: boolean;
+  loadError: LoadErrorState | null;
+  onReload: () => void;
+  onOpenExternal: () => void;
+  onOpenSettings: () => void;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  if (!input.validHubUrl) {
+    return (
+      <View style={styles.overlayCard} testID="persona-invalid-url-state">
+        <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
+        <Text style={styles.overlayDescription}>{t("personaEmbed.error.invalidUrl")}</Text>
+        <View style={styles.overlayActions}>
+          <Button onPress={input.onOpenSettings}>{t("personaEmbed.toolbar.settings")}</Button>
+        </View>
+      </View>
+    );
+  }
+  if (input.mountRejected) {
+    return (
+      <View style={styles.overlayCard} testID="persona-mount-rejected-state">
+        <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
+        <Text style={styles.overlayDescription}>{t("personaEmbed.error.mountRejected")}</Text>
+        <View style={styles.overlayActions}>
+          <Button onPress={input.onReload}>{t("personaEmbed.error.retry")}</Button>
+          <Button variant="ghost" onPress={input.onOpenSettings}>
+            {t("personaEmbed.toolbar.settings")}
+          </Button>
+        </View>
+      </View>
+    );
+  }
+  if (!input.loadError) {
+    return null;
+  }
+  return (
+    <View style={styles.overlayCard} testID="persona-load-error-state">
+      <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
+      <Text style={styles.overlayDescription}>
+        {t("personaEmbed.error.loadFailedDetail", {
+          url: input.loadError.url || input.validHubUrl,
+        })}
+      </Text>
+      <Text style={styles.overlayMeta}>
+        {input.loadError.description} ({input.loadError.code})
+      </Text>
+      <View style={styles.overlayActions}>
+        <Button onPress={input.onReload}>{t("personaEmbed.error.retry")}</Button>
+        <Button variant="outline" onPress={input.onOpenExternal}>
+          {t("personaEmbed.toolbar.openExternal")}
+        </Button>
+        <Button variant="ghost" onPress={input.onOpenSettings}>
+          {t("personaEmbed.toolbar.settings")}
+        </Button>
+      </View>
+    </View>
+  );
+}
+
 export function PersonaSurface() {
   const { t } = useTranslation();
   const toast = useToast();
   const isCompact = useIsCompactFormFactor();
-  const personaSettings = usePersonaEmbedSettings();
+  const { settings: personaSettings, isLoaded: settingsLoaded } = usePersonaEmbedSettingsState();
   const updatePersonaSettings = useUpdatePersonaEmbedSettings();
 
   const normalizedHub = useMemo(
@@ -97,6 +202,8 @@ export function PersonaSurface() {
     [personaSettings.hubUrl],
   );
   const validHubUrl = normalizedHub.ok ? normalizedHub.url : null;
+  const authorizedHubOrigin = normalizedHub.ok ? normalizedHub.origin : null;
+  const canMountWebview = settingsLoaded && personaSettings.enabled && validHubUrl !== null;
 
   const anchorRef = useRef<View | null>(null);
   const [webviewNode, setWebviewNode] = useState<PersonaElectronWebviewElement | null>(null);
@@ -105,6 +212,7 @@ export function PersonaSurface() {
   const [canGoForward, setCanGoForward] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<LoadErrorState | null>(null);
+  const [mountRejected, setMountRejected] = useState(false);
 
   const guestConfig = useMemo<PersonaGuestConfigMessage | null>(() => {
     if (!normalizedHub.ok) {
@@ -132,6 +240,9 @@ export function PersonaSurface() {
   const guestConfigRef = useRef(guestConfig);
   guestConfigRef.current = guestConfig;
 
+  const currentUrlRef = useRef(currentUrl);
+  currentUrlRef.current = currentUrl;
+
   const currentSessionRoute = useMemo(() => {
     if (!validHubUrl || !currentUrl) {
       return null;
@@ -141,6 +252,9 @@ export function PersonaSurface() {
 
   const handleOpenSessionRequest = useCallback(
     (payload: DesktopPersonaOpenSessionEvent) => {
+      if (!canMountWebview || !validHubUrl) {
+        return;
+      }
       if (!payload?.machineId || !payload?.sessionId) {
         return;
       }
@@ -150,11 +264,19 @@ export function PersonaSurface() {
         allowPersonaFallbackNavigation: (rawHref) => {
           sendPersonaGuestAllowOnce(rawHref);
         },
+        lookupSessionMetadataHint: ({ machineId, sessionId }) =>
+          lookupPersonaGuestSessionMetadata({
+            machineId,
+            sessionId,
+            authorizedHubUrl: validHubUrl,
+          }),
       });
       void openPersonaSession(
         {
           machineId: payload.machineId,
           sessionId: payload.sessionId,
+          workspaceIdHint: payload.workspaceIdHint ?? null,
+          cwdHint: payload.cwdHint ?? null,
           panel: payload.panel === "diff" ? "diff" : null,
           source: payload.source,
           rawHref: payload.rawHref ?? null,
@@ -162,12 +284,12 @@ export function PersonaSurface() {
         deps,
       );
     },
-    [isCompact, toast],
+    [canMountWebview, isCompact, toast, validHubUrl],
   );
 
   // Sync resident webview geometry with the anchor container.
   const syncAnchorGeometry = useCallback(() => {
-    if (loadError || !validHubUrl) {
+    if (!canMountWebview || loadError || mountRejected) {
       parkResidentPersonaWebview();
       return;
     }
@@ -178,31 +300,51 @@ export function PersonaSurface() {
     }
     const rect = element.getBoundingClientRect();
     presentResidentPersonaWebview(rect);
-  }, [loadError, validHubUrl]);
+  }, [canMountWebview, loadError, mountRejected]);
 
-  // Create or reuse the resident <webview> for the configured Hub URL.
+  // Create or reuse the resident <webview> only once settings are hydrated and Persona is enabled.
   useEffect(() => {
     let cancelled = false;
+    if (!settingsLoaded) {
+      parkResidentPersonaWebview();
+      return;
+    }
+    if (!personaSettings.enabled) {
+      setWebviewNode(null);
+      setLoadError(null);
+      setMountRejected(false);
+      void disableResidentPersonaWebview();
+      return;
+    }
     if (!validHubUrl) {
       parkResidentPersonaWebview();
       setWebviewNode(null);
+      setMountRejected(false);
       return;
     }
 
     setLoadError(null);
+    setMountRejected(false);
     void (async () => {
       const webview = await ensureResidentPersonaWebview(validHubUrl);
       if (cancelled) {
         return;
       }
+      if (!webview) {
+        setWebviewNode(null);
+        setMountRejected(true);
+        return;
+      }
       setWebviewNode(webview);
-      if (webview) {
-        const liveUrl = webview.getURL?.() || validHubUrl;
+      const liveUrl = readWebviewUrlSafely(webview, validHubUrl);
+      if (authorizedHubOrigin && isSameOriginUrl(liveUrl, authorizedHubOrigin)) {
         setCurrentUrl(liveUrl);
-        if (guestConfigRef.current) {
-          sendPersonaGuestConfig(guestConfigRef.current);
-          sendPersonaGuestRouteSync(liveUrl);
-        }
+      } else {
+        setCurrentUrl(validHubUrl);
+      }
+      if (guestConfigRef.current) {
+        sendPersonaGuestConfig(guestConfigRef.current);
+        sendPersonaGuestRouteSync(liveUrl);
       }
     })();
 
@@ -210,15 +352,15 @@ export function PersonaSurface() {
       cancelled = true;
       parkResidentPersonaWebview();
     };
-  }, [validHubUrl]);
+  }, [authorizedHubOrigin, personaSettings.enabled, settingsLoaded, validHubUrl]);
 
   // Push updated config whenever hidePersonaSidebar / interceptSessionClicks / language change.
   useEffect(() => {
-    if (!webviewNode || !guestConfig) {
+    if (!webviewNode || !guestConfig || !canMountWebview) {
       return;
     }
     sendPersonaGuestConfig(guestConfig);
-  }, [guestConfig, webviewNode]);
+  }, [canMountWebview, guestConfig, webviewNode]);
 
   // Observe anchor bounds & viewport resize.
   useLayoutEffect(() => {
@@ -248,7 +390,7 @@ export function PersonaSurface() {
 
   // Bind Electron <webview> lifecycle and guest IPC listeners.
   useEffect(() => {
-    if (!webviewNode) {
+    if (!webviewNode || !validHubUrl || !authorizedHubOrigin || !canMountWebview) {
       return;
     }
 
@@ -273,22 +415,24 @@ export function PersonaSurface() {
     const onDomReady = () => {
       setLoadError(null);
       refreshNavButtons();
-      const liveUrl = webviewNode.getURL?.() || currentUrl;
-      if (liveUrl) {
+      const liveUrl = readWebviewUrlSafely(webviewNode, currentUrlRef.current || validHubUrl);
+      if (isSameOriginUrl(liveUrl, authorizedHubOrigin)) {
         setCurrentUrl(liveUrl);
-      }
-      if (guestConfigRef.current) {
-        sendPersonaGuestConfig(guestConfigRef.current);
-      }
-      if (liveUrl) {
+        if (guestConfigRef.current) {
+          sendPersonaGuestConfig(guestConfigRef.current);
+        }
         sendPersonaGuestRouteSync(liveUrl);
       }
     };
 
     const onNavigate = (event: Event) => {
       const navEvent = event as WebviewNavigateEvent;
-      const nextUrl = navEvent.url || webviewNode.getURL?.() || "";
-      if (nextUrl) {
+      // Ignore subframe navigations so embedded iframes never hijack toolbar state or route sync.
+      if (navEvent.isMainFrame === false) {
+        return;
+      }
+      const nextUrl = navEvent.url || readWebviewUrlSafely(webviewNode, "");
+      if (nextUrl && isSameOriginUrl(nextUrl, authorizedHubOrigin)) {
         setCurrentUrl(nextUrl);
         setLoadError(null);
         sendPersonaGuestRouteSync(nextUrl);
@@ -305,26 +449,35 @@ export function PersonaSurface() {
       setLoadError({
         code: failEvent.errorCode ?? -1,
         description: failEvent.errorDescription || "Load failed",
-        url: failEvent.validatedURL || validHubUrl || "",
+        url: failEvent.validatedURL || validHubUrl,
       });
     };
 
     const onIpcMessage = (event: Event) => {
       const ipcEvent = event as WebviewIpcMessageEvent;
+      if (ipcEvent.isMainFrame === false) {
+        return;
+      }
+      const currentGuestUrl = readWebviewUrlSafely(webviewNode, "");
+      if (!isSameOriginUrl(currentGuestUrl, authorizedHubOrigin)) {
+        return;
+      }
+
       if (ipcEvent.channel === "paseo:persona:ready") {
         if (guestConfigRef.current) {
           sendPersonaGuestConfig(guestConfigRef.current);
         }
-        const liveUrl = webviewNode.getURL?.() || currentUrl;
-        if (liveUrl) {
-          sendPersonaGuestRouteSync(liveUrl);
-        }
+        sendPersonaGuestRouteSync(currentGuestUrl);
         return;
       }
       if (ipcEvent.channel === "paseo:persona:open-session") {
-        const rawPayload = ipcEvent.args?.[0] as DesktopPersonaOpenSessionEvent | undefined;
-        if (rawPayload) {
-          handleOpenSessionRequest(rawPayload);
+        const validated = validatePersonaGuestOpenSessionPayload(ipcEvent.args?.[0], {
+          authorizedHubUrl: validHubUrl,
+          currentGuestUrl,
+          isMainFrame: ipcEvent.isMainFrame,
+        });
+        if (validated) {
+          handleOpenSessionRequest(validated);
         }
       }
     };
@@ -346,20 +499,29 @@ export function PersonaSurface() {
       webviewNode.removeEventListener("did-fail-load", onFailLoad);
       webviewNode.removeEventListener("ipc-message", onIpcMessage);
     };
-  }, [currentUrl, handleOpenSessionRequest, validHubUrl, webviewNode]);
+  }, [authorizedHubOrigin, canMountWebview, handleOpenSessionRequest, validHubUrl, webviewNode]);
 
   // Listen for main-process window-open interceptions (e.g. TaskPanel "Open in new window").
   useEffect(() => {
+    if (!canMountWebview || !validHubUrl) {
+      return;
+    }
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
     void (async () => {
       try {
-        const dispose = await listenToDesktopEvent<DesktopPersonaOpenSessionEvent>(
+        const dispose = await listenToDesktopEvent<unknown>(
           "persona-open-session",
-          (payload) => {
-            if (!disposed) {
-              handleOpenSessionRequest(payload);
+          (rawPayload) => {
+            if (disposed) {
+              return;
+            }
+            const validated = validatePersonaGuestOpenSessionPayload(rawPayload, {
+              authorizedHubUrl: validHubUrl,
+            });
+            if (validated) {
+              handleOpenSessionRequest(validated);
             }
           },
         );
@@ -377,16 +539,16 @@ export function PersonaSurface() {
       disposed = true;
       unlisten?.();
     };
-  }, [handleOpenSessionRequest]);
+  }, [canMountWebview, handleOpenSessionRequest, validHubUrl]);
 
   const handleGoHome = useCallback(() => {
-    if (!validHubUrl) return;
+    if (!canMountWebview || !validHubUrl) return;
     setLoadError(null);
     const webview = getResidentPersonaWebview();
     if (webview?.loadURL) {
       void webview.loadURL(validHubUrl).catch(() => undefined);
     }
-  }, [validHubUrl]);
+  }, [canMountWebview, validHubUrl]);
 
   const handleGoBack = useCallback(() => {
     getResidentPersonaWebview()?.goBack?.();
@@ -397,19 +559,23 @@ export function PersonaSurface() {
   }, []);
 
   const handleReload = useCallback(() => {
+    if (!canMountWebview || !validHubUrl) return;
     setLoadError(null);
+    setMountRejected(false);
     const webview = getResidentPersonaWebview();
     if (!webview) {
-      if (validHubUrl) {
-        void (async () => {
-          const next = await ensureResidentPersonaWebview(validHubUrl);
-          setWebviewNode(next);
-        })();
-      }
+      void (async () => {
+        const next = await ensureResidentPersonaWebview(validHubUrl);
+        if (!next) {
+          setMountRejected(true);
+          return;
+        }
+        setWebviewNode(next);
+      })();
       return;
     }
     webview.reload?.();
-  }, [validHubUrl]);
+  }, [canMountWebview, validHubUrl]);
 
   const handleTogglePersonaSidebar = useCallback(() => {
     void updatePersonaSettings({
@@ -454,39 +620,42 @@ export function PersonaSurface() {
     handleToolbarOpenSession("diff");
   }, [handleToolbarOpenSession]);
 
-  let overlayContent: ReactElement | null = null;
-  if (!validHubUrl) {
-    overlayContent = (
-      <View style={styles.overlayCard} testID="persona-invalid-url-state">
-        <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
-        <Text style={styles.overlayDescription}>{t("personaEmbed.error.invalidUrl")}</Text>
-        <View style={styles.overlayActions}>
-          <Button onPress={handleOpenSettings}>{t("personaEmbed.toolbar.settings")}</Button>
-        </View>
+  if (!settingsLoaded) {
+    return (
+      <View style={styles.disabledContainer} testID="persona-surface-electron-loading">
+        <ThemedSpinner size="small" uniProps={iconMutedMapping} />
       </View>
     );
-  } else if (loadError) {
-    overlayContent = (
-      <View style={styles.overlayCard} testID="persona-load-error-state">
-        <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
-        <Text style={styles.overlayDescription}>
-          {t("personaEmbed.error.loadFailedDetail", { url: loadError.url || validHubUrl })}
-        </Text>
-        <Text style={styles.overlayMeta}>
-          {loadError.description} ({loadError.code})
-        </Text>
-        <View style={styles.overlayActions}>
-          <Button onPress={handleReload}>{t("personaEmbed.error.retry")}</Button>
-          <Button variant="outline" onPress={handleOpenExternal}>
-            {t("personaEmbed.toolbar.openExternal")}
-          </Button>
-          <Button variant="ghost" onPress={handleOpenSettings}>
-            {t("personaEmbed.toolbar.settings")}
-          </Button>
+  }
+
+  if (!personaSettings.enabled) {
+    return (
+      <View style={styles.disabledContainer} testID="persona-surface-electron-disabled">
+        <View style={styles.overlayCard}>
+          <Text style={styles.overlayTitle}>{t("personaEmbed.error.disabledTitle")}</Text>
+          <Text style={styles.overlayDescription}>
+            {t("personaEmbed.error.disabledDescription")}
+          </Text>
+          <View style={styles.overlayActions}>
+            <Button onPress={handleOpenSettings} testID="persona-disabled-open-settings">
+              {t("personaEmbed.error.enableInSettings")}
+            </Button>
+          </View>
         </View>
       </View>
     );
   }
+
+  const overlayContent = (
+    <PersonaSurfaceOverlay
+      validHubUrl={validHubUrl}
+      mountRejected={mountRejected}
+      loadError={loadError}
+      onReload={handleReload}
+      onOpenExternal={handleOpenExternal}
+      onOpenSettings={handleOpenSettings}
+    />
+  );
 
   return (
     <View style={styles.container} testID="persona-surface-electron">
@@ -614,6 +783,13 @@ export function PersonaSurface() {
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
+    backgroundColor: theme.colors.surface0,
+  },
+  disabledContainer: {
+    flex: 1,
+    padding: theme.spacing[6],
+    alignItems: "center",
+    justifyContent: "center",
     backgroundColor: theme.colors.surface0,
   },
   toolbar: {

@@ -10,6 +10,8 @@ import {
   parsePersonaEmbedSessionRoute,
   sanitizeMachineServerMap,
   testPersonaHubHealth,
+  validatePersonaGuestOpenSessionPayload,
+  validatePersonaSessionMetadataResult,
 } from "./settings";
 
 describe("persona embed settings", () => {
@@ -116,13 +118,203 @@ describe("persona embed settings", () => {
     }
 
     const failFetch = vi.fn(async () => new Response("nope", { status: 503 }));
-    const failResult = await testPersonaHubHealth("http://10.37.217.3:18660", {
+    const failResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
       fetchFn: failFetch as unknown as typeof fetch,
     });
-    expect(failResult).toEqual({ ok: false, error: "HTTP 503" });
+    expect(failResult).toEqual({ ok: false, code: "http_error", error: "HTTP 503" });
 
     const invalidResult = await testPersonaHubHealth("file:///etc/passwd");
-    expect(invalidResult).toEqual({ ok: false, error: "invalid_protocol" });
+    expect(invalidResult).toEqual({
+      ok: false,
+      code: "invalid_url",
+      error: "invalid_protocol",
+    });
+  });
+
+  it("delegates Electron health check to main process and distinguishes Web CORS unreadable vs network failure", async () => {
+    // Electron path uses main-process checkHealth without calling fetch
+    const electronCheckHealth = vi.fn(async () => ({
+      ok: true as const,
+      hubName: "main-probed-hub",
+      version: "2.0.0",
+      latencyMs: 12,
+    }));
+    const electronResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
+      electronCheckHealth,
+    });
+    expect(electronCheckHealth).toHaveBeenCalledTimes(1);
+    expect(electronResult).toEqual({
+      ok: true,
+      hubName: "main-probed-hub",
+      version: "2.0.0",
+      latencyMs: 12,
+    });
+
+    // Web cross-origin CORS failure -> no-cors probe receives opaque response -> cors_unreadable
+    const corsFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.mode === "no-cors") {
+        return { type: "opaque", ok: false } as unknown as Response;
+      }
+      throw new TypeError("Failed to fetch");
+    });
+    const corsResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
+      fetchFn: corsFetch as unknown as typeof fetch,
+      pageOriginOverride: "http://localhost:8081",
+    });
+    expect(corsResult.ok).toBe(false);
+    if (!corsResult.ok) {
+      expect(corsResult.code).toBe("cors_unreadable");
+    }
+
+    // Web cross-origin genuine network failure -> no-cors also throws -> network_error
+    const offlineFetch = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const offlineResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
+      fetchFn: offlineFetch as unknown as typeof fetch,
+      pageOriginOverride: "http://localhost:8081",
+    });
+    expect(offlineResult.ok).toBe(false);
+    if (!offlineResult.ok) {
+      expect(offlineResult.code).toBe("network_error");
+    }
+
+    // Redirect on health check is explicitly blocked
+    const redirectFetch = vi.fn(
+      async () => new Response(null, { status: 302, headers: { location: "https://evil.test/" } }),
+    );
+    const redirectResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
+      fetchFn: redirectFetch as unknown as typeof fetch,
+    });
+    expect(redirectResult).toEqual({
+      ok: false,
+      code: "redirect_blocked",
+      error: "Health check redirect blocked",
+    });
+  });
+
+  it("validates guest open-session and session-metadata payloads strictly against field types, main frame, and origin", () => {
+    const hubUrl = "http://127.0.0.1:18660";
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        {
+          machineId: "n37-217-003",
+          sessionId: "paseo-ag_1",
+          workspaceIdHint: "wks_0123456789abcdef",
+          cwdHint: "/repo/paseo-fork",
+          panel: "diff",
+          source: "link-click",
+          rawHref: "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_1",
+        },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/",
+          isMainFrame: true,
+        },
+      ),
+    ).toEqual({
+      machineId: "n37-217-003",
+      sessionId: "paseo-ag_1",
+      workspaceIdHint: "wks_0123456789abcdef",
+      cwdHint: "/repo/paseo-fork",
+      panel: "diff",
+      source: "link-click",
+      rawHref: "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_1",
+    });
+
+    // Rejects subframe, off-origin guest URL, off-origin rawHref, and bad field types
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: "m1", sessionId: "s1", source: "link-click" },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/",
+          isMainFrame: false,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: "m1", sessionId: "s1", source: "link-click" },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "https://evil.example.com/",
+          isMainFrame: true,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          rawHref: "https://evil.example.com/s/m1/s1",
+        },
+        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: 123, sessionId: "s1", source: "link-click" },
+        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: "m1", sessionId: "s1", source: "evil-source" },
+        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: "m1", sessionId: "s1", source: "link-click", workspaceIdHint: { bad: true } },
+        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+      ),
+    ).toBeNull();
+
+    // Validates session metadata responses
+    expect(
+      validatePersonaSessionMetadataResult(
+        {
+          requestId: "req-1",
+          machineId: "m1",
+          sessionId: "s1",
+          workspaceIdHint: "wks_0123456789abcdef",
+          cwdHint: "/repo/app",
+        },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/s/m1/s1",
+          isMainFrame: true,
+          expectedRequestId: "req-1",
+          expectedMachineId: "m1",
+          expectedSessionId: "s1",
+        },
+      ),
+    ).toEqual({
+      workspaceIdHint: "wks_0123456789abcdef",
+      cwdHint: "/repo/app",
+    });
+    expect(
+      validatePersonaSessionMetadataResult(
+        {
+          requestId: "req-other",
+          machineId: "m1",
+          sessionId: "s1",
+          workspaceIdHint: "wks_0123456789abcdef",
+          cwdHint: "/repo/app",
+        },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/s/m1/s1",
+          isMainFrame: true,
+          expectedRequestId: "req-1",
+          expectedMachineId: "m1",
+          expectedSessionId: "s1",
+        },
+      ),
+    ).toBeNull();
   });
 
   it("parses embedded session routes and detects HTTPS->HTTP mixed content", () => {

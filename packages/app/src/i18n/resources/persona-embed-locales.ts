@@ -44,6 +44,11 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Check that Persona Hub is running and reachable at {{url}}.",
       invalidUrl: "Invalid Persona Hub URL. Use http:// or https://.",
       retry: "Retry",
+      disabledTitle: "Embedded Persona is disabled",
+      disabledDescription: "Enable Persona embedding in settings to open Persona Hub inside Paseo.",
+      enableInSettings: "Open Persona settings",
+      mountRejected:
+        "Persona Hub could not be authorized for embedding. Verify the Hub URL and try again.",
     },
     webFallback: {
       title: "Persona works best in Paseo Desktop",
@@ -60,8 +65,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "Session not found in Paseo; opened workspace instead.",
       unmappedMachine: 'No Paseo host mapped for Persona machine "{{machine}}".',
+      ambiguousMachine:
+        'Multiple Paseo hosts matched a session for Persona machine "{{machine}}". Configure a machine mapping.',
       configureMapping: "Configure mapping",
       hostOffline: 'Host "{{host}}" is currently offline.',
+      hostSyncTimeout:
+        'Timed out syncing session directory from host "{{host}}". Please try again.',
       notManagedByPaseo: "This session is not managed by Paseo; kept open in Persona.",
     },
     settings: {
@@ -72,6 +81,9 @@ export const personaEmbedLocales = {
       hideMainChatHint:
         "Hide Paseo's built-in Main Chat entry while Persona is enabled. History is preserved.",
       mainChatStillActiveBanner: "Built-in Main Chat is still active on {{host}}.",
+      mainChatStatusLoading: "Checking built-in Main Chat status on {{host}}...",
+      mainChatStatusError: "Unable to check built-in Main Chat on {{host}}: {{error}}",
+      retryCheck: "Retry",
       disableMainChatAction: "Disable on host",
       mainChatDisabledToast: "Disabled built-in Main Chat on {{host}}.",
       hubUrlLabel: "Persona Hub URL",
@@ -83,6 +95,8 @@ export const personaEmbedLocales = {
       testConnection: "Test connection",
       testingConnection: "Testing...",
       connectionOk: "Reachable · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "Hub responded, but browser cross-origin policy blocked reading the health payload. Test in Paseo Desktop or open in a new tab.",
       connectionFailed: "Unreachable: {{error}}",
       embedOptionsTitle: "Desktop embedding",
       desktopOnlyHint: "Available in Paseo Desktop (Electron).",
@@ -147,6 +161,10 @@ export const personaEmbedLocales = {
       loadFailedDetail: "请确认 Persona Hub 正在运行且可访问 {{url}}。",
       invalidUrl: "Persona Hub 地址无效，请使用 http:// 或 https://。",
       retry: "重试",
+      disabledTitle: "单窗口 Persona 内嵌未启用",
+      disabledDescription: "请在设置中启用 Persona 内嵌后再于 Paseo 窗口内访问 Persona Hub。",
+      enableInSettings: "前往 Persona 设置",
+      mountRejected: "Persona Hub 源站未通过桌面端授权，请检查地址后重试。",
     },
     webFallback: {
       title: "在浏览器中以外部标签页使用 Persona",
@@ -161,8 +179,11 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "未找到对应会话，已打开所属工作区。",
       unmappedMachine: "未找到 Persona 机器「{{machine}}」对应的 Paseo 宿主。",
+      ambiguousMachine:
+        "多台 Paseo 宿主存在同名会话，无法唯一确定 Persona 机器「{{machine}}」，请先配置映射。",
       configureMapping: "去配置映射",
       hostOffline: "宿主「{{host}}」当前离线，请稍后重试。",
+      hostSyncTimeout: "等待宿主「{{host}}」同步会话目录超时，请稍后重试。",
       notManagedByPaseo: "该会话非 Paseo 托管，继续在 Persona 内查看。",
     },
     settings: {
@@ -172,6 +193,9 @@ export const personaEmbedLocales = {
       hideMainChatLabel: "隐藏自研主对话入口（互斥切换）",
       hideMainChatHint: "启用 Persona 时隐藏左侧栏自研主对话入口与方向树，保留历史随时可切回。",
       mainChatStillActiveBanner: "检测到宿主「{{host}}」的自研主对话仍在后台开启。",
+      mainChatStatusLoading: "正在检测宿主「{{host}}」的自研主对话状态…",
+      mainChatStatusError: "无法确认宿主「{{host}}」的自研主对话状态：{{error}}",
+      retryCheck: "重试",
       disableMainChatAction: "一键关闭自研主对话",
       mainChatDisabledToast: "已关闭宿主「{{host}}」的自研主对话。",
       hubUrlLabel: "Persona Hub 地址",
@@ -183,6 +207,8 @@ export const personaEmbedLocales = {
       testConnection: "测试连接",
       testingConnection: "正在测试…",
       connectionOk: "连通正常 · {{hubName}}（v{{version}}）",
+      connectionCorsUnreadable:
+        "Hub 已响应，但受浏览器跨源策略限制无法读取健康检查内容；请在 Paseo 桌面端测试或新标签页打开确认。",
       connectionFailed: "无法连接：{{error}}",
       embedOptionsTitle: "桌面端内嵌体验",
       desktopOnlyHint: "仅在 Paseo 桌面端（Electron）可用。",
@@ -244,6 +270,10 @@ export const personaEmbedLocales = {
       loadFailedDetail: "تحقق من تشغيل Persona Hub وإمكانية الوصول إلى {{url}}.",
       invalidUrl: "عنوان Persona Hub غير صالح. استخدم http:// أو https://.",
       retry: "إعادة المحاولة",
+      disabledTitle: "تضمين Persona معطّل",
+      disabledDescription: "فعّل تضمين Persona من الإعدادات لفتح Persona Hub داخل Paseo.",
+      enableInSettings: "فتح إعدادات Persona",
+      mountRejected: "تعذر تفويض عنوان Persona Hub للتضمين. تحقق من العنوان وحاول مجددًا.",
     },
     webFallback: {
       title: "يعمل Persona بشكل أفضل في تطبيق Paseo لسطح المكتب",
@@ -260,8 +290,11 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "لم يتم العثور على الجلسة في Paseo؛ تم فتح مساحة العمل بدلًا من ذلك.",
       unmappedMachine: 'لا يوجد مضيف Paseo مرتبط بجهاز Persona "{{machine}}".',
+      ambiguousMachine:
+        'تطابقت عدة مضيفات Paseo لجهاز Persona "{{machine}}". يرجى إعداد الربط يدويًا.',
       configureMapping: "إعداد الربط",
       hostOffline: 'المضيف "{{host}}" غير متصل حاليًا.',
+      hostSyncTimeout: 'انتهت مهلة مزامنة دليل الجلسات من المضيف "{{host}}". حاول مرة أخرى.',
       notManagedByPaseo: "هذه الجلسة غير مُدارة بواسطة Paseo؛ ستبقى مفتوحة في Persona.",
     },
     settings: {
@@ -271,6 +304,9 @@ export const personaEmbedLocales = {
       hideMainChatLabel: "استبدال مدخل المحادثة الرئيسية المدمجة",
       hideMainChatHint: "إخفاء مدخل المحادثة الرئيسية أثناء تفعيل Persona مع الاحتفاظ بالسجل.",
       mainChatStillActiveBanner: "المحادثة الرئيسية المدمجة لا تزال مفعّلة على {{host}}.",
+      mainChatStatusLoading: "جارٍ التحقق من حالة المحادثة الرئيسية المدمجة على {{host}}...",
+      mainChatStatusError: "تعذر التحقق من المحادثة الرئيسية المدمجة على {{host}}: {{error}}",
+      retryCheck: "إعادة المحاولة",
       disableMainChatAction: "تعطيل على المضيف",
       mainChatDisabledToast: "تم تعطيل المحادثة الرئيسية المدمجة على {{host}}.",
       hubUrlLabel: "عنوان Persona Hub",
@@ -282,6 +318,8 @@ export const personaEmbedLocales = {
       testConnection: "اختبار الاتصال",
       testingConnection: "جارٍ الاختبار...",
       connectionOk: "متصل · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "استجاب Hub لكن سياسة CORS في المتصفح منعت قراءة النتيجة. اختبر في Paseo Desktop أو افتحه في تبويب جديد.",
       connectionFailed: "تعذر الاتصال: {{error}}",
       embedOptionsTitle: "خيارات التضمين لسطح المكتب",
       desktopOnlyHint: "متاح فقط في تطبيق Paseo لسطح المكتب (Electron).",
@@ -344,6 +382,12 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Comprueba que Persona Hub esté en ejecución y accesible en {{url}}.",
       invalidUrl: "URL de Persona Hub no válida. Usa http:// o https://.",
       retry: "Reintentar",
+      disabledTitle: "Persona integrado está desactivado",
+      disabledDescription:
+        "Activa Persona integrado en los ajustes para abrir Persona Hub en Paseo.",
+      enableInSettings: "Abrir ajustes de Persona",
+      mountRejected:
+        "No se pudo autorizar el origen de Persona Hub para la integración. Comprueba la URL e inténtalo de nuevo.",
     },
     webFallback: {
       title: "Persona funciona mejor en Paseo Desktop",
@@ -360,8 +404,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "No se encontró la sesión en Paseo; se abrió el espacio de trabajo.",
       unmappedMachine: 'No hay ningún host de Paseo asignado para la máquina "{{machine}}".',
+      ambiguousMachine:
+        'Varios hosts de Paseo coincidieron con una sesión de la máquina "{{machine}}". Configura una asignación.',
       configureMapping: "Configurar asignación",
       hostOffline: 'El host "{{host}}" está sin conexión.',
+      hostSyncTimeout:
+        'Se agotó el tiempo al sincronizar el directorio de sesiones de "{{host}}". Inténtalo de nuevo.',
       notManagedByPaseo:
         "Esta sesión no está gestionada por Paseo; se mantiene abierta en Persona.",
     },
@@ -374,6 +422,10 @@ export const personaEmbedLocales = {
       hideMainChatHint:
         "Oculta la entrada del chat principal integrado mientras Persona esté activo. El historial se conserva.",
       mainChatStillActiveBanner: "El chat principal integrado sigue activo en {{host}}.",
+      mainChatStatusLoading: "Comprobando el estado del chat principal integrado en {{host}}...",
+      mainChatStatusError:
+        "No se pudo comprobar el chat principal integrado en {{host}}: {{error}}",
+      retryCheck: "Reintentar",
       disableMainChatAction: "Desactivar en el host",
       mainChatDisabledToast: "Chat principal integrado desactivado en {{host}}.",
       hubUrlLabel: "URL de Persona Hub",
@@ -385,6 +437,8 @@ export const personaEmbedLocales = {
       testConnection: "Probar conexión",
       testingConnection: "Probando...",
       connectionOk: "Accesible · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "El Hub respondió, pero la política CORS del navegador impidió leer la respuesta. Prueba en Paseo Desktop o ábrelo en una nueva pestaña.",
       connectionFailed: "Inaccesible: {{error}}",
       embedOptionsTitle: "Integración de escritorio",
       desktopOnlyHint: "Disponible en Paseo Desktop (Electron).",
@@ -449,6 +503,12 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Vérifiez que Persona Hub fonctionne et est joignable à {{url}}.",
       invalidUrl: "URL Persona Hub invalide. Utilisez http:// ou https://.",
       retry: "Réessayer",
+      disabledTitle: "L'intégration Persona est désactivée",
+      disabledDescription:
+        "Activez l'intégration Persona dans les paramètres pour ouvrir Persona Hub dans Paseo.",
+      enableInSettings: "Ouvrir les paramètres Persona",
+      mountRejected:
+        "L'origine de Persona Hub n'a pas pu être autorisée pour l'intégration. Vérifiez l'URL et réessayez.",
     },
     webFallback: {
       title: "Persona fonctionne mieux dans Paseo Desktop",
@@ -465,8 +525,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "Session introuvable dans Paseo ; espace de travail ouvert à la place.",
       unmappedMachine: "Aucun hôte Paseo associé à la machine Persona « {{machine}} ».",
+      ambiguousMachine:
+        "Plusieurs hôtes Paseo correspondent à une session de « {{machine}} ». Configurez une association.",
       configureMapping: "Configurer l'association",
       hostOffline: "L’hôte « {{host}} » est actuellement hors ligne.",
+      hostSyncTimeout:
+        "Délai dépassé lors de la synchronisation des sessions de l'hôte « {{host}} ». Veuillez réessayer.",
       notManagedByPaseo:
         "Cette session n'est pas gérée par Paseo ; conservée ouverte dans Persona.",
     },
@@ -479,6 +543,10 @@ export const personaEmbedLocales = {
       hideMainChatHint:
         "Masque le chat principal intégré tant que Persona est activé. L'historique est conservé.",
       mainChatStillActiveBanner: "Le chat principal intégré est toujours actif sur {{host}}.",
+      mainChatStatusLoading: "Vérification du chat principal intégré sur {{host}}...",
+      mainChatStatusError:
+        "Impossible de vérifier le chat principal intégré sur {{host}} : {{error}}",
+      retryCheck: "Réessayer",
       disableMainChatAction: "Désactiver sur l'hôte",
       mainChatDisabledToast: "Chat principal intégré désactivé sur {{host}}.",
       hubUrlLabel: "URL du Persona Hub",
@@ -490,6 +558,8 @@ export const personaEmbedLocales = {
       testConnection: "Tester la connexion",
       testingConnection: "Test en cours...",
       connectionOk: "Accessible · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "Le Hub a répondu, mais la politique CORS du navigateur bloque la lecture de la réponse. Testez dans Paseo Desktop ou ouvrez dans un nouvel onglet.",
       connectionFailed: "Inaccessible : {{error}}",
       embedOptionsTitle: "Intégration bureau",
       desktopOnlyHint: "Disponible dans Paseo Desktop (Electron).",
@@ -555,6 +625,10 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Persona Hub が起動しており {{url}} に到達可能か確認してください。",
       invalidUrl: "Persona Hub の URL が無効です。http:// または https:// を使用してください。",
       retry: "再試行",
+      disabledTitle: "Persona 埋め込みは無効です",
+      disabledDescription: "設定で Persona 埋め込みを有効にしてから Paseo 内で開いてください。",
+      enableInSettings: "Persona 設定を開く",
+      mountRejected: "Persona Hub の埋め込み認可に失敗しました。URL を確認して再試行してください。",
     },
     webFallback: {
       title: "Persona の埋め込みは Paseo デスクトップ版で利用できます",
@@ -571,8 +645,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "該当セッションが見つからないため、ワークスペースを開きました。",
       unmappedMachine: "Persona マシン「{{machine}}」に対応する Paseo ホストが見つかりません。",
+      ambiguousMachine:
+        "複数の Paseo ホストに一致するセッションが見つかりました。マシン「{{machine}}」のマッピングを設定してください。",
       configureMapping: "マッピングを設定",
       hostOffline: "ホスト「{{host}}」は現在オフラインです。",
+      hostSyncTimeout:
+        "ホスト「{{host}}」からのセッション一覧同期がタイムアウトしました。再度お試しください。",
       notManagedByPaseo: "このセッションは Paseo 管理外のため、Persona 内で開いたままにします。",
     },
     settings: {
@@ -582,6 +660,9 @@ export const personaEmbedLocales = {
       hideMainChatLabel: "内蔵メインチャット入口を非表示にする",
       hideMainChatHint: "Persona 有効時は内蔵メインチャット入口を非表示にします（履歴は保持）。",
       mainChatStillActiveBanner: "ホスト「{{host}}」で内蔵メインチャットが有効なままです。",
+      mainChatStatusLoading: "ホスト「{{host}}」の内蔵メインチャット状態を確認中...",
+      mainChatStatusError: "ホスト「{{host}}」の内蔵メインチャットを確認できません: {{error}}",
+      retryCheck: "再試行",
       disableMainChatAction: "ホスト側で無効化",
       mainChatDisabledToast: "ホスト「{{host}}」の内蔵メインチャットを無効化しました。",
       hubUrlLabel: "Persona Hub URL",
@@ -593,6 +674,8 @@ export const personaEmbedLocales = {
       testConnection: "接続テスト",
       testingConnection: "テスト中...",
       connectionOk: "接続成功 · {{hubName}}（v{{version}}）",
+      connectionCorsUnreadable:
+        "Hub は応答しましたがブラウザの CORS 制限により内容を読み取れません。Paseo デスクトップ版でテストするか新しいタブで確認してください。",
       connectionFailed: "接続不可: {{error}}",
       embedOptionsTitle: "デスクトップ埋め込み設定",
       desktopOnlyHint: "Paseo デスクトップ版（Electron）でのみ利用可能です。",
@@ -656,6 +739,11 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Persona Hub가 실행 중이며 {{url}}에 연결 가능한지 확인하세요.",
       invalidUrl: "유효하지 않은 Persona Hub 주소입니다. http:// 또는 https://를 사용하세요.",
       retry: "다시 시도",
+      disabledTitle: "Persona 임베드가 비활성화되어 있습니다",
+      disabledDescription: "설정에서 Persona 임베드를 활성화한 후 Paseo 창 안에서 열어 주세요.",
+      enableInSettings: "Persona 설정 열기",
+      mountRejected:
+        "Persona Hub 임베드 권한 확인에 실패했습니다. 주소를 확인하고 다시 시도하세요.",
     },
     webFallback: {
       title: "Persona는 Paseo 데스크톱 앱에서 최적화되어 있습니다",
@@ -672,8 +760,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "Paseo에서 해당 세션을 찾지 못해 워크스페이스를 대신 열었습니다.",
       unmappedMachine: 'Persona 머신 "{{machine}}"에 매핑된 Paseo 호스트가 없습니다.',
+      ambiguousMachine:
+        '여러 Paseo 호스트에서 "{{machine}}" 머신의 세션이 일치했습니다. 머신 매핑을 설정해 주세요.',
       configureMapping: "매핑 설정",
       hostOffline: '호스트 "{{host}}"가 현재 오프라인입니다.',
+      hostSyncTimeout:
+        '호스트 "{{host}}"의 세션 목록 동기화 시간이 초과되었습니다. 다시 시도하세요.',
       notManagedByPaseo: "Paseo에서 관리하지 않는 세션이므로 Persona 내부에 유지합니다.",
     },
     settings: {
@@ -683,6 +775,9 @@ export const personaEmbedLocales = {
       hideMainChatLabel: "기본 메인 채팅 항목 숨기기",
       hideMainChatHint: "Persona 활성화 시 기본 메인 채팅 항목을 숨깁니다. 기존 기록은 유지됩니다.",
       mainChatStillActiveBanner: "{{host}} 호스트에서 기본 메인 채팅이 여전히 활성화되어 있습니다.",
+      mainChatStatusLoading: "{{host}} 호스트의 기본 메인 채팅 상태를 확인하는 중...",
+      mainChatStatusError: "{{host}} 호스트의 기본 메인 채팅 상태를 확인할 수 없음: {{error}}",
+      retryCheck: "다시 시도",
       disableMainChatAction: "호스트에서 비활성화",
       mainChatDisabledToast: "{{host}} 호스트의 기본 메인 채팅을 비활성화했습니다.",
       hubUrlLabel: "Persona Hub 주소",
@@ -694,6 +789,8 @@ export const personaEmbedLocales = {
       testConnection: "연결 테스트",
       testingConnection: "테스트 중...",
       connectionOk: "연결됨 · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "Hub는 응답했지만 브라우저 CORS 정책으로 응답 내용을 읽을 수 없습니다. Paseo 데스크톱에서 테스트하거나 새 탭에서 확인하세요.",
       connectionFailed: "연결 실패: {{error}}",
       embedOptionsTitle: "데스크톱 임베드 옵션",
       desktopOnlyHint: "Paseo 데스크톱 앱(Electron)에서만 사용할 수 있습니다.",
@@ -755,6 +852,12 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Verifique se o Persona Hub está em execução e acessível em {{url}}.",
       invalidUrl: "URL do Persona Hub inválida. Use http:// ou https://.",
       retry: "Tentar novamente",
+      disabledTitle: "O Persona incorporado está desativado",
+      disabledDescription:
+        "Ative o Persona incorporado nas configurações para abrir o Persona Hub no Paseo.",
+      enableInSettings: "Abrir configurações do Persona",
+      mountRejected:
+        "Não foi possível autorizar a origem do Persona Hub para incorporação. Verifique a URL e tente novamente.",
     },
     webFallback: {
       title: "O Persona funciona melhor no Paseo Desktop",
@@ -771,8 +874,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "Sessão não encontrada no Paseo; espaço de trabalho aberto.",
       unmappedMachine: 'Nenhum host Paseo mapeado para a máquina Persona "{{machine}}".',
+      ambiguousMachine:
+        'Vários hosts Paseo corresponderam a uma sessão da máquina "{{machine}}". Configure um mapeamento.',
       configureMapping: "Configurar mapeamento",
       hostOffline: 'O host "{{host}}" está offline no momento.',
+      hostSyncTimeout:
+        'Tempo esgotado ao sincronizar o diretório de sessões de "{{host}}". Tente novamente.',
       notManagedByPaseo: "Esta sessão não é gerenciada pelo Paseo; mantida aberta no Persona.",
     },
     settings: {
@@ -784,6 +891,10 @@ export const personaEmbedLocales = {
       hideMainChatHint:
         "Oculta a entrada do chat principal enquanto o Persona estiver ativo. O histórico é mantido.",
       mainChatStillActiveBanner: "O chat principal integrado ainda está ativo em {{host}}.",
+      mainChatStatusLoading: "Verificando o chat principal integrado em {{host}}...",
+      mainChatStatusError:
+        "Não foi possível verificar o chat principal integrado em {{host}}: {{error}}",
+      retryCheck: "Tentar novamente",
       disableMainChatAction: "Desativar no host",
       mainChatDisabledToast: "Chat principal integrado desativado em {{host}}.",
       hubUrlLabel: "URL do Persona Hub",
@@ -795,6 +906,8 @@ export const personaEmbedLocales = {
       testConnection: "Testar conexão",
       testingConnection: "Testando...",
       connectionOk: "Acessível · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "O Hub respondeu, mas a política CORS do navegador bloqueou a leitura da resposta. Teste no Paseo Desktop ou abra em uma nova aba.",
       connectionFailed: "Inacessível: {{error}}",
       embedOptionsTitle: "Incorporação desktop",
       desktopOnlyHint: "Disponível apenas no Paseo Desktop (Electron).",
@@ -859,6 +972,12 @@ export const personaEmbedLocales = {
       loadFailedDetail: "Убедитесь, что Persona Hub запущен и доступен по адресу {{url}}.",
       invalidUrl: "Некорректный URL Persona Hub. Используйте http:// или https://.",
       retry: "Повторить",
+      disabledTitle: "Встроенный Persona отключён",
+      disabledDescription:
+        "Включите встроенный Persona в настройках, чтобы открыть Persona Hub в Paseo.",
+      enableInSettings: "Открыть настройки Persona",
+      mountRejected:
+        "Не удалось авторизовать источник Persona Hub для встраивания. Проверьте URL и повторите попытку.",
     },
     webFallback: {
       title: "Persona лучше всего работает в Paseo Desktop",
@@ -875,8 +994,12 @@ export const personaEmbedLocales = {
     jump: {
       workspaceFallback: "Сессия в Paseo не найдена; открыто рабочее пространство.",
       unmappedMachine: "Для машины Persona «{{machine}}» не сопоставлен хост Paseo.",
+      ambiguousMachine:
+        "Несколько хостов Paseo совпали с сессией машины «{{machine}}». Настройте сопоставление.",
       configureMapping: "Настроить сопоставление",
       hostOffline: "Хост «{{host}}» сейчас не в сети.",
+      hostSyncTimeout:
+        "Превышено время синхронизации каталога сессий хоста «{{host}}». Повторите попытку.",
       notManagedByPaseo: "Эта сессия не управляется Paseo; оставлена открытой в Persona.",
     },
     settings: {
@@ -887,6 +1010,10 @@ export const personaEmbedLocales = {
       hideMainChatHint:
         "Скрывает вход во встроенный главный чат при активном Persona. История сохраняется.",
       mainChatStillActiveBanner: "Встроенный главный чат всё ещё включён на хосте {{host}}.",
+      mainChatStatusLoading: "Проверка состояния встроенного главного чата на хосте {{host}}...",
+      mainChatStatusError:
+        "Не удалось проверить встроенный главный чат на хосте {{host}}: {{error}}",
+      retryCheck: "Повторить",
       disableMainChatAction: "Отключить на хосте",
       mainChatDisabledToast: "Встроенный главный чат отключён на хосте {{host}}.",
       hubUrlLabel: "URL Persona Hub",
@@ -898,6 +1025,8 @@ export const personaEmbedLocales = {
       testConnection: "Проверить подключение",
       testingConnection: "Проверка...",
       connectionOk: "Доступен · {{hubName}} (v{{version}})",
+      connectionCorsUnreadable:
+        "Hub ответил, но политика CORS браузера не позволяет прочитать ответ. Проверьте в Paseo Desktop или откройте в новой вкладке.",
       connectionFailed: "Недоступен: {{error}}",
       embedOptionsTitle: "Настройки встраивания",
       desktopOnlyHint: "Доступно только в Paseo Desktop (Electron).",

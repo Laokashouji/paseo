@@ -9,12 +9,18 @@ import { useStoreWithEqualityFn } from "zustand/traditional";
 import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { Button } from "@/components/ui/button";
 import { FormTextInput } from "@/components/ui/form-field";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { SelectField, type SelectFieldOption } from "@/components/ui/select-field";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
+import { findMainChatAgentOnHost } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
-import { destroyResidentPersonaWebview } from "@/persona/resident-persona-webview";
+import { useOnlineMainChatSettingsSync } from "@/main-chat/use-steward-roster";
+import {
+  disableResidentPersonaWebview,
+  syncPersonaHubUrlWithMain,
+} from "@/persona/resident-persona-webview";
 import {
   normalizePersonaHubUrl,
   testPersonaHubHealth,
@@ -35,6 +41,7 @@ const ThemedCheckCircle = withUnistyles(CheckCircle2);
 const ThemedXCircle = withUnistyles(XCircle);
 const ThemedPlus = withUnistyles(Plus);
 const ThemedTrash = withUnistyles(Trash2);
+const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const warningIconMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 const successIconMapping = (theme: Theme) => ({ color: theme.colors.primary });
@@ -45,6 +52,18 @@ interface ActiveMainChatHost {
   serverId: string;
   label: string;
 }
+
+interface MainChatHostSyncStatus {
+  serverId: string;
+  label: string;
+  state: "active" | "loading" | "error";
+  error?: string;
+}
+
+type HostMainChatStateEntry =
+  | { serverId: string; state: "active" }
+  | { serverId: string; state: "loading" }
+  | { serverId: string; state: "error"; error: string };
 
 interface ActiveMainChatHostBannerProps {
   host: ActiveMainChatHost;
@@ -80,6 +99,106 @@ const ActiveMainChatHostBanner = memo(function ActiveMainChatHostBanner({
       >
         {t("personaEmbed.settings.disableMainChatAction")}
       </Button>
+    </View>
+  );
+});
+
+interface MainChatHostLoadingRowProps {
+  host: ActiveMainChatHost;
+}
+
+const MainChatHostLoadingRow = memo(function MainChatHostLoadingRow({
+  host,
+}: MainChatHostLoadingRowProps) {
+  const { t } = useTranslation();
+  return (
+    <View style={styles.statusBanner} testID={`persona-main-chat-loading-${host.serverId}`}>
+      <View style={styles.warningBannerLeft}>
+        <ThemedLoadingSpinner size="small" uniProps={mutedIconMapping} />
+        <Text style={settingsStyles.rowHint}>
+          {t("personaEmbed.settings.mainChatStatusLoading", { host: host.label })}
+        </Text>
+      </View>
+    </View>
+  );
+});
+
+interface MainChatHostErrorRowProps {
+  host: ActiveMainChatHost;
+  error: string;
+  retrying: boolean;
+  onRetry: (host: ActiveMainChatHost) => void;
+}
+
+const MainChatHostErrorRow = memo(function MainChatHostErrorRow({
+  host,
+  error,
+  retrying,
+  onRetry,
+}: MainChatHostErrorRowProps) {
+  const { t } = useTranslation();
+  const handleRetry = useCallback(() => {
+    onRetry(host);
+  }, [host, onRetry]);
+
+  return (
+    <View style={styles.errorBanner} testID={`persona-main-chat-error-${host.serverId}`}>
+      <View style={styles.warningBannerLeft}>
+        <ThemedXCircle size={15} uniProps={dangerIconMapping} />
+        <Text style={styles.warningBannerText}>
+          {t("personaEmbed.settings.mainChatStatusError", { host: host.label, error })}
+        </Text>
+      </View>
+      <Button
+        size="sm"
+        variant="outline"
+        loading={retrying}
+        disabled={retrying}
+        onPress={handleRetry}
+        testID={`persona-retry-main-chat-${host.serverId}`}
+      >
+        {t("personaEmbed.settings.retryCheck")}
+      </Button>
+    </View>
+  );
+});
+
+const PersonaHealthStatusRow = memo(function PersonaHealthStatusRow({
+  result,
+}: {
+  result: PersonaHealthCheckResult;
+}) {
+  const { t } = useTranslation();
+  if (result.ok) {
+    return (
+      <View style={styles.healthRow} testID="persona-settings-health-result">
+        <ThemedCheckCircle size={15} uniProps={successIconMapping} />
+        <Text style={styles.healthOkText}>
+          {t("personaEmbed.settings.connectionOk", {
+            hubName: result.hubName,
+            version: result.version,
+          })}{" "}
+          · {result.latencyMs}ms
+        </Text>
+      </View>
+    );
+  }
+  if (result.code === "cors_unreadable") {
+    return (
+      <View style={styles.healthRow} testID="persona-settings-health-result">
+        <ThemedAlertTriangle size={15} uniProps={warningIconMapping} />
+        <Text style={styles.healthWarningText} testID="persona-settings-health-cors-unreadable">
+          {t("personaEmbed.settings.connectionCorsUnreadable")}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.healthRow} testID="persona-settings-health-result">
+      <ThemedXCircle size={15} uniProps={dangerIconMapping} />
+      <Text style={settingsStyles.rowError}>
+        {t("personaEmbed.settings.connectionFailed", { error: result.error })}
+      </Text>
     </View>
   );
 });
@@ -127,6 +246,8 @@ const MachineMappingRow = memo(function MachineMappingRow({
 });
 
 export function PersonaSettingsSection() {
+  useOnlineMainChatSettingsSync();
+
   const { t } = useTranslation();
   const toast = useToast();
   const hosts = useHosts();
@@ -144,6 +265,7 @@ export function PersonaSettingsSection() {
   const [newMachineResetKey, setNewMachineResetKey] = useState(0);
   const [newTargetServerId, setNewTargetServerId] = useState<string | null>(null);
   const [disablingHostId, setDisablingHostId] = useState<string | null>(null);
+  const [retryingHostId, setRetryingHostId] = useState<string | null>(null);
   const [isClearingSession, setIsClearingSession] = useState(false);
   const clearInFlightRef = useRef(false);
 
@@ -152,44 +274,71 @@ export function PersonaSettingsSection() {
     setHubUrlResetKey((key) => key + 1);
   }, [persona.hubUrl]);
 
-  // Stable deep-equal selectors: detect connected hosts whose built-in Main Chat is still active.
-  const mainChatEnabledServerIds = useStoreWithEqualityFn(
-    useMainChatSettingsStore,
-    useCallback(
-      (state) =>
-        hosts
-          .filter((host) => isMainChatEnabled(state.settingsByServerId[host.serverId]))
-          .map((host) => host.serverId),
-      [hosts],
-    ),
-    equal,
-  );
-
-  const onlineServerIds = useStoreWithEqualityFn(
+  // Stable deep-equal selectors: track online hosts that support built-in Main Chat and distinguish
+  // loading / error / confirmed-active / confirmed-disabled states.
+  const onlineHostCapabilities = useStoreWithEqualityFn(
     useSessionStore,
     useCallback(
       (state) =>
-        hosts
-          .filter((host) => Boolean(state.sessions[host.serverId]?.client))
-          .map((host) => host.serverId),
+        hosts.flatMap((host) => {
+          const session = state.sessions[host.serverId];
+          if (!session?.client) {
+            return [];
+          }
+          const hasExistingMainChat = findMainChatAgentOnHost(session, host.serverId) !== null;
+          const features = session.serverInfo?.features;
+          const canQuerySettings = typeof session.client.getMainChatSettings === "function";
+          const supportsMainChat =
+            hasExistingMainChat ||
+            features?.mainChat === true ||
+            (features === undefined && canQuerySettings);
+          return [{ serverId: host.serverId, supportsMainChat, canQuerySettings }];
+        }),
       [hosts],
     ),
     equal,
   );
 
-  const activeMainChatHosts = useMemo<ActiveMainChatHost[]>(() => {
-    if (!persona.enabled || mainChatEnabledServerIds.length === 0) {
+  const hostMainChatStates = useStoreWithEqualityFn(
+    useMainChatSettingsStore,
+    useCallback(
+      (state): HostMainChatStateEntry[] =>
+        onlineHostCapabilities.flatMap<HostMainChatStateEntry>((entry) => {
+          const settings = state.settingsByServerId[entry.serverId];
+          if (settings !== undefined) {
+            return isMainChatEnabled(settings)
+              ? [{ serverId: entry.serverId, state: "active" }]
+              : [];
+          }
+          if (!entry.supportsMainChat) {
+            return [];
+          }
+          const error = state.errorByServerId[entry.serverId];
+          if (error) {
+            return [{ serverId: entry.serverId, state: "error", error }];
+          }
+          if (entry.canQuerySettings || state.loadingByServerId[entry.serverId]) {
+            return [{ serverId: entry.serverId, state: "loading" }];
+          }
+          return [];
+        }),
+      [onlineHostCapabilities],
+    ),
+    equal,
+  );
+
+  const mainChatHostStatuses = useMemo<MainChatHostSyncStatus[]>(() => {
+    if (!persona.enabled || hostMainChatStates.length === 0) {
       return [];
     }
-    const onlineSet = new Set(onlineServerIds);
     const hostLabelById = new Map(hosts.map((host) => [host.serverId, host.label]));
-    return mainChatEnabledServerIds
-      .filter((serverId) => onlineSet.has(serverId))
-      .map((serverId) => ({
-        serverId,
-        label: hostLabelById.get(serverId) ?? serverId,
-      }));
-  }, [hosts, mainChatEnabledServerIds, onlineServerIds, persona.enabled]);
+    return hostMainChatStates.map((entry) => ({
+      serverId: entry.serverId,
+      label: hostLabelById.get(entry.serverId) ?? entry.serverId,
+      state: entry.state,
+      ...(entry.state === "error" ? { error: entry.error } : {}),
+    }));
+  }, [hostMainChatStates, hosts, persona.enabled]);
 
   const hostOptions = useMemo<SelectFieldOption<string>[]>(
     () =>
@@ -226,16 +375,11 @@ export function PersonaSettingsSection() {
       void (async () => {
         await updatePersona({ enabled: nextEnabled });
         if (!nextEnabled) {
-          destroyResidentPersonaWebview();
-          void getDesktopHost()
-            ?.persona?.setHubUrl?.(null)
-            .catch(() => undefined);
+          await disableResidentPersonaWebview();
         } else {
           const normalized = normalizePersonaHubUrl(persona.hubUrl);
           if (normalized.ok) {
-            void getDesktopHost()
-              ?.persona?.setHubUrl?.(normalized.url)
-              .catch(() => undefined);
+            await syncPersonaHubUrlWithMain(normalized.url, { enabled: true });
           }
         }
       })();
@@ -249,6 +393,23 @@ export function PersonaSettingsSection() {
     },
     [updatePersona],
   );
+
+  const handleRetryMainChatHost = useCallback((host: ActiveMainChatHost) => {
+    void (async () => {
+      const client = useSessionStore.getState().sessions[host.serverId]?.client ?? null;
+      if (!client || typeof client.getMainChatSettings !== "function") {
+        return;
+      }
+      setRetryingHostId(host.serverId);
+      try {
+        await useMainChatSettingsStore.getState().loadSettings(host.serverId, client);
+      } catch {
+        // Store records errorByServerId; keep error row visible for further retry.
+      } finally {
+        setRetryingHostId((current) => (current === host.serverId ? null : current));
+      }
+    })();
+  }, []);
 
   const handleDisableMainChatOnHost = useCallback(
     (host: ActiveMainChatHost) => {
@@ -286,16 +447,14 @@ export function PersonaSettingsSection() {
       setHubUrlDraft(normalized.url);
       if (normalized.url !== persona.hubUrl) {
         await updatePersona({ hubUrl: normalized.url });
-        void getDesktopHost()
-          ?.persona?.setHubUrl?.(normalized.url)
-          .catch(() => undefined);
+        await syncPersonaHubUrlWithMain(normalized.url, { enabled: persona.enabled });
         if (showToast) {
           toast.show(t("personaEmbed.settings.urlSavedToast"), { variant: "success" });
         }
       }
       return normalized.url;
     },
-    [hubUrlDraft, persona.hubUrl, t, toast, updatePersona],
+    [hubUrlDraft, persona.enabled, persona.hubUrl, t, toast, updatePersona],
   );
 
   const handleHubUrlChange = useCallback(
@@ -331,10 +490,10 @@ export function PersonaSettingsSection() {
       setHubUrlDraft(normalized.url);
       if (normalized.url !== persona.hubUrl) {
         await updatePersona({ hubUrl: normalized.url });
-        void getDesktopHost()
-          ?.persona?.setHubUrl?.(normalized.url)
-          .catch(() => undefined);
       }
+      // Register the configured Hub URL with Electron main before probing its fixed health path
+      // (preserving `enabled` so disabled mode still rejects webview attachment).
+      await syncPersonaHubUrlWithMain(normalized.url, { enabled: persona.enabled });
 
       setIsTestingConnection(true);
       try {
@@ -344,7 +503,7 @@ export function PersonaSettingsSection() {
         setIsTestingConnection(false);
       }
     })();
-  }, [hubUrlDraft, persona.hubUrl, t, updatePersona]);
+  }, [hubUrlDraft, persona.enabled, persona.hubUrl, t, updatePersona]);
 
   const handleToggleHidePersonaSidebar = useCallback(
     (nextValue: boolean) => {
@@ -457,14 +616,30 @@ export function PersonaSettingsSection() {
           </View>
         </View>
 
-        {activeMainChatHosts.map((host) => (
-          <ActiveMainChatHostBanner
-            key={host.serverId}
-            host={host}
-            disabling={disablingHostId === host.serverId}
-            onDisable={handleDisableMainChatOnHost}
-          />
-        ))}
+        {mainChatHostStatuses.map((host) => {
+          if (host.state === "active") {
+            return (
+              <ActiveMainChatHostBanner
+                key={host.serverId}
+                host={host}
+                disabling={disablingHostId === host.serverId}
+                onDisable={handleDisableMainChatOnHost}
+              />
+            );
+          }
+          if (host.state === "loading") {
+            return <MainChatHostLoadingRow key={host.serverId} host={host} />;
+          }
+          return (
+            <MainChatHostErrorRow
+              key={host.serverId}
+              host={host}
+              error={host.error ?? ""}
+              retrying={retryingHostId === host.serverId}
+              onRetry={handleRetryMainChatHost}
+            />
+          );
+        })}
       </SettingsSection>
 
       {/* Section 2: Persona Hub URL & health check */}
@@ -513,31 +688,7 @@ export function PersonaSettingsSection() {
               </Text>
             ) : null}
 
-            {healthResult ? (
-              <View style={styles.healthRow} testID="persona-settings-health-result">
-                {healthResult.ok ? (
-                  <>
-                    <ThemedCheckCircle size={15} uniProps={successIconMapping} />
-                    <Text style={styles.healthOkText}>
-                      {t("personaEmbed.settings.connectionOk", {
-                        hubName: healthResult.hubName,
-                        version: healthResult.version,
-                      })}{" "}
-                      · {healthResult.latencyMs}ms
-                    </Text>
-                  </>
-                ) : (
-                  <>
-                    <ThemedXCircle size={15} uniProps={dangerIconMapping} />
-                    <Text style={settingsStyles.rowError}>
-                      {t("personaEmbed.settings.connectionFailed", {
-                        error: healthResult.error,
-                      })}
-                    </Text>
-                  </>
-                )}
-              </View>
-            ) : null}
+            {healthResult ? <PersonaHealthStatusRow result={healthResult} /> : null}
           </View>
         </View>
       </SettingsSection>
@@ -696,6 +847,32 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
     flexWrap: "wrap",
   },
+  statusBanner: {
+    marginTop: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    paddingHorizontal: theme.spacing[4],
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface2,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  errorBanner: {
+    marginTop: theme.spacing[3],
+    paddingVertical: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.statusDanger,
+    backgroundColor: theme.colors.surface2,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing[3],
+    flexWrap: "wrap",
+  },
   warningBannerLeft: {
     flexDirection: "row",
     alignItems: "center",
@@ -732,6 +909,11 @@ const styles = StyleSheet.create((theme) => ({
   healthOkText: {
     color: theme.colors.primary,
     fontSize: theme.fontSize.sm,
+  },
+  healthWarningText: {
+    color: theme.colors.statusWarning,
+    fontSize: theme.fontSize.sm,
+    flexShrink: 1,
   },
   mappingHeader: {
     paddingVertical: theme.spacing[3],

@@ -6,16 +6,18 @@ import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import { isMixedContentIframeBlocked, normalizePersonaHubUrl } from "./settings";
-import { usePersonaEmbedSettings } from "./use-persona-settings";
+import { usePersonaEmbedSettingsState } from "./use-persona-settings";
 
 const ThemedExternalLink = withUnistyles(ExternalLink);
 const ThemedCopy = withUnistyles(Copy);
 const ThemedSettings = withUnistyles(Settings);
+const ThemedSpinner = withUnistyles(LoadingSpinner);
 
 const accentForegroundIcon = (theme: Theme) => ({ color: theme.colors.accentForeground });
 const mutedIcon = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -36,7 +38,7 @@ export interface PersonaWebFallbackProps {
 export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps = {}) {
   const { t } = useTranslation();
   const toast = useToast();
-  const personaSettings = usePersonaEmbedSettings();
+  const { settings: personaSettings, isLoaded } = usePersonaEmbedSettingsState();
   const [iframePreviewEnabled, setIframePreviewEnabled] = useState(false);
 
   const normalizedHub = useMemo(
@@ -70,6 +72,30 @@ export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps
   const handleOpenSettings = useCallback(() => {
     router.push(buildSettingsSectionRoute("persona"));
   }, []);
+
+  if (!isLoaded) {
+    return (
+      <View style={styles.container} testID="persona-surface-web-loading">
+        <ThemedSpinner size="small" uniProps={mutedIcon} />
+      </View>
+    );
+  }
+
+  if (!personaSettings.enabled) {
+    return (
+      <View style={styles.container} testID="persona-surface-web-disabled">
+        <View style={styles.card}>
+          <Text style={styles.title}>{t("personaEmbed.error.disabledTitle")}</Text>
+          <Text style={styles.description}>{t("personaEmbed.error.disabledDescription")}</Text>
+          <View style={styles.actions}>
+            <Button onPress={handleOpenSettings} testID="persona-web-open-settings">
+              {t("personaEmbed.error.enableInSettings")}
+            </Button>
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container} testID="persona-surface-web">

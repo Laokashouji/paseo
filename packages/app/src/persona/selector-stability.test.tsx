@@ -328,18 +328,168 @@ describe("Persona embed React selector stability and mutual exclusion", () => {
     expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
   });
 
-  it("localizes personaEmbed strings across all 9 supported languages without English copy-paste", () => {
+  it("syncs online multi-host main-chat settings while built-in Main Chat entry is hidden, distinguishes loading/error/active states, and never auto-disables", async () => {
+    let resolveHost1!: (value: {
+      settings: ReturnType<typeof createDefaultMainChatSettings>;
+    }) => void;
+    const host1Promise = new Promise<{
+      settings: ReturnType<typeof createDefaultMainChatSettings>;
+    }>((resolve) => {
+      resolveHost1 = resolve;
+    });
+
+    const host1Update = vi.fn(async () => ({
+      settings: { ...createDefaultMainChatSettings("conservative"), enabled: false },
+    }));
+    const host1Client = {
+      getMainChatSettings: vi.fn(() => host1Promise),
+      updateMainChatSettings: host1Update,
+    } as unknown as DaemonClient;
+
+    const host2Get = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("RPC timeout"))
+      .mockResolvedValueOnce({
+        settings: { ...createDefaultMainChatSettings("conservative"), enabled: true },
+      });
+    const host2Update = vi.fn(async () => ({
+      settings: { ...createDefaultMainChatSettings("conservative"), enabled: false },
+    }));
+    const host2Client = {
+      getMainChatSettings: host2Get,
+      updateMainChatSettings: host2Update,
+    } as unknown as DaemonClient;
+
+    useMainChatSettingsStore.setState({
+      settingsByServerId: {},
+      loadingByServerId: {},
+      errorByServerId: {},
+      lastPatrolByServerId: {},
+    });
+    useSessionStore.setState({
+      sessions: {
+        srv_1: {
+          serverId: "srv_1",
+          client: host1Client,
+          clientGeneration: 1,
+          viewedTimelineSync: null,
+          serverInfo: {
+            serverId: "srv_1",
+            hostname: "n37-217-003",
+            version: "0.17.533",
+            features: { mainChat: true },
+          },
+          hasHydratedAgents: true,
+          hasHydratedWorkspaces: true,
+          hasWorkspaceDirectorySnapshot: true,
+          agents: new Map(),
+          agentDetails: new Map(),
+          workspaces: new Map(),
+          projects: new Map(),
+        } as unknown as SessionState,
+        srv_2: {
+          serverId: "srv_2",
+          client: host2Client,
+          clientGeneration: 1,
+          viewedTimelineSync: null,
+          serverInfo: {
+            serverId: "srv_2",
+            hostname: "ML9YK34K66",
+            version: "0.17.533",
+            features: { mainChat: true },
+          },
+          hasHydratedAgents: true,
+          hasHydratedWorkspaces: true,
+          hasWorkspaceDirectorySnapshot: true,
+          agents: new Map(),
+          agentDetails: new Map(),
+          workspaces: new Map(),
+          projects: new Map(),
+        } as unknown as SessionState,
+      },
+      agentLastActivity: new Map(),
+    });
+
+    const qc = makeQueryClient({ enabled: true, hideBuiltInMainChatWhenEnabled: true });
+    const view = render(
+      <QueryClientProvider client={qc}>
+        <ToastApiProvider api={noopToastApi}>
+          <KeyboardActionDispatcherProvider>
+            <MainChatHeroRow />
+            <PersonaSettingsSection />
+          </KeyboardActionDispatcherProvider>
+        </ToastApiProvider>
+      </QueryClientProvider>,
+    );
+
+    // Built-in MainChatHeroRow is hidden, yet both online hosts start syncing immediately
+    expect(view.queryByTestId("sidebar-main-chat-hero")).toBeNull();
+    expect(view.queryByTestId("persona-main-chat-loading-srv_1")).not.toBeNull();
+
+    // Host 2 fails first -> error banner with retry button renders
+    await waitFor(() => {
+      expect(view.queryByTestId("persona-main-chat-error-srv_2")).not.toBeNull();
+    });
+
+    // Resolve Host 1 as enabled -> active warning banner renders; NEVER auto-disables
+    act(() => {
+      resolveHost1({
+        settings: { ...createDefaultMainChatSettings("conservative"), enabled: true },
+      });
+    });
+    await waitFor(() => {
+      expect(view.queryByTestId("persona-main-chat-active-banner-srv_1")).not.toBeNull();
+    });
+    expect(host1Update).not.toHaveBeenCalled();
+    expect(host2Update).not.toHaveBeenCalled();
+
+    // Retry Host 2 -> transitions from error to confirmed-active banner
+    const retryBtn = view.getByTestId("persona-retry-main-chat-srv_2");
+    act(() => {
+      retryBtn.click();
+    });
+    await waitFor(() => {
+      expect(view.queryByTestId("persona-main-chat-active-banner-srv_2")).not.toBeNull();
+    });
+    expect(host2Update).not.toHaveBeenCalled();
+    expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
+  });
+
+  it("keeps identical key sets and interpolation placeholders across all 9 supported locales", () => {
+    const flattenKeys = (obj: Record<string, unknown>, prefix = ""): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(obj)) {
+        const nextKey = prefix ? `${prefix}.${key}` : key;
+        if (typeof value === "string") {
+          out[nextKey] = value;
+        } else if (value && typeof value === "object") {
+          Object.assign(out, flattenKeys(value as Record<string, unknown>, nextKey));
+        }
+      }
+      return out;
+    };
+
+    const extractPlaceholders = (text: string): string[] =>
+      Array.from(text.matchAll(/\{\{([^}]+)\}\}/g), (match) => match[1]).sort();
+
+    const enFlat = flattenKeys(personaEmbedLocales.en as unknown as Record<string, unknown>);
+    const enKeys = Object.keys(enFlat).sort();
     const nonEnglishLocales = ["zh-CN", "ar", "es", "fr", "ja", "ko", "pt-BR", "ru"] as const;
+
     for (const locale of nonEnglishLocales) {
+      const localeFlat = flattenKeys(
+        personaEmbedLocales[locale] as unknown as Record<string, unknown>,
+      );
+      expect(Object.keys(localeFlat).sort()).toEqual(enKeys);
+      for (const key of enKeys) {
+        expect(extractPlaceholders(localeFlat[key])).toEqual(extractPlaceholders(enFlat[key]));
+      }
       expect(personaEmbedLocales[locale].settings.enabledLabel).not.toBe(
         personaEmbedLocales.en.settings.enabledLabel,
       );
       expect(personaEmbedLocales[locale].webFallback.title).not.toBe(
         personaEmbedLocales.en.webFallback.title,
       );
-      expect(personaEmbedLocales[locale].jump.unmappedMachine).toContain("{{machine}}");
-      expect(personaEmbedLocales[locale].settings.connectionOk).toContain("{{hubName}}");
-      expect(personaEmbedLocales[locale].settings.connectionOk).toContain("{{version}}");
     }
   });
 });

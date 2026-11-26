@@ -1,6 +1,7 @@
 import { getDesktopHost } from "@/desktop/host";
 import { WEB_SURFACE_PLANE } from "@/lib/overlay-root";
 import type { PersonaGuestConfigMessage } from "./resident-persona-webview";
+import { validatePersonaSessionMetadataResult, type PersonaSessionMetadataHints } from "./settings";
 
 export type { PersonaGuestConfigMessage } from "./resident-persona-webview";
 
@@ -8,6 +9,7 @@ export const PERSONA_RESIDENT_HOST_ID = "paseo-persona-resident-webview";
 const PERSONA_SURFACE_ATTR = "data-paseo-persona-surface";
 const PERSONA_WEBVIEW_ATTR = "data-paseo-persona-webview";
 const DEFAULT_PARTITION = "persist:persona";
+const METADATA_LOOKUP_TIMEOUT_MS = 1_500;
 
 export interface PersonaElectronWebviewElement extends HTMLElement {
   src: string;
@@ -33,6 +35,9 @@ interface ResidentPersonaState {
 }
 
 let residentState: ResidentPersonaState | null = null;
+let lifecycleGeneration = 0;
+let hubSyncQueue: Promise<unknown> = Promise.resolve();
+let nextMetadataRequestSeq = 0;
 
 function readDocument(): Document | null {
   return typeof document === "undefined" ? null : document;
@@ -110,15 +115,42 @@ function ensureHostContainer(ownerDocument: Document): HTMLElement {
   return host;
 }
 
-export async function syncPersonaHubUrlWithMain(hubUrl: string | null): Promise<void> {
-  const setter = getDesktopHost()?.persona?.setHubUrl;
-  if (typeof setter !== "function") {
-    return;
-  }
-  try {
-    await setter(hubUrl);
-  } catch {
-    // Ignore IPC errors in degraded environments.
+function enqueueHubSync<T>(operation: () => Promise<T>): Promise<T> {
+  const next = hubSyncQueue.then(operation, operation);
+  hubSyncQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+function invokeSetHubUrl(hubUrl: string | null, options?: { enabled?: boolean }): Promise<boolean> {
+  return enqueueHubSync(async () => {
+    const setter = getDesktopHost()?.persona?.setHubUrl;
+    if (typeof setter !== "function") {
+      return false;
+    }
+    try {
+      const accepted = await setter(hubUrl, options);
+      return accepted === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export async function syncPersonaHubUrlWithMain(
+  hubUrl: string | null,
+  options?: { enabled?: boolean },
+): Promise<boolean> {
+  return invokeSetHubUrl(hubUrl, options);
+}
+
+function removeResidentDomOnly(): void {
+  if (residentState) {
+    residentState.webview.remove();
+    residentState.surface.remove();
+    residentState = null;
   }
 }
 
@@ -126,22 +158,30 @@ export async function ensureResidentPersonaWebview(
   hubUrl: string,
 ): Promise<PersonaElectronWebviewElement | null> {
   const ownerDocument = readDocument();
-  if (!ownerDocument || !hubUrl.trim()) {
+  const normalizedHubUrl = hubUrl.trim();
+  if (!ownerDocument || !normalizedHubUrl) {
     return null;
   }
 
-  await syncPersonaHubUrlWithMain(hubUrl);
+  const generation = ++lifecycleGeneration;
+  const registered = await invokeSetHubUrl(normalizedHubUrl, { enabled: true });
+
+  // Cancel creation if another destroy/disable/ensure call superseded us while awaiting IPC,
+  // or if the main process rejected Hub registration.
+  if (!registered || generation !== lifecycleGeneration) {
+    return null;
+  }
 
   if (
     residentState &&
     residentState.webview.isConnected &&
     residentState.surface.isConnected &&
-    residentState.hubUrl === hubUrl
+    residentState.hubUrl === normalizedHubUrl
   ) {
     return residentState.webview;
   }
 
-  destroyResidentPersonaWebview();
+  removeResidentDomOnly();
 
   const host = ensureHostContainer(ownerDocument);
   const surface = ownerDocument.createElement("div");
@@ -155,7 +195,7 @@ export async function ensureResidentPersonaWebview(
   webview.setAttribute("spellcheck", "false");
   webview.setAttribute("autosize", "on");
   applyWebviewFillStyle(webview);
-  webview.src = hubUrl;
+  webview.src = normalizedHubUrl;
 
   surface.appendChild(webview);
   host.appendChild(surface);
@@ -163,7 +203,7 @@ export async function ensureResidentPersonaWebview(
   residentState = {
     webview,
     surface,
-    hubUrl,
+    hubUrl: normalizedHubUrl,
   };
   return webview;
 }
@@ -211,11 +251,13 @@ export function reloadResidentPersonaWebview(): void {
 }
 
 export function destroyResidentPersonaWebview(): void {
-  if (residentState) {
-    residentState.webview.remove();
-    residentState.surface.remove();
-    residentState = null;
-  }
+  lifecycleGeneration += 1;
+  removeResidentDomOnly();
+}
+
+export async function disableResidentPersonaWebview(): Promise<void> {
+  destroyResidentPersonaWebview();
+  await invokeSetHubUrl(null, { enabled: false });
 }
 
 export function sendPersonaGuestConfig(config: PersonaGuestConfigMessage): void {
@@ -252,4 +294,89 @@ export function sendPersonaGuestAllowOnce(url: string): void {
   } catch {
     // Ignore when guest is unavailable.
   }
+}
+
+interface WebviewMetadataIpcEvent extends Event {
+  channel?: string;
+  args?: unknown[];
+  isMainFrame?: boolean;
+}
+
+/**
+ * Requests same-origin session metadata (`workspace_id`, `cwd`) from the authorized Persona guest.
+ * Used after host resolution when toolbar or window-open jumps need Level-4 workspace fallback.
+ */
+export function lookupPersonaGuestSessionMetadata(input: {
+  machineId: string;
+  sessionId: string;
+  authorizedHubUrl: string;
+  timeoutMs?: number;
+}): Promise<PersonaSessionMetadataHints | null> {
+  const webview = getResidentPersonaWebview();
+  if (!webview || typeof webview.send !== "function") {
+    return Promise.resolve(null);
+  }
+  const requestId = `persona-meta-${++nextMetadataRequestSeq}`;
+  const timeoutMs = input.timeoutMs ?? METADATA_LOOKUP_TIMEOUT_MS;
+
+  let resolvePending: ((value: PersonaSessionMetadataHints | null) => void) | null = null;
+  const pending = new Promise<PersonaSessionMetadataHints | null>((resolve) => {
+    resolvePending = resolve;
+  });
+
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const finish = (value: PersonaSessionMetadataHints | null): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    webview.removeEventListener("ipc-message", onIpcMessage);
+    resolvePending?.(value);
+  };
+
+  const onIpcMessage = (event: Event): void => {
+    const ipcEvent = event as WebviewMetadataIpcEvent;
+    if (ipcEvent.channel !== "paseo:persona:session-metadata-result") {
+      return;
+    }
+    let currentGuestUrl: string | null = null;
+    try {
+      currentGuestUrl = webview.getURL?.() || webview.src || null;
+    } catch {
+      currentGuestUrl = webview.src || null;
+    }
+    const validated = validatePersonaSessionMetadataResult(ipcEvent.args?.[0], {
+      authorizedHubUrl: input.authorizedHubUrl,
+      currentGuestUrl,
+      isMainFrame: ipcEvent.isMainFrame,
+      expectedRequestId: requestId,
+      expectedMachineId: input.machineId,
+      expectedSessionId: input.sessionId,
+    });
+    if (!validated) {
+      return;
+    }
+    finish(validated);
+  };
+
+  webview.addEventListener("ipc-message", onIpcMessage);
+  timer = setTimeout(() => finish(null), timeoutMs);
+
+  try {
+    webview.send("paseo:persona:lookup-session-metadata", {
+      requestId,
+      machineId: input.machineId,
+      sessionId: input.sessionId,
+    });
+  } catch {
+    finish(null);
+  }
+
+  return pending;
 }

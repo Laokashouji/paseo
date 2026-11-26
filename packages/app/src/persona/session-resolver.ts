@@ -18,7 +18,7 @@ export type PersonaSessionMatchLevel =
   | "label_persona_session" // Level 1: labels['persona.session']
   | "paseo_prefix_agent_id" // Level 2: paseo-<agentId> 或直传 agentId
   | "provider_thread_id" // Level 3: Claude sessionId / Codex threadId
-  | "workspace_fallback"; // Level 4: workspaceId / cwd 回退
+  | "workspace_fallback"; // Level 4: workspaceId / cwd 回退（仅限已确定主机）
 
 export type PersonaSessionResolution =
   | {
@@ -51,10 +51,11 @@ export type PersonaSessionResolution =
     }
   | {
       kind: "unresolved";
-      reason: "unmapped_machine" | "host_offline" | "not_found";
+      reason: "unmapped_machine" | "ambiguous_machine" | "host_offline" | "not_found";
       machineId: string;
       sessionId: string;
       resolvedServerId: string | null;
+      candidateServerIds?: readonly string[];
     };
 
 export interface PersonaSessionResolverHost {
@@ -68,12 +69,16 @@ export interface PersonaSessionResolverInput {
   hosts: readonly PersonaSessionResolverHost[];
   sessions: Readonly<Record<string, SessionState | undefined>>;
   connectionStatusByServerId: Readonly<Record<string, string | undefined>>;
+  /** Optional custom-provider -> built-in root map per host, matching Persona `providerRoots`. */
+  providerRootsByServerId?: Readonly<Record<string, Readonly<Record<string, string>> | undefined>>;
 }
 
 export type MachineResolutionSource = "explicit_map" | "hostname" | "label" | "server_id" | "none";
 
 const PERSONA_SESSION_LABEL = "persona.session";
 const PASEO_SESSION_PREFIX = "paseo-";
+// Patterns aligned with Persona `integrations/paseo/lib/map.js` (SESSION_ID, CLAUDE_ID, CODEX_THREAD).
+const PERSONA_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const CLAUDE_ID_PATTERN = /^[0-9a-fA-F-]{8,64}$/;
 const CODEX_THREAD_PATTERN = /^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
 const WORKSPACE_ID_PATTERN = /^wks_[0-9a-f]{16}$/;
@@ -84,6 +89,27 @@ function isKnownServerId(
   sessions: Readonly<Record<string, SessionState | undefined>>,
 ): boolean {
   return hosts.some((host) => host.serverId === serverId) || Boolean(sessions[serverId]);
+}
+
+function collectOrderedServerIds(
+  hosts: readonly PersonaSessionResolverHost[],
+  sessions: Readonly<Record<string, SessionState | undefined>>,
+): string[] {
+  const orderedServerIds: string[] = [];
+  const seenServerIds = new Set<string>();
+  for (const host of hosts) {
+    if (!seenServerIds.has(host.serverId)) {
+      seenServerIds.add(host.serverId);
+      orderedServerIds.push(host.serverId);
+    }
+  }
+  for (const serverId of Object.keys(sessions)) {
+    if (!seenServerIds.has(serverId)) {
+      seenServerIds.add(serverId);
+      orderedServerIds.push(serverId);
+    }
+  }
+  return orderedServerIds;
 }
 
 export function resolveMachineToServerId(input: {
@@ -107,34 +133,23 @@ export function resolveMachineToServerId(input: {
   }
 
   const lowerMachine = normalizedMachineId.toLowerCase();
+  const orderedServerIds = collectOrderedServerIds(input.hosts, input.sessions);
 
-  // 2. Hostname match (case-insensitive) via serverInfo.hostname.
-  const orderedServerIds: string[] = [];
-  const seenServerIds = new Set<string>();
-  for (const host of input.hosts) {
-    if (!seenServerIds.has(host.serverId)) {
-      seenServerIds.add(host.serverId);
-      orderedServerIds.push(host.serverId);
-    }
-  }
-  for (const serverId of Object.keys(input.sessions)) {
-    if (!seenServerIds.has(serverId)) {
-      seenServerIds.add(serverId);
-      orderedServerIds.push(serverId);
-    }
-  }
-
-  for (const serverId of orderedServerIds) {
+  // 2. Hostname match (case-insensitive) via serverInfo.hostname — require uniqueness.
+  const hostnameMatches = orderedServerIds.filter((serverId) => {
     const hostname = input.sessions[serverId]?.serverInfo?.hostname?.trim();
-    if (hostname && hostname.toLowerCase() === lowerMachine) {
-      return { serverId, source: "hostname" };
-    }
+    return Boolean(hostname && hostname.toLowerCase() === lowerMachine);
+  });
+  if (hostnameMatches.length === 1) {
+    return { serverId: hostnameMatches[0], source: "hostname" };
   }
 
-  // 3. Host label match (case-insensitive).
-  const labelMatch = input.hosts.find((host) => host.label.trim().toLowerCase() === lowerMachine);
-  if (labelMatch) {
-    return { serverId: labelMatch.serverId, source: "label" };
+  // 3. Host label match (case-insensitive) — require uniqueness.
+  const labelMatches = input.hosts.filter(
+    (host) => host.label.trim().toLowerCase() === lowerMachine,
+  );
+  if (labelMatches.length === 1) {
+    return { serverId: labelMatches[0].serverId, source: "label" };
   }
 
   // 4. Direct serverId match.
@@ -212,17 +227,70 @@ function pickBestAgent(candidates: readonly Agent[]): Agent | null {
   return sorted[0] ?? null;
 }
 
-function readCodexThreadId(agent: Agent): string | null {
+/**
+ * Mirrors Persona `agentRoot(agent, roots)` (`integrations/paseo/lib/map.js:131`):
+ * prefers `persistence.metadata.provider`, then `providerRoots[agent.provider]`, then `agent.provider`.
+ */
+export function resolveAgentProviderRoot(
+  agent: Agent,
+  providerRoots?: Readonly<Record<string, string>>,
+): string {
   const metadata = agent.persistence?.metadata;
-  if (!metadata || typeof metadata !== "object") {
-    return null;
+  if (metadata && typeof metadata === "object") {
+    const persistedRoot = (metadata as { provider?: unknown }).provider;
+    if (typeof persistedRoot === "string" && persistedRoot.length > 0) {
+      return persistedRoot;
+    }
   }
-  const threadId = (metadata as { threadId?: unknown }).threadId;
-  return typeof threadId === "string" && threadId.trim().length > 0 ? threadId.trim() : null;
+  const mappedRoot = providerRoots?.[agent.provider];
+  if (typeof mappedRoot === "string" && mappedRoot.length > 0) {
+    return mappedRoot;
+  }
+  return typeof agent.provider === "string" ? agent.provider : "";
+}
+
+/**
+ * Mirrors Persona `claudeId(agent)` + `sessionIdOf` (`integrations/paseo/lib/map.js:228-241`):
+ * returns the single canonical Claude session ID (first valid of persistence.sessionId, runtimeInfo.sessionId).
+ */
+export function resolveCanonicalClaudeSessionId(agent: Agent): string | null {
+  for (const candidate of [agent.persistence?.sessionId, agent.runtimeInfo?.sessionId]) {
+    if (typeof candidate === "string" && CLAUDE_ID_PATTERN.test(candidate)) {
+      return PERSONA_SESSION_ID_PATTERN.test(candidate) ? candidate : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Mirrors Persona `codexThreadOf(agent, roots)` (`integrations/paseo/lib/map.js:258-265`):
+ * returns the single canonical Codex thread ID (first valid of persistence.metadata.threadId,
+ * persistence.sessionId, runtimeInfo.sessionId).
+ */
+export function resolveCanonicalCodexThreadId(agent: Agent): string | null {
+  const metadata = agent.persistence?.metadata;
+  const threadId =
+    metadata && typeof metadata === "object"
+      ? (metadata as { threadId?: unknown }).threadId
+      : undefined;
+  for (const candidate of [threadId, agent.persistence?.sessionId, agent.runtimeInfo?.sessionId]) {
+    if (typeof candidate === "string" && CODEX_THREAD_PATTERN.test(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function matchLevel1(agents: readonly Agent[], sessionId: string): Agent | null {
-  const matches = agents.filter((agent) => agent.labels?.[PERSONA_SESSION_LABEL] === sessionId);
+  if (!PERSONA_SESSION_ID_PATTERN.test(sessionId)) {
+    return null;
+  }
+  const matches = agents.filter((agent) => {
+    const label = agent.labels?.[PERSONA_SESSION_LABEL];
+    return (
+      typeof label === "string" && PERSONA_SESSION_ID_PATTERN.test(label) && label === sessionId
+    );
+  });
   return pickBestAgent(matches);
 }
 
@@ -237,26 +305,18 @@ function matchLevel2(agents: readonly Agent[], sessionId: string): Agent | null 
   return pickBestAgent(matches);
 }
 
-function matchLevel3(agents: readonly Agent[], sessionId: string): Agent | null {
-  const isClaudeId = CLAUDE_ID_PATTERN.test(sessionId);
-  const isCodexThread = CODEX_THREAD_PATTERN.test(sessionId);
-  if (!isClaudeId && !isCodexThread) {
-    return null;
-  }
-
+function matchLevel3(
+  agents: readonly Agent[],
+  sessionId: string,
+  providerRoots?: Readonly<Record<string, string>>,
+): Agent | null {
   const matches = agents.filter((agent) => {
-    if (isClaudeId) {
-      if (
-        agent.persistence?.sessionId === sessionId ||
-        agent.runtimeInfo?.sessionId === sessionId
-      ) {
-        return true;
-      }
+    const root = resolveAgentProviderRoot(agent, providerRoots);
+    if (root === "claude") {
+      return resolveCanonicalClaudeSessionId(agent) === sessionId;
     }
-    if (isCodexThread) {
-      if (readCodexThreadId(agent) === sessionId) {
-        return true;
-      }
+    if (root === "codex") {
+      return resolveCanonicalCodexThreadId(agent) === sessionId;
     }
     return false;
   });
@@ -314,43 +374,79 @@ function toAgentResolution(
   };
 }
 
-function scanSingleHostForAgentOrWorkspace(input: {
+interface CrossHostAgentCandidate {
   serverId: string;
-  session: SessionState | undefined;
+  agent: Agent;
+}
+
+/**
+ * Unmapped machine resolution: compare match levels globally across all hosts (L1 -> L2 -> L3)
+ * and require a unique host at the winning level. Level-4 workspace fallback is NEVER used when
+ * the target host is unknown.
+ */
+function resolveAcrossUnmappedHosts(input: {
+  machineId: string;
   sessionId: string;
-  workspaceIdHint?: string | null;
-  cwdHint?: string | null;
   panel: "diff" | null;
-}): Extract<PersonaSessionResolution, { kind: "agent" | "workspace" }> | null {
-  const agents = collectSessionAgents(input.session);
-
-  const l1 = matchLevel1(agents, input.sessionId);
-  if (l1) {
-    return toAgentResolution(l1, input.serverId, "label_persona_session", input.panel);
+  hosts: readonly PersonaSessionResolverHost[];
+  sessions: Readonly<Record<string, SessionState | undefined>>;
+  providerRootsByServerId?: Readonly<Record<string, Readonly<Record<string, string>> | undefined>>;
+}): PersonaSessionResolution {
+  const candidateServerIds = collectOrderedServerIds(input.hosts, input.sessions);
+  const agentsByServerId = new Map<string, Agent[]>();
+  for (const serverId of candidateServerIds) {
+    agentsByServerId.set(serverId, collectSessionAgents(input.sessions[serverId]));
   }
 
-  const l2 = matchLevel2(agents, input.sessionId);
-  if (l2) {
-    return toAgentResolution(l2, input.serverId, "paseo_prefix_agent_id", input.panel);
+  const tiers: Array<{
+    level: Exclude<PersonaSessionMatchLevel, "workspace_fallback">;
+    match: (agents: readonly Agent[], serverId: string) => Agent | null;
+  }> = [
+    {
+      level: "label_persona_session",
+      match: (agents) => matchLevel1(agents, input.sessionId),
+    },
+    {
+      level: "paseo_prefix_agent_id",
+      match: (agents) => matchLevel2(agents, input.sessionId),
+    },
+    {
+      level: "provider_thread_id",
+      match: (agents, serverId) =>
+        matchLevel3(agents, input.sessionId, input.providerRootsByServerId?.[serverId]),
+    },
+  ];
+
+  for (const tier of tiers) {
+    const hits: CrossHostAgentCandidate[] = [];
+    for (const serverId of candidateServerIds) {
+      const matched = tier.match(agentsByServerId.get(serverId) ?? [], serverId);
+      if (matched) {
+        hits.push({ serverId, agent: matched });
+      }
+    }
+    if (hits.length === 1) {
+      return toAgentResolution(hits[0].agent, hits[0].serverId, tier.level, input.panel);
+    }
+    if (hits.length > 1) {
+      return {
+        kind: "unresolved",
+        reason: "ambiguous_machine",
+        machineId: input.machineId,
+        sessionId: input.sessionId,
+        resolvedServerId: null,
+        candidateServerIds: hits.map((hit) => hit.serverId),
+      };
+    }
   }
 
-  const l3 = matchLevel3(agents, input.sessionId);
-  if (l3) {
-    return toAgentResolution(l3, input.serverId, "provider_thread_id", input.panel);
-  }
-
-  const ws = matchLevel4Workspace(input.session?.workspaces, input.workspaceIdHint, input.cwdHint);
-  if (ws) {
-    return {
-      kind: "workspace",
-      level: "workspace_fallback",
-      serverId: input.serverId,
-      workspaceId: ws.id,
-      panel: input.panel,
-    };
-  }
-
-  return null;
+  return {
+    kind: "unresolved",
+    reason: "unmapped_machine",
+    machineId: input.machineId,
+    sessionId: input.sessionId,
+    resolvedServerId: null,
+  };
 }
 
 export function resolvePersonaSession(
@@ -368,34 +464,21 @@ export function resolvePersonaSession(
   });
 
   if (!machineMatch.serverId) {
-    // Fallback read-only scan across all known hosts for globally unique session/agent IDs.
-    const candidateServerIds = Object.keys(input.sessions);
-    for (const serverId of candidateServerIds) {
-      const hit = scanSingleHostForAgentOrWorkspace({
-        serverId,
-        session: input.sessions[serverId],
-        sessionId,
-        workspaceIdHint: input.request.workspaceIdHint,
-        cwdHint: input.request.cwdHint,
-        panel,
-      });
-      if (hit) {
-        return hit;
-      }
-    }
-    return {
-      kind: "unresolved",
-      reason: "unmapped_machine",
+    return resolveAcrossUnmappedHosts({
       machineId,
       sessionId,
-      resolvedServerId: null,
-    };
+      panel,
+      hosts: input.hosts,
+      sessions: input.sessions,
+      providerRootsByServerId: input.providerRootsByServerId,
+    });
   }
 
   const serverId = machineMatch.serverId;
   const session = input.sessions[serverId];
   const connectionStatus = input.connectionStatusByServerId[serverId];
   const agents = collectSessionAgents(session);
+  const providerRoots = input.providerRootsByServerId?.[serverId];
 
   // Level 1: labels['persona.session']
   const level1Match = matchLevel1(agents, sessionId);
@@ -431,8 +514,8 @@ export function resolvePersonaSession(
     };
   }
 
-  // Level 3: Claude sessionId / Codex threadId
-  const level3Match = matchLevel3(agents, sessionId);
+  // Level 3: Canonical Claude sessionId / Codex threadId by actual provider root
+  const level3Match = matchLevel3(agents, sessionId, providerRoots);
   if (level3Match) {
     return toAgentResolution(level3Match, serverId, "provider_thread_id", panel);
   }
@@ -454,7 +537,7 @@ export function resolvePersonaSession(
     };
   }
 
-  // Level 4: Workspace fallback via workspaceIdHint or cwdHint
+  // Level 4: Workspace fallback via workspaceIdHint or cwdHint (only on a resolved host)
   const workspaceMatch = matchLevel4Workspace(
     session.workspaces,
     input.request.workspaceIdHint,

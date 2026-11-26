@@ -39,9 +39,17 @@ export interface OpenPersonaSessionDeps {
   getHosts: () => readonly PersonaSessionResolverHost[];
   getSessions: () => Readonly<Record<string, SessionState | undefined>>;
   getConnectionStatusByServerId: () => Readonly<Record<string, string | undefined>>;
+  getProviderRootsByServerId?: () => Readonly<
+    Record<string, Readonly<Record<string, string>> | undefined>
+  >;
   getOpenInSidePanePreferences: () => OpenInSidePanePreferences;
   getIsCompact: () => boolean;
   waitForHostHydration: (serverId: string, timeoutMs: number) => Promise<void>;
+  lookupSessionMetadataHint?: (input: {
+    machineId: string;
+    sessionId: string;
+    serverId: string;
+  }) => Promise<{ workspaceIdHint?: string | null; cwdHint?: string | null } | null>;
   fetchRemoteAgent?: (
     serverId: string,
     agentId: string,
@@ -69,7 +77,13 @@ export interface OpenPersonaSessionDeps {
   }) => void;
   allowPersonaFallbackNavigation?: (rawHref: string) => void;
   showUnmappedMachineToast: (input: { machineId: string; onConfigure: () => void }) => void;
+  showAmbiguousMachineToast?: (input: {
+    machineId: string;
+    candidateServerIds: readonly string[];
+    onConfigure: () => void;
+  }) => void;
   showHostOfflineToast: (hostLabel: string) => void;
+  showHostSyncTimeoutToast?: (hostLabel: string) => void;
   showWorkspaceFallbackToast: () => void;
   showNotManagedByPaseoToast: () => void;
 }
@@ -80,7 +94,7 @@ export interface OpenPersonaSessionResult {
   navigatedRoute?: string;
 }
 
-function buildUnmappedMachineToastContent(input: {
+function buildMappingActionToastContent(input: {
   message: string;
   actionLabel: string;
   onAction: () => void;
@@ -126,6 +140,7 @@ function resolveCurrentResolution(
     hosts: deps.getHosts(),
     sessions: deps.getSessions(),
     connectionStatusByServerId: deps.getConnectionStatusByServerId(),
+    providerRootsByServerId: deps.getProviderRootsByServerId?.(),
   });
 }
 
@@ -243,6 +258,25 @@ function handleUnresolvedResolution(
   resolution: Extract<PersonaSessionResolution, { kind: "unresolved" }>,
   deps: OpenPersonaSessionDeps,
 ): OpenPersonaSessionResult {
+  if (resolution.reason === "ambiguous_machine") {
+    const onConfigure = () => {
+      deps.navigateToRoute(buildSettingsSectionRoute("persona"));
+    };
+    if (deps.showAmbiguousMachineToast) {
+      deps.showAmbiguousMachineToast({
+        machineId: resolution.machineId,
+        candidateServerIds: resolution.candidateServerIds ?? [],
+        onConfigure,
+      });
+    } else {
+      deps.showUnmappedMachineToast({
+        machineId: resolution.machineId,
+        onConfigure,
+      });
+    }
+    return { resolution, handled: false };
+  }
+
   if (resolution.reason === "unmapped_machine") {
     deps.showUnmappedMachineToast({
       machineId: resolution.machineId,
@@ -266,16 +300,80 @@ function handleUnresolvedResolution(
   return { resolution, handled: false };
 }
 
+function hasWorkspaceHint(request: PersonaSessionOpenRequest): boolean {
+  return Boolean(request.workspaceIdHint?.trim() || request.cwdHint?.trim());
+}
+
+async function enrichWorkspaceHintsIfNeeded(
+  request: PersonaSessionOpenRequest,
+  resolution: PersonaSessionResolution,
+  deps: OpenPersonaSessionDeps,
+): Promise<{ request: PersonaSessionOpenRequest; resolution: PersonaSessionResolution }> {
+  if (
+    resolution.kind !== "unresolved" ||
+    resolution.reason !== "not_found" ||
+    resolution.resolvedServerId === null ||
+    hasWorkspaceHint(request) ||
+    !deps.lookupSessionMetadataHint
+  ) {
+    return { request, resolution };
+  }
+  try {
+    const metadata = await deps.lookupSessionMetadataHint({
+      machineId: request.machineId,
+      sessionId: request.sessionId,
+      serverId: resolution.resolvedServerId,
+    });
+    const workspaceIdHint = metadata?.workspaceIdHint?.trim() || null;
+    const cwdHint = metadata?.cwdHint?.trim() || null;
+    if (!workspaceIdHint && !cwdHint) {
+      return { request, resolution };
+    }
+    const nextRequest: PersonaSessionOpenRequest = {
+      ...request,
+      ...(workspaceIdHint ? { workspaceIdHint } : {}),
+      ...(cwdHint ? { cwdHint } : {}),
+    };
+    return {
+      request: nextRequest,
+      resolution: resolveCurrentResolution(nextRequest, deps),
+    };
+  } catch {
+    return { request, resolution };
+  }
+}
+
+function handleHydrationTimeout(
+  resolution: Extract<PersonaSessionResolution, { kind: "pending_hydration" }>,
+  deps: OpenPersonaSessionDeps,
+): OpenPersonaSessionResult {
+  const hostLabel = lookupHostLabel(deps, resolution.serverId, resolution.serverId);
+  const liveStatus = deps.getConnectionStatusByServerId()[resolution.serverId];
+  if (liveStatus === "offline" || liveStatus === "error") {
+    deps.showHostOfflineToast(hostLabel);
+  } else if (deps.showHostSyncTimeoutToast) {
+    deps.showHostSyncTimeoutToast(hostLabel);
+  } else {
+    deps.showHostOfflineToast(hostLabel);
+  }
+  return { resolution, handled: false };
+}
+
 export async function openPersonaSession(
   request: PersonaSessionOpenRequest,
   deps: OpenPersonaSessionDeps,
 ): Promise<OpenPersonaSessionResult> {
-  let resolution = resolveCurrentResolution(request, deps);
+  let effectiveRequest = request;
+  let resolution = resolveCurrentResolution(effectiveRequest, deps);
 
   if (resolution.kind === "pending_hydration") {
     await deps.waitForHostHydration(resolution.serverId, HYDRATION_WAIT_TIMEOUT_MS);
-    resolution = resolveCurrentResolution(request, deps);
+    resolution = resolveCurrentResolution(effectiveRequest, deps);
   }
+
+  const enriched = await enrichWorkspaceHintsIfNeeded(effectiveRequest, resolution, deps);
+  effectiveRequest = enriched.request;
+  resolution = enriched.resolution;
 
   if (resolution.kind === "agent") {
     const route = resolution.workspaceId
@@ -307,27 +405,48 @@ export async function openPersonaSession(
   }
 
   if (resolution.kind === "pending_hydration") {
-    const hostLabel = lookupHostLabel(deps, resolution.serverId, resolution.serverId);
-    deps.showHostOfflineToast(hostLabel);
-    return { resolution, handled: false };
+    return handleHydrationTimeout(resolution, deps);
   }
 
-  return handleUnresolvedResolution(request, resolution, deps);
+  return handleUnresolvedResolution(effectiveRequest, resolution, deps);
 }
 
-function waitForSessionAgentsHydration(serverId: string, timeoutMs: number): Promise<void> {
-  const initialSession = useSessionStore.getState().sessions[serverId];
-  if (initialSession?.hasHydratedAgents) {
+export interface HostDirectoryHydrationWaitDeps {
+  isAgentsHydrated: (serverId: string) => boolean;
+  subscribeAgentsHydrated: (listener: () => void) => () => void;
+  acquireDirectoryDemand?: (serverId: string) => () => void;
+  runProbeCycleNow?: (serverId: string) => Promise<unknown>;
+}
+
+/**
+ * Waits for a host's directory (agents + workspaces) to hydrate while explicitly holding
+ * directory demand for the wait window and releasing it on completion or timeout.
+ */
+export function waitForHostDirectoryHydration(
+  serverId: string,
+  timeoutMs: number,
+  deps: HostDirectoryHydrationWaitDeps,
+): Promise<void> {
+  if (deps.isAgentsHydrated(serverId)) {
     return Promise.resolve();
   }
 
-  // Trigger a probe/refresh in case the host is still warming up.
+  let releaseDirectoryDemand: (() => void) | null = null;
   try {
-    void getHostRuntimeStore()
-      .runProbeCycleNow(serverId)
-      .catch(() => undefined);
+    releaseDirectoryDemand = deps.acquireDirectoryDemand?.(serverId) ?? null;
+  } catch {
+    releaseDirectoryDemand = null;
+  }
+
+  try {
+    void deps.runProbeCycleNow?.(serverId).catch(() => undefined);
   } catch {
     // Ignore when host runtime store is not initialized in tests.
+  }
+
+  if (deps.isAgentsHydrated(serverId)) {
+    releaseDirectoryDemand?.();
+    return Promise.resolve();
   }
 
   let notifyDone: (() => void) | null = null;
@@ -350,23 +469,47 @@ function waitForSessionAgentsHydration(serverId: string, timeoutMs: number): Pro
     }
     unsubscribe?.();
     unsubscribe = null;
+    releaseDirectoryDemand?.();
+    releaseDirectoryDemand = null;
     notifyDone?.();
   };
 
-  unsubscribe = useSessionStore.subscribe((state) => {
-    if (state.sessions[serverId]?.hasHydratedAgents) {
+  unsubscribe = deps.subscribeAgentsHydrated(() => {
+    if (deps.isAgentsHydrated(serverId)) {
       finish();
     }
   });
-  timer = setTimeout(finish, timeoutMs);
 
+  // Re-check once after subscribing in case hydration landed synchronously during demand acquisition.
+  if (deps.isAgentsHydrated(serverId)) {
+    finish();
+    return pending;
+  }
+
+  timer = setTimeout(finish, timeoutMs);
   return pending;
+}
+
+function waitForSessionAgentsHydration(serverId: string, timeoutMs: number): Promise<void> {
+  let runtime: ReturnType<typeof getHostRuntimeStore> | null = null;
+  try {
+    runtime = getHostRuntimeStore();
+  } catch {
+    runtime = null;
+  }
+  return waitForHostDirectoryHydration(serverId, timeoutMs, {
+    isAgentsHydrated: (id) => Boolean(useSessionStore.getState().sessions[id]?.hasHydratedAgents),
+    subscribeAgentsHydrated: (listener) => useSessionStore.subscribe(listener),
+    acquireDirectoryDemand: runtime ? (id) => runtime.acquireDirectoryDemand(id) : undefined,
+    runProbeCycleNow: runtime ? (id) => runtime.runProbeCycleNow(id) : undefined,
+  });
 }
 
 export function createAppOpenPersonaSessionDeps(options: {
   toast: ToastApi;
   isCompact: boolean;
   allowPersonaFallbackNavigation?: (rawHref: string) => void;
+  lookupSessionMetadataHint?: OpenPersonaSessionDeps["lookupSessionMetadataHint"];
 }): OpenPersonaSessionDeps {
   return {
     getMachineServerMap: () => readPersonaEmbedSettingsSnapshot().machineServerMap,
@@ -390,6 +533,7 @@ export function createAppOpenPersonaSessionDeps(options: {
     getIsCompact: () =>
       options.isCompact || useWorkspaceLayoutStore.getState().layoutMode !== "split-panes",
     waitForHostHydration: waitForSessionAgentsHydration,
+    lookupSessionMetadataHint: options.lookupSessionMetadataHint,
     fetchRemoteAgent: async (serverId, agentId) => {
       const client =
         useSessionStore.getState().sessions[serverId]?.client ??
@@ -417,7 +561,7 @@ export function createAppOpenPersonaSessionDeps(options: {
     showUnmappedMachineToast: ({ machineId, onConfigure }) => {
       let dismissToast: (() => void) | null = null;
       dismissToast = options.toast.show(
-        buildUnmappedMachineToastContent({
+        buildMappingActionToastContent({
           message: i18n.t("personaEmbed.jump.unmappedMachine", { machine: machineId }),
           actionLabel: i18n.t("personaEmbed.jump.configureMapping"),
           onAction: () => {
@@ -428,8 +572,28 @@ export function createAppOpenPersonaSessionDeps(options: {
         { variant: "warning", durationMs: 6_000, testID: "persona-unmapped-machine-toast" },
       );
     },
+    showAmbiguousMachineToast: ({ machineId, onConfigure }) => {
+      let dismissToast: (() => void) | null = null;
+      dismissToast = options.toast.show(
+        buildMappingActionToastContent({
+          message: i18n.t("personaEmbed.jump.ambiguousMachine", { machine: machineId }),
+          actionLabel: i18n.t("personaEmbed.jump.configureMapping"),
+          onAction: () => {
+            dismissToast?.();
+            onConfigure();
+          },
+        }),
+        { variant: "warning", durationMs: 6_000, testID: "persona-ambiguous-machine-toast" },
+      );
+    },
     showHostOfflineToast: (hostLabel) => {
       options.toast.show(i18n.t("personaEmbed.jump.hostOffline", { host: hostLabel }), {
+        variant: "warning",
+        durationMs: 4_500,
+      });
+    },
+    showHostSyncTimeoutToast: (hostLabel) => {
+      options.toast.show(i18n.t("personaEmbed.jump.hostSyncTimeout", { host: hostLabel }), {
         variant: "warning",
         durationMs: 4_500,
       });

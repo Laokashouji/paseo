@@ -3,15 +3,20 @@ import { router } from "expo-router";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
 import { normalizePersonaHubUrl } from "./settings";
-import { usePersonaEmbedSettings } from "./use-persona-settings";
+import { usePersonaEmbedSettingsState } from "./use-persona-settings";
+
+const ThemedSpinner = withUnistyles(LoadingSpinner);
+const mutedIcon = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 export function PersonaSurface() {
   const { t } = useTranslation();
-  const personaSettings = usePersonaEmbedSettings();
+  const { settings: personaSettings, isLoaded } = usePersonaEmbedSettingsState();
 
   const normalizedHub = useMemo(
     () => normalizePersonaHubUrl(personaSettings.hubUrl),
@@ -29,6 +34,28 @@ export function PersonaSurface() {
   const handleOpenSettings = useCallback(() => {
     router.push(buildSettingsSectionRoute("persona"));
   }, []);
+
+  if (!isLoaded) {
+    return (
+      <View style={styles.container} testID="persona-surface-native-loading">
+        <ThemedSpinner size="small" uniProps={mutedIcon} />
+      </View>
+    );
+  }
+
+  if (!personaSettings.enabled) {
+    return (
+      <View style={styles.container} testID="persona-surface-native-disabled">
+        <View style={styles.card}>
+          <Text style={styles.title}>{t("personaEmbed.error.disabledTitle")}</Text>
+          <Text style={styles.description}>{t("personaEmbed.error.disabledDescription")}</Text>
+          <View style={styles.actions}>
+            <Button onPress={handleOpenSettings}>{t("personaEmbed.error.enableInSettings")}</Button>
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container} testID="persona-surface-native">

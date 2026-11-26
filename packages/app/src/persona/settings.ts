@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  getDesktopHost,
+  type DesktopPersonaHealthCheckResult,
+  type DesktopPersonaOpenSessionEvent,
+} from "@/desktop/host";
 
 export interface PersonaEmbedSettings {
   /** 是否启用单窗口 Persona 内嵌入口 */
@@ -124,6 +129,17 @@ export function normalizePersonaEmbedSettings(value: unknown): PersonaEmbedSetti
   return PersonaEmbedSettingsSchema.parse(value);
 }
 
+export type PersonaHealthCheckFailureCode =
+  | "invalid_url"
+  | "not_configured"
+  | "unauthorized_caller"
+  | "redirect_blocked"
+  | "cors_unreadable"
+  | "http_error"
+  | "invalid_payload"
+  | "timeout"
+  | "network_error";
+
 export interface PersonaHealthCheckSuccess {
   ok: true;
   hubName: string;
@@ -134,6 +150,7 @@ export interface PersonaHealthCheckSuccess {
 export interface PersonaHealthCheckFailure {
   ok: false;
   error: string;
+  code?: PersonaHealthCheckFailureCode;
 }
 
 export type PersonaHealthCheckResult = PersonaHealthCheckSuccess | PersonaHealthCheckFailure;
@@ -155,7 +172,7 @@ function parsePersonaHealthPayload(
 ): PersonaHealthCheckResult {
   const record = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
   if (record?.ok !== true) {
-    return { ok: false, error: "Unexpected health payload" };
+    return { ok: false, code: "invalid_payload", error: "Unexpected health payload" };
   }
   return {
     ok: true,
@@ -165,47 +182,143 @@ function parsePersonaHealthPayload(
   };
 }
 
-export async function testPersonaHubHealth(
-  rawHubUrl: string,
-  options: {
-    fetchFn?: typeof fetch;
-    timeoutMs?: number;
-  } = {},
+function normalizeDesktopHealthResult(
+  raw: DesktopPersonaHealthCheckResult | null | undefined,
+): PersonaHealthCheckResult {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, code: "network_error", error: "Health check returned empty result" };
+  }
+  if (raw.ok === true) {
+    return {
+      ok: true,
+      hubName: readTrimmedString(raw.hubName, "Persona Hub"),
+      version: readTrimmedString(raw.version, "unknown"),
+      latencyMs:
+        typeof raw.latencyMs === "number" && Number.isFinite(raw.latencyMs)
+          ? Math.max(0, raw.latencyMs)
+          : 0,
+    };
+  }
+  return {
+    ok: false,
+    code: raw.code ?? "network_error",
+    error: readTrimmedString(raw.error, "Health check failed"),
+  };
+}
+
+function readCurrentPageOrigin(override?: string | null): string | null {
+  if (typeof override === "string" && override.trim().length > 0) {
+    return override.trim();
+  }
+  if (
+    typeof window !== "undefined" &&
+    window.location?.origin &&
+    window.location.origin !== "null"
+  ) {
+    return window.location.origin;
+  }
+  return null;
+}
+
+async function runDesktopHealthProbe(
+  desktopCheckHealth: () => Promise<DesktopPersonaHealthCheckResult>,
 ): Promise<PersonaHealthCheckResult> {
-  const normalized = normalizePersonaHubUrl(rawHubUrl);
-  if (!normalized.ok) {
-    return { ok: false, error: normalized.error };
+  try {
+    const result = await desktopCheckHealth();
+    return normalizeDesktopHealthResult(result);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "network_error",
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
+}
 
-  const fetchFn = options.fetchFn ?? globalThis.fetch;
-  if (typeof fetchFn !== "function") {
-    return { ok: false, error: "fetch unavailable" };
+async function detectBrowserCorsUnreadable(input: {
+  error: unknown;
+  fetchFn: typeof fetch;
+  healthUrl: string;
+  targetOrigin: string;
+  pageOriginOverride?: string | null;
+  signal?: AbortSignal;
+}): Promise<boolean> {
+  const pageOrigin = readCurrentPageOrigin(input.pageOriginOverride);
+  if (
+    !(input.error instanceof TypeError) ||
+    pageOrigin === null ||
+    pageOrigin === input.targetOrigin
+  ) {
+    return false;
   }
+  try {
+    const opaqueResponse = await input.fetchFn(input.healthUrl, {
+      method: "GET",
+      credentials: "omit",
+      mode: "no-cors",
+      signal: input.signal,
+    });
+    return opaqueResponse.type === "opaque" || opaqueResponse.ok;
+  } catch {
+    return false;
+  }
+}
 
-  const timeoutMs = options.timeoutMs ?? 5_000;
+async function runWebHealthProbe(input: {
+  fetchFn: typeof fetch;
+  healthUrl: string;
+  targetOrigin: string;
+  displayHost: string;
+  timeoutMs: number;
+  pageOriginOverride?: string | null;
+}): Promise<PersonaHealthCheckResult> {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const timer = controller ? setTimeout(() => controller.abort(), input.timeoutMs) : null;
   const startedAt = Date.now();
 
   try {
-    const response = await fetchFn(`${normalized.url}/api/v1/health`, {
+    const response = await input.fetchFn(input.healthUrl, {
       method: "GET",
       // Health check must never attach cookies or tokens.
       credentials: "omit",
+      redirect: "manual",
       headers: { Accept: "application/json" },
       signal: controller?.signal,
     });
+    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+      return {
+        ok: false,
+        code: "redirect_blocked",
+        error: "Health check redirect blocked",
+      };
+    }
     if (!response.ok) {
-      return { ok: false, error: `HTTP ${response.status}` };
+      return { ok: false, code: "http_error", error: `HTTP ${response.status}` };
     }
     const data: unknown = await response.json();
-    return parsePersonaHealthPayload(data, normalized.displayHost, startedAt);
+    return parsePersonaHealthPayload(data, input.displayHost, startedAt);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      return { ok: false, error: "Request timed out" };
+      return { ok: false, code: "timeout", error: "Request timed out" };
+    }
+    const corsUnreadable = await detectBrowserCorsUnreadable({
+      error,
+      fetchFn: input.fetchFn,
+      healthUrl: input.healthUrl,
+      targetOrigin: input.targetOrigin,
+      pageOriginOverride: input.pageOriginOverride,
+      signal: controller?.signal,
+    });
+    if (corsUnreadable) {
+      return {
+        ok: false,
+        code: "cors_unreadable",
+        error: "Browser cross-origin policy blocked reading health response",
+      };
     }
     return {
       ok: false,
+      code: "network_error",
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -213,6 +326,43 @@ export async function testPersonaHubHealth(
       clearTimeout(timer);
     }
   }
+}
+
+export async function testPersonaHubHealth(
+  rawHubUrl: string,
+  options: {
+    fetchFn?: typeof fetch;
+    electronCheckHealth?: () => Promise<DesktopPersonaHealthCheckResult>;
+    timeoutMs?: number;
+    pageOriginOverride?: string | null;
+  } = {},
+): Promise<PersonaHealthCheckResult> {
+  const normalized = normalizePersonaHubUrl(rawHubUrl);
+  if (!normalized.ok) {
+    return { ok: false, code: "invalid_url", error: normalized.error };
+  }
+
+  // In Electron Desktop, delegate to the main-process credential-less probe on the registered Hub.
+  const desktopCheckHealth =
+    options.electronCheckHealth ??
+    (options.fetchFn ? undefined : getDesktopHost()?.persona?.checkHealth);
+  if (typeof desktopCheckHealth === "function") {
+    return runDesktopHealthProbe(desktopCheckHealth);
+  }
+
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  if (typeof fetchFn !== "function") {
+    return { ok: false, code: "network_error", error: "fetch unavailable" };
+  }
+
+  return runWebHealthProbe({
+    fetchFn,
+    healthUrl: `${normalized.url}/api/v1/health`,
+    targetOrigin: normalized.origin,
+    displayHost: normalized.displayHost,
+    timeoutMs: options.timeoutMs ?? 5_000,
+    pageOriginOverride: options.pageOriginOverride,
+  });
 }
 
 export interface ParsedPersonaEmbedSessionRoute {
@@ -302,4 +452,219 @@ export function isMixedContentIframeBlocked(
   }
   const normalized = normalizePersonaHubUrl(hubUrl);
   return normalized.ok && normalized.url.startsWith("http://");
+}
+
+const VALID_OPEN_SESSION_SOURCES = new Set<DesktopPersonaOpenSessionEvent["source"]>([
+  "window-open",
+  "link-click",
+  "header-button",
+  "changes-panel-button",
+]);
+
+function containsDisallowedLineOrNullChar(value: string): boolean {
+  return value.includes("\r") || value.includes("\n") || value.includes("\0");
+}
+
+function isSafeIdentifierString(value: unknown, maxLength = 256): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > maxLength) {
+    return false;
+  }
+  return (
+    !trimmed.includes("/") && !trimmed.includes("\\") && !containsDisallowedLineOrNullChar(trimmed)
+  );
+}
+
+function isSafeCwdHintString(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 4096 && !containsDisallowedLineOrNullChar(value);
+}
+
+function isSameOriginHttpUrl(urlString: string, authorizedOrigin: string): boolean {
+  try {
+    const parsed = new URL(urlString);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      !parsed.username &&
+      !parsed.password &&
+      parsed.origin === authorizedOrigin
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateGuestFrameContext(options: {
+  authorizedHubUrl: string;
+  currentGuestUrl?: string | null;
+  isMainFrame?: boolean;
+}): { origin: string } | null {
+  if (options.isMainFrame === false) {
+    return null;
+  }
+  const hub = normalizePersonaHubUrl(options.authorizedHubUrl);
+  if (!hub.ok) {
+    return null;
+  }
+  if (options.currentGuestUrl !== undefined) {
+    if (
+      typeof options.currentGuestUrl !== "string" ||
+      !isSameOriginHttpUrl(options.currentGuestUrl, hub.origin)
+    ) {
+      return null;
+    }
+  }
+  return { origin: hub.origin };
+}
+
+function parseOptionalWorkspaceIdHint(
+  value: unknown,
+): { ok: true; value: string | null | undefined } | { ok: false } {
+  if (value === undefined || value === null) {
+    return { ok: true, value };
+  }
+  if (isSafeIdentifierString(value, 128)) {
+    return { ok: true, value: value.trim() };
+  }
+  return { ok: false };
+}
+
+function parseOptionalCwdHint(
+  value: unknown,
+): { ok: true; value: string | null | undefined } | { ok: false } {
+  if (value === undefined || value === null) {
+    return { ok: true, value };
+  }
+  if (isSafeCwdHintString(value)) {
+    return { ok: true, value: value.trim() };
+  }
+  return { ok: false };
+}
+
+function parseOptionalRawHref(
+  value: unknown,
+  origin: string,
+): { ok: true; value: string | undefined } | { ok: false } {
+  if (value === undefined || value === null) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof value === "string" && isSameOriginHttpUrl(value, origin)) {
+    return { ok: true, value };
+  }
+  return { ok: false };
+}
+
+function parseOptionalSessionView(
+  value: unknown,
+): { ok: true; value: "chat" | "term" | undefined } | { ok: false } {
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+  if (value === "chat" || value === "term") {
+    return { ok: true, value };
+  }
+  return { ok: false };
+}
+
+function parseOptionalSessionPanel(
+  value: unknown,
+): { ok: true; value: "diff" | undefined } | { ok: false } {
+  if (value === undefined || value === null) {
+    return { ok: true, value: undefined };
+  }
+  if (value === "diff") {
+    return { ok: true, value: "diff" };
+  }
+  return { ok: false };
+}
+
+/**
+ * Strictly validates an open-session IPC message coming from a Persona guest or main window-open.
+ * Rejects subframe events, off-origin guests, invalid field types, and off-origin `rawHref` values.
+ */
+export function validatePersonaGuestOpenSessionPayload(
+  raw: unknown,
+  options: {
+    authorizedHubUrl: string;
+    currentGuestUrl?: string | null;
+    isMainFrame?: boolean;
+  },
+): DesktopPersonaOpenSessionEvent | null {
+  const frameContext = validateGuestFrameContext(options);
+  if (!frameContext || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+
+  const record = raw as Record<string, unknown>;
+  if (!isSafeIdentifierString(record.machineId) || !isSafeIdentifierString(record.sessionId)) {
+    return null;
+  }
+  if (
+    typeof record.source !== "string" ||
+    !VALID_OPEN_SESSION_SOURCES.has(record.source as DesktopPersonaOpenSessionEvent["source"])
+  ) {
+    return null;
+  }
+
+  const view = parseOptionalSessionView(record.view);
+  const panel = parseOptionalSessionPanel(record.panel);
+  const rawHref = parseOptionalRawHref(record.rawHref, frameContext.origin);
+  const workspaceIdHint = parseOptionalWorkspaceIdHint(record.workspaceIdHint);
+  const cwdHint = parseOptionalCwdHint(record.cwdHint);
+  if (!view.ok || !panel.ok || !rawHref.ok || !workspaceIdHint.ok || !cwdHint.ok) {
+    return null;
+  }
+
+  return {
+    machineId: record.machineId.trim(),
+    sessionId: record.sessionId.trim(),
+    source: record.source as DesktopPersonaOpenSessionEvent["source"],
+    ...(view.value ? { view: view.value } : {}),
+    ...(panel.value ? { panel: panel.value } : {}),
+    ...(rawHref.value ? { rawHref: rawHref.value } : {}),
+    ...(workspaceIdHint.value !== undefined ? { workspaceIdHint: workspaceIdHint.value } : {}),
+    ...(cwdHint.value !== undefined ? { cwdHint: cwdHint.value } : {}),
+  };
+}
+
+export interface PersonaSessionMetadataHints {
+  workspaceIdHint: string | null;
+  cwdHint: string | null;
+}
+
+export function validatePersonaSessionMetadataResult(
+  raw: unknown,
+  options: {
+    authorizedHubUrl: string;
+    currentGuestUrl?: string | null;
+    isMainFrame?: boolean;
+    expectedRequestId: string;
+    expectedMachineId: string;
+    expectedSessionId: string;
+  },
+): PersonaSessionMetadataHints | null {
+  const frameContext = validateGuestFrameContext(options);
+  if (!frameContext || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  if (
+    record.requestId !== options.expectedRequestId ||
+    record.machineId !== options.expectedMachineId ||
+    record.sessionId !== options.expectedSessionId
+  ) {
+    return null;
+  }
+  const workspaceIdHint = parseOptionalWorkspaceIdHint(record.workspaceIdHint);
+  const cwdHint = parseOptionalCwdHint(record.cwdHint);
+  return {
+    workspaceIdHint: workspaceIdHint.ok ? (workspaceIdHint.value ?? null) : null,
+    cwdHint: cwdHint.ok ? (cwdHint.value ?? null) : null,
+  };
 }

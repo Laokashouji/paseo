@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPEN_IN_SIDE_PANE_PREFERENCES } from "@/hooks/use-settings/storage";
 import type { Agent, SessionState, WorkspaceDescriptor } from "@/stores/session-store";
-import { openPersonaSession, type OpenPersonaSessionDeps } from "./open-persona-session";
+import {
+  openPersonaSession,
+  waitForHostDirectoryHydration,
+  type OpenPersonaSessionDeps,
+} from "./open-persona-session";
 
 function makeAgent(overrides: Partial<Agent> & { id: string; serverId: string }): Agent {
   return {
@@ -321,5 +325,178 @@ describe("openPersonaSession executor", () => {
     );
     expect(notFoundHeaderHarness.allowPersonaFallbackNavigation).not.toHaveBeenCalled();
     expect(notFoundHeaderHarness.showNotManagedByPaseoToast).toHaveBeenCalledTimes(1);
+  });
+
+  it("enriches Level-4 workspace hints via lookupSessionMetadataHint after host resolution", async () => {
+    const ws = {
+      id: "wks_fedcba9876543210",
+      workspaceDirectory: "/data00/repo/demo",
+    } as WorkspaceDescriptor;
+    const lookupSessionMetadataHint = vi.fn(async () => ({
+      workspaceIdHint: ws.id,
+      cwdHint: ws.workspaceDirectory,
+    }));
+    const harness = createDeps({
+      getSessions: () => ({
+        srv_devbox: makeSession("srv_devbox", { workspaces: new Map([[ws.id, ws]]) }),
+      }),
+      lookupSessionMetadataHint,
+    });
+
+    const result = await openPersonaSession(
+      {
+        machineId: "n37-217-003",
+        sessionId: "unmanaged-sid",
+        panel: "diff",
+        source: "window-open",
+      },
+      harness.deps,
+    );
+
+    expect(lookupSessionMetadataHint).toHaveBeenCalledWith({
+      machineId: "n37-217-003",
+      sessionId: "unmanaged-sid",
+      serverId: "srv_devbox",
+    });
+    expect(result.handled).toBe(true);
+    expect(result.resolution).toEqual({
+      kind: "workspace",
+      level: "workspace_fallback",
+      serverId: "srv_devbox",
+      workspaceId: ws.id,
+      panel: "diff",
+    });
+    expect(harness.navigateToWorkspace).toHaveBeenCalledWith({
+      serverId: "srv_devbox",
+      workspaceId: ws.id,
+      target: { kind: "working_diff" },
+    });
+  });
+
+  it("shows ambiguous-machine toast prompting mapping when multiple hosts match the same session", async () => {
+    const showAmbiguousMachineToast = vi.fn();
+    const sharedSid = "shared_sess_1";
+    const harness = createDeps({
+      getHosts: () => [
+        { serverId: "srv_a", label: "Host A" },
+        { serverId: "srv_b", label: "Host B" },
+      ],
+      getSessions: () => ({
+        srv_a: makeSession("srv_a", {
+          serverInfo: { serverId: "srv_a", hostname: "host-a", version: "0.17.533" },
+          agents: new Map([
+            [
+              "ag_a",
+              makeAgent({
+                id: "ag_a",
+                serverId: "srv_a",
+                labels: { "persona.session": sharedSid },
+              }),
+            ],
+          ]),
+        }),
+        srv_b: makeSession("srv_b", {
+          serverInfo: { serverId: "srv_b", hostname: "host-b", version: "0.17.533" },
+          agents: new Map([
+            [
+              "ag_b",
+              makeAgent({
+                id: "ag_b",
+                serverId: "srv_b",
+                labels: { "persona.session": sharedSid },
+              }),
+            ],
+          ]),
+        }),
+      }),
+      getConnectionStatusByServerId: () => ({ srv_a: "online", srv_b: "online" }),
+      showAmbiguousMachineToast,
+    });
+
+    const result = await openPersonaSession(
+      { machineId: "unmapped-machine", sessionId: sharedSid, source: "link-click" },
+      harness.deps,
+    );
+
+    expect(result.handled).toBe(false);
+    expect(showAmbiguousMachineToast).toHaveBeenCalledTimes(1);
+    const arg = showAmbiguousMachineToast.mock.calls[0]?.[0];
+    expect(arg?.machineId).toBe("unmapped-machine");
+    expect(arg?.candidateServerIds).toEqual(["srv_a", "srv_b"]);
+    arg?.onConfigure();
+    expect(harness.navigateToRoute).toHaveBeenCalledWith("/settings/persona");
+  });
+
+  it("acquires and releases host directory demand during cold-start wait and distinguishes sync timeout from offline", async () => {
+    const release = vi.fn();
+    const acquireDirectoryDemand = vi.fn(() => release);
+    const runProbeCycleNow = vi.fn(async () => undefined);
+    let hydrated = false;
+    const listeners = new Set<() => void>();
+
+    const waitPromise = waitForHostDirectoryHydration("srv_devbox", 500, {
+      isAgentsHydrated: () => hydrated,
+      subscribeAgentsHydrated: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      acquireDirectoryDemand,
+      runProbeCycleNow,
+    });
+
+    expect(acquireDirectoryDemand).toHaveBeenCalledWith("srv_devbox");
+    expect(release).not.toHaveBeenCalled();
+
+    hydrated = true;
+    for (const listener of listeners) {
+      listener();
+    }
+    await waitPromise;
+    expect(release).toHaveBeenCalledTimes(1);
+
+    // Timeout also releases directory demand
+    const releaseTimeout = vi.fn();
+    await waitForHostDirectoryHydration("srv_devbox", 10, {
+      isAgentsHydrated: () => false,
+      subscribeAgentsHydrated: () => () => undefined,
+      acquireDirectoryDemand: () => releaseTimeout,
+    });
+    expect(releaseTimeout).toHaveBeenCalledTimes(1);
+
+    // Online host timing out on directory sync MUST show sync-timeout toast, NOT offline toast
+    const showHostSyncTimeoutToast = vi.fn();
+    const onlineTimeoutHarness = createDeps({
+      getSessions: () => ({
+        srv_devbox: makeSession("srv_devbox", { hasHydratedAgents: false }),
+      }),
+      getConnectionStatusByServerId: () => ({ srv_devbox: "online" }),
+      waitForHostHydration: vi.fn(async () => undefined),
+      showHostSyncTimeoutToast,
+    });
+
+    await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: "herdr-1", source: "link-click" },
+      onlineTimeoutHarness.deps,
+    );
+    expect(showHostSyncTimeoutToast).toHaveBeenCalledWith("DevBox");
+    expect(onlineTimeoutHarness.showHostOfflineToast).not.toHaveBeenCalled();
+
+    // Host that went offline during hydration wait shows host-offline toast
+    let status = "connecting";
+    const offlineTimeoutHarness = createDeps({
+      getSessions: () => ({
+        srv_devbox: makeSession("srv_devbox", { hasHydratedAgents: false }),
+      }),
+      getConnectionStatusByServerId: () => ({ srv_devbox: status }),
+      waitForHostHydration: vi.fn(async () => {
+        status = "offline";
+      }),
+      showHostSyncTimeoutToast: vi.fn(),
+    });
+    await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: "herdr-1", source: "link-click" },
+      offlineTimeoutHarness.deps,
+    );
+    expect(offlineTimeoutHarness.showHostOfflineToast).toHaveBeenCalledWith("DevBox");
   });
 });

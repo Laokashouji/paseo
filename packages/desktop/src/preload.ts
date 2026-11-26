@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
+import type { PersonaHealthCheckResult } from "./features/persona-webview/index.js";
 import type { DesktopWindowChromeMode } from "./window/chrome.js";
 
 // This preload runs in Electron's sandbox and is tsc-compiled (not bundled), so it MUST
@@ -147,8 +148,10 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
   },
   persona: {
     partition: PERSONA_WEBVIEW_PARTITION,
-    setHubUrl: (hubUrl: string | null) =>
-      ipcRenderer.invoke("paseo:persona:set-hub-url", hubUrl) as Promise<boolean>,
+    setHubUrl: (hubUrl: string | null, options?: { enabled?: boolean }) =>
+      ipcRenderer.invoke("paseo:persona:set-hub-url", hubUrl, options) as Promise<boolean>,
+    checkHealth: () =>
+      ipcRenderer.invoke("paseo:persona:check-health") as Promise<PersonaHealthCheckResult>,
     clearSession: () => ipcRenderer.invoke("paseo:persona:clear-session") as Promise<void>,
     openDevTools: (webContentsId: number) =>
       ipcRenderer.invoke("paseo:persona:open-devtools", webContentsId) as Promise<boolean>,

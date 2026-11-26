@@ -461,4 +461,256 @@ describe("resolvePersonaSession (4-level resolver)", () => {
       resolvedServerId: "srv_devbox",
     });
   });
+
+  it("Level 1 & Level 3: enforces Persona SESSION_ID rules and canonical provider-specific IDs without accepting discarded IDs", () => {
+    const uuidA = "11111111-2222-4333-8444-555555555555";
+    const uuidB = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const uuidC = "99999999-8888-4777-8666-555555555555";
+
+    const codexAgent = makeAgent({
+      id: "ag_codex",
+      serverId: "srv_devbox",
+      provider: "codex-sub2api",
+      workspaceId: "wks_0123456789abcdef",
+      persistence: {
+        provider: "codex-sub2api",
+        sessionId: uuidB,
+        metadata: { provider: "codex", threadId: uuidA },
+      },
+      runtimeInfo: { provider: "codex-sub2api", sessionId: uuidC },
+    });
+
+    const claudeAgent = makeAgent({
+      id: "ag_claude",
+      serverId: "srv_devbox",
+      provider: "claude",
+      workspaceId: "wks_0123456789abcdef",
+      persistence: {
+        provider: "claude",
+        sessionId: uuidB,
+        metadata: { threadId: uuidC },
+      },
+      runtimeInfo: { provider: "claude", sessionId: uuidC },
+    });
+
+    const opencodeAgent = makeAgent({
+      id: "ag_opencode",
+      serverId: "srv_devbox",
+      provider: "opencode",
+      workspaceId: "wks_0123456789abcdef",
+      persistence: { provider: "opencode", sessionId: uuidC },
+    });
+
+    const invalidLabelAgent = makeAgent({
+      id: "ag_invalid_label",
+      serverId: "srv_devbox",
+      labels: { "persona.session": "-leading-dash-invalid" },
+    });
+
+    const session = makeSession("srv_devbox", {
+      agents: new Map([
+        [codexAgent.id, codexAgent],
+        [claudeAgent.id, claudeAgent],
+        [opencodeAgent.id, opencodeAgent],
+        [invalidLabelAgent.id, invalidLabelAgent],
+      ]),
+    });
+
+    // Codex canonical ID is metadata.threadId (uuidA); discarded persistence.sessionId (uuidB) MUST NOT match codexAgent
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "n37-217-003", sessionId: uuidA, source: "link-click" },
+        machineServerMap: {},
+        hosts,
+        sessions: { srv_devbox: session },
+        connectionStatusByServerId: onlineStatus,
+      }),
+    ).toMatchObject({ kind: "agent", level: "provider_thread_id", agentId: "ag_codex" });
+
+    // uuidB matches claudeAgent (its canonical persistence.sessionId), NEVER codexAgent
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "n37-217-003", sessionId: uuidB, source: "link-click" },
+        machineServerMap: {},
+        hosts,
+        sessions: { srv_devbox: session },
+        connectionStatusByServerId: onlineStatus,
+      }),
+    ).toMatchObject({ kind: "agent", level: "provider_thread_id", agentId: "ag_claude" });
+
+    // uuidC is discarded by both claudeAgent (runtimeInfo after valid persistence) and codexAgent,
+    // and opencode is neither Claude nor Codex -> MUST NOT match any agent
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "n37-217-003", sessionId: uuidC, source: "link-click" },
+        machineServerMap: {},
+        hosts,
+        sessions: { srv_devbox: session },
+        connectionStatusByServerId: onlineStatus,
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: uuidC,
+      resolvedServerId: "srv_devbox",
+    });
+
+    // Custom codex provider resolved via providerRootsByServerId falls back to persistence.sessionId when threadId absent
+    const customCodexNoThread = makeAgent({
+      id: "ag_codex_custom",
+      serverId: "srv_devbox",
+      provider: "my-codex",
+      persistence: { provider: "my-codex", sessionId: uuidC },
+    });
+    const customSession = makeSession("srv_devbox", {
+      agents: new Map([[customCodexNoThread.id, customCodexNoThread]]),
+    });
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "n37-217-003", sessionId: uuidC, source: "link-click" },
+        machineServerMap: {},
+        hosts,
+        sessions: { srv_devbox: customSession },
+        connectionStatusByServerId: onlineStatus,
+        providerRootsByServerId: { srv_devbox: { "my-codex": "codex" } },
+      }),
+    ).toMatchObject({ kind: "agent", level: "provider_thread_id", agentId: "ag_codex_custom" });
+
+    // Invalid Level-1 persona.session label value (fails Persona SESSION_ID regex) is rejected
+    expect(
+      resolvePersonaSession({
+        request: {
+          machineId: "n37-217-003",
+          sessionId: "-leading-dash-invalid",
+          source: "link-click",
+        },
+        machineServerMap: {},
+        hosts,
+        sessions: { srv_devbox: session },
+        connectionStatusByServerId: onlineStatus,
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: "-leading-dash-invalid",
+      resolvedServerId: "srv_devbox",
+    });
+  });
+
+  it("unmapped machine: compares tiers globally across hosts, rejects ambiguous ties, and disables Level-4 workspace fallback", () => {
+    const sharedUuid = "12345678-1234-4123-8123-1234567890ab";
+    const multiHosts = [
+      { serverId: "srv_a", label: "Host A" },
+      { serverId: "srv_b", label: "Host B" },
+    ];
+
+    // Host A has Level-3 match, Host B has exact Level-1 match -> Host B MUST win regardless of order
+    const sessionAL3 = makeSession("srv_a", {
+      serverInfo: { serverId: "srv_a", hostname: "host-a", version: "0.17.533" },
+      agents: new Map([
+        [
+          "ag_a",
+          makeAgent({
+            id: "ag_a",
+            serverId: "srv_a",
+            provider: "claude",
+            persistence: { provider: "claude", sessionId: sharedUuid },
+          }),
+        ],
+      ]),
+    });
+    const sessionBL1 = makeSession("srv_b", {
+      serverInfo: { serverId: "srv_b", hostname: "host-b", version: "0.17.533" },
+      agents: new Map([
+        [
+          "ag_b",
+          makeAgent({
+            id: "ag_b",
+            serverId: "srv_b",
+            labels: { "persona.session": sharedUuid },
+          }),
+        ],
+      ]),
+    });
+
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "unmapped-box", sessionId: sharedUuid, source: "link-click" },
+        machineServerMap: {},
+        hosts: multiHosts,
+        sessions: { srv_a: sessionAL3, srv_b: sessionBL1 },
+        connectionStatusByServerId: { srv_a: "online", srv_b: "online" },
+      }),
+    ).toMatchObject({
+      kind: "agent",
+      level: "label_persona_session",
+      serverId: "srv_b",
+      agentId: "ag_b",
+    });
+
+    // Both Host A and Host B have the same Level-1 label -> ambiguous_machine (prompts mapping)
+    const sessionAL1 = makeSession("srv_a", {
+      serverInfo: { serverId: "srv_a", hostname: "host-a", version: "0.17.533" },
+      agents: new Map([
+        [
+          "ag_a",
+          makeAgent({
+            id: "ag_a",
+            serverId: "srv_a",
+            labels: { "persona.session": sharedUuid },
+          }),
+        ],
+      ]),
+    });
+
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "unmapped-box", sessionId: sharedUuid, source: "link-click" },
+        machineServerMap: {},
+        hosts: multiHosts,
+        sessions: { srv_a: sessionAL1, srv_b: sessionBL1 },
+        connectionStatusByServerId: { srv_a: "online", srv_b: "online" },
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-box",
+      sessionId: sharedUuid,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_a", "srv_b"],
+    });
+
+    // Unmapped machine MUST NOT perform Level-4 workspace/cwd fallback even when hints match Host A
+    const ws = makeWorkspace({
+      id: "wks_0123456789abcdef",
+      workspaceDirectory: "/data00/repo/paseo-fork",
+    });
+    const sessionWithWs = makeSession("srv_a", {
+      serverInfo: { serverId: "srv_a", hostname: "host-a", version: "0.17.533" },
+      workspaces: new Map([[ws.id, ws]]),
+    });
+    expect(
+      resolvePersonaSession({
+        request: {
+          machineId: "unmapped-box",
+          sessionId: "unknown-session",
+          workspaceIdHint: ws.id,
+          cwdHint: "/data00/repo/paseo-fork",
+          source: "link-click",
+        },
+        machineServerMap: {},
+        hosts: multiHosts,
+        sessions: { srv_a: sessionWithWs },
+        connectionStatusByServerId: { srv_a: "online" },
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "unmapped-box",
+      sessionId: "unknown-session",
+      resolvedServerId: null,
+    });
+  });
 });
