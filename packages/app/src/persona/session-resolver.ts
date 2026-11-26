@@ -73,7 +73,13 @@ export interface PersonaSessionResolverInput {
   providerRootsByServerId?: Readonly<Record<string, Readonly<Record<string, string>> | undefined>>;
 }
 
-export type MachineResolutionSource = "explicit_map" | "hostname" | "label" | "server_id" | "none";
+export type MachineResolutionSource =
+  | "explicit_map"
+  | "explicit_map_missing"
+  | "hostname"
+  | "label"
+  | "server_id"
+  | "none";
 
 const PERSONA_SESSION_LABEL = "persona.session";
 const PASEO_SESSION_PREFIX = "paseo-";
@@ -124,12 +130,17 @@ export function resolveMachineToServerId(input: {
   }
 
   // 1. Explicit configuration mapping takes highest priority.
+  // When an explicit mapping exists for this machineId but its target serverId is missing from
+  // hosts/sessions, NEVER downgrade to hostname/label/serverId or cross-host heuristics.
   const mappedServerId =
     input.machineServerMap[input.machineId]?.trim() ??
     input.machineServerMap[normalizedMachineId]?.trim() ??
     "";
-  if (mappedServerId && isKnownServerId(mappedServerId, input.hosts, input.sessions)) {
-    return { serverId: mappedServerId, source: "explicit_map" };
+  if (mappedServerId) {
+    if (isKnownServerId(mappedServerId, input.hosts, input.sessions)) {
+      return { serverId: mappedServerId, source: "explicit_map" };
+    }
+    return { serverId: null, source: "explicit_map_missing" };
   }
 
   const lowerMachine = normalizedMachineId.toLowerCase();
@@ -462,6 +473,16 @@ export function resolvePersonaSession(
     hosts: input.hosts,
     sessions: input.sessions,
   });
+
+  if (machineMatch.source === "explicit_map_missing") {
+    return {
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId,
+      sessionId,
+      resolvedServerId: null,
+    };
+  }
 
   if (!machineMatch.serverId) {
     return resolveAcrossUnmappedHosts({

@@ -1,4 +1,4 @@
-import { getDesktopHost } from "@/desktop/host";
+import { getDesktopHost, type DesktopPersonaHubPartitionEntry } from "@/desktop/host";
 
 export interface PersonaGuestConfigMessage {
   hubOrigin: string;
@@ -25,6 +25,48 @@ export function reconcileResidentPersonaWebviews(
   _hubs: ReadonlyArray<{ id: string; hubUrl: string }>,
 ): void {
   // No-op outside Electron desktop runtime.
+}
+
+export async function syncPersonaHubEntriesWithMain(
+  entries: readonly DesktopPersonaHubPartitionEntry[] | null,
+  options?: { enabled?: boolean },
+): Promise<boolean> {
+  const personaBridge = getDesktopHost()?.persona;
+  if (!personaBridge) {
+    return false;
+  }
+  const normalizedEntries = Array.isArray(entries)
+    ? entries
+        .map((entry) => ({
+          partition: entry.partition.trim(),
+          hubUrl: entry.hubUrl.trim(),
+        }))
+        .filter((entry) => entry.partition.length > 0 && entry.hubUrl.length > 0)
+    : [];
+  try {
+    if (
+      personaBridge.supportsPerHubPartitions === true &&
+      typeof personaBridge.setHubEntries === "function"
+    ) {
+      const accepted = await personaBridge.setHubEntries(
+        normalizedEntries.length > 0 ? normalizedEntries : null,
+        options,
+      );
+      return accepted === true;
+    }
+    const urls = Array.from(new Set(normalizedEntries.map((entry) => entry.hubUrl)));
+    if (typeof personaBridge.setHubUrls === "function") {
+      const accepted = await personaBridge.setHubUrls(urls.length > 0 ? urls : null, options);
+      return accepted === true;
+    }
+    if (typeof personaBridge.setHubUrl === "function") {
+      const accepted = await personaBridge.setHubUrl(urls[0] ?? null, options);
+      return accepted === true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export async function syncPersonaHubUrlsWithMain(
@@ -64,7 +106,7 @@ export async function syncPersonaHubUrlWithMain(
 }
 
 export async function disableResidentPersonaWebview(): Promise<void> {
-  await syncPersonaHubUrlsWithMain(null, { enabled: false });
+  await syncPersonaHubEntriesWithMain(null, { enabled: false });
 }
 
 export function parkResidentPersonaWebview(_hubId?: string): void {

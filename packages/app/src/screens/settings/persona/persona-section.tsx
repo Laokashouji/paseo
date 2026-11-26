@@ -30,11 +30,11 @@ import { useOnlineMainChatSettingsSync } from "@/main-chat/use-steward-roster";
 import {
   destroyResidentPersonaWebview,
   disableResidentPersonaWebview,
-  syncPersonaHubUrlsWithMain,
+  syncPersonaHubEntriesWithMain,
 } from "@/persona/resident-persona-webview";
 import {
   addPersonaHubProfile,
-  collectValidPersonaHubUrls,
+  collectValidPersonaHubPartitionEntries,
   formatPersonaHubDisplayHost,
   getActivePersonaHub,
   getPersonaHubById,
@@ -44,9 +44,11 @@ import {
   openPersonaHubInRightSplit,
   removePersonaHubProfile,
   reorderPersonaHubProfiles,
+  resolvePersonaHubPartition,
   selectActivePersonaHub,
   testPersonaHubHealth,
   updatePersonaHubProfile,
+  type PersonaEmbedSettings,
   type PersonaHealthCheckResult,
   type PersonaHubProfile,
   type PersonaHubProfileMutationError,
@@ -669,10 +671,19 @@ const PersonaSelectedHubEditor = memo(function PersonaSelectedHubEditor({
   );
 });
 
+function collectHostPartitionEntries(settings: PersonaEmbedSettings) {
+  const desktopPersona = getDesktopHost()?.persona;
+  return collectValidPersonaHubPartitionEntries(settings, {
+    basePartition: desktopPersona?.partition,
+    partitionPrefix: desktopPersona?.partitionPrefix,
+  });
+}
+
 interface PersonaSessionDataSectionProps {
   editingHub: PersonaHubProfile | null;
   editingHubDisplayHost: string | null;
   hasMultipleHubs: boolean;
+  supportsScopedClear: boolean;
   clearingTarget: "hub" | "all" | null;
   onClearHubSession: () => void;
   onClearAllSession: () => void;
@@ -682,17 +693,18 @@ const PersonaSessionDataSection = memo(function PersonaSessionDataSection({
   editingHub,
   editingHubDisplayHost,
   hasMultipleHubs,
+  supportsScopedClear,
   clearingTarget,
   onClearHubSession,
   onClearAllSession,
 }: PersonaSessionDataSectionProps) {
   const { t } = useTranslation();
-  const hasHubClearRow = Boolean(editingHub && editingHubDisplayHost);
+  const hasHubClearRow = Boolean(supportsScopedClear && editingHub && editingHubDisplayHost);
   const clearAllLabel = resolveClearAllButtonLabel({ clearingTarget, hasMultipleHubs, t });
   return (
     <SettingsSection title={t("personaEmbed.settings.sessionDataTitle")}>
       <View style={settingsStyles.card}>
-        {editingHub && editingHubDisplayHost ? (
+        {hasHubClearRow && editingHub && editingHubDisplayHost ? (
           <View style={settingsStyles.row}>
             <View style={settingsStyles.rowContent}>
               <Text style={settingsStyles.rowTitle}>
@@ -1257,8 +1269,9 @@ export function PersonaSettingsSection() {
         if (!nextEnabled) {
           await disableResidentPersonaWebview();
         } else {
-          const validUrls = collectValidPersonaHubUrls(persona);
-          await syncPersonaHubUrlsWithMain(validUrls, { enabled: true });
+          await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(persona), {
+            enabled: true,
+          });
         }
       })();
     },
@@ -1358,7 +1371,7 @@ export function PersonaSettingsSection() {
         });
         return applied.ok ? applied.settings : current;
       });
-      await syncPersonaHubUrlsWithMain(collectValidPersonaHubUrls(result.settings), {
+      await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(result.settings), {
         enabled: persona.enabled,
       });
       toast.show(t("personaEmbed.settings.hubAddedToast", { name: result.hub.name }), {
@@ -1401,7 +1414,7 @@ export function PersonaSettingsSection() {
         const nextSettings = removePersonaHubProfile(persona, hub.id);
         await updatePersona((current) => removePersonaHubProfile(current, hub.id));
         destroyResidentPersonaWebview(hub.id);
-        await syncPersonaHubUrlsWithMain(collectValidPersonaHubUrls(nextSettings), {
+        await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(nextSettings), {
           enabled: nextSettings.enabled,
         });
         setHealthResultByHubId((current) => {
@@ -1473,10 +1486,11 @@ export function PersonaSettingsSection() {
           });
           return applied.ok ? applied.settings : current;
         });
-        const nextUrls = previewNext.ok
-          ? collectValidPersonaHubUrls(previewNext.settings)
-          : collectValidPersonaHubUrls(persona);
-        await syncPersonaHubUrlsWithMain(nextUrls, { enabled: persona.enabled });
+        destroyResidentPersonaWebview(editingHubId);
+        const nextEntries = previewNext.ok
+          ? collectHostPartitionEntries(previewNext.settings)
+          : collectHostPartitionEntries(persona);
+        await syncPersonaHubEntriesWithMain(nextEntries, { enabled: persona.enabled });
         if (showToast) {
           toast.show(t("personaEmbed.settings.urlSavedToast"), { variant: "success" });
         }
@@ -1520,7 +1534,7 @@ export function PersonaSettingsSection() {
       setHubUrlError(null);
       setHubUrlDraft(normalized.url);
 
-      let nextUrls = collectValidPersonaHubUrls(persona);
+      let nextEntries = collectHostPartitionEntries(persona);
       if (normalized.url !== editingHubUrl) {
         const previewNext = updatePersonaHubProfile(persona, targetHubId, {
           hubUrl: normalized.url,
@@ -1531,15 +1545,25 @@ export function PersonaSettingsSection() {
           });
           return applied.ok ? applied.settings : current;
         });
+        destroyResidentPersonaWebview(targetHubId);
         if (previewNext.ok) {
-          nextUrls = collectValidPersonaHubUrls(previewNext.settings);
+          nextEntries = collectHostPartitionEntries(previewNext.settings);
         }
       }
-      if (!nextUrls.includes(normalized.url)) {
-        nextUrls = [...nextUrls, normalized.url];
+      const desktopPersona = getDesktopHost()?.persona;
+      const targetPartition = resolvePersonaHubPartition(targetHubId, {
+        basePartition: desktopPersona?.partition,
+        partitionPrefix: desktopPersona?.partitionPrefix,
+      });
+      if (targetPartition) {
+        // Place the probed Hub first so legacy single-Hub desktop shells also probe this exact Hub.
+        nextEntries = [
+          { partition: targetPartition, hubUrl: normalized.url },
+          ...nextEntries.filter((entry) => entry.partition !== targetPartition),
+        ];
       }
-      // Register the multi-Hub allowlist with Electron main before probing this Hub's fixed path.
-      await syncPersonaHubUrlsWithMain(nextUrls, { enabled: persona.enabled });
+      // Register the per-partition multi-Hub allowlist with Electron main before probing this Hub's fixed path.
+      await syncPersonaHubEntriesWithMain(nextEntries, { enabled: persona.enabled });
 
       setTestingHubId(targetHubId);
       try {
@@ -1611,6 +1635,8 @@ export function PersonaSettingsSection() {
     [editingHubId, updatePersona],
   );
 
+  const supportsPerHubPartitions = Boolean(getDesktopHost()?.persona?.supportsPerHubPartitions);
+
   const handleClearHubSession = useCallback(() => {
     if (!editingHub || clearInFlightRef.current) {
       return;
@@ -1635,14 +1661,23 @@ export function PersonaSettingsSection() {
         if (!confirmed) {
           return;
         }
-        await syncPersonaHubUrlsWithMain(collectValidPersonaHubUrls(persona), {
+        await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(persona), {
           enabled: persona.enabled,
         });
-        const clearSession = getDesktopHost()?.persona?.clearSession;
+        const desktopPersona = getDesktopHost()?.persona;
+        const clearSession = desktopPersona?.clearSession;
         if (!clearSession) {
           throw new Error("Electron persona bridge is unavailable");
         }
-        await clearSession(normalized.url);
+        const partition = resolvePersonaHubPartition(editingHub.id, {
+          basePartition: desktopPersona?.partition,
+          partitionPrefix: desktopPersona?.partitionPrefix,
+        });
+        await clearSession(
+          desktopPersona?.supportsPerHubPartitions === true && partition
+            ? { partition, hubUrl: normalized.url }
+            : normalized.url,
+        );
         toast.show(t("personaEmbed.settings.clearHubSuccess", { name: editingHub.name }), {
           variant: "success",
         });
@@ -1673,6 +1708,9 @@ export function PersonaSettingsSection() {
         if (!confirmed) {
           return;
         }
+        await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(persona), {
+          enabled: persona.enabled,
+        });
         const clearSession = getDesktopHost()?.persona?.clearSession;
         if (!clearSession) {
           throw new Error("Electron persona bridge is unavailable");
@@ -1686,7 +1724,7 @@ export function PersonaSettingsSection() {
         setClearingTarget(null);
       }
     })();
-  }, [t, toast]);
+  }, [persona, t, toast]);
 
   return (
     <View testID="persona-settings-section">
@@ -1817,6 +1855,7 @@ export function PersonaSettingsSection() {
           editingHub={editingHub}
           editingHubDisplayHost={editingHubDisplayHost}
           hasMultipleHubs={hasMultipleHubs}
+          supportsScopedClear={supportsPerHubPartitions}
           clearingTarget={clearingTarget}
           onClearHubSession={handleClearHubSession}
           onClearAllSession={handleClearAllSession}

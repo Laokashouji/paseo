@@ -1699,6 +1699,50 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
       serverId: "srv_b",
       agentId: "ag_hub_b",
     });
+
+    // P1-2 regression: when Hub A has an explicit machineServerMap pointing to srv_a,
+    // and srv_a is missing from hosts & sessions while srv_b holds the exact same sessionId,
+    // openPersonaSession MUST abort auto-jump, prompt to reconfigure mapping, and NEVER jump to srv_b.
+    useSessionStore.setState({
+      sessions: {
+        srv_b: makeSession("srv_b", {
+          serverInfo: { serverId: "srv_b", hostname: "shared-machine", version: "0.17.535" },
+          workspaces: new Map([[wsB.id, wsB]]),
+          agents: new Map([[agentB.id, agentB]]),
+        }),
+      },
+    });
+    setupRuntimeHosts([{ serverId: "srv_b", label: "shared-machine", status: "online" }]);
+
+    const showUnmappedMachineToast = vi.fn();
+    const navigateToAgent = vi.fn();
+    const navigateToWorkspace = vi.fn();
+    const navigateToRoute = vi.fn();
+    const staleMapRes = await openPersonaSession(
+      { machineId: "shared-machine", sessionId: sharedClaudeSessionId, source: "link-click" },
+      {
+        ...depsHubA,
+        showUnmappedMachineToast,
+        navigateToAgent,
+        navigateToWorkspace,
+        navigateToRoute,
+      },
+    );
+    expect(staleMapRes.handled).toBe(false);
+    expect(staleMapRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "shared-machine",
+      sessionId: sharedClaudeSessionId,
+      resolvedServerId: null,
+    });
+    expect(navigateToAgent).not.toHaveBeenCalled();
+    expect(navigateToWorkspace).not.toHaveBeenCalled();
+    expect(navigateToRoute).not.toHaveBeenCalled();
+    expect(showUnmappedMachineToast).toHaveBeenCalledTimes(1);
+    expect(showUnmappedMachineToast).toHaveBeenCalledWith(
+      expect.objectContaining({ machineId: "shared-machine" }),
+    );
     appQueryClient.removeQueries({ queryKey: APP_SETTINGS_QUERY_KEY });
   });
 });

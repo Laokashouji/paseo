@@ -44,6 +44,8 @@ export interface PersonaEmbedSettings {
 }
 
 export const DEFAULT_PERSONA_HUB_ID = "hub-default";
+export const PERSONA_WEBVIEW_PARTITION = "persist:persona";
+export const PERSONA_WEBVIEW_PARTITION_PREFIX = "persist:persona-";
 export const DEFAULT_PERSONA_HUB_URL = "http://10.37.217.3:18660";
 export const DEFAULT_PERSONA_HUB_NAME = "10.37.217.3";
 export const MIN_PERSONA_SPLIT_RATIO = 0.25;
@@ -52,6 +54,42 @@ export const DEFAULT_PERSONA_SPLIT_RATIO = 0.5;
 export const MAX_PERSONA_HUBS = 32;
 export const MAX_PERSONA_HUB_NAME_LENGTH = 64;
 export const MAX_PERSONA_HUB_ID_LENGTH = 64;
+const PERSONA_HUB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+
+export interface PersonaHubPartitionEntry {
+  partition: string;
+  hubUrl: string;
+}
+
+/**
+ * Maps a Persona Hub ID to its isolated persistent Electron partition:
+ * - `hub-default` (migrated from 0.17.534) stays on `persist:persona` to preserve login state.
+ * - Additional Hubs get `persist:persona-<id>` with a strictly validated ASCII slug.
+ */
+export function resolvePersonaHubPartition(
+  hubId: string | undefined | null,
+  options?: { basePartition?: string; partitionPrefix?: string },
+): string | null {
+  if (typeof hubId !== "string") {
+    return null;
+  }
+  const trimmed = hubId.trim();
+  if (!trimmed || !PERSONA_HUB_ID_PATTERN.test(trimmed)) {
+    return null;
+  }
+  const basePartition =
+    typeof options?.basePartition === "string" && options.basePartition.startsWith("persist:")
+      ? options.basePartition
+      : PERSONA_WEBVIEW_PARTITION;
+  if (trimmed === DEFAULT_PERSONA_HUB_ID) {
+    return basePartition;
+  }
+  const prefix =
+    typeof options?.partitionPrefix === "string" && options.partitionPrefix.startsWith("persist:")
+      ? options.partitionPrefix
+      : PERSONA_WEBVIEW_PARTITION_PREFIX;
+  return `${prefix}${trimmed}`;
+}
 
 export const DEFAULT_PERSONA_HUB_PROFILE: PersonaHubProfile = {
   id: DEFAULT_PERSONA_HUB_ID,
@@ -200,11 +238,7 @@ function sanitizePersonaHubId(rawId: unknown): string | null {
   if (
     trimmed.length === 0 ||
     trimmed.length > MAX_PERSONA_HUB_ID_LENGTH ||
-    trimmed.includes("/") ||
-    trimmed.includes("\\") ||
-    trimmed.includes("\r") ||
-    trimmed.includes("\n") ||
-    trimmed.includes("\0")
+    !PERSONA_HUB_ID_PATTERN.test(trimmed)
   ) {
     return null;
   }
@@ -218,12 +252,15 @@ export function createPersonaHubId(existingIds: ReadonlySet<string>, nameHint?: 
     .replace(/^-+|-+$/g, "")
     .slice(0, 32);
   const base = slug ? `hub-${slug}` : "hub";
-  if (!existingIds.has(base)) {
+  // Reserve DEFAULT_PERSONA_HUB_ID so newly created Hubs never inherit the migrated persist:persona partition.
+  const isTaken = (candidate: string): boolean =>
+    candidate === DEFAULT_PERSONA_HUB_ID || existingIds.has(candidate);
+  if (!isTaken(base)) {
     return base;
   }
   for (let index = 2; index < 10_000; index += 1) {
     const candidate = `${base}-${index}`;
-    if (!existingIds.has(candidate)) {
+    if (!isTaken(candidate)) {
       return candidate;
     }
   }
@@ -432,6 +469,23 @@ export function collectValidPersonaHubUrls(settings: PersonaEmbedSettings): stri
     }
   }
   return urls;
+}
+
+export function collectValidPersonaHubPartitionEntries(
+  settings: PersonaEmbedSettings,
+  options?: { basePartition?: string; partitionPrefix?: string },
+): PersonaHubPartitionEntry[] {
+  const entries: PersonaHubPartitionEntry[] = [];
+  const seenPartitions = new Set<string>();
+  for (const hub of settings.hubs) {
+    const normalized = normalizePersonaHubUrl(hub.hubUrl);
+    const partition = resolvePersonaHubPartition(hub.id, options);
+    if (normalized.ok && partition && !seenPartitions.has(partition)) {
+      seenPartitions.add(partition);
+      entries.push({ partition, hubUrl: normalized.url });
+    }
+  }
+  return entries;
 }
 
 export function selectActivePersonaHub(

@@ -53,6 +53,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "Close this split pane",
       resizeSplitHandle: "Resize split panes",
       inOtherPane: "Other pane",
+      moreActions: "More actions",
     },
     guest: {
       openInPaseo: "Open in Paseo",
@@ -228,6 +229,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "关闭此分屏栏",
       resizeSplitHandle: "拖拽调整左右分屏比例",
       inOtherPane: "另一栏",
+      moreActions: "更多操作",
     },
     guest: {
       openInPaseo: "在 Paseo 打开",
@@ -392,6 +394,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "إغلاق هذا الجزء المقسم",
       resizeSplitHandle: "تغيير حجم الأجزاء المقسمة",
       inOtherPane: "في الجزء الآخر",
+      moreActions: "المزيد من الإجراءات",
     },
     guest: {
       openInPaseo: "فتح في Paseo",
@@ -561,6 +564,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "Cerrar este panel dividido",
       resizeSplitHandle: "Redimensionar paneles divididos",
       inOtherPane: "Otro panel",
+      moreActions: "Más acciones",
     },
     guest: {
       openInPaseo: "Abrir en Paseo",
@@ -740,6 +744,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "Fermer ce volet scindé",
       resizeSplitHandle: "Redimensionner les volets scindés",
       inOtherPane: "Autre volet",
+      moreActions: "Plus d'actions",
     },
     guest: {
       openInPaseo: "Ouvrir dans Paseo",
@@ -920,6 +925,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "この分割ペインを閉じる",
       resizeSplitHandle: "分割比率を調整",
       inOtherPane: "別ペイン",
+      moreActions: "その他の操作",
     },
     guest: {
       openInPaseo: "Paseo で開く",
@@ -1091,6 +1097,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "이 분할 창 닫기",
       resizeSplitHandle: "분할 비율 조절",
       inOtherPane: "다른 창",
+      moreActions: "더 많은 작업",
     },
     guest: {
       openInPaseo: "Paseo에서 열기",
@@ -1261,6 +1268,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "Fechar este painel dividido",
       resizeSplitHandle: "Redimensionar painéis divididos",
       inOtherPane: "Outro painel",
+      moreActions: "Mais ações",
     },
     guest: {
       openInPaseo: "Abrir no Paseo",
@@ -1438,6 +1446,7 @@ export const personaEmbedLocales = {
       closeSplitPane: "Закрыть эту панель",
       resizeSplitHandle: "Изменить пропорцию панелей",
       inOtherPane: "Другая панель",
+      moreActions: "Другие действия",
     },
     guest: {
       openInPaseo: "Открыть в Paseo",

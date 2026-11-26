@@ -663,6 +663,9 @@ function collectCandidateServerIdsForProviderRoots(
   });
 
   const candidateServerIds = new Set<string>();
+  if (machineMatch.source === "explicit_map_missing") {
+    return candidateServerIds;
+  }
   if (machineMatch.serverId) {
     candidateServerIds.add(machineMatch.serverId);
     return candidateServerIds;

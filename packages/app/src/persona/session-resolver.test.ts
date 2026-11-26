@@ -143,7 +143,18 @@ describe("resolveMachineToServerId", () => {
       }),
     ).toEqual({ serverId: "srv_devbox", source: "server_id" });
 
-    // Unknown machine
+    // Truly unmapped unknown machine
+    expect(
+      resolveMachineToServerId({
+        machineId: "unknown-box",
+        machineServerMap: {},
+        hosts,
+        sessions,
+      }),
+    ).toEqual({ serverId: null, source: "none" });
+
+    // Explicitly mapped machine whose target serverId is missing MUST return explicit_map_missing
+    // and NEVER fall through to hostname/label/serverId on another host
     expect(
       resolveMachineToServerId({
         machineId: "unknown-box",
@@ -151,7 +162,16 @@ describe("resolveMachineToServerId", () => {
         hosts,
         sessions,
       }),
-    ).toEqual({ serverId: null, source: "none" });
+    ).toEqual({ serverId: null, source: "explicit_map_missing" });
+
+    expect(
+      resolveMachineToServerId({
+        machineId: "ML9YK34K66",
+        machineServerMap: { ML9YK34K66: "srv_removed_host" },
+        hosts,
+        sessions,
+      }),
+    ).toEqual({ serverId: null, source: "explicit_map_missing" });
   });
 });
 
@@ -710,6 +730,101 @@ describe("resolvePersonaSession (4-level resolver)", () => {
       reason: "unmapped_machine",
       machineId: "unmapped-box",
       sessionId: "unknown-session",
+      resolvedServerId: null,
+    });
+  });
+
+  it("P1-2: aborts auto-jump when explicit machineServerMap target serverId is missing and NEVER falls back to Host B sharing machineId+sessionId", () => {
+    const sharedSessionId = "12345678-1234-4123-8123-1234567890ab";
+    const sessionB = makeSession("srv_b", {
+      serverInfo: { serverId: "srv_b", hostname: "shared-box", version: "0.17.535" },
+      agents: new Map([
+        [
+          "ag_b_l1",
+          makeAgent({
+            id: "ag_b_l1",
+            serverId: "srv_b",
+            labels: { "persona.session": sharedSessionId },
+          }),
+        ],
+        [
+          "ag_b_l2",
+          makeAgent({
+            id: "ag_b_l2",
+            serverId: "srv_b",
+          }),
+        ],
+        [
+          "ag_b_l3",
+          makeAgent({
+            id: "ag_b_l3",
+            serverId: "srv_b",
+            provider: "claude",
+            persistence: { provider: "claude", sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+          }),
+        ],
+      ]),
+    });
+
+    // Host A (srv_a) is explicitly mapped for "shared-box", but srv_a is NOT in hosts or sessions.
+    // Host B (srv_b) IS present, shares hostname "shared-box", label "shared-box", AND the exact sessionId!
+    const hostsOnlyB = [{ serverId: "srv_b", label: "shared-box" }];
+    const sessionsOnlyB = { srv_b: sessionB };
+    const statusOnlyB = { srv_b: "online" };
+    const staleExplicitMap = { "shared-box": "srv_a" };
+
+    // L1 exact persona.session label on Host B -> MUST abort, NEVER jump to srv_b
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "shared-box", sessionId: sharedSessionId, source: "link-click" },
+        machineServerMap: staleExplicitMap,
+        hosts: hostsOnlyB,
+        sessions: sessionsOnlyB,
+        connectionStatusByServerId: statusOnlyB,
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "shared-box",
+      sessionId: sharedSessionId,
+      resolvedServerId: null,
+    });
+
+    // L2 paseo-<agentId> on Host B -> MUST abort, NEVER jump to srv_b
+    expect(
+      resolvePersonaSession({
+        request: { machineId: "shared-box", sessionId: "paseo-ag_b_l2", source: "link-click" },
+        machineServerMap: staleExplicitMap,
+        hosts: hostsOnlyB,
+        sessions: sessionsOnlyB,
+        connectionStatusByServerId: statusOnlyB,
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "shared-box",
+      sessionId: "paseo-ag_b_l2",
+      resolvedServerId: null,
+    });
+
+    // L3 Claude sessionId on Host B -> MUST abort, NEVER jump to srv_b
+    expect(
+      resolvePersonaSession({
+        request: {
+          machineId: "shared-box",
+          sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          source: "link-click",
+        },
+        machineServerMap: staleExplicitMap,
+        hosts: hostsOnlyB,
+        sessions: sessionsOnlyB,
+        connectionStatusByServerId: statusOnlyB,
+      }),
+    ).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "shared-box",
+      sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       resolvedServerId: null,
     });
   });

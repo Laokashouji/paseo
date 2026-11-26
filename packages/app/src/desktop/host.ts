@@ -200,12 +200,28 @@ export type DesktopPersonaHealthCheckResult =
         | "network_error";
     };
 
+export interface DesktopPersonaHubPartitionEntry {
+  partition: string;
+  hubUrl: string;
+}
+
+export interface DesktopPersonaClearSessionTarget {
+  partition?: string;
+  hubUrl?: string;
+}
+
 export interface DesktopPersonaBridge {
   readonly partition?: string;
+  readonly partitionPrefix?: string;
+  readonly supportsPerHubPartitions?: boolean;
+  setHubEntries?: (
+    entries: DesktopPersonaHubPartitionEntry[] | null,
+    options?: { enabled?: boolean },
+  ) => Promise<boolean>;
   setHubUrls?: (hubUrls: string[] | null, options?: { enabled?: boolean }) => Promise<boolean>;
   setHubUrl?: (hubUrl: string | null, options?: { enabled?: boolean }) => Promise<boolean>;
   checkHealth?: (hubUrl?: string) => Promise<DesktopPersonaHealthCheckResult>;
-  clearSession?: (hubUrl?: string) => Promise<void>;
+  clearSession?: (target?: string | DesktopPersonaClearSessionTarget) => Promise<void>;
   openDevTools?: (webContentsId: number) => Promise<boolean>;
 }
 

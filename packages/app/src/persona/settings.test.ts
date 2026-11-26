@@ -4,6 +4,7 @@ import {
   addPersonaHubProfile,
   clampPersonaSplitRatio,
   closePersonaSplitPane,
+  collectValidPersonaHubPartitionEntries,
   collectValidPersonaHubUrls,
   DEFAULT_PERSONA_EMBED_SETTINGS,
   DEFAULT_PERSONA_HUB_ID,
@@ -21,8 +22,11 @@ import {
   normalizePersonaHubUrl,
   openPersonaHubInRightSplit,
   parsePersonaEmbedSessionRoute,
+  PERSONA_WEBVIEW_PARTITION,
+  PERSONA_WEBVIEW_PARTITION_PREFIX,
   removePersonaHubProfile,
   reorderPersonaHubProfiles,
+  resolvePersonaHubPartition,
   sanitizeMachineServerMap,
   selectActivePersonaHub,
   selectSecondaryPersonaHub,
@@ -302,6 +306,42 @@ describe("persona embed settings", () => {
       "http://127.0.0.1:18661",
       "https://hub-c.example.com/persona",
     ]);
+
+    // Partition resolution preserves persist:persona for hub-default and isolates additional Hubs
+    const migratedWithExtra = addPersonaHubProfile(
+      normalizePersonaEmbedSettings({
+        enabled: true,
+        hubUrl: "http://127.0.0.1:18660",
+      }),
+      { name: "Default", hubUrl: "http://127.0.0.1:18661" },
+    );
+    expect(migratedWithExtra.ok).toBe(true);
+    if (migratedWithExtra.ok) {
+      expect(migratedWithExtra.hub.id).not.toBe(DEFAULT_PERSONA_HUB_ID);
+      expect(collectValidPersonaHubPartitionEntries(migratedWithExtra.settings)).toEqual([
+        { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660" },
+        {
+          partition: `${PERSONA_WEBVIEW_PARTITION_PREFIX}${migratedWithExtra.hub.id}`,
+          hubUrl: "http://127.0.0.1:18661",
+        },
+      ]);
+      // Even after deleting hub-default, creating a Hub named "Default" never reuses hub-default
+      const afterDeleteDefault = removePersonaHubProfile(
+        migratedWithExtra.settings,
+        DEFAULT_PERSONA_HUB_ID,
+      );
+      const readded = addPersonaHubProfile(afterDeleteDefault, {
+        name: "Default",
+        hubUrl: "http://127.0.0.1:18662",
+      });
+      expect(readded.ok).toBe(true);
+      if (readded.ok) {
+        expect(readded.hub.id).not.toBe(DEFAULT_PERSONA_HUB_ID);
+        expect(resolvePersonaHubPartition(readded.hub.id)).toBe(
+          `${PERSONA_WEBVIEW_PARTITION_PREFIX}${readded.hub.id}`,
+        );
+      }
+    }
 
     // Enable split, open Hub C in right split, swap panes, select secondary as active swaps cleanly
     state = openPersonaHubInRightSplit(state, "hub-c");
