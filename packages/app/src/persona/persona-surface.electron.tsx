@@ -39,6 +39,7 @@ import {
   lookupPersonaGuestSessionMetadata,
   parkResidentPersonaWebview,
   presentResidentPersonaWebview,
+  readResidentPersonaWebviewContentsId,
   sendPersonaGuestAllowOnce,
   sendPersonaGuestConfig,
   sendPersonaGuestRouteSync,
@@ -49,6 +50,7 @@ import {
   normalizePersonaHubUrl,
   parsePersonaEmbedSessionRoute,
   validatePersonaGuestOpenSessionPayload,
+  validatePersonaGuestReadyPayload,
 } from "./settings";
 import {
   usePersonaEmbedSettingsState,
@@ -79,12 +81,6 @@ interface WebviewFailLoadEvent extends Event {
 
 interface WebviewNavigateEvent extends Event {
   url?: string;
-  isMainFrame?: boolean;
-}
-
-interface WebviewIpcMessageEvent extends Event {
-  channel?: string;
-  args?: unknown[];
   isMainFrame?: boolean;
 }
 
@@ -453,42 +449,12 @@ export function PersonaSurface() {
       });
     };
 
-    const onIpcMessage = (event: Event) => {
-      const ipcEvent = event as WebviewIpcMessageEvent;
-      if (ipcEvent.isMainFrame === false) {
-        return;
-      }
-      const currentGuestUrl = readWebviewUrlSafely(webviewNode, "");
-      if (!isSameOriginUrl(currentGuestUrl, authorizedHubOrigin)) {
-        return;
-      }
-
-      if (ipcEvent.channel === "paseo:persona:ready") {
-        if (guestConfigRef.current) {
-          sendPersonaGuestConfig(guestConfigRef.current);
-        }
-        sendPersonaGuestRouteSync(currentGuestUrl);
-        return;
-      }
-      if (ipcEvent.channel === "paseo:persona:open-session") {
-        const validated = validatePersonaGuestOpenSessionPayload(ipcEvent.args?.[0], {
-          authorizedHubUrl: validHubUrl,
-          currentGuestUrl,
-          isMainFrame: ipcEvent.isMainFrame,
-        });
-        if (validated) {
-          handleOpenSessionRequest(validated);
-        }
-      }
-    };
-
     webviewNode.addEventListener("did-start-loading", onStartLoading);
     webviewNode.addEventListener("did-stop-loading", onStopLoading);
     webviewNode.addEventListener("dom-ready", onDomReady);
     webviewNode.addEventListener("did-navigate", onNavigate);
     webviewNode.addEventListener("did-navigate-in-page", onNavigate);
     webviewNode.addEventListener("did-fail-load", onFailLoad);
-    webviewNode.addEventListener("ipc-message", onIpcMessage);
 
     return () => {
       webviewNode.removeEventListener("did-start-loading", onStartLoading);
@@ -497,39 +463,68 @@ export function PersonaSurface() {
       webviewNode.removeEventListener("did-navigate", onNavigate);
       webviewNode.removeEventListener("did-navigate-in-page", onNavigate);
       webviewNode.removeEventListener("did-fail-load", onFailLoad);
-      webviewNode.removeEventListener("ipc-message", onIpcMessage);
     };
-  }, [authorizedHubOrigin, canMountWebview, handleOpenSessionRequest, validHubUrl, webviewNode]);
+  }, [authorizedHubOrigin, canMountWebview, validHubUrl, webviewNode]);
 
-  // Listen for main-process window-open interceptions (e.g. TaskPanel "Open in new window").
+  // Listen for main-process verified guest main-frame events (`persona-open-session` from
+  // guest-preload / window-open and `persona-guest-ready`). Electron 44's `<webview>`
+  // `IpcMessageEvent` has no `isMainFrame`, so all guest -> host IPC is verified in main via
+  // `senderFrame === webContents.mainFrame` + registered Hub origin before forwarding here.
   useEffect(() => {
     if (!canMountWebview || !validHubUrl) {
       return;
     }
     let disposed = false;
-    let unlisten: (() => void) | null = null;
+    const unlisteners: Array<() => void> = [];
+
+    const readVerificationContext = () => {
+      const activeWebview = getResidentPersonaWebview();
+      const currentGuestUrl = readWebviewUrlSafely(activeWebview, "");
+      return {
+        authorizedHubUrl: validHubUrl,
+        ...(currentGuestUrl ? { currentGuestUrl } : {}),
+        expectedGuestWebContentsId: readResidentPersonaWebviewContentsId(activeWebview),
+      };
+    };
 
     void (async () => {
       try {
-        const dispose = await listenToDesktopEvent<unknown>(
-          "persona-open-session",
-          (rawPayload) => {
+        const [disposeOpenSession, disposeGuestReady] = await Promise.all([
+          listenToDesktopEvent<unknown>("persona-open-session", (rawPayload) => {
             if (disposed) {
               return;
             }
-            const validated = validatePersonaGuestOpenSessionPayload(rawPayload, {
-              authorizedHubUrl: validHubUrl,
-            });
+            const validated = validatePersonaGuestOpenSessionPayload(
+              rawPayload,
+              readVerificationContext(),
+            );
             if (validated) {
               handleOpenSessionRequest(validated);
             }
-          },
-        );
+          }),
+          listenToDesktopEvent<unknown>("persona-guest-ready", (rawPayload) => {
+            if (disposed) {
+              return;
+            }
+            const validated = validatePersonaGuestReadyPayload(
+              rawPayload,
+              readVerificationContext(),
+            );
+            if (!validated) {
+              return;
+            }
+            if (guestConfigRef.current) {
+              sendPersonaGuestConfig(guestConfigRef.current);
+            }
+            sendPersonaGuestRouteSync(validated.frameUrl);
+          }),
+        ]);
         if (disposed) {
-          dispose();
+          disposeOpenSession();
+          disposeGuestReady();
           return;
         }
-        unlisten = dispose;
+        unlisteners.push(disposeOpenSession, disposeGuestReady);
       } catch {
         // Ignore when desktop event listener is unavailable in non-Electron tests.
       }
@@ -537,7 +532,9 @@ export function PersonaSurface() {
 
     return () => {
       disposed = true;
-      unlisten?.();
+      for (const dispose of unlisteners) {
+        dispose();
+      }
     };
   }, [canMountWebview, handleOpenSessionRequest, validHubUrl]);
 

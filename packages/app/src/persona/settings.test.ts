@@ -11,6 +11,7 @@ import {
   sanitizeMachineServerMap,
   testPersonaHubHealth,
   validatePersonaGuestOpenSessionPayload,
+  validatePersonaGuestReadyPayload,
   validatePersonaSessionMetadataResult,
 } from "./settings";
 
@@ -193,8 +194,11 @@ describe("persona embed settings", () => {
     });
   });
 
-  it("validates guest open-session and session-metadata payloads strictly against field types, main frame, and origin", () => {
+  it("validates main-process verified guest open-session, ready, and session-metadata payloads fail-closed without fake isMainFrame flags", () => {
     const hubUrl = "http://127.0.0.1:18660";
+    const guestId = 42;
+    const validFrameUrl = "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_1";
+
     expect(
       validatePersonaGuestOpenSessionPayload(
         {
@@ -204,12 +208,14 @@ describe("persona embed settings", () => {
           cwdHint: "/repo/paseo-fork",
           panel: "diff",
           source: "link-click",
-          rawHref: "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_1",
+          rawHref: validFrameUrl,
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
         },
         {
           authorizedHubUrl: hubUrl,
           currentGuestUrl: "http://127.0.0.1:18660/",
-          isMainFrame: true,
+          expectedGuestWebContentsId: guestId,
         },
       ),
     ).toEqual({
@@ -219,27 +225,71 @@ describe("persona embed settings", () => {
       cwdHint: "/repo/paseo-fork",
       panel: "diff",
       source: "link-click",
-      rawHref: "http://127.0.0.1:18660/s/n37-217-003/paseo-ag_1",
+      rawHref: validFrameUrl,
     });
 
-    // Rejects subframe, off-origin guest URL, off-origin rawHref, and bad field types
+    // Fail-closed: rejects missing guestWebContentsId, mismatched guestWebContentsId, missing/off-origin frameUrl
     expect(
       validatePersonaGuestOpenSessionPayload(
-        { machineId: "m1", sessionId: "s1", source: "link-click" },
-        {
-          authorizedHubUrl: hubUrl,
-          currentGuestUrl: "http://127.0.0.1:18660/",
-          isMainFrame: false,
-        },
+        { machineId: "m1", sessionId: "s1", source: "link-click", frameUrl: validFrameUrl },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
       ),
     ).toBeNull();
     expect(
       validatePersonaGuestOpenSessionPayload(
-        { machineId: "m1", sessionId: "s1", source: "link-click" },
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          guestWebContentsId: 99,
+          frameUrl: validFrameUrl,
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        { machineId: "m1", sessionId: "s1", source: "link-click", guestWebContentsId: guestId },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          guestWebContentsId: guestId,
+          frameUrl: "about:blank",
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          guestWebContentsId: guestId,
+          frameUrl: "https://evil.example.com/s/m1/s1",
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaGuestOpenSessionPayload(
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
+        },
         {
           authorizedHubUrl: hubUrl,
           currentGuestUrl: "https://evil.example.com/",
-          isMainFrame: true,
+          expectedGuestWebContentsId: guestId,
         },
       ),
     ).toBeNull();
@@ -250,30 +300,55 @@ describe("persona embed settings", () => {
           sessionId: "s1",
           source: "link-click",
           rawHref: "https://evil.example.com/s/m1/s1",
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
         },
-        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/",
+          expectedGuestWebContentsId: guestId,
+        },
       ),
     ).toBeNull();
     expect(
       validatePersonaGuestOpenSessionPayload(
-        { machineId: 123, sessionId: "s1", source: "link-click" },
-        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+        {
+          machineId: 123,
+          sessionId: "s1",
+          source: "link-click",
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
       ),
     ).toBeNull();
     expect(
       validatePersonaGuestOpenSessionPayload(
-        { machineId: "m1", sessionId: "s1", source: "evil-source" },
-        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "evil-source",
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
       ),
     ).toBeNull();
     expect(
       validatePersonaGuestOpenSessionPayload(
-        { machineId: "m1", sessionId: "s1", source: "link-click", workspaceIdHint: { bad: true } },
-        { authorizedHubUrl: hubUrl, currentGuestUrl: "http://127.0.0.1:18660/", isMainFrame: true },
+        {
+          machineId: "m1",
+          sessionId: "s1",
+          source: "link-click",
+          workspaceIdHint: { bad: true },
+          guestWebContentsId: guestId,
+          frameUrl: validFrameUrl,
+        },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
       ),
     ).toBeNull();
 
-    // Validates session metadata responses
+    // Validates session metadata responses fail-closed
     expect(
       validatePersonaSessionMetadataResult(
         {
@@ -282,11 +357,13 @@ describe("persona embed settings", () => {
           sessionId: "s1",
           workspaceIdHint: "wks_0123456789abcdef",
           cwdHint: "/repo/app",
+          guestWebContentsId: guestId,
+          frameUrl: "http://127.0.0.1:18660/s/m1/s1",
         },
         {
           authorizedHubUrl: hubUrl,
           currentGuestUrl: "http://127.0.0.1:18660/s/m1/s1",
-          isMainFrame: true,
+          expectedGuestWebContentsId: guestId,
           expectedRequestId: "req-1",
           expectedMachineId: "m1",
           expectedSessionId: "s1",
@@ -299,7 +376,7 @@ describe("persona embed settings", () => {
     expect(
       validatePersonaSessionMetadataResult(
         {
-          requestId: "req-other",
+          requestId: "req-1",
           machineId: "m1",
           sessionId: "s1",
           workspaceIdHint: "wks_0123456789abcdef",
@@ -308,11 +385,46 @@ describe("persona embed settings", () => {
         {
           authorizedHubUrl: hubUrl,
           currentGuestUrl: "http://127.0.0.1:18660/s/m1/s1",
-          isMainFrame: true,
+          expectedGuestWebContentsId: guestId,
           expectedRequestId: "req-1",
           expectedMachineId: "m1",
           expectedSessionId: "s1",
         },
+      ),
+    ).toBeNull();
+    expect(
+      validatePersonaSessionMetadataResult(
+        {
+          requestId: "req-other",
+          machineId: "m1",
+          sessionId: "s1",
+          workspaceIdHint: "wks_0123456789abcdef",
+          cwdHint: "/repo/app",
+          guestWebContentsId: guestId,
+          frameUrl: "http://127.0.0.1:18660/s/m1/s1",
+        },
+        {
+          authorizedHubUrl: hubUrl,
+          currentGuestUrl: "http://127.0.0.1:18660/s/m1/s1",
+          expectedGuestWebContentsId: guestId,
+          expectedRequestId: "req-1",
+          expectedMachineId: "m1",
+          expectedSessionId: "s1",
+        },
+      ),
+    ).toBeNull();
+
+    // Validates ready payload fail-closed
+    expect(
+      validatePersonaGuestReadyPayload(
+        { guestWebContentsId: guestId, frameUrl: "http://127.0.0.1:18660/" },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
+      ),
+    ).toEqual({ guestWebContentsId: guestId, frameUrl: "http://127.0.0.1:18660/" });
+    expect(
+      validatePersonaGuestReadyPayload(
+        { guestWebContentsId: 99, frameUrl: "http://127.0.0.1:18660/" },
+        { authorizedHubUrl: hubUrl, expectedGuestWebContentsId: guestId },
       ),
     ).toBeNull();
   });

@@ -53,7 +53,7 @@ interface MetadataCacheEntry {
 export interface PersonaGuestIpcLike {
   on(channel: string, listener: (event: unknown, payload: unknown) => void): void;
   removeListener?(channel: string, listener: (event: unknown, payload: unknown) => void): void;
-  sendToHost(channel: string, ...args: unknown[]): void;
+  send(channel: string, ...args: unknown[]): void;
 }
 
 export type PersonaGuestWindow = Window & typeof globalThis;
@@ -445,7 +445,7 @@ export function mountPersonaGuestPreload(
       if (disposed || !isAuthorizedMainDocument()) {
         return;
       }
-      options.ipc.sendToHost(OPEN_SESSION_CHANNEL, {
+      options.ipc.send(OPEN_SESSION_CHANNEL, {
         machineId: input.machineId,
         sessionId: input.sessionId,
         ...(input.panel ? { panel: input.panel } : {}),
@@ -736,7 +736,7 @@ export function mountPersonaGuestPreload(
     latestRouteUrl = win.location.href;
     startObserver();
     scheduleDomSync();
-    options.ipc.sendToHost(READY_CHANNEL, { url: latestRouteUrl });
+    options.ipc.send(READY_CHANNEL, { url: latestRouteUrl });
   };
 
   const pickNonEmptyLabel = (candidate: unknown, fallback: string): string =>
@@ -877,7 +877,7 @@ export function mountPersonaGuestPreload(
       if (disposed || !isAuthorizedMainDocument()) {
         return;
       }
-      options.ipc.sendToHost(SESSION_METADATA_RESULT_CHANNEL, {
+      options.ipc.send(SESSION_METADATA_RESULT_CHANNEL, {
         requestId,
         machineId,
         sessionId,

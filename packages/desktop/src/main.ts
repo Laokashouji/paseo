@@ -93,10 +93,13 @@ import {
   isTrustedPersonaHostIpcEvent,
   listPersonaWebviewGuests,
   normalizePersonaHubUrl,
+  PERSONA_GUEST_READY_EVENT,
   PERSONA_HUB_URL_ARG_PREFIX,
   PERSONA_OPEN_SESSION_EVENT,
+  PERSONA_SESSION_METADATA_RESULT_EVENT,
   PERSONA_WEBVIEW_PARTITION,
   probePersonaHubHealth,
+  registerPersonaWebviewGuestIpcBridge,
   registerPersonaWebviewNavigationGuards,
   type PersonaHealthCheckResult,
 } from "./features/persona-webview/index.js";
@@ -975,34 +978,71 @@ async function createWindow(
       contents.once("destroyed", () => {
         personaGuestHubUrlByWebContentsId.delete(contents.id);
       });
+      const getAuthorizedHubUrl = (): string => {
+        const pinned = personaGuestHubUrlByWebContentsId.get(contents.id);
+        if (!pinned) {
+          return "";
+        }
+        const hostState = personaHubStateByHostWebContentsId.get(pinned.hostWebContentsId);
+        if (!hostState?.enabled) {
+          return "";
+        }
+        const pinnedNormalized = normalizePersonaHubUrl(pinned.hubUrl);
+        const hostNormalized = normalizePersonaHubUrl(hostState.hubUrl);
+        if (
+          !pinnedNormalized ||
+          !hostNormalized ||
+          pinnedNormalized.origin !== hostNormalized.origin
+        ) {
+          return "";
+        }
+        return pinned.hubUrl;
+      };
+      const sendToHostMainFrame = (channel: string, payload: unknown): void => {
+        if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+          return;
+        }
+        const hostMainFrame = mainWindow.webContents.mainFrame;
+        if (hostMainFrame && !hostMainFrame.detached) {
+          hostMainFrame.send(channel, payload);
+          return;
+        }
+        mainWindow.webContents.send(channel, payload);
+      };
       registerPersonaWebviewNavigationGuards(contents, {
-        getConfiguredHubUrl: () => {
-          const pinned = personaGuestHubUrlByWebContentsId.get(contents.id);
-          if (!pinned) {
-            return "";
-          }
-          const hostState = personaHubStateByHostWebContentsId.get(pinned.hostWebContentsId);
-          if (!hostState?.enabled) {
-            return "";
-          }
-          const pinnedNormalized = normalizePersonaHubUrl(pinned.hubUrl);
-          const hostNormalized = normalizePersonaHubUrl(hostState.hubUrl);
-          if (
-            !pinnedNormalized ||
-            !hostNormalized ||
-            pinnedNormalized.origin !== hostNormalized.origin
-          ) {
-            return "";
-          }
-          return pinned.hubUrl;
-        },
+        getConfiguredHubUrl: getAuthorizedHubUrl,
         onOpenSession: (payload) => {
-          if (!mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(PERSONA_OPEN_SESSION_EVENT, payload);
-          }
+          sendToHostMainFrame(PERSONA_OPEN_SESSION_EVENT, {
+            ...payload,
+            guestWebContentsId: contents.id,
+            frameUrl: contents.getURL(),
+          });
         },
         openExternalUrl,
         logWarn: (message, details) => log.warn(message, details),
+      });
+      registerPersonaWebviewGuestIpcBridge(contents, {
+        getConfiguredHubUrl: getAuthorizedHubUrl,
+        onGuestOpenSession: (payload, context) => {
+          sendToHostMainFrame(PERSONA_OPEN_SESSION_EVENT, {
+            ...payload,
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
+        onGuestSessionMetadataResult: (payload, context) => {
+          sendToHostMainFrame(PERSONA_SESSION_METADATA_RESULT_EVENT, {
+            ...payload,
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
+        onGuestReady: (context) => {
+          sendToHostMainFrame(PERSONA_GUEST_READY_EVENT, {
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
       });
       contents.on("context-menu", (_contextMenuEvent, params) => {
         showPersonaWebviewContextMenu(mainWindow, contents, params);

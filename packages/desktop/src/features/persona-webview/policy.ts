@@ -1,6 +1,15 @@
 export const PERSONA_WEBVIEW_PARTITION = "persist:persona";
 export const PERSONA_OPEN_SESSION_EVENT_NAME = "persona-open-session";
 export const PERSONA_OPEN_SESSION_EVENT = `paseo:event:${PERSONA_OPEN_SESSION_EVENT_NAME}`;
+export const PERSONA_SESSION_METADATA_RESULT_EVENT_NAME = "persona-session-metadata-result";
+export const PERSONA_SESSION_METADATA_RESULT_EVENT = `paseo:event:${PERSONA_SESSION_METADATA_RESULT_EVENT_NAME}`;
+export const PERSONA_GUEST_READY_EVENT_NAME = "persona-guest-ready";
+export const PERSONA_GUEST_READY_EVENT = `paseo:event:${PERSONA_GUEST_READY_EVENT_NAME}`;
+
+export const PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL = "paseo:persona:open-session";
+export const PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL =
+  "paseo:persona:session-metadata-result";
+export const PERSONA_GUEST_READY_IPC_CHANNEL = "paseo:persona:ready";
 
 export interface ParsedPersonaSessionPath {
   machineId: string;

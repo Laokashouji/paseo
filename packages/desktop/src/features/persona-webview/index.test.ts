@@ -1,13 +1,23 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import {
   clearPersonaWebviewSession,
   getPersonaWebviewSession,
+  isTrustedPersonaGuestMainFrameIpcEvent,
   isTrustedPersonaHostIpcEvent,
   listPersonaWebviewGuests,
+  PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
+  PERSONA_GUEST_READY_IPC_CHANNEL,
+  PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_WEBVIEW_PARTITION,
   probePersonaHubHealth,
+  registerPersonaWebviewGuestIpcBridge,
   registerPersonaWebviewNavigationGuards,
   type PersonaGuardableWebContents,
+  type PersonaGuestFrameLike,
+  type PersonaGuestIpcMainEventLike,
+  type PersonaGuestIpcWebContentsLike,
   type PersonaNavigationEvent,
   type PersonaWindowOpenSessionPayload,
 } from "./index.js";
@@ -59,6 +69,67 @@ function createMockWebContents(currentUrl = "http://127.0.0.1:18660/") {
         throw new Error("windowOpenHandler not registered");
       }
       return windowOpenHandler({ url });
+    },
+  };
+}
+
+async function startHealthTestHttpServer(): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+}> {
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  const finishSlowBody = (
+    timer: ReturnType<typeof setTimeout>,
+    res: { destroyed: boolean; writableEnded: boolean; end: (chunk: string) => void },
+  ): void => {
+    pendingTimers.delete(timer);
+    if (!res.destroyed && !res.writableEnded) {
+      res.end('true,"hub_name":"late-hub","version":"0.0.1"}');
+    }
+  };
+
+  const server: Server = createServer((req, res) => {
+    if (req.url === "/slow/api/v1/health") {
+      // Immediately flush 200 headers and partial body, then stall longer than timeoutMs.
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.flushHeaders();
+      res.write('{"ok":');
+      const timer = setTimeout(() => finishSlowBody(timer, res), 2_000);
+      pendingTimers.add(timer);
+      req.once("close", () => {
+        clearTimeout(timer);
+        pendingTimers.delete(timer);
+      });
+      return;
+    }
+
+    if (req.url === "/fast/api/v1/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, hub_name: "real-http-hub", version: "3.1.4" }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address() as AddressInfo;
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      for (const timer of pendingTimers) {
+        clearTimeout(timer);
+      }
+      pendingTimers.clear();
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     },
   };
 }
@@ -393,5 +464,254 @@ describe("persona-webview runtime helpers", () => {
       code: "redirect_blocked",
       error: "Health check redirect blocked",
     });
+  });
+
+  it("aborts slow JSON response bodies on schedule over real local HTTP and returns timeout", async () => {
+    const httpServer = await startHealthTestHttpServer();
+
+    try {
+      const startedAt = Date.now();
+      const slowResult = await probePersonaHubHealth(`${httpServer.baseUrl}/slow`, {
+        timeoutMs: 80,
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(slowResult).toEqual({
+        ok: false,
+        code: "timeout",
+        error: "Request timed out",
+      });
+      expect(elapsedMs).toBeLessThan(1_000);
+
+      const fastResult = await probePersonaHubHealth(`${httpServer.baseUrl}/fast`, {
+        timeoutMs: 1_000,
+      });
+      expect(fastResult.ok).toBe(true);
+      if (fastResult.ok) {
+        expect(fastResult.hubName).toBe("real-http-hub");
+        expect(fastResult.version).toBe("3.1.4");
+      }
+    } finally {
+      await httpServer.close();
+    }
+  });
+
+  it("enforces real Electron main-process senderFrame === contents.mainFrame and origin verification for guest IPC", () => {
+    let ipcListener:
+      | ((event: PersonaGuestIpcMainEventLike, channel: string, ...args: unknown[]) => void)
+      | null = null;
+    let configuredHubUrl = "http://127.0.0.1:18660";
+    let currentContentsUrl = "http://127.0.0.1:18660/s/n37-217-003/sess_1";
+    let destroyed = false;
+    let contentsType = "webview";
+
+    const mainFrame: PersonaGuestFrameLike = {
+      url: "http://127.0.0.1:18660/s/n37-217-003/sess_1",
+      origin: "http://127.0.0.1:18660",
+      detached: false,
+      parent: null,
+      processId: 7,
+      routingId: 1,
+    };
+    Object.assign(mainFrame, { top: mainFrame });
+
+    const sameOriginSubFrame: PersonaGuestFrameLike = {
+      url: "http://127.0.0.1:18660/embedded-frame",
+      origin: "http://127.0.0.1:18660",
+      detached: false,
+      parent: mainFrame,
+      top: mainFrame,
+      processId: 7,
+      routingId: 2,
+    };
+
+    const contents: PersonaGuestIpcWebContentsLike = {
+      id: 42,
+      mainFrame,
+      isDestroyed: () => destroyed,
+      getType: () => contentsType,
+      getURL: () => currentContentsUrl,
+      on: (event, listener) => {
+        if (event === "ipc-message") {
+          ipcListener = listener;
+        }
+      },
+    };
+
+    const onGuestOpenSession = vi.fn();
+    const onGuestSessionMetadataResult = vi.fn();
+    const onGuestReady = vi.fn();
+
+    registerPersonaWebviewGuestIpcBridge(contents, {
+      getConfiguredHubUrl: () => configuredHubUrl,
+      onGuestOpenSession,
+      onGuestSessionMetadataResult,
+      onGuestReady,
+    });
+    expect(ipcListener).not.toBeNull();
+
+    const mainEvent: PersonaGuestIpcMainEventLike = {
+      sender: contents,
+      senderFrame: mainFrame,
+      processId: 7,
+      frameId: 1,
+    };
+
+    // Accepts genuine mainFrame open-session, metadata-result, and ready events
+    ipcListener?.(mainEvent, PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL, {
+      machineId: "n37-217-003",
+      sessionId: "sess_1",
+      source: "link-click",
+    });
+    expect(onGuestOpenSession).toHaveBeenCalledWith(
+      { machineId: "n37-217-003", sessionId: "sess_1", source: "link-click" },
+      { guestWebContentsId: 42, frameUrl: mainFrame.url },
+    );
+
+    ipcListener?.(mainEvent, PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL, {
+      requestId: "req-1",
+      machineId: "n37-217-003",
+      sessionId: "sess_1",
+      workspaceIdHint: "wks_0123456789abcdef",
+      cwdHint: "/repo/app",
+    });
+    expect(onGuestSessionMetadataResult).toHaveBeenCalledWith(
+      {
+        requestId: "req-1",
+        machineId: "n37-217-003",
+        sessionId: "sess_1",
+        workspaceIdHint: "wks_0123456789abcdef",
+        cwdHint: "/repo/app",
+      },
+      { guestWebContentsId: 42, frameUrl: mainFrame.url },
+    );
+
+    ipcListener?.(mainEvent, PERSONA_GUEST_READY_IPC_CHANNEL, { url: mainFrame.url });
+    expect(onGuestReady).toHaveBeenCalledWith({
+      guestWebContentsId: 42,
+      frameUrl: mainFrame.url,
+    });
+
+    onGuestOpenSession.mockClear();
+    onGuestSessionMetadataResult.mockClear();
+    onGuestReady.mockClear();
+
+    // Rejects same-origin subframe for both open-session and metadata reply
+    const subFrameEvent: PersonaGuestIpcMainEventLike = {
+      sender: contents,
+      senderFrame: sameOriginSubFrame,
+      processId: 7,
+      frameId: 2,
+    };
+    ipcListener?.(subFrameEvent, PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL, {
+      machineId: "n37-217-003",
+      sessionId: "sess_1",
+      source: "link-click",
+    });
+    ipcListener?.(subFrameEvent, PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL, {
+      requestId: "req-1",
+      machineId: "n37-217-003",
+      sessionId: "sess_1",
+    });
+    ipcListener?.(subFrameEvent, PERSONA_GUEST_READY_IPC_CHANNEL, {});
+    expect(onGuestOpenSession).not.toHaveBeenCalled();
+    expect(onGuestSessionMetadataResult).not.toHaveBeenCalled();
+    expect(onGuestReady).not.toHaveBeenCalled();
+
+    // Fail-closed when senderFrame is missing, detached, mismatched frameId/processId, or wrong sender
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: null, processId: 7, frameId: 1 },
+        contents,
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: {}, senderFrame: mainFrame, processId: 7, frameId: 1 },
+        contents,
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: mainFrame, processId: 7, frameId: 99 },
+        contents,
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: mainFrame, processId: 8, frameId: 1 },
+        contents,
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+
+    const detachedMainFrame: PersonaGuestFrameLike = { ...mainFrame, detached: true };
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: detachedMainFrame, processId: 7, frameId: 1 },
+        { ...contents, mainFrame: detachedMainFrame },
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+
+    // Rejects off-origin, about:blank, opaque origin, unregistered Hub, non-webview, or destroyed contents
+    const offOriginFrame: PersonaGuestFrameLike = {
+      url: "https://evil.example.com/s/m1/s1",
+      origin: "https://evil.example.com",
+      parent: null,
+    };
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: offOriginFrame },
+        { ...contents, mainFrame: offOriginFrame, getURL: () => offOriginFrame.url },
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+
+    const blankFrame: PersonaGuestFrameLike = {
+      url: "about:blank",
+      origin: "null",
+      parent: null,
+    };
+    expect(
+      isTrustedPersonaGuestMainFrameIpcEvent(
+        { sender: contents, senderFrame: blankFrame },
+        { ...contents, mainFrame: blankFrame, getURL: () => "about:blank" },
+        configuredHubUrl,
+      ),
+    ).toBe(false);
+
+    configuredHubUrl = "";
+    expect(isTrustedPersonaGuestMainFrameIpcEvent(mainEvent, contents, configuredHubUrl)).toBe(
+      false,
+    );
+
+    configuredHubUrl = "http://127.0.0.1:18660";
+    contentsType = "window";
+    expect(isTrustedPersonaGuestMainFrameIpcEvent(mainEvent, contents, configuredHubUrl)).toBe(
+      false,
+    );
+
+    contentsType = "webview";
+    currentContentsUrl = "https://evil.example.com/";
+    expect(isTrustedPersonaGuestMainFrameIpcEvent(mainEvent, contents, configuredHubUrl)).toBe(
+      false,
+    );
+
+    currentContentsUrl = mainFrame.url;
+    destroyed = true;
+    expect(isTrustedPersonaGuestMainFrameIpcEvent(mainEvent, contents, configuredHubUrl)).toBe(
+      false,
+    );
+
+    // Ignores unknown IPC channels even from a trusted main frame
+    destroyed = false;
+    ipcListener?.(mainEvent, "paseo:persona:unknown", { machineId: "m1" });
+    expect(onGuestOpenSession).not.toHaveBeenCalled();
+    expect(onGuestSessionMetadataResult).not.toHaveBeenCalled();
+    expect(onGuestReady).not.toHaveBeenCalled();
   });
 });

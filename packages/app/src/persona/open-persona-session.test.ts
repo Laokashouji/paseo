@@ -1,7 +1,24 @@
-import { describe, expect, it, vi } from "vitest";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type {
+  GetProvidersSnapshotResponseMessage,
+  MutableDaemonConfig,
+} from "@getpaseo/protocol/messages";
+import { router } from "expo-router";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { daemonConfigQueryKey } from "@/data/daemon-config";
+import { providersSnapshotQueryKey } from "@/data/providers-snapshot";
+import { queryClient as appQueryClient } from "@/data/query-client";
 import { DEFAULT_OPEN_IN_SIDE_PANE_PREFERENCES } from "@/hooks/use-settings/storage";
-import type { Agent, SessionState, WorkspaceDescriptor } from "@/stores/session-store";
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import {
+  useSessionStore,
+  type Agent,
+  type SessionState,
+  type WorkspaceDescriptor,
+} from "@/stores/session-store";
+import {
+  createAppOpenPersonaSessionDeps,
+  deriveProviderRootsFromDaemonConfig,
   openPersonaSession,
   waitForHostDirectoryHydration,
   type OpenPersonaSessionDeps,
@@ -498,5 +515,363 @@ describe("openPersonaSession executor", () => {
       offlineTimeoutHarness.deps,
     );
     expect(offlineTimeoutHarness.showHostOfflineToast).toHaveBeenCalledWith("DevBox");
+  });
+});
+
+describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_devbox") });
+    appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_mac") });
+    appQueryClient.removeQueries({ queryKey: ["providersSnapshot", "srv_devbox"] });
+    appQueryClient.removeQueries({ queryKey: ["providersSnapshot", "srv_mac"] });
+    useSessionStore.setState({ sessions: {}, agentLastActivity: new Map() });
+  });
+
+  function setupRuntimeHosts(hosts: Array<{ serverId: string; label: string; status: string }>) {
+    const store = getHostRuntimeStore();
+    vi.spyOn(store, "getHosts").mockReturnValue(
+      hosts.map((host) => ({ serverId: host.serverId, label: host.label })) as ReturnType<
+        typeof store.getHosts
+      >,
+    );
+    vi.spyOn(store, "getSnapshot").mockImplementation((serverId) => {
+      const matched = hosts.find((host) => host.serverId === serverId);
+      if (!matched) {
+        return null;
+      }
+      return {
+        connectionStatus: matched.status,
+        client: useSessionStore.getState().sessions[serverId]?.client ?? null,
+      } as ReturnType<typeof store.getSnapshot>;
+    });
+    vi.spyOn(router, "push").mockImplementation(() => undefined);
+    vi.spyOn(router, "navigate").mockImplementation(() => undefined);
+  }
+
+  const noopToast = {
+    show: vi.fn(() => () => undefined),
+    error: vi.fn(() => () => undefined),
+    copied: vi.fn(() => () => undefined),
+  };
+
+  it("derives chained extends roots with cycle protection and resolves custom providers missing metadata.provider via daemonConfig cache", async () => {
+    expect(
+      deriveProviderRootsFromDaemonConfig({
+        "codex-sub2api": { extends: "codex" },
+        "my-codex": { extends: "codex-sub2api" },
+        "claude-magpie": { extends: "claude" },
+        "custom-acp": { extends: "acp" },
+        loopA: { extends: "loopB" },
+        loopB: { extends: "loopA" },
+      } as MutableDaemonConfig["providers"]),
+    ).toEqual({
+      "codex-sub2api": "codex",
+      "my-codex": "codex",
+      "claude-magpie": "claude",
+      "custom-acp": "acp",
+      loopA: "loopA",
+      loopB: "loopB",
+    });
+
+    const codexThreadA = "11111111-2222-4333-8444-555555555555";
+    const codexThreadB = "22222222-3333-4444-8555-666666666666";
+    const claudeSessionId = "abcdef12-3456-4789-8abc-def012345678";
+    const acpSessionId = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+
+    const codexSub2ApiAgent = makeAgent({
+      id: "ag_codex_sub2api",
+      serverId: "srv_mac",
+      provider: "codex-sub2api",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex-sub2api", sessionId: codexThreadA },
+    });
+    const chainedCodexAgent = makeAgent({
+      id: "ag_my_codex",
+      serverId: "srv_mac",
+      provider: "my-codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: codexThreadB },
+    });
+    const claudeMagpieAgent = makeAgent({
+      id: "ag_claude_magpie",
+      serverId: "srv_devbox",
+      provider: "claude-magpie",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "claude-magpie", sessionId: claudeSessionId },
+    });
+    const customAcpAgent = makeAgent({
+      id: "ag_custom_acp",
+      serverId: "srv_devbox",
+      provider: "custom-acp",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "custom-acp", sessionId: acpSessionId },
+    });
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([
+            [codexSub2ApiAgent.id, codexSub2ApiAgent],
+            [chainedCodexAgent.id, chainedCodexAgent],
+          ]),
+        }),
+        srv_devbox: makeSession("srv_devbox", {
+          serverInfo: { serverId: "srv_devbox", hostname: "n37-217-003", version: "0.17.533" },
+          agents: new Map([
+            [claudeMagpieAgent.id, claudeMagpieAgent],
+            [customAcpAgent.id, customAcpAgent],
+          ]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_devbox", label: "DevBox", status: "online" },
+    ]);
+
+    appQueryClient.setQueryData(daemonConfigQueryKey("srv_mac"), {
+      providers: {
+        "codex-sub2api": { extends: "codex" },
+        "my-codex": { extends: "codex-sub2api" },
+      },
+    } as unknown as MutableDaemonConfig);
+    appQueryClient.setQueryData(daemonConfigQueryKey("srv_devbox"), {
+      providers: {
+        "claude-magpie": { extends: "claude" },
+        "custom-acp": { extends: "acp" },
+      },
+    } as unknown as MutableDaemonConfig);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    expect(deps.getProviderRootsByServerId?.()).toEqual({
+      srv_mac: { "codex-sub2api": "codex", "my-codex": "codex" },
+      srv_devbox: { "claude-magpie": "claude", "custom-acp": "acp" },
+    });
+
+    const macSub2ApiResult = await openPersonaSession(
+      { machineId: "ML9YK34K66", sessionId: codexThreadA, source: "link-click" },
+      deps,
+    );
+    expect(macSub2ApiResult.handled).toBe(true);
+    expect(macSub2ApiResult.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_mac",
+      agentId: "ag_codex_sub2api",
+      workspaceId: "wks_1111111111111111",
+      archived: false,
+      panel: null,
+    });
+
+    const macChainedResult = await openPersonaSession(
+      { machineId: "ML9YK34K66", sessionId: codexThreadB, source: "link-click" },
+      deps,
+    );
+    expect(macChainedResult.handled).toBe(true);
+    expect(macChainedResult.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_mac",
+      agentId: "ag_my_codex",
+      workspaceId: "wks_1111111111111111",
+      archived: false,
+      panel: null,
+    });
+
+    const devboxClaudeResult = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: claudeSessionId, source: "header-button" },
+      deps,
+    );
+    expect(devboxClaudeResult.handled).toBe(true);
+    expect(devboxClaudeResult.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_devbox",
+      agentId: "ag_claude_magpie",
+      workspaceId: "wks_2222222222222222",
+      archived: false,
+      panel: null,
+    });
+
+    // Non-claude/codex custom provider (`extends: "acp"`) MUST NOT falsely match L3.
+    const acpResult = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: acpSessionId, source: "header-button" },
+      deps,
+    );
+    expect(acpResult.handled).toBe(false);
+    expect(acpResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: acpSessionId,
+      resolvedServerId: "srv_devbox",
+    });
+  });
+
+  it("derives custom provider roots from cached providersSnapshot catalog when daemonConfig is absent", async () => {
+    const codexThread = "33333333-4444-4555-8666-777777777777";
+    const claudeSid = "fedcba98-7654-4321-8fed-cba987654321";
+
+    const codexAgent = makeAgent({
+      id: "ag_snapshot_codex",
+      serverId: "srv_devbox",
+      provider: "codex-sub2api",
+      workspaceId: "wks_3333333333333333",
+      persistence: null,
+      runtimeInfo: { provider: "codex-sub2api", sessionId: codexThread },
+    });
+    const claudeAgent = makeAgent({
+      id: "ag_snapshot_claude",
+      serverId: "srv_devbox",
+      provider: "claude-magpie",
+      workspaceId: "wks_3333333333333333",
+      persistence: null,
+      runtimeInfo: { provider: "claude-magpie", sessionId: claudeSid },
+    });
+
+    useSessionStore.setState({
+      sessions: {
+        srv_devbox: makeSession("srv_devbox", {
+          serverInfo: { serverId: "srv_devbox", hostname: "n37-217-003", version: "0.17.533" },
+          agents: new Map([
+            [codexAgent.id, codexAgent],
+            [claudeAgent.id, claudeAgent],
+          ]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([{ serverId: "srv_devbox", label: "DevBox", status: "online" }]);
+
+    appQueryClient.setQueryData(providersSnapshotQueryKey("srv_devbox", null), {
+      entries: [
+        {
+          provider: "codex-sub2api",
+          status: "ready",
+          enabled: true,
+          source: "custom",
+          modes: [
+            { id: "auto", label: "Default" },
+            { id: "auto-review", label: "Auto-review" },
+            { id: "full-access", label: "Full Access" },
+          ],
+        },
+        {
+          provider: "claude-magpie",
+          status: "ready",
+          enabled: true,
+          source: "custom",
+          modes: [
+            { id: "default", label: "Always Ask" },
+            { id: "acceptEdits", label: "Accept File Edits" },
+            { id: "bypassPermissions", label: "Bypass" },
+          ],
+        },
+      ],
+    } as unknown as GetProvidersSnapshotResponseMessage["payload"]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const codexRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: codexThread, source: "link-click" },
+      deps,
+    );
+    expect(codexRes.handled).toBe(true);
+    expect(codexRes.resolution).toMatchObject({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_devbox",
+      agentId: "ag_snapshot_codex",
+    });
+
+    const claudeRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: claudeSid, source: "link-click" },
+      deps,
+    );
+    expect(claudeRes.handled).toBe(true);
+    expect(claudeRes.resolution).toMatchObject({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_devbox",
+      agentId: "ag_snapshot_claude",
+    });
+  });
+
+  it("fetches missing daemonConfig on demand during cold start before falling back to L4 workspace", async () => {
+    const codexThread = "55555555-6666-4777-8888-999999999999";
+    const ws = {
+      id: "wks_4444444444444444",
+      workspaceDirectory: "/data00/repo/paseo-fork",
+    } as WorkspaceDescriptor;
+    const coldAgent = makeAgent({
+      id: "ag_cold_my_codex",
+      serverId: "srv_devbox",
+      provider: "my-codex",
+      workspaceId: ws.id,
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: codexThread },
+    });
+    const getDaemonConfig = vi.fn(async () => ({
+      config: {
+        providers: {
+          "my-codex": { extends: "codex" },
+        },
+      } as unknown as MutableDaemonConfig,
+    }));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_devbox: makeSession("srv_devbox", {
+          client: { getDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_devbox", hostname: "n37-217-003", version: "0.17.533" },
+          agents: new Map([[coldAgent.id, coldAgent]]),
+          workspaces: new Map([[ws.id, ws]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([{ serverId: "srv_devbox", label: "DevBox", status: "online" }]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    // Even when workspaceIdHint would satisfy L4, on-demand daemonConfig fetch resolves L3 first.
+    const result = await openPersonaSession(
+      {
+        machineId: "n37-217-003",
+        sessionId: codexThread,
+        workspaceIdHint: ws.id,
+        source: "link-click",
+      },
+      deps,
+    );
+
+    expect(getDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(result.handled).toBe(true);
+    expect(result.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_devbox",
+      agentId: "ag_cold_my_codex",
+      workspaceId: ws.id,
+      archived: false,
+      panel: null,
+    });
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_devbox"))).toBeDefined();
   });
 });

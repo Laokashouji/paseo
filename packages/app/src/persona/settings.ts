@@ -500,18 +500,40 @@ function isSameOriginHttpUrl(urlString: string, authorizedOrigin: string): boole
   }
 }
 
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 function validateGuestFrameContext(options: {
   authorizedHubUrl: string;
   currentGuestUrl?: string | null;
-  isMainFrame?: boolean;
-}): { origin: string } | null {
-  if (options.isMainFrame === false) {
-    return null;
-  }
+  frameUrl?: unknown;
+  guestWebContentsId?: unknown;
+  expectedGuestWebContentsId?: number | null;
+}): { origin: string; frameUrl: string; guestWebContentsId: number } | null {
   const hub = normalizePersonaHubUrl(options.authorizedHubUrl);
   if (!hub.ok) {
     return null;
   }
+
+  // Require real main-process verified guest WebContents identity (fail closed when missing).
+  if (!isPositiveInteger(options.guestWebContentsId)) {
+    return null;
+  }
+  if (
+    options.expectedGuestWebContentsId !== undefined &&
+    options.expectedGuestWebContentsId !== null &&
+    (!isPositiveInteger(options.expectedGuestWebContentsId) ||
+      options.guestWebContentsId !== options.expectedGuestWebContentsId)
+  ) {
+    return null;
+  }
+
+  // Require real main-process verified same-origin frame URL (fail closed when missing or off-origin).
+  if (typeof options.frameUrl !== "string" || !isSameOriginHttpUrl(options.frameUrl, hub.origin)) {
+    return null;
+  }
+
   if (options.currentGuestUrl !== undefined) {
     if (
       typeof options.currentGuestUrl !== "string" ||
@@ -520,7 +542,12 @@ function validateGuestFrameContext(options: {
       return null;
     }
   }
-  return { origin: hub.origin };
+
+  return {
+    origin: hub.origin,
+    frameUrl: options.frameUrl,
+    guestWebContentsId: options.guestWebContentsId,
+  };
 }
 
 function parseOptionalWorkspaceIdHint(
@@ -585,23 +612,33 @@ function parseOptionalSessionPanel(
 }
 
 /**
- * Strictly validates an open-session IPC message coming from a Persona guest or main window-open.
- * Rejects subframe events, off-origin guests, invalid field types, and off-origin `rawHref` values.
+ * Strictly validates an open-session event forwarded by the Electron main process after real
+ * `senderFrame === webContents.mainFrame` + authorized Hub origin verification.
+ * Fails closed when guest WebContents identity, frameUrl, origin, or field types are missing/invalid.
  */
 export function validatePersonaGuestOpenSessionPayload(
   raw: unknown,
   options: {
     authorizedHubUrl: string;
     currentGuestUrl?: string | null;
-    isMainFrame?: boolean;
+    expectedGuestWebContentsId?: number | null;
   },
 ): DesktopPersonaOpenSessionEvent | null {
-  const frameContext = validateGuestFrameContext(options);
-  if (!frameContext || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return null;
   }
 
   const record = raw as Record<string, unknown>;
+  const frameContext = validateGuestFrameContext({
+    authorizedHubUrl: options.authorizedHubUrl,
+    currentGuestUrl: options.currentGuestUrl,
+    frameUrl: record.frameUrl,
+    guestWebContentsId: record.guestWebContentsId,
+    expectedGuestWebContentsId: options.expectedGuestWebContentsId,
+  });
+  if (!frameContext) {
+    return null;
+  }
   if (!isSafeIdentifierString(record.machineId) || !isSafeIdentifierString(record.sessionId)) {
     return null;
   }
@@ -643,17 +680,26 @@ export function validatePersonaSessionMetadataResult(
   options: {
     authorizedHubUrl: string;
     currentGuestUrl?: string | null;
-    isMainFrame?: boolean;
+    expectedGuestWebContentsId?: number | null;
     expectedRequestId: string;
     expectedMachineId: string;
     expectedSessionId: string;
   },
 ): PersonaSessionMetadataHints | null {
-  const frameContext = validateGuestFrameContext(options);
-  if (!frameContext || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return null;
   }
   const record = raw as Record<string, unknown>;
+  const frameContext = validateGuestFrameContext({
+    authorizedHubUrl: options.authorizedHubUrl,
+    currentGuestUrl: options.currentGuestUrl,
+    frameUrl: record.frameUrl,
+    guestWebContentsId: record.guestWebContentsId,
+    expectedGuestWebContentsId: options.expectedGuestWebContentsId,
+  });
+  if (!frameContext) {
+    return null;
+  }
   if (
     record.requestId !== options.expectedRequestId ||
     record.machineId !== options.expectedMachineId ||
@@ -666,5 +712,38 @@ export function validatePersonaSessionMetadataResult(
   return {
     workspaceIdHint: workspaceIdHint.ok ? (workspaceIdHint.value ?? null) : null,
     cwdHint: cwdHint.ok ? (cwdHint.value ?? null) : null,
+  };
+}
+
+export interface ValidatedPersonaGuestReadyPayload {
+  guestWebContentsId: number;
+  frameUrl: string;
+}
+
+export function validatePersonaGuestReadyPayload(
+  raw: unknown,
+  options: {
+    authorizedHubUrl: string;
+    currentGuestUrl?: string | null;
+    expectedGuestWebContentsId?: number | null;
+  },
+): ValidatedPersonaGuestReadyPayload | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const frameContext = validateGuestFrameContext({
+    authorizedHubUrl: options.authorizedHubUrl,
+    currentGuestUrl: options.currentGuestUrl,
+    frameUrl: record.frameUrl,
+    guestWebContentsId: record.guestWebContentsId,
+    expectedGuestWebContentsId: options.expectedGuestWebContentsId,
+  });
+  if (!frameContext) {
+    return null;
+  }
+  return {
+    guestWebContentsId: frameContext.guestWebContentsId,
+    frameUrl: frameContext.frameUrl,
   };
 }

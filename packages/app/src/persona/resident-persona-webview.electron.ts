@@ -1,3 +1,4 @@
+import { listenToDesktopEvent } from "@/desktop/electron/events";
 import { getDesktopHost } from "@/desktop/host";
 import { WEB_SURFACE_PLANE } from "@/lib/overlay-root";
 import type { PersonaGuestConfigMessage } from "./resident-persona-webview";
@@ -296,15 +297,24 @@ export function sendPersonaGuestAllowOnce(url: string): void {
   }
 }
 
-interface WebviewMetadataIpcEvent extends Event {
-  channel?: string;
-  args?: unknown[];
-  isMainFrame?: boolean;
+export function readResidentPersonaWebviewContentsId(
+  webview: PersonaElectronWebviewElement | null | undefined = getResidentPersonaWebview(),
+): number | null {
+  if (!webview || typeof webview.getWebContentsId !== "function") {
+    return null;
+  }
+  try {
+    const id = webview.getWebContentsId();
+    return typeof id === "number" && Number.isInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Requests same-origin session metadata (`workspace_id`, `cwd`) from the authorized Persona guest.
- * Used after host resolution when toolbar or window-open jumps need Level-4 workspace fallback.
+ * Receives replies exclusively via the main-process `persona-session-metadata-result` channel
+ * after `senderFrame === contents.mainFrame` + registered Hub origin verification.
  */
 export function lookupPersonaGuestSessionMetadata(input: {
   machineId: string;
@@ -326,6 +336,7 @@ export function lookupPersonaGuestSessionMetadata(input: {
 
   let settled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let unlisten: (() => void) | null = null;
 
   const finish = (value: PersonaSessionMetadataHints | null): void => {
     if (settled) {
@@ -336,25 +347,27 @@ export function lookupPersonaGuestSessionMetadata(input: {
       clearTimeout(timer);
       timer = null;
     }
-    webview.removeEventListener("ipc-message", onIpcMessage);
+    unlisten?.();
+    unlisten = null;
     resolvePending?.(value);
   };
 
-  const onIpcMessage = (event: Event): void => {
-    const ipcEvent = event as WebviewMetadataIpcEvent;
-    if (ipcEvent.channel !== "paseo:persona:session-metadata-result") {
-      return;
-    }
-    let currentGuestUrl: string | null = null;
+  const onDesktopMetadataResult = (rawPayload: unknown): void => {
+    let currentGuestUrl: string | undefined;
     try {
-      currentGuestUrl = webview.getURL?.() || webview.src || null;
+      const liveUrl = webview.getURL?.() || webview.src || "";
+      if (liveUrl.trim().length > 0) {
+        currentGuestUrl = liveUrl;
+      }
     } catch {
-      currentGuestUrl = webview.src || null;
+      if (webview.src.trim().length > 0) {
+        currentGuestUrl = webview.src;
+      }
     }
-    const validated = validatePersonaSessionMetadataResult(ipcEvent.args?.[0], {
+    const validated = validatePersonaSessionMetadataResult(rawPayload, {
       authorizedHubUrl: input.authorizedHubUrl,
-      currentGuestUrl,
-      isMainFrame: ipcEvent.isMainFrame,
+      ...(currentGuestUrl ? { currentGuestUrl } : {}),
+      expectedGuestWebContentsId: readResidentPersonaWebviewContentsId(webview),
       expectedRequestId: requestId,
       expectedMachineId: input.machineId,
       expectedSessionId: input.sessionId,
@@ -365,18 +378,28 @@ export function lookupPersonaGuestSessionMetadata(input: {
     finish(validated);
   };
 
-  webview.addEventListener("ipc-message", onIpcMessage);
   timer = setTimeout(() => finish(null), timeoutMs);
 
-  try {
-    webview.send("paseo:persona:lookup-session-metadata", {
-      requestId,
-      machineId: input.machineId,
-      sessionId: input.sessionId,
-    });
-  } catch {
-    finish(null);
-  }
+  void (async () => {
+    try {
+      const dispose = await listenToDesktopEvent<unknown>(
+        "persona-session-metadata-result",
+        onDesktopMetadataResult,
+      );
+      if (settled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+      webview.send?.("paseo:persona:lookup-session-metadata", {
+        requestId,
+        machineId: input.machineId,
+        sessionId: input.sessionId,
+      });
+    } catch {
+      finish(null);
+    }
+  })();
 
   return pending;
 }

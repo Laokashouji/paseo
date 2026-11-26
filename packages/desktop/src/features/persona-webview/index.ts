@@ -5,6 +5,9 @@ import {
   isAllowedPersonaWebviewUrl,
   normalizePersonaHubUrl,
   parsePersonaSessionPath,
+  PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
+  PERSONA_GUEST_READY_IPC_CHANNEL,
+  PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_WEBVIEW_PARTITION,
   type ParsedPersonaSessionPath,
 } from "./policy.js";
@@ -18,8 +21,15 @@ export {
   isValidPersonaHubUrl,
   normalizePersonaHubUrl,
   parsePersonaSessionPath,
+  PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
+  PERSONA_GUEST_READY_EVENT,
+  PERSONA_GUEST_READY_EVENT_NAME,
+  PERSONA_GUEST_READY_IPC_CHANNEL,
+  PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_OPEN_SESSION_EVENT_NAME,
+  PERSONA_SESSION_METADATA_RESULT_EVENT,
+  PERSONA_SESSION_METADATA_RESULT_EVENT_NAME,
   PERSONA_WEBVIEW_PARTITION,
   type NormalizedPersonaHubUrl,
   type ParsedPersonaSessionPath,
@@ -119,12 +129,71 @@ function resolveHealthRedirectTarget(
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function cancelResponseBodySafely(response: Response): void {
+  try {
+    const cancelPromise = response.body?.cancel?.();
+    if (cancelPromise && typeof cancelPromise.catch === "function") {
+      void cancelPromise.catch(() => undefined);
+    }
+  } catch {
+    // Ignore body cancellation errors when cleaning up timed-out or redirected responses.
+  }
+}
+
+async function readHealthJsonWithAbort(response: Response, signal?: AbortSignal): Promise<unknown> {
+  if (signal?.aborted) {
+    cancelResponseBodySafely(response);
+    throw createAbortError();
+  }
+  if (!signal) {
+    return await response.json();
+  }
+
+  let onAbort: (() => void) | null = null;
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      cancelResponseBodySafely(response);
+      reject(createAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  const jsonPromise = response.json();
+  // Suppress unhandled rejection if abort wins the race before jsonPromise settles.
+  void jsonPromise.catch(() => undefined);
+
+  try {
+    return await Promise.race([jsonPromise, abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
 async function parseHealthJsonResponse(
   response: Response,
   fallbackHost: string,
   startedAt: number,
+  signal?: AbortSignal,
 ): Promise<PersonaHealthCheckResult> {
   if (!response.ok) {
+    cancelResponseBodySafely(response);
     return {
       ok: false,
       code: "http_error",
@@ -133,8 +202,11 @@ async function parseHealthJsonResponse(
   }
   let data: unknown;
   try {
-    data = await response.json();
-  } catch {
+    data = await readHealthJsonWithAbort(response, signal);
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      return { ok: false, code: "timeout", error: "Request timed out" };
+    }
     return {
       ok: false,
       code: "invalid_payload",
@@ -205,7 +277,12 @@ export async function probePersonaHubHealth(
       });
 
       if (!PERSONA_REDIRECT_STATUSES.has(response.status)) {
-        return parseHealthJsonResponse(response, normalized.displayHost, startedAt);
+        return await parseHealthJsonResponse(
+          response,
+          normalized.displayHost,
+          startedAt,
+          controller?.signal,
+        );
       }
 
       const nextUrl = resolveHealthRedirectTarget(
@@ -214,6 +291,7 @@ export async function probePersonaHubHealth(
         normalized.url,
         redirectCount,
       );
+      cancelResponseBodySafely(response);
       if (!nextUrl) {
         return {
           ok: false,
@@ -230,7 +308,7 @@ export async function probePersonaHubHealth(
       error: "Health check redirect blocked",
     };
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
+    if (controller?.signal.aborted || isAbortError(error)) {
       return { ok: false, code: "timeout", error: "Request timed out" };
     }
     return {
@@ -448,5 +526,197 @@ export function registerPersonaWebviewNavigationGuards(
       openExternalSafely(url, deps);
     }
     return { action: "deny" };
+  });
+}
+
+export interface PersonaGuestFrameLike {
+  readonly url: string;
+  readonly origin?: string;
+  readonly detached?: boolean;
+  readonly parent?: object | null;
+  readonly top?: object | null;
+  readonly processId?: number;
+  readonly routingId?: number;
+}
+
+export interface PersonaGuestIpcMainEventLike {
+  readonly sender: object | null | undefined;
+  readonly senderFrame?: PersonaGuestFrameLike | null;
+  readonly processId?: number;
+  readonly frameId?: number;
+}
+
+export interface PersonaGuestIpcWebContentsLike {
+  readonly id: number;
+  readonly mainFrame?: PersonaGuestFrameLike | null;
+  isDestroyed(): boolean;
+  getType?: () => string;
+  getURL(): string;
+  on(
+    event: "ipc-message",
+    listener: (event: PersonaGuestIpcMainEventLike, channel: string, ...args: unknown[]) => void,
+  ): void;
+}
+
+export interface PersonaGuestMainFrameContext {
+  guestWebContentsId: number;
+  frameUrl: string;
+}
+
+export interface PersonaGuestIpcBridgeDeps {
+  getConfiguredHubUrl(): string;
+  onGuestOpenSession(payload: Record<string, unknown>, context: PersonaGuestMainFrameContext): void;
+  onGuestSessionMetadataResult(
+    payload: Record<string, unknown>,
+    context: PersonaGuestMainFrameContext,
+  ): void;
+  onGuestReady(context: PersonaGuestMainFrameContext): void;
+}
+
+function isSameOriginHttpUrlStrict(urlString: unknown, expectedOrigin: string): boolean {
+  if (typeof urlString !== "string") {
+    return false;
+  }
+  const trimmed = urlString.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      !parsed.username &&
+      !parsed.password &&
+      parsed.origin === expectedOrigin
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isMatchingMainFrameIdentity(
+  event: PersonaGuestIpcMainEventLike,
+  mainFrame: PersonaGuestFrameLike | null | undefined,
+): boolean {
+  const senderFrame = event.senderFrame;
+  if (!mainFrame || !senderFrame || senderFrame !== mainFrame) {
+    return false;
+  }
+  if (senderFrame.detached === true) {
+    return false;
+  }
+  if (senderFrame.parent !== undefined && senderFrame.parent !== null) {
+    return false;
+  }
+  if (senderFrame.top !== undefined && senderFrame.top !== senderFrame) {
+    return false;
+  }
+  const processMismatch =
+    typeof event.processId === "number" &&
+    typeof senderFrame.processId === "number" &&
+    event.processId !== senderFrame.processId;
+  const frameMismatch =
+    typeof event.frameId === "number" &&
+    typeof senderFrame.routingId === "number" &&
+    event.frameId !== senderFrame.routingId;
+  return !processMismatch && !frameMismatch;
+}
+
+function isAuthorizedGuestMainFrameOrigin(
+  senderFrame: PersonaGuestFrameLike,
+  contents: PersonaGuestIpcWebContentsLike,
+  configuredHubUrl: string | undefined | null,
+): boolean {
+  const normalizedHub = normalizePersonaHubUrl(configuredHubUrl);
+  if (!normalizedHub) {
+    return false;
+  }
+  if (!isSameOriginHttpUrlStrict(senderFrame.url, normalizedHub.origin)) {
+    return false;
+  }
+  if (senderFrame.origin !== undefined && senderFrame.origin !== normalizedHub.origin) {
+    return false;
+  }
+  return isSameOriginHttpUrlStrict(contents.getURL(), normalizedHub.origin);
+}
+
+/**
+ * Verifies in the Electron main process that a guest `ipc-message` originates strictly from the
+ * guest WebContents' real `mainFrame` on the currently registered Persona Hub origin.
+ * Fail-closed when frame identity, mainFrame, or registered Hub origin is missing or mismatched.
+ */
+export function isTrustedPersonaGuestMainFrameIpcEvent(
+  event: PersonaGuestIpcMainEventLike | null | undefined,
+  contents: PersonaGuestIpcWebContentsLike | null | undefined,
+  configuredHubUrl: string | undefined | null,
+): boolean {
+  if (!event || !contents || contents.isDestroyed()) {
+    return false;
+  }
+  if (typeof contents.getType === "function" && contents.getType() !== "webview") {
+    return false;
+  }
+  if (event.sender !== contents) {
+    return false;
+  }
+  if (!isMatchingMainFrameIdentity(event, contents.mainFrame) || !event.senderFrame) {
+    return false;
+  }
+  return isAuthorizedGuestMainFrameOrigin(event.senderFrame, contents, configuredHubUrl);
+}
+
+/**
+ * Bridges trusted guest main-frame IPC messages (`open-session`, `session-metadata-result`,
+ * `ready`) through the Electron main process using real `senderFrame === contents.mainFrame`
+ * verification and registered Hub origin checks.
+ */
+export function registerPersonaWebviewGuestIpcBridge(
+  contents: PersonaGuestIpcWebContentsLike,
+  deps: PersonaGuestIpcBridgeDeps,
+): void {
+  contents.on("ipc-message", (event, channel, ...args) => {
+    if (
+      channel !== PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL &&
+      channel !== PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL &&
+      channel !== PERSONA_GUEST_READY_IPC_CHANNEL
+    ) {
+      return;
+    }
+
+    if (!isTrustedPersonaGuestMainFrameIpcEvent(event, contents, deps.getConfiguredHubUrl())) {
+      return;
+    }
+
+    const frameUrl = event.senderFrame?.url;
+    if (typeof frameUrl !== "string") {
+      return;
+    }
+    const context: PersonaGuestMainFrameContext = {
+      guestWebContentsId: contents.id,
+      frameUrl,
+    };
+
+    if (channel === PERSONA_GUEST_READY_IPC_CHANNEL) {
+      deps.onGuestReady(context);
+      return;
+    }
+
+    const payload = args[0];
+    if (!isPlainRecord(payload)) {
+      return;
+    }
+
+    if (channel === PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL) {
+      deps.onGuestOpenSession(payload, context);
+      return;
+    }
+
+    if (channel === PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL) {
+      deps.onGuestSessionMetadataResult(payload, context);
+    }
   });
 }

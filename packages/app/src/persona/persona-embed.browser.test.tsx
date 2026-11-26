@@ -26,6 +26,12 @@ import {
   mountPersonaGuestPreload,
   type PersonaGuestIpcLike,
 } from "../../../desktop/src/features/persona-webview/guest-preload";
+import {
+  registerPersonaWebviewGuestIpcBridge,
+  type PersonaGuestFrameLike,
+  type PersonaGuestIpcMainEventLike,
+  type PersonaGuestIpcWebContentsLike,
+} from "../../../desktop/src/features/persona-webview/index";
 import { PersonaHeroRow } from "./hero-row";
 import { PersonaSurface as ElectronPersonaSurface } from "./persona-surface.electron";
 import { PersonaSurface } from "./persona-surface.web";
@@ -58,7 +64,7 @@ vi.mock("electron", () => {
   const ipcRenderer = {
     on: vi.fn(),
     removeListener: vi.fn(),
-    sendToHost: vi.fn(),
+    send: vi.fn(),
   };
   return {
     default: { ipcRenderer },
@@ -553,24 +559,26 @@ describe("Persona C2 embed Chromium browser regressions", () => {
     expect(hostEl.querySelector('[data-testid="persona-toolbar-open-in-paseo"]')).not.toBeNull();
     expect(hostEl.querySelector('[data-testid="persona-toolbar-open-diff"]')).not.toBeNull();
 
-    // Untrusted guest IPC (subframe or off-origin rawHref) is silently dropped
+    // Direct `<webview>` `ipc-message` (Electron 44 only supplies `frameId: [processId, frameId]`,
+    // never `isMainFrame`) MUST NOT be trusted by the renderer, and forged/off-origin desktop events
+    // missing real main-process frame context MUST be rejected.
     await act(async () => {
-      const badIpc = new Event("ipc-message") as Event & {
+      const directWebviewIpc = new Event("ipc-message") as Event & {
         channel?: string;
         args?: unknown[];
-        isMainFrame?: boolean;
+        frameId?: [number, number];
       };
-      badIpc.channel = "paseo:persona:open-session";
-      badIpc.isMainFrame = true;
-      badIpc.args = [
+      directWebviewIpc.channel = "paseo:persona:open-session";
+      directWebviewIpc.frameId = [10, 1];
+      directWebviewIpc.args = [
         {
           machineId: "n37-217-003",
           sessionId: "paseo-ag_123",
           source: "link-click",
-          rawHref: "https://evil.example.com/s/n37-217-003/paseo-ag_123",
+          rawHref: `${hubUrl}/s/n37-217-003/paseo-ag_123`,
         },
       ];
-      liveWebview?.dispatchEvent(badIpc);
+      liveWebview?.dispatchEvent(directWebviewIpc);
     });
     expect(mockNavigateToWorkspace).not.toHaveBeenCalled();
 
@@ -615,7 +623,7 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       ipc: {
         on: vi.fn(),
         removeListener: vi.fn(),
-        sendToHost: inactiveIpcSend,
+        send: inactiveIpcSend,
       },
       authorizedHubUrl: "https://other-origin.example.com",
       isMainFrame: () => true,
@@ -628,7 +636,7 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       ipc: {
         on: vi.fn(),
         removeListener: vi.fn(),
-        sendToHost: inactiveIpcSend,
+        send: inactiveIpcSend,
       },
       authorizedHubUrl: hubUrl,
       isMainFrame: () => false,
@@ -698,9 +706,70 @@ describe("Persona C2 embed Chromium browser regressions", () => {
     const liveWebview = getResidentPersonaWebview();
     expect(liveWebview).not.toBeNull();
 
-    // Wire a real bidirectional IPC bridge between guest-preload and liveWebview
+    // Wire a real bidirectional IPC bridge through the actual main-process
+    // `registerPersonaWebviewGuestIpcBridge` (`senderFrame === contents.mainFrame` + origin check).
+    const guestWebContentsId = 42;
+    const guestSessionUrl = `${hubUrl}/s/n37-217-003/unmanaged-cli-session`;
+    const mainFrame: PersonaGuestFrameLike = {
+      url: guestSessionUrl,
+      origin: window.location.origin,
+      detached: false,
+      parent: null,
+      processId: 10,
+      routingId: 1,
+    };
+    Object.assign(mainFrame, { top: mainFrame });
+    const subFrame: PersonaGuestFrameLike = {
+      url: `${hubUrl}/embedded-subframe`,
+      origin: window.location.origin,
+      detached: false,
+      parent: mainFrame,
+      top: mainFrame,
+      processId: 10,
+      routingId: 2,
+    };
+
+    let mainGuestIpcListener:
+      | ((event: PersonaGuestIpcMainEventLike, channel: string, ...args: unknown[]) => void)
+      | null = null;
+    const guestWebContents: PersonaGuestIpcWebContentsLike = {
+      id: guestWebContentsId,
+      mainFrame,
+      isDestroyed: () => false,
+      getType: () => "webview",
+      getURL: () => guestSessionUrl,
+      on(event, listener) {
+        if (event === "ipc-message") {
+          mainGuestIpcListener = listener;
+        }
+      },
+    };
+    registerPersonaWebviewGuestIpcBridge(guestWebContents, {
+      getConfiguredHubUrl: () => hubUrl,
+      onGuestOpenSession: (payload, context) => {
+        desktopMock.emitDesktopEvent("persona-open-session", {
+          ...payload,
+          guestWebContentsId: context.guestWebContentsId,
+          frameUrl: context.frameUrl,
+        });
+      },
+      onGuestSessionMetadataResult: (payload, context) => {
+        desktopMock.emitDesktopEvent("persona-session-metadata-result", {
+          ...payload,
+          guestWebContentsId: context.guestWebContentsId,
+          frameUrl: context.frameUrl,
+        });
+      },
+      onGuestReady: (context) => {
+        desktopMock.emitDesktopEvent("persona-guest-ready", {
+          guestWebContentsId: context.guestWebContentsId,
+          frameUrl: context.frameUrl,
+        });
+      },
+    });
+
     const guestListeners = new Map<string, Set<(event: unknown, payload: unknown) => void>>();
-    const dispatchedToHost: Array<{ channel: string; payload: unknown }> = [];
+    const dispatchedToMain: Array<{ channel: string; payload: unknown }> = [];
     const guestIpc: PersonaGuestIpcLike = {
       on(channel, listener) {
         const set = guestListeners.get(channel) ?? new Set();
@@ -710,21 +779,23 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       removeListener(channel, listener) {
         guestListeners.get(channel)?.delete(listener);
       },
-      sendToHost(channel, payload) {
-        dispatchedToHost.push({ channel, payload });
-        const ipcEvent = new Event("ipc-message") as Event & {
-          channel?: string;
-          args?: unknown[];
-          isMainFrame?: boolean;
-        };
-        ipcEvent.channel = channel;
-        ipcEvent.args = [payload];
-        ipcEvent.isMainFrame = true;
-        liveWebview?.dispatchEvent(ipcEvent);
+      send(channel, payload) {
+        dispatchedToMain.push({ channel, payload });
+        mainGuestIpcListener?.(
+          {
+            sender: guestWebContents,
+            senderFrame: mainFrame,
+            processId: 10,
+            frameId: 1,
+          },
+          channel,
+          payload,
+        );
       },
     };
     if (liveWebview) {
-      liveWebview.getURL = () => `${hubUrl}/s/n37-217-003/unmanaged-cli-session`;
+      liveWebview.getWebContentsId = () => guestWebContentsId;
+      liveWebview.getURL = () => guestSessionUrl;
       liveWebview.send = (channel: string, payload?: unknown) => {
         for (const listener of guestListeners.get(channel) ?? []) {
           listener({}, payload);
@@ -811,7 +882,51 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       expect(idleMutations).toBe(afterLabelUpdate);
       idleObserver.disconnect();
 
-      // P1-5 flow 1: real DOM click on <a href="/s/..."> carries workspace_id/cwd through to L4 workspace fallback
+      // P2-5 regression: subframe IPC on both open-session and metadata-result MUST be blocked by
+      // main-process `senderFrame === contents.mainFrame` verification, and direct Electron 44
+      // `<webview>` `ipc-message` events (with `frameId: [10, 2]`, no `isMainFrame`) MUST be ignored.
+      mockNavigateToWorkspace.mockClear();
+      await act(async () => {
+        mainGuestIpcListener?.(
+          {
+            sender: guestWebContents,
+            senderFrame: subFrame,
+            processId: 10,
+            frameId: 2,
+          },
+          "paseo:persona:open-session",
+          {
+            machineId: "n37-217-003",
+            sessionId: "unmanaged-cli-session",
+            workspaceIdHint: ws.id,
+            cwdHint: ws.workspaceDirectory,
+            source: "link-click",
+            rawHref: guestSessionUrl,
+          },
+        );
+        const directSubframeEvent = new Event("ipc-message") as Event & {
+          channel?: string;
+          args?: unknown[];
+          frameId?: [number, number];
+        };
+        directSubframeEvent.channel = "paseo:persona:open-session";
+        directSubframeEvent.frameId = [10, 2];
+        directSubframeEvent.args = [
+          {
+            machineId: "n37-217-003",
+            sessionId: "unmanaged-cli-session",
+            workspaceIdHint: ws.id,
+            source: "link-click",
+            rawHref: guestSessionUrl,
+          },
+        ];
+        liveWebview?.dispatchEvent(directSubframeEvent);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      });
+      expect(mockNavigateToWorkspace).not.toHaveBeenCalled();
+
+      // P1-5 flow 1: real DOM click on <a href="/s/..."> carries workspace_id/cwd through main-process
+      // verified forwarding into L4 workspace fallback
       const sessionLink = guestStage.querySelector("#persona-session-link") as HTMLAnchorElement;
       await act(async () => {
         sessionLink.dispatchEvent(
@@ -820,7 +935,7 @@ describe("Persona C2 embed Chromium browser regressions", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       });
 
-      const clickMessage = dispatchedToHost.find(
+      const clickMessage = dispatchedToMain.find(
         (entry) => entry.channel === "paseo:persona:open-session",
       );
       expect(clickMessage?.payload).toMatchObject({
@@ -838,14 +953,63 @@ describe("Persona C2 embed Chromium browser regressions", () => {
         target: undefined,
       });
 
-      // P1-5 flow 2: toolbar Open in Paseo button resolves L4 via same-origin guest metadata lookup
+      // P1-5 flow 2: toolbar Open in Paseo button resolves L4 via main-process verified guest metadata lookup,
+      // while rejecting forged subframe metadata replies and direct `<webview>` `ipc-message` replies.
       mockNavigateToWorkspace.mockClear();
+      const originalWebviewSend = liveWebview?.send;
+      if (liveWebview && originalWebviewSend) {
+        liveWebview.send = (channel: string, payload?: unknown) => {
+          if (
+            channel === "paseo:persona:lookup-session-metadata" &&
+            payload &&
+            typeof payload === "object"
+          ) {
+            const req = payload as { requestId?: string; machineId?: string; sessionId?: string };
+            // Attempt 1: subframe sends forged metadata through main-process guest IPC -> dropped
+            mainGuestIpcListener?.(
+              {
+                sender: guestWebContents,
+                senderFrame: subFrame,
+                processId: 10,
+                frameId: 2,
+              },
+              "paseo:persona:session-metadata-result",
+              {
+                requestId: req.requestId,
+                machineId: req.machineId,
+                sessionId: req.sessionId,
+                workspaceIdHint: "wks_0000000000000000",
+                cwdHint: "/evil/subframe",
+              },
+            );
+            // Attempt 2: direct `<webview>` Electron 44 `ipc-message` (no `isMainFrame`) -> ignored
+            const forgedDirectReply = new Event("ipc-message") as Event & {
+              channel?: string;
+              args?: unknown[];
+              frameId?: [number, number];
+            };
+            forgedDirectReply.channel = "paseo:persona:session-metadata-result";
+            forgedDirectReply.frameId = [10, 2];
+            forgedDirectReply.args = [
+              {
+                requestId: req.requestId,
+                machineId: req.machineId,
+                sessionId: req.sessionId,
+                workspaceIdHint: "wks_0000000000000000",
+                cwdHint: "/evil/direct-webview",
+              },
+            ];
+            liveWebview.dispatchEvent(forgedDirectReply);
+          }
+          originalWebviewSend(channel, payload);
+        };
+      }
       await act(async () => {
         const navEvent = new Event("did-navigate-in-page") as Event & {
           url?: string;
           isMainFrame?: boolean;
         };
-        navEvent.url = `${hubUrl}/s/n37-217-003/unmanaged-cli-session`;
+        navEvent.url = guestSessionUrl;
         navEvent.isMainFrame = true;
         liveWebview?.dispatchEvent(navEvent);
       });
@@ -862,15 +1026,20 @@ describe("Persona C2 embed Chromium browser regressions", () => {
         workspaceId: ws.id,
         target: undefined,
       });
+      if (liveWebview && originalWebviewSend) {
+        liveWebview.send = originalWebviewSend;
+      }
 
-      // P1-5 flow 3: main-process window-open event enriches metadata via guest lookup and opens workspace
+      // P1-5 flow 3: main-process window-open event enriches metadata via main-process verified guest lookup
       mockNavigateToWorkspace.mockClear();
       await act(async () => {
         desktopMock.emitDesktopEvent("persona-open-session", {
           machineId: "n37-217-003",
           sessionId: "unmanaged-cli-session",
           source: "window-open",
-          rawHref: `${hubUrl}/s/n37-217-003/unmanaged-cli-session`,
+          rawHref: guestSessionUrl,
+          guestWebContentsId,
+          frameUrl: guestSessionUrl,
         });
         await new Promise((resolve) => setTimeout(resolve, 60));
       });
