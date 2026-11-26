@@ -173,7 +173,7 @@ function getAgentUpdatedTimestamp(agent: Agent): number {
   return Number.isFinite(created) ? created : 0;
 }
 
-function collectSessionAgents(session: SessionState | undefined): Agent[] {
+export function collectSessionAgents(session: SessionState | undefined): Agent[] {
   if (!session) {
     return [];
   }

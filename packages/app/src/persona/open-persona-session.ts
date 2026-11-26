@@ -28,6 +28,7 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import {
+  collectSessionAgents,
   resolveMachineToServerId,
   resolvePersonaSession,
   type PersonaSessionOpenRequest,
@@ -411,45 +412,6 @@ function readAgentPersistedProviderRoot(agent: Agent): string | null {
   return null;
 }
 
-function collectSessionAgentValues(session: SessionState | undefined): Agent[] {
-  if (!session) {
-    return [];
-  }
-  const byId = new Map<string, Agent>();
-  const add = (agent: Agent): void => {
-    const existing = byId.get(agent.id);
-    if (!existing) {
-      byId.set(agent.id, agent);
-      return;
-    }
-    const existingHasPersistedRoot = readAgentPersistedProviderRoot(existing) !== null;
-    const incomingHasPersistedRoot = readAgentPersistedProviderRoot(agent) !== null;
-    if (!existingHasPersistedRoot && incomingHasPersistedRoot) {
-      byId.set(agent.id, agent);
-      return;
-    }
-    if (existingHasPersistedRoot && !incomingHasPersistedRoot) {
-      return;
-    }
-    const existingHasPersistence = existing.persistence !== null;
-    const incomingHasPersistence = agent.persistence !== null;
-    if (!existingHasPersistence && incomingHasPersistence) {
-      byId.set(agent.id, agent);
-    }
-  };
-  if (session.agents) {
-    for (const agent of session.agents.values()) {
-      add(agent);
-    }
-  }
-  if (session.agentDetails) {
-    for (const agent of session.agentDetails.values()) {
-      add(agent);
-    }
-  }
-  return Array.from(byId.values());
-}
-
 function readCustomProviderId(
   rawProvider: unknown,
   roots: Readonly<Record<string, string>>,
@@ -493,7 +455,7 @@ export function deriveProviderRootsForServer(input: {
   session?: SessionState | undefined;
 }): Record<string, string> {
   const roots = deriveProviderRootsFromDaemonConfig(input.daemonConfig?.providers);
-  const agents = collectSessionAgentValues(input.session);
+  const agents = collectSessionAgents(input.session);
   recordPersistedAgentProviderRoots(agents, roots);
   return roots;
 }
@@ -531,7 +493,7 @@ export function collectAppProviderRootsByServerId(input: {
 }
 
 function hasCustomProviderAgentMissingPersistedRoot(session: SessionState | undefined): boolean {
-  for (const agent of collectSessionAgentValues(session)) {
+  for (const agent of collectSessionAgents(session)) {
     const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
     if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
       continue;
@@ -547,7 +509,7 @@ function hasUnresolvedCustomProviderAgent(
   session: SessionState | undefined,
   providerRoots: Readonly<Record<string, string>> | undefined,
 ): boolean {
-  for (const agent of collectSessionAgentValues(session)) {
+  for (const agent of collectSessionAgents(session)) {
     const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
     if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
       continue;
@@ -585,7 +547,7 @@ function hasUnconfirmedCustomProviderAgentForThread(input: {
   if (input.hasAuthoritativeConfig === true) {
     return false;
   }
-  for (const agent of collectSessionAgentValues(input.session)) {
+  for (const agent of collectSessionAgents(input.session)) {
     const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
     if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
       continue;

@@ -1259,6 +1259,142 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
     );
   });
 
+  it("fails closed with ambiguous_machine on 1.7s daemonConfig timeout when the shared thread only exists on a newer agentDetails record with null persistence", async () => {
+    vi.useFakeTimers();
+    const sharedThread = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const macCodexAgent = makeAgent({
+      id: "ag_mac_builtin_codex",
+      serverId: "srv_mac",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex", sessionId: sharedThread },
+    });
+    const staleOtherDirectoryAgent = makeAgent({
+      id: "ag_other_my_codex",
+      serverId: "srv_other",
+      provider: "my-codex",
+      workspaceId: "wks_2222222222222222",
+      updatedAt: new Date("2026-11-24T00:00:00.000Z"),
+      lastActivityAt: new Date("2026-11-24T00:00:00.000Z"),
+      persistence: null,
+      runtimeInfo: undefined,
+    });
+    const newerOtherDetailAgent = makeAgent({
+      id: "ag_other_my_codex",
+      serverId: "srv_other",
+      provider: "my-codex",
+      workspaceId: "wks_2222222222222222",
+      updatedAt: new Date("2026-11-24T00:05:00.000Z"),
+      lastActivityAt: new Date("2026-11-24T00:05:00.000Z"),
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: sharedThread },
+    });
+
+    const macGetDaemonConfig = vi.fn(async () => ({
+      config: { providers: {} } as unknown as MutableDaemonConfig,
+    }));
+    const otherDaemonConfig = {
+      providers: {
+        "my-codex": { extends: "codex" },
+      },
+    } as unknown as MutableDaemonConfig;
+    const otherGetDaemonConfig = vi
+      .fn<() => Promise<{ config: MutableDaemonConfig }>>()
+      .mockImplementationOnce(() => delayDaemonConfig(otherDaemonConfig, 1_700))
+      .mockImplementationOnce(async () => ({
+        config: otherDaemonConfig,
+      }));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          client: { getDaemonConfig: macGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([[macCodexAgent.id, macCodexAgent]]),
+        }),
+        srv_other: makeSession("srv_other", {
+          client: { getDaemonConfig: otherGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_other", hostname: "other-workstation", version: "0.17.533" },
+          agents: new Map([[staleOtherDirectoryAgent.id, staleOtherDirectoryAgent]]),
+          agentDetails: new Map([[newerOtherDetailAgent.id, newerOtherDetailAgent]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_other", label: "Other Host", status: "online" },
+    ]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const firstClickPromise = openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: sharedThread,
+        source: "link-click",
+      },
+      deps,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const firstResult = await firstClickPromise;
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(macGetDaemonConfig).not.toHaveBeenCalled();
+    expect(firstResult.handled).toBe(false);
+    expect(firstResult.navigatedRoute).toBeUndefined();
+    expect(firstResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-workstation",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_mac", "srv_other"],
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(noopToast.show).toHaveBeenCalledTimes(1);
+    expect(noopToast.show).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ testID: "persona-ambiguous-machine-toast" }),
+    );
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeUndefined();
+
+    // Let the timed-out 1.7s response settle and confirm it does not leak into cache.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeUndefined();
+
+    const secondResult = await openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: sharedThread,
+        source: "link-click",
+      },
+      deps,
+    );
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(2);
+    expect(secondResult.handled).toBe(false);
+    expect(secondResult.navigatedRoute).toBeUndefined();
+    expect(secondResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-workstation",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_mac", "srv_other"],
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(noopToast.show).toHaveBeenCalledTimes(2);
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toEqual(
+      otherDaemonConfig,
+    );
+  });
+
   it("still opens the first host after timeout when a second slow unmapped online host does not hold the target thread ID", async () => {
     vi.useFakeTimers();
     const targetThread = "88888888-9999-4aaa-8bbb-cccccccccccc";
