@@ -399,22 +399,55 @@ export function deriveProviderRootsFromDaemonConfig(
   return roots;
 }
 
+function readAgentPersistedProviderRoot(agent: Agent): string | null {
+  const metadata = agent.persistence?.metadata;
+  const persistedRoot =
+    metadata && typeof metadata === "object"
+      ? (metadata as { provider?: unknown }).provider
+      : undefined;
+  if (typeof persistedRoot === "string" && persistedRoot.trim().length > 0) {
+    return persistedRoot.trim();
+  }
+  return null;
+}
+
 function collectSessionAgentValues(session: SessionState | undefined): Agent[] {
   if (!session) {
     return [];
   }
-  const agents: Agent[] = [];
+  const byId = new Map<string, Agent>();
+  const add = (agent: Agent): void => {
+    const existing = byId.get(agent.id);
+    if (!existing) {
+      byId.set(agent.id, agent);
+      return;
+    }
+    const existingHasPersistedRoot = readAgentPersistedProviderRoot(existing) !== null;
+    const incomingHasPersistedRoot = readAgentPersistedProviderRoot(agent) !== null;
+    if (!existingHasPersistedRoot && incomingHasPersistedRoot) {
+      byId.set(agent.id, agent);
+      return;
+    }
+    if (existingHasPersistedRoot && !incomingHasPersistedRoot) {
+      return;
+    }
+    const existingHasPersistence = existing.persistence !== null;
+    const incomingHasPersistence = agent.persistence !== null;
+    if (!existingHasPersistence && incomingHasPersistence) {
+      byId.set(agent.id, agent);
+    }
+  };
   if (session.agents) {
     for (const agent of session.agents.values()) {
-      agents.push(agent);
+      add(agent);
     }
   }
   if (session.agentDetails) {
     for (const agent of session.agentDetails.values()) {
-      agents.push(agent);
+      add(agent);
     }
   }
-  return agents;
+  return Array.from(byId.values());
 }
 
 function readCustomProviderId(
@@ -440,13 +473,9 @@ function recordPersistedAgentProviderRoots(
     if (!providerId) {
       continue;
     }
-    const metadata = agent.persistence?.metadata;
-    const persistedRoot =
-      metadata && typeof metadata === "object"
-        ? (metadata as { provider?: unknown }).provider
-        : undefined;
-    if (typeof persistedRoot === "string" && persistedRoot.trim().length > 0) {
-      roots[providerId] = persistedRoot.trim();
+    const persistedRoot = readAgentPersistedProviderRoot(agent);
+    if (persistedRoot !== null) {
+      roots[providerId] = persistedRoot;
     }
   }
 }
@@ -501,18 +530,6 @@ export function collectAppProviderRootsByServerId(input: {
   return byServerId;
 }
 
-function readAgentPersistedProviderRoot(agent: Agent): string | null {
-  const metadata = agent.persistence?.metadata;
-  const persistedRoot =
-    metadata && typeof metadata === "object"
-      ? (metadata as { provider?: unknown }).provider
-      : undefined;
-  if (typeof persistedRoot === "string" && persistedRoot.trim().length > 0) {
-    return persistedRoot.trim();
-  }
-  return null;
-}
-
 function hasCustomProviderAgentMissingPersistedRoot(session: SessionState | undefined): boolean {
   for (const agent of collectSessionAgentValues(session)) {
     const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
@@ -543,6 +560,120 @@ function hasUnresolvedCustomProviderAgent(
     }
   }
   return false;
+}
+
+function agentMatchesCandidateThreadId(agent: Agent, sessionId: string): boolean {
+  const metadata = agent.persistence?.metadata;
+  const threadId =
+    metadata && typeof metadata === "object"
+      ? (metadata as { threadId?: unknown }).threadId
+      : undefined;
+  for (const candidate of [threadId, agent.persistence?.sessionId, agent.runtimeInfo?.sessionId]) {
+    if (typeof candidate === "string" && candidate === sessionId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnconfirmedCustomProviderAgentForThread(input: {
+  session: SessionState | undefined;
+  sessionId: string;
+  hasAuthoritativeConfig: boolean | null;
+  providerRoots?: Readonly<Record<string, string>>;
+}): boolean {
+  if (input.hasAuthoritativeConfig === true) {
+    return false;
+  }
+  for (const agent of collectSessionAgentValues(input.session)) {
+    const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
+    if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
+      continue;
+    }
+    if (readAgentPersistedProviderRoot(agent) !== null) {
+      continue;
+    }
+    if (
+      input.hasAuthoritativeConfig === null &&
+      input.providerRoots &&
+      providerId in input.providerRoots
+    ) {
+      continue;
+    }
+    if (agentMatchesCandidateThreadId(agent, input.sessionId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function applyUnconfirmedCrossHostThreadGuard(input: {
+  request: PersonaSessionOpenRequest;
+  resolution: PersonaSessionResolution;
+  serverIdsNeedingConfig: readonly string[];
+  deps: OpenPersonaSessionDeps;
+}): PersonaSessionResolution {
+  if (input.resolution.kind !== "agent" || input.resolution.level !== "provider_thread_id") {
+    return input.resolution;
+  }
+
+  const hosts = input.deps.getHosts();
+  const sessions = input.deps.getSessions();
+  const machineMatch = resolveMachineToServerId({
+    machineId: input.request.machineId,
+    machineServerMap: input.deps.getMachineServerMap(),
+    hosts,
+    sessions,
+  });
+  if (machineMatch.serverId !== null) {
+    return input.resolution;
+  }
+
+  const normalizedSessionId = input.request.sessionId.trim();
+  if (!normalizedSessionId) {
+    return input.resolution;
+  }
+
+  const statuses = input.deps.getConnectionStatusByServerId();
+  const providerRootsByServer = input.deps.hasDaemonConfigCache
+    ? undefined
+    : input.deps.getProviderRootsByServerId?.();
+  const unconfirmedConflictServerIds: string[] = [];
+
+  for (const otherServerId of input.serverIdsNeedingConfig) {
+    if (otherServerId === input.resolution.serverId) {
+      continue;
+    }
+    if (statuses[otherServerId] !== "online") {
+      continue;
+    }
+    const hasAuthoritativeConfig = input.deps.hasDaemonConfigCache
+      ? input.deps.hasDaemonConfigCache(otherServerId)
+      : null;
+    if (
+      hasUnconfirmedCustomProviderAgentForThread({
+        session: sessions[otherServerId],
+        sessionId: normalizedSessionId,
+        hasAuthoritativeConfig,
+        providerRoots: providerRootsByServer?.[otherServerId],
+      })
+    ) {
+      unconfirmedConflictServerIds.push(otherServerId);
+    }
+  }
+
+  if (unconfirmedConflictServerIds.length === 0) {
+    return input.resolution;
+  }
+
+  return {
+    kind: "unresolved",
+    reason: "ambiguous_machine",
+    machineId: input.request.machineId.trim(),
+    sessionId: normalizedSessionId,
+    resolvedServerId: null,
+    candidateServerIds: [input.resolution.serverId, ...unconfirmedConflictServerIds],
+  };
 }
 
 function shouldRefreshProviderRootsForResolution(resolution: PersonaSessionResolution): boolean {
@@ -633,14 +764,19 @@ async function refreshProviderRootsIfNeeded(
   }
 
   try {
-    const updated = await deps.ensureProviderRoots(serverIdsNeedingConfig);
-    if (!updated) {
-      return resolution;
-    }
-    return resolveCurrentResolution(request, deps);
+    await deps.ensureProviderRoots(serverIdsNeedingConfig);
   } catch {
-    return resolution;
+    // Re-resolve with whatever authoritative config is available and fail closed below.
   }
+
+  // 当未映射机器按 L3 单主机命中时，若其他在线候选主机仍缺少权威配置且持有相同线程，暂停自动跳转避免误跳
+  const nextResolution = resolveCurrentResolution(request, deps);
+  return applyUnconfirmedCrossHostThreadGuard({
+    request,
+    resolution: nextResolution,
+    serverIdsNeedingConfig,
+    deps,
+  });
 }
 
 export async function openPersonaSession(

@@ -520,6 +520,7 @@ describe("openPersonaSession executor", () => {
 
 describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     noopToast.show.mockClear();
     noopToast.error.mockClear();
@@ -559,6 +560,17 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
     error: vi.fn(() => () => undefined),
     copied: vi.fn(() => () => undefined),
   };
+
+  function delayDaemonConfig(
+    config: MutableDaemonConfig,
+    delayMs: number,
+  ): Promise<{ config: MutableDaemonConfig }> {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        resolve({ config });
+      }, delayMs);
+    });
+  }
 
   it("derives chained extends roots with cycle protection and resolves custom providers missing metadata.provider via daemonConfig cache", async () => {
     expect(
@@ -1122,5 +1134,331 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
       panel: null,
     });
     expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_devbox"))).toBeDefined();
+  });
+
+  it("fails closed with ambiguous_machine when a second unmapped online host holding the same thread times out on daemonConfig, and stays ambiguous on prompt retry", async () => {
+    vi.useFakeTimers();
+    const sharedThread = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const macCodexAgent = makeAgent({
+      id: "ag_mac_builtin_codex",
+      serverId: "srv_mac",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex", sessionId: sharedThread },
+    });
+    const otherCustomCodexAgent = makeAgent({
+      id: "ag_other_my_codex",
+      serverId: "srv_other",
+      provider: "my-codex",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: sharedThread },
+    });
+
+    const macGetDaemonConfig = vi.fn(async () => ({
+      config: { providers: {} } as unknown as MutableDaemonConfig,
+    }));
+    const otherDaemonConfig = {
+      providers: {
+        "my-codex": { extends: "codex" },
+      },
+    } as unknown as MutableDaemonConfig;
+    const otherGetDaemonConfig = vi
+      .fn<() => Promise<{ config: MutableDaemonConfig }>>()
+      .mockImplementationOnce(() => delayDaemonConfig(otherDaemonConfig, 1_700))
+      .mockImplementationOnce(async () => ({
+        config: otherDaemonConfig,
+      }));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          client: { getDaemonConfig: macGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([[macCodexAgent.id, macCodexAgent]]),
+        }),
+        srv_other: makeSession("srv_other", {
+          client: { getDaemonConfig: otherGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_other", hostname: "other-workstation", version: "0.17.533" },
+          agents: new Map([[otherCustomCodexAgent.id, otherCustomCodexAgent]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_other", label: "Other Host", status: "online" },
+    ]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const firstClickPromise = openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: sharedThread,
+        source: "link-click",
+      },
+      deps,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const firstResult = await firstClickPromise;
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(macGetDaemonConfig).not.toHaveBeenCalled();
+    expect(firstResult.handled).toBe(false);
+    expect(firstResult.navigatedRoute).toBeUndefined();
+    expect(firstResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-workstation",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_mac", "srv_other"],
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(noopToast.show).toHaveBeenCalledTimes(1);
+    expect(noopToast.show).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ testID: "persona-ambiguous-machine-toast" }),
+    );
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeUndefined();
+
+    // Let the timed-out 1.7s response settle and confirm it does not leak into cache.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeUndefined();
+
+    const secondResult = await openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: sharedThread,
+        source: "link-click",
+      },
+      deps,
+    );
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(2);
+    expect(secondResult.handled).toBe(false);
+    expect(secondResult.navigatedRoute).toBeUndefined();
+    expect(secondResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-workstation",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_mac", "srv_other"],
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(noopToast.show).toHaveBeenCalledTimes(2);
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toEqual(
+      otherDaemonConfig,
+    );
+  });
+
+  it("still opens the first host after timeout when a second slow unmapped online host does not hold the target thread ID", async () => {
+    vi.useFakeTimers();
+    const targetThread = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const unrelatedThread = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+    const macCodexAgent = makeAgent({
+      id: "ag_mac_builtin_codex",
+      serverId: "srv_mac",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex", sessionId: targetThread },
+    });
+    const otherUnrelatedCustomAgent = makeAgent({
+      id: "ag_other_unrelated_custom",
+      serverId: "srv_other",
+      provider: "my-codex",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: unrelatedThread },
+    });
+
+    const macGetDaemonConfig = vi.fn(async () => ({
+      config: { providers: {} } as unknown as MutableDaemonConfig,
+    }));
+    const otherDaemonConfig = {
+      providers: {
+        "my-codex": { extends: "codex" },
+      },
+    } as unknown as MutableDaemonConfig;
+    const otherGetDaemonConfig = vi.fn(() => delayDaemonConfig(otherDaemonConfig, 1_700));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          client: { getDaemonConfig: macGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([[macCodexAgent.id, macCodexAgent]]),
+        }),
+        srv_other: makeSession("srv_other", {
+          client: { getDaemonConfig: otherGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_other", hostname: "other-workstation", version: "0.17.533" },
+          agents: new Map([[otherUnrelatedCustomAgent.id, otherUnrelatedCustomAgent]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_other", label: "Other Host", status: "online" },
+    ]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const openPromise = openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: targetThread,
+        source: "link-click",
+      },
+      deps,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await openPromise;
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(macGetDaemonConfig).not.toHaveBeenCalled();
+    expect(result.handled).toBe(true);
+    expect(result.navigatedRoute).toBe("/h/srv_mac/workspace/wks_1111111111111111");
+    expect(result.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_mac",
+      agentId: "ag_mac_builtin_codex",
+      workspaceId: "wks_1111111111111111",
+      archived: false,
+      panel: null,
+    });
+    expect(noopToast.show).not.toHaveBeenCalled();
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(250);
+  });
+
+  it("fails closed when ensureProviderRoots throws and another unmapped host matches via persistence.metadata.threadId, without blocking explicitly mapped machines", async () => {
+    const sharedThread = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const hostACodex = makeAgent({
+      id: "ag_a_codex",
+      serverId: "srv_a",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex", sessionId: sharedThread },
+    });
+    const hostBCustomThread = makeAgent({
+      id: "ag_b_custom_thread",
+      serverId: "srv_b",
+      provider: "custom-codex-b",
+      workspaceId: "wks_2222222222222222",
+      persistence: {
+        provider: "custom-codex-b",
+        sessionId: "other-session-id",
+        metadata: { threadId: sharedThread },
+      },
+    });
+    const hostCCustomSession = makeAgent({
+      id: "ag_c_custom_session",
+      serverId: "srv_c",
+      provider: "custom-codex-c",
+      workspaceId: "wks_3333333333333333",
+      persistence: {
+        provider: "custom-codex-c",
+        sessionId: sharedThread,
+      },
+    });
+
+    const sessions = {
+      srv_a: makeSession("srv_a", {
+        serverInfo: { serverId: "srv_a", hostname: "host-a", version: "0.17.533" },
+        agents: new Map([[hostACodex.id, hostACodex]]),
+      }),
+      srv_b: makeSession("srv_b", {
+        serverInfo: { serverId: "srv_b", hostname: "host-b", version: "0.17.533" },
+        agents: new Map([[hostBCustomThread.id, hostBCustomThread]]),
+      }),
+      srv_c: makeSession("srv_c", {
+        serverInfo: { serverId: "srv_c", hostname: "host-c", version: "0.17.533" },
+        agents: new Map([[hostCCustomSession.id, hostCCustomSession]]),
+      }),
+    };
+    const hosts = [
+      { serverId: "srv_a", label: "Host A" },
+      { serverId: "srv_b", label: "Host B" },
+      { serverId: "srv_c", label: "Host C" },
+    ];
+    const showAmbiguousMachineToast = vi.fn();
+    const throwingEnsure = vi.fn(async () => {
+      throw new Error("rpc failed");
+    });
+
+    const unmappedHarness = createDeps({
+      getHosts: () => hosts,
+      getSessions: () => sessions,
+      getConnectionStatusByServerId: () => ({ srv_a: "online", srv_b: "online", srv_c: "online" }),
+      hasDaemonConfigCache: () => false,
+      ensureProviderRoots: throwingEnsure,
+      showAmbiguousMachineToast,
+    });
+
+    const unmappedResult = await openPersonaSession(
+      { machineId: "unmapped-machine", sessionId: sharedThread, source: "link-click" },
+      unmappedHarness.deps,
+    );
+
+    expect(throwingEnsure).toHaveBeenCalledWith(["srv_b", "srv_c"]);
+    expect(unmappedResult.handled).toBe(false);
+    expect(unmappedResult.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-machine",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_a", "srv_b", "srv_c"],
+    });
+    expect(unmappedHarness.navigateToAgent).not.toHaveBeenCalled();
+    expect(showAmbiguousMachineToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        machineId: "unmapped-machine",
+        candidateServerIds: ["srv_a", "srv_b", "srv_c"],
+      }),
+    );
+
+    // Explicitly mapped machine MUST NOT be blocked by another slow/failing host with the same thread.
+    const mappedEnsure = vi.fn(async () => false);
+    const mappedHarness = createDeps({
+      getMachineServerMap: () => ({ "mapped-alias": "srv_a" }),
+      getHosts: () => hosts,
+      getSessions: () => sessions,
+      getConnectionStatusByServerId: () => ({ srv_a: "online", srv_b: "online", srv_c: "online" }),
+      hasDaemonConfigCache: () => false,
+      ensureProviderRoots: mappedEnsure,
+      showAmbiguousMachineToast: vi.fn(),
+    });
+
+    const mappedResult = await openPersonaSession(
+      { machineId: "mapped-alias", sessionId: sharedThread, source: "link-click" },
+      mappedHarness.deps,
+    );
+
+    expect(mappedEnsure).not.toHaveBeenCalled();
+    expect(mappedResult.handled).toBe(true);
+    expect(mappedResult.resolution).toEqual({
+      kind: "agent",
+      level: "provider_thread_id",
+      serverId: "srv_a",
+      agentId: "ag_a_codex",
+      workspaceId: "wks_1111111111111111",
+      archived: false,
+      panel: null,
+    });
+    expect(mappedHarness.navigateToAgent).toHaveBeenCalledTimes(1);
   });
 });
