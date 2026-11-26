@@ -557,7 +557,7 @@ export const personaEmbedLocales = {
       urlSavedToast: "URL du Persona Hub enregistrée.",
       testConnection: "Tester la connexion",
       testingConnection: "Test en cours...",
-      connectionOk: "Accessible · {{hubName}} (v{{version}})",
+      connectionOk: "Accessible · {{hubName}} (version {{version}})",
       connectionCorsUnreadable:
         "Le Hub a répondu, mais la politique CORS du navigateur bloque la lecture de la réponse. Testez dans Paseo Desktop ou ouvrez dans un nouvel onglet.",
       connectionFailed: "Inaccessible : {{error}}",
