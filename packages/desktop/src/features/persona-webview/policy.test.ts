@@ -5,6 +5,8 @@ import {
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
+  isPersonaDiskPartitionDirName,
   isPersonaWebviewAttach,
   isPersonaWebviewPartition,
   isValidPersonaHubUrl,
@@ -13,7 +15,10 @@ import {
   normalizePersonaHubEntries,
   normalizePersonaHubUrl,
   normalizePersonaHubUrlList,
+  normalizePersonaWebviewPartition,
   parsePersonaSessionPath,
+  PERSONA_DISK_PARTITION_DIR_NAME,
+  PERSONA_DISK_PARTITION_DIR_PREFIX,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_WEBVIEW_PARTITION,
   PERSONA_WEBVIEW_PARTITION_PREFIX,
@@ -400,5 +405,69 @@ describe("persona-webview policy", () => {
         "https://proxy.example.com/hub-a",
       ]),
     ).toBeNull();
+  });
+
+  it("canonicalizes Hub partitions to lowercase, rejects uppercase/case-colliding entries fail-closed, and strictly validates on-disk partition directory names", () => {
+    expect(PERSONA_DISK_PARTITION_DIR_NAME).toBe("persona");
+    expect(PERSONA_DISK_PARTITION_DIR_PREFIX).toBe("persona-");
+
+    // Hub ID resolution folds ASCII case to canonical lowercase and maps Hub-Default -> persist:persona
+    expect(resolvePersonaHubPartition("hub-Case")).toBe("persist:persona-hub-case");
+    expect(resolvePersonaHubPartition("hub-case")).toBe("persist:persona-hub-case");
+    expect(resolvePersonaHubPartition("HUB-DEFAULT")).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(normalizePersonaWebviewPartition("persist:persona-hub-Case")).toBe(
+      "persist:persona-hub-case",
+    );
+    expect(normalizePersonaWebviewPartition("PERSIST:persona")).toBeNull();
+    expect(normalizePersonaWebviewPartition("persist:PERSONA")).toBeNull();
+
+    // Active partition validator requires canonical lowercase (prevents Electron Session vs FS divergence)
+    expect(isPersonaWebviewPartition("persist:persona-hub-case")).toBe(true);
+    expect(isPersonaWebviewPartition("persist:persona-hub-Case")).toBe(false);
+    expect(isPersonaWebviewPartition("PERSIST:persona")).toBe(false);
+    expect(isPersonaWebviewPartition("persist:PERSONA")).toBe(false);
+
+    // Case-colliding or non-lowercase entries fail closed in normalizePersonaHubEntries & attach matching
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+        { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18661" },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+        { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toBeNull();
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-Case", src: "http://127.0.0.1:18660/" },
+        [{ partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" }],
+      ),
+    ).toBeNull();
+
+    // Disk partition scanner validator allows exact persona / safe persona-* dirs (incl. legacy mixed case)
+    // while strictly excluding paseo-browser and malformed/unsafe names
+    expect(isPersonaDiskPartitionDirName("persona")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-work")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-work-a1b2c3d4")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-LegacyCase")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("paseo-browser")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona_other")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-../escape")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-bad.dot")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("PERSONA")).toBe(false);
+
+    expect(isPersonaClearablePartition("persist:persona")).toBe(true);
+    expect(isPersonaClearablePartition("persist:persona-hub-LegacyCase")).toBe(true);
+    expect(isPersonaClearablePartition("persist:paseo-browser")).toBe(false);
+    expect(isPersonaClearablePartition("PERSIST:persona")).toBe(false);
   });
 });

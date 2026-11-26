@@ -54,7 +54,7 @@ export const DEFAULT_PERSONA_SPLIT_RATIO = 0.5;
 export const MAX_PERSONA_HUBS = 32;
 export const MAX_PERSONA_HUB_NAME_LENGTH = 64;
 export const MAX_PERSONA_HUB_ID_LENGTH = 64;
-const PERSONA_HUB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const PERSONA_HUB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export interface PersonaHubPartitionEntry {
   partition: string;
@@ -62,33 +62,33 @@ export interface PersonaHubPartitionEntry {
 }
 
 /**
- * Maps a Persona Hub ID to its isolated persistent Electron partition:
- * - `hub-default` (migrated from 0.17.534) stays on `persist:persona` to preserve login state.
- * - Additional Hubs get `persist:persona-<id>` with a strictly validated ASCII slug.
+ * Maps a Persona Hub ID to its canonical lowercase isolated persistent Electron partition:
+ * - `hub-default` (case-insensitively, migrated from 0.17.534) stays on `persist:persona`.
+ * - Additional Hubs get `persist:persona-<lowercase-id>` with a strictly validated ASCII slug.
  */
 export function resolvePersonaHubPartition(
   hubId: string | undefined | null,
   options?: { basePartition?: string; partitionPrefix?: string },
 ): string | null {
-  if (typeof hubId !== "string") {
+  const normalizedId = sanitizePersonaHubId(hubId);
+  if (!normalizedId) {
     return null;
   }
-  const trimmed = hubId.trim();
-  if (!trimmed || !PERSONA_HUB_ID_PATTERN.test(trimmed)) {
-    return null;
-  }
+  const rawBase = typeof options?.basePartition === "string" ? options.basePartition.trim() : "";
   const basePartition =
-    typeof options?.basePartition === "string" && options.basePartition.startsWith("persist:")
-      ? options.basePartition
+    rawBase.startsWith("persist:") && rawBase === rawBase.toLowerCase()
+      ? rawBase
       : PERSONA_WEBVIEW_PARTITION;
-  if (trimmed === DEFAULT_PERSONA_HUB_ID) {
+  if (normalizedId === DEFAULT_PERSONA_HUB_ID) {
     return basePartition;
   }
+  const rawPrefix =
+    typeof options?.partitionPrefix === "string" ? options.partitionPrefix.trim() : "";
   const prefix =
-    typeof options?.partitionPrefix === "string" && options.partitionPrefix.startsWith("persist:")
-      ? options.partitionPrefix
+    rawPrefix.startsWith("persist:") && rawPrefix === rawPrefix.toLowerCase()
+      ? rawPrefix
       : PERSONA_WEBVIEW_PARTITION_PREFIX;
-  return `${prefix}${trimmed}`;
+  return `${prefix}${normalizedId}`;
 }
 
 export const DEFAULT_PERSONA_HUB_PROFILE: PersonaHubProfile = {
@@ -234,17 +234,46 @@ function sanitizePersonaHubId(rawId: unknown): string | null {
   if (typeof rawId !== "string") {
     return null;
   }
-  const trimmed = rawId.trim();
+  const normalized = rawId.trim().toLowerCase();
   if (
-    trimmed.length === 0 ||
-    trimmed.length > MAX_PERSONA_HUB_ID_LENGTH ||
-    !PERSONA_HUB_ID_PATTERN.test(trimmed)
+    normalized.length === 0 ||
+    normalized.length > MAX_PERSONA_HUB_ID_LENGTH ||
+    !PERSONA_HUB_ID_PATTERN.test(normalized)
   ) {
     return null;
   }
-  return trimmed;
+  return normalized;
 }
 
+function appendHubIdSuffix(base: string, suffix: string): string {
+  const maxBaseLength = Math.max(1, MAX_PERSONA_HUB_ID_LENGTH - suffix.length - 1);
+  const trimmedBase = base.slice(0, maxBaseLength).replace(/[-_]+$/, "") || "hub";
+  return `${trimmedBase}-${suffix}`;
+}
+
+function generateRandomLowercaseToken(length = 8): string {
+  const hexAlphabet = "0123456789abcdef";
+  const byteCount = Math.ceil(length / 2);
+  const bytes = new Uint8Array(byteCount);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  let token = "";
+  for (const byte of bytes) {
+    token += hexAlphabet[(byte >> 4) & 0x0f] + hexAlphabet[byte & 0x0f];
+  }
+  return token.slice(0, length);
+}
+
+/**
+ * Generates a non-reusable canonical lowercase Hub ID with a random suffix so deleting a Hub
+ * (e.g. "Work") and re-creating another Hub with the same name never reuses the previous
+ * `persist:persona-<id>` Electron partition directory.
+ */
 export function createPersonaHubId(existingIds: ReadonlySet<string>, nameHint?: string): string {
   const slug = stripControlChars(nameHint ?? "")
     .toLowerCase()
@@ -252,46 +281,86 @@ export function createPersonaHubId(existingIds: ReadonlySet<string>, nameHint?: 
     .replace(/^-+|-+$/g, "")
     .slice(0, 32);
   const base = slug ? `hub-${slug}` : "hub";
+  const existingLowerIds = new Set<string>();
+  for (const existing of existingIds) {
+    const normalized = sanitizePersonaHubId(existing);
+    if (normalized) {
+      existingLowerIds.add(normalized);
+    }
+  }
   // Reserve DEFAULT_PERSONA_HUB_ID so newly created Hubs never inherit the migrated persist:persona partition.
   const isTaken = (candidate: string): boolean =>
-    candidate === DEFAULT_PERSONA_HUB_ID || existingIds.has(candidate);
-  if (!isTaken(base)) {
-    return base;
-  }
-  for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `${base}-${index}`;
+    candidate === DEFAULT_PERSONA_HUB_ID || existingLowerIds.has(candidate);
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const candidate = appendHubIdSuffix(base, generateRandomLowercaseToken(8));
     if (!isTaken(candidate)) {
       return candidate;
     }
   }
-  return `hub-${Date.now()}`;
+  const fallback = appendHubIdSuffix(
+    base,
+    `${Date.now().toString(36)}${generateRandomLowercaseToken(6)}`,
+  );
+  return isTaken(fallback)
+    ? `hub-${Date.now().toString(36)}${generateRandomLowercaseToken(8)}`
+    : fallback;
 }
 
-function allocateUniqueHubId(rawId: unknown, usedIds: Set<string>, index: number): string {
+function allocateUniqueHubId(
+  rawId: unknown,
+  usedIds: Set<string>,
+  reservedLowerIds: ReadonlySet<string>,
+  index: number,
+): string {
   const sanitized = sanitizePersonaHubId(rawId);
   if (sanitized && !usedIds.has(sanitized)) {
     usedIds.add(sanitized);
     return sanitized;
   }
   const base = sanitized ?? `hub-${index + 1}`;
-  if (!usedIds.has(base)) {
+  if (
+    !sanitized &&
+    base !== DEFAULT_PERSONA_HUB_ID &&
+    !usedIds.has(base) &&
+    !reservedLowerIds.has(base)
+  ) {
     usedIds.add(base);
     return base;
   }
   let suffix = 2;
-  while (usedIds.has(`${base}-${suffix}`)) {
+  let candidate = appendHubIdSuffix(base, String(suffix));
+  while (
+    candidate === DEFAULT_PERSONA_HUB_ID ||
+    usedIds.has(candidate) ||
+    reservedLowerIds.has(candidate)
+  ) {
     suffix += 1;
+    candidate = appendHubIdSuffix(base, String(suffix));
   }
-  const uniqueId = `${base}-${suffix}`;
-  usedIds.add(uniqueId);
-  return uniqueId;
+  usedIds.add(candidate);
+  return candidate;
 }
 
-function sanitizeHubProfileList(rawHubs: unknown[]): PersonaHubProfile[] {
-  const hubs: PersonaHubProfile[] = [];
-  const usedIds = new Set<string>();
+interface SanitizedHubProfileListResult {
+  hubs: PersonaHubProfile[];
+  rawIdToAllocatedId: Map<string, string>;
+  lowerIdToAllocatedId: Map<string, string>;
+}
 
-  for (let index = 0; index < rawHubs.length && hubs.length < MAX_PERSONA_HUBS; index += 1) {
+function sanitizeHubProfileList(rawHubs: unknown[]): SanitizedHubProfileListResult {
+  const validRecords: Array<{
+    record: Record<string, unknown>;
+    normalizedUrl: string;
+    rawTrimmedId: string;
+    sanitizedId: string | null;
+  }> = [];
+  const reservedLowerIds = new Set<string>();
+
+  for (
+    let index = 0;
+    index < rawHubs.length && validRecords.length < MAX_PERSONA_HUBS;
+    index += 1
+  ) {
     const item = rawHubs[index];
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       continue;
@@ -307,7 +376,27 @@ function sanitizeHubProfileList(rawHubs: unknown[]): PersonaHubProfile[] {
       }
       normalizedUrl = validated.url;
     }
-    const id = allocateUniqueHubId(record.id, usedIds, hubs.length);
+    const rawTrimmedId = typeof record.id === "string" ? record.id.trim() : "";
+    const sanitizedId = sanitizePersonaHubId(record.id);
+    if (sanitizedId) {
+      reservedLowerIds.add(sanitizedId);
+    }
+    validRecords.push({ record, normalizedUrl, rawTrimmedId, sanitizedId });
+  }
+
+  const hubs: PersonaHubProfile[] = [];
+  const usedIds = new Set<string>();
+  const rawIdToAllocatedId = new Map<string, string>();
+  const lowerIdToAllocatedId = new Map<string, string>();
+
+  for (const { record, normalizedUrl, rawTrimmedId, sanitizedId } of validRecords) {
+    const id = allocateUniqueHubId(record.id, usedIds, reservedLowerIds, hubs.length);
+    if (rawTrimmedId && !rawIdToAllocatedId.has(rawTrimmedId)) {
+      rawIdToAllocatedId.set(rawTrimmedId, id);
+    }
+    if (sanitizedId && !lowerIdToAllocatedId.has(sanitizedId)) {
+      lowerIdToAllocatedId.set(sanitizedId, id);
+    }
     const name = sanitizePersonaHubName(record.name, normalizedUrl);
     const machineServerMap = sanitizeMachineServerMap(record.machineServerMap);
     hubs.push({
@@ -318,7 +407,30 @@ function sanitizeHubProfileList(rawHubs: unknown[]): PersonaHubProfile[] {
     });
   }
 
-  return hubs;
+  return { hubs, rawIdToAllocatedId, lowerIdToAllocatedId };
+}
+
+function resolveNormalizedHubRefId(
+  rawRef: unknown,
+  rawIdToAllocatedId: ReadonlyMap<string, string>,
+  lowerIdToAllocatedId: ReadonlyMap<string, string>,
+): string | null {
+  if (typeof rawRef !== "string") {
+    return null;
+  }
+  const trimmed = rawRef.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const exactMatch = rawIdToAllocatedId.get(trimmed);
+  if (exactMatch) {
+    return exactMatch;
+  }
+  const normalized = sanitizePersonaHubId(trimmed);
+  if (!normalized) {
+    return null;
+  }
+  return lowerIdToAllocatedId.get(normalized) ?? normalized;
 }
 
 function migrateLegacySingleHub(record: Record<string, unknown>): PersonaHubProfile[] {
@@ -351,15 +463,21 @@ function resolveNormalizedSplitState(input: {
   hubs: readonly PersonaHubProfile[];
   activeHubId: string;
   requestedSecondaryId: unknown;
+  rawIdToAllocatedId: ReadonlyMap<string, string>;
+  lowerIdToAllocatedId: ReadonlyMap<string, string>;
   splitRequested: boolean;
 }): { splitEnabled: boolean; secondaryHubId: string | null } {
   if (input.hubs.length < 2 || !input.activeHubId) {
     return { splitEnabled: false, secondaryHubId: null };
   }
-  const sanitizedSecondary = sanitizePersonaHubId(input.requestedSecondaryId);
+  const resolvedSecondary = resolveNormalizedHubRefId(
+    input.requestedSecondaryId,
+    input.rawIdToAllocatedId,
+    input.lowerIdToAllocatedId,
+  );
   const matchedSecondary =
-    sanitizedSecondary && sanitizedSecondary !== input.activeHubId
-      ? input.hubs.find((hub) => hub.id === sanitizedSecondary)
+    resolvedSecondary && resolvedSecondary !== input.activeHubId
+      ? input.hubs.find((hub) => hub.id === resolvedSecondary)
       : undefined;
   let secondaryHubId: string | null = matchedSecondary?.id ?? null;
   if (!secondaryHubId && input.splitRequested) {
@@ -375,11 +493,19 @@ function normalizePersonaEmbedSettingsRecord(value: unknown): PersonaEmbedSettin
     return DEFAULT_PERSONA_EMBED_SETTINGS;
   }
   const record = value as Record<string, unknown>;
-  const hubs = Array.isArray(record.hubs)
+  const { hubs, rawIdToAllocatedId, lowerIdToAllocatedId } = Array.isArray(record.hubs)
     ? sanitizeHubProfileList(record.hubs)
-    : migrateLegacySingleHub(record);
+    : {
+        hubs: migrateLegacySingleHub(record),
+        rawIdToAllocatedId: new Map<string, string>(),
+        lowerIdToAllocatedId: new Map<string, string>(),
+      };
 
-  const requestedActiveId = sanitizePersonaHubId(record.activeHubId);
+  const requestedActiveId = resolveNormalizedHubRefId(
+    record.activeHubId,
+    rawIdToAllocatedId,
+    lowerIdToAllocatedId,
+  );
   const activeHub =
     (requestedActiveId ? hubs.find((hub) => hub.id === requestedActiveId) : undefined) ??
     hubs[0] ??
@@ -389,6 +515,8 @@ function normalizePersonaEmbedSettingsRecord(value: unknown): PersonaEmbedSettin
     hubs,
     activeHubId,
     requestedSecondaryId: record.secondaryHubId,
+    rawIdToAllocatedId,
+    lowerIdToAllocatedId,
     splitRequested: record.splitEnabled === true,
   });
 
@@ -651,12 +779,14 @@ export function addPersonaHubProfile(
   if (!validatedUrl.ok) {
     return { ok: false, error: validatedUrl.error };
   }
-  const existingIds = new Set(settings.hubs.map((hub) => hub.id));
+  const existingLowerIds = new Set(settings.hubs.map((hub) => hub.id.trim().toLowerCase()));
   const sanitizedRequestedId = sanitizePersonaHubId(input.id);
   const id =
-    sanitizedRequestedId && !existingIds.has(sanitizedRequestedId)
+    sanitizedRequestedId &&
+    sanitizedRequestedId !== DEFAULT_PERSONA_HUB_ID &&
+    !existingLowerIds.has(sanitizedRequestedId)
       ? sanitizedRequestedId
-      : createPersonaHubId(existingIds, input.name || validatedUrl.displayHost);
+      : createPersonaHubId(existingLowerIds, input.name || validatedUrl.displayHost);
   const hub: PersonaHubProfile = {
     id,
     name: sanitizePersonaHubName(input.name, validatedUrl.url),
@@ -668,7 +798,8 @@ export function addPersonaHubProfile(
     hubs: [...settings.hubs, hub],
     activeHubId: settings.activeHubId || hub.id,
   });
-  return { ok: true, settings: nextSettings, hub };
+  const committedHub = nextSettings.hubs.find((entry) => entry.id === hub.id) ?? hub;
+  return { ok: true, settings: nextSettings, hub: committedHub };
 }
 
 export function updatePersonaHubProfile(

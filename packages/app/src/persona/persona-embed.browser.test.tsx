@@ -28,6 +28,7 @@ import {
   type PersonaGuestIpcLike,
 } from "../../../desktop/src/features/persona-webview/guest-preload";
 import {
+  createPersonaHostHubRegistry,
   registerPersonaWebviewGuestIpcBridge,
   type PersonaGuestFrameLike,
   type PersonaGuestIpcMainEventLike,
@@ -2084,5 +2085,186 @@ describe("Persona C2 embed Chromium browser regressions", () => {
     await renderInBrowser(legacyQc, <PersonaSettingsSection />);
     expect(hostEl.querySelector('[data-testid="persona-settings-clear-hub-session"]')).toBeNull();
     expect(hostEl.querySelector('[data-testid="persona-settings-clear-session"]')).not.toBeNull();
+  });
+
+  it("clears deleted non-default Hub partition, sweeps residual disk partitions on Clear All, never reuses deleted Work ID, and blocks case-colliding partitions in registry", async () => {
+    const defaultUrl = `${window.location.origin}/__persona-default-iso`;
+    const workUrl = `${window.location.origin}/__persona-work-iso`;
+    const hostId = 88;
+    const simulatedDiskPartitions = new Set<string>([
+      PERSONA_WEBVIEW_PARTITION,
+      "persist:persona-hub-work", // legacy residual on-disk partition
+      "persist:paseo-browser", // unrelated browser partition — must never be cleared
+    ]);
+    const clearedPartitionsHistory: string[] = [];
+
+    const registry = createPersonaHostHubRegistry({
+      listPersistedPartitions: () => Array.from(simulatedDiskPartitions),
+    });
+
+    const clearSessionSpy = vi.fn(
+      async (target?: string | { partition?: string; hubUrl?: string }) => {
+        const resolved = registry.resolveClearSessionTarget(hostId, target);
+        if (!resolved.ok) {
+          throw new Error(resolved.error);
+        }
+        const partitions = resolved.mode === "single" ? [resolved.partition] : resolved.partitions;
+        for (const partition of partitions) {
+          clearedPartitionsHistory.push(partition);
+        }
+      },
+    );
+
+    installDesktopPersonaMock({
+      setHubEntries: vi.fn(async (entries, options) =>
+        registry.setHostHubEntries(hostId, entries, options),
+      ),
+      clearSession: clearSessionSpy,
+    });
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "Default Hub",
+          hubUrl: defaultUrl,
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+    });
+
+    await renderInBrowser(qc, <PersonaSettingsSection />);
+
+    const setInputValue = (testId: string, value: string) => {
+      const input = hostEl.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    // Step 1: Create "Work" Hub -> gets non-reusable random lowercase ID (not static "hub-work")
+    await act(async () => {
+      (hostEl.querySelector('[data-testid="persona-settings-add-hub"]') as HTMLElement)?.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Work");
+      setInputValue("persona-settings-new-hub-url", workUrl);
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-new-hub-submit"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+
+    const workHub1 = qc
+      .getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)
+      ?.persona.hubs.find((hub) => hub.name === "Work");
+    expect(workHub1).toBeDefined();
+    expect(workHub1!.id).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workHub1!.id).not.toBe("hub-work");
+    const workPartition1 = `${PERSONA_WEBVIEW_PARTITION_PREFIX}${workHub1!.id}`;
+    simulatedDiskPartitions.add(workPartition1);
+
+    // Step 2: Delete non-default "Work" Hub -> synchronously clears its isolated partition & revokes allowlist
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          `[data-testid="persona-settings-hub-delete-${workHub1!.id}"]`,
+        ) as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs).toHaveLength(1);
+    expect(clearSessionSpy).toHaveBeenCalledWith({
+      partition: workPartition1,
+      hubUrl: workUrl,
+    });
+    expect(clearedPartitionsHistory).toContain(workPartition1);
+    // Deleted partition is revoked from main registry immediately after deletion
+    expect(
+      registry.authorizeWebviewAttach(hostId, { partition: workPartition1, src: `${workUrl}/` }),
+    ).toBeNull();
+
+    // Step 3: Click Clear All -> sweeps default + deleted Work + legacy persist:persona-hub-work, never paseo-browser
+    clearedPartitionsHistory.length = 0;
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-clear-session"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(clearedPartitionsHistory).toEqual(
+      expect.arrayContaining([
+        PERSONA_WEBVIEW_PARTITION,
+        "persist:persona-hub-work",
+        workPartition1,
+      ]),
+    );
+    expect(clearedPartitionsHistory).not.toContain("persist:paseo-browser");
+
+    // Step 4: Re-create another Hub named "Work" -> gets a brand new lowercase ID & partition
+    await act(async () => {
+      (hostEl.querySelector('[data-testid="persona-settings-add-hub"]') as HTMLElement)?.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Work");
+      setInputValue("persona-settings-new-hub-url", workUrl);
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-new-hub-submit"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    const workHub2 = qc
+      .getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)
+      ?.persona.hubs.find((hub) => hub.name === "Work");
+    expect(workHub2).toBeDefined();
+    expect(workHub2!.id).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workHub2!.id).not.toBe(workHub1!.id);
+    expect(workHub2!.id).not.toBe("hub-work");
+
+    // Step 5: Deleting hub-default does NOT call single-partition clearSession on persist:persona
+    clearSessionSpy.mockClear();
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          `[data-testid="persona-settings-hub-delete-${DEFAULT_PERSONA_HUB_ID}"]`,
+        ) as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(clearSessionSpy).not.toHaveBeenCalled();
+
+    // Step 6: Case-colliding config disambiguates cleanly and main registry blocks raw uppercase collisions
+    const normalizedCaseConfig = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        { id: "hub-Case", name: "Upper", hubUrl: defaultUrl, machineServerMap: {} },
+        { id: "hub-case", name: "Lower", hubUrl: workUrl, machineServerMap: {} },
+      ],
+      activeHubId: "hub-case",
+      splitEnabled: true,
+      secondaryHubId: "hub-Case",
+    });
+    expect(normalizedCaseConfig.hubs.map((hub) => hub.id)).toEqual(["hub-case", "hub-case-2"]);
+    expect(normalizedCaseConfig.activeHubId).toBe("hub-case-2");
+    expect(normalizedCaseConfig.secondaryHubId).toBe("hub-case");
+    expect(
+      registry.setHostHubEntries(
+        hostId,
+        [
+          { partition: "persist:persona-hub-Case", hubUrl: defaultUrl },
+          { partition: "persist:persona-hub-case", hubUrl: workUrl },
+        ],
+        { enabled: true },
+      ),
+    ).toBe(false);
   });
 });

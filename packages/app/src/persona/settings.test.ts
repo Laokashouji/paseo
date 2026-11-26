@@ -6,6 +6,7 @@ import {
   closePersonaSplitPane,
   collectValidPersonaHubPartitionEntries,
   collectValidPersonaHubUrls,
+  createPersonaHubId,
   DEFAULT_PERSONA_EMBED_SETTINGS,
   DEFAULT_PERSONA_HUB_ID,
   DEFAULT_PERSONA_HUB_NAME,
@@ -15,6 +16,7 @@ import {
   getActivePersonaHub,
   getSecondaryPersonaHub,
   isMixedContentIframeBlocked,
+  MAX_PERSONA_HUB_ID_LENGTH,
   MAX_PERSONA_HUBS,
   MAX_PERSONA_SPLIT_RATIO,
   MIN_PERSONA_SPLIT_RATIO,
@@ -770,5 +772,173 @@ describe("persona embed settings", () => {
     expect(isMixedContentIframeBlocked("https:", "http://10.37.217.3:18660")).toBe(true);
     expect(isMixedContentIframeBlocked("https:", "https://hub.example.com")).toBe(false);
     expect(isMixedContentIframeBlocked("http:", "http://10.37.217.3:18660")).toBe(false);
+  });
+
+  it("allocates non-reusable random lowercase Hub IDs so deleting and re-adding a same-name Hub never reuses its partition", () => {
+    let state = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubUrl: "http://127.0.0.1:18660",
+    });
+
+    const addWork1 = addPersonaHubProfile(state, {
+      name: "Work",
+      hubUrl: "http://127.0.0.1:18661",
+    });
+    expect(addWork1.ok).toBe(true);
+    if (!addWork1.ok) return;
+    const workId1 = addWork1.hub.id;
+    expect(workId1).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workId1).toBe(workId1.toLowerCase());
+    expect(workId1).not.toBe("hub-work");
+    const partition1 = resolvePersonaHubPartition(workId1);
+    expect(partition1).toBe(`persist:persona-${workId1}`);
+
+    // Delete Work, then re-create a Hub with the exact same name "Work"
+    state = removePersonaHubProfile(addWork1.settings, workId1);
+    const addWork2 = addPersonaHubProfile(state, {
+      name: "Work",
+      hubUrl: "http://127.0.0.1:18661",
+    });
+    expect(addWork2.ok).toBe(true);
+    if (!addWork2.ok) return;
+    const workId2 = addWork2.hub.id;
+    expect(workId2).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workId2).not.toBe(workId1);
+    expect(workId2).not.toBe("hub-work");
+    expect(resolvePersonaHubPartition(workId2)).toBe(`persist:persona-${workId2}`);
+    expect(resolvePersonaHubPartition(workId2)).not.toBe(partition1);
+
+    // Direct createPersonaHubId also honors case-insensitive existing IDs and max length
+    const generated = createPersonaHubId(new Set(["HUB-WORK"]), "A".repeat(80));
+    expect(generated.length).toBeLessThanOrEqual(MAX_PERSONA_HUB_ID_LENGTH);
+    expect(generated).toBe(generated.toLowerCase());
+
+    // Explicit hub-default / HUB-DEFAULT request cannot hijack the migrated persist:persona partition
+    const afterDeleteDefault = removePersonaHubProfile(addWork2.settings, DEFAULT_PERSONA_HUB_ID);
+    const hijackAttempt = addPersonaHubProfile(afterDeleteDefault, {
+      id: "HUB-DEFAULT",
+      name: "Default",
+      hubUrl: "http://127.0.0.1:18662",
+    });
+    expect(hijackAttempt.ok).toBe(true);
+    if (hijackAttempt.ok) {
+      expect(hijackAttempt.hub.id).not.toBe(DEFAULT_PERSONA_HUB_ID);
+      expect(resolvePersonaHubPartition(hijackAttempt.hub.id)).not.toBe(PERSONA_WEBVIEW_PARTITION);
+    }
+  });
+
+  it("canonicalizes and disambiguates case-colliding Hub IDs (hub-Case vs hub-case) while preserving activeHubId/secondaryHubId references", () => {
+    expect(resolvePersonaHubPartition("hub-Case")).toBe("persist:persona-hub-case");
+    expect(resolvePersonaHubPartition("HUB-DEFAULT")).toBe(PERSONA_WEBVIEW_PARTITION);
+
+    const normalized = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "hub-Case",
+          name: "Upper Hub",
+          hubUrl: "http://127.0.0.1:18660",
+          machineServerMap: { box: "srv_upper" },
+        },
+        {
+          id: "hub-case",
+          name: "Lower Hub",
+          hubUrl: "http://127.0.0.1:18661",
+          machineServerMap: { box: "srv_lower" },
+        },
+      ],
+      activeHubId: "hub-case",
+      splitEnabled: true,
+      secondaryHubId: "hub-Case",
+    });
+
+    expect(normalized.hubs.map((h) => ({ id: h.id, name: h.name }))).toEqual([
+      { id: "hub-case", name: "Upper Hub" },
+      { id: "hub-case-2", name: "Lower Hub" },
+    ]);
+    // Exact raw ID references survive disambiguation without flipping primary and secondary panes
+    expect(normalized.activeHubId).toBe("hub-case-2");
+    expect(normalized.secondaryHubId).toBe("hub-case");
+    expect(normalized.splitEnabled).toBe(true);
+    expect(normalized.hubUrl).toBe("http://127.0.0.1:18661");
+    expect(normalized.machineServerMap).toEqual({ box: "srv_lower" });
+    expect(collectValidPersonaHubPartitionEntries(normalized)).toEqual([
+      { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" },
+      { partition: "persist:persona-hub-case-2", hubUrl: "http://127.0.0.1:18661" },
+    ]);
+
+    // Existing hub-case-2 keeps its own ID when hub-Case and hub-case collide
+    const withExistingSuffix = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        { id: "hub-Case", name: "Upper", hubUrl: "http://127.0.0.1:18660", machineServerMap: {} },
+        { id: "hub-case", name: "Lower", hubUrl: "http://127.0.0.1:18661", machineServerMap: {} },
+        {
+          id: "hub-case-2",
+          name: "Existing Two",
+          hubUrl: "http://127.0.0.1:18662",
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: "hub-case-2",
+      splitEnabled: true,
+      secondaryHubId: "hub-case",
+    });
+    expect(withExistingSuffix.hubs.map((h) => h.id)).toEqual([
+      "hub-case",
+      "hub-case-3",
+      "hub-case-2",
+    ]);
+    expect(withExistingSuffix.activeHubId).toBe("hub-case-2");
+    expect(withExistingSuffix.secondaryHubId).toBe("hub-case-3");
+
+    // Hub-Default + hub-default disambiguate to distinct partitions, and max-length IDs stay <= 64 chars
+    const maxLenLower = "a".repeat(MAX_PERSONA_HUB_ID_LENGTH);
+    const maxLenUpper = "A".repeat(MAX_PERSONA_HUB_ID_LENGTH);
+    const edgeCase = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "Hub-Default",
+          name: "Default Upper",
+          hubUrl: "http://127.0.0.1:18660",
+          machineServerMap: {},
+        },
+        {
+          id: "hub-default",
+          name: "Default Lower",
+          hubUrl: "http://127.0.0.1:18661",
+          machineServerMap: {},
+        },
+        {
+          id: maxLenUpper,
+          name: "Long Upper",
+          hubUrl: "http://127.0.0.1:18662",
+          machineServerMap: {},
+        },
+        {
+          id: maxLenLower,
+          name: "Long Lower",
+          hubUrl: "http://127.0.0.1:18663",
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: maxLenLower,
+      secondaryHubId: "Hub-Default",
+      splitEnabled: true,
+    });
+    expect(edgeCase.hubs[0]?.id).toBe("hub-default");
+    expect(edgeCase.hubs[1]?.id).toBe("hub-default-2");
+    expect(edgeCase.hubs[2]?.id).toBe(maxLenLower);
+    expect(edgeCase.hubs[3]?.id.length).toBeLessThanOrEqual(MAX_PERSONA_HUB_ID_LENGTH);
+    expect(edgeCase.hubs[3]?.id).not.toBe(maxLenLower);
+    expect(edgeCase.activeHubId).toBe(edgeCase.hubs[3]?.id);
+    expect(edgeCase.secondaryHubId).toBe("hub-default");
+    const entries = collectValidPersonaHubPartitionEntries(edgeCase);
+    expect(entries).toHaveLength(4);
+    expect(new Set(entries.map((entry) => entry.partition)).size).toBe(4);
+    for (const entry of entries) {
+      expect(entry.partition).toBe(entry.partition.toLowerCase());
+    }
   });
 });

@@ -193,7 +193,7 @@ function deduplicatePartitionEntries(
   }
   const byPartition = new Map<string, DesktopPersonaHubPartitionEntry>();
   for (const item of entries) {
-    const partition = item.partition.trim();
+    const partition = item.partition.trim().toLowerCase();
     const hubUrl = item.hubUrl.trim();
     if (partition.length > 0 && hubUrl.length > 0) {
       byPartition.set(partition, { partition, hubUrl });

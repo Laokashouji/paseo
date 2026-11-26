@@ -1,5 +1,7 @@
 export const PERSONA_WEBVIEW_PARTITION = "persist:persona";
 export const PERSONA_WEBVIEW_PARTITION_PREFIX = "persist:persona-";
+export const PERSONA_DISK_PARTITION_DIR_NAME = "persona";
+export const PERSONA_DISK_PARTITION_DIR_PREFIX = "persona-";
 export const DEFAULT_PERSONA_HUB_ID = "hub-default";
 export const PERSONA_OPEN_SESSION_EVENT_NAME = "persona-open-session";
 export const PERSONA_OPEN_SESSION_EVENT = `paseo:event:${PERSONA_OPEN_SESSION_EVENT_NAME}`;
@@ -38,13 +40,37 @@ export interface NormalizedPersonaHubUrl {
 
 const PERSONA_ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const PERSONA_HEALTH_ENDPOINT_SUFFIX = "/api/v1/health";
-const PERSONA_HUB_PARTITION_SUFFIX_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const PERSONA_HUB_PARTITION_SUFFIX_LOWER_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const PERSONA_HUB_PARTITION_SUFFIX_ANY_CASE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 export const MAX_PERSONA_HUB_URLS = 32;
 
 /**
- * Validates that a Chromium partition name belongs strictly to Persona:
+ * Validates and folds a Persona persistent partition name to canonical lowercase.
+ * Rejects non-string values, uppercase `persist:` prefixes, and unsafe suffixes.
+ */
+export function normalizePersonaWebviewPartition(partition: unknown): string | null {
+  if (typeof partition !== "string") {
+    return null;
+  }
+  if (partition === PERSONA_WEBVIEW_PARTITION) {
+    return PERSONA_WEBVIEW_PARTITION;
+  }
+  if (!partition.startsWith(PERSONA_WEBVIEW_PARTITION_PREFIX)) {
+    return null;
+  }
+  const suffix = partition.slice(PERSONA_WEBVIEW_PARTITION_PREFIX.length);
+  if (!PERSONA_HUB_PARTITION_SUFFIX_ANY_CASE_PATTERN.test(suffix)) {
+    return null;
+  }
+  return `${PERSONA_WEBVIEW_PARTITION_PREFIX}${suffix.toLowerCase()}`;
+}
+
+/**
+ * Validates that a Chromium partition name belongs strictly to Persona AND is already canonical
+ * lowercase so case-insensitive filesystems (macOS/Windows) and Electron's case-sensitive Session
+ * cache can never diverge or collide on the same on-disk partition directory:
  * - Legacy/default Hub partition: `persist:persona`
- * - Additional per-Hub isolated partition: `persist:persona-<id>` with safe ASCII slug
+ * - Additional per-Hub isolated partition: `persist:persona-<lowercase-id>`
  */
 export function isPersonaWebviewPartition(partition: unknown): partition is string {
   if (typeof partition !== "string") {
@@ -57,29 +83,57 @@ export function isPersonaWebviewPartition(partition: unknown): partition is stri
     return false;
   }
   const suffix = partition.slice(PERSONA_WEBVIEW_PARTITION_PREFIX.length);
-  return PERSONA_HUB_PARTITION_SUFFIX_PATTERN.test(suffix);
+  return PERSONA_HUB_PARTITION_SUFFIX_LOWER_PATTERN.test(suffix);
 }
 
 /**
- * Maps a Persona Hub ID to its persistent Electron session partition:
- * - `hub-default` (migrated from 0.17.534) stays on `persist:persona` to preserve login state.
- * - Any other valid Hub ID receives an isolated `persist:persona-<id>` partition.
+ * Validates an on-disk directory name under Electron's `<userData>/Partitions/` directory.
+ * Accepts exact `persona` and safe `persona-<ascii>` names (including historical mixed-case
+ * directories left on case-sensitive filesystems) while rejecting unrelated partitions such as
+ * `paseo-browser`, path traversal segments, or empty suffixes.
+ */
+export function isPersonaDiskPartitionDirName(dirName: unknown): dirName is string {
+  if (typeof dirName !== "string") {
+    return false;
+  }
+  if (dirName === PERSONA_DISK_PARTITION_DIR_NAME) {
+    return true;
+  }
+  if (!dirName.startsWith(PERSONA_DISK_PARTITION_DIR_PREFIX)) {
+    return false;
+  }
+  const suffix = dirName.slice(PERSONA_DISK_PARTITION_DIR_PREFIX.length);
+  return PERSONA_HUB_PARTITION_SUFFIX_ANY_CASE_PATTERN.test(suffix);
+}
+
+/**
+ * Validates a partition target eligible for full Persona session clearing (canonical lowercase
+ * partitions plus any safe historical mixed-case `persist:persona-*` directory discovered on disk).
+ */
+export function isPersonaClearablePartition(partition: unknown): partition is string {
+  return normalizePersonaWebviewPartition(partition) !== null;
+}
+
+/**
+ * Maps a Persona Hub ID to its canonical lowercase persistent Electron session partition:
+ * - `hub-default` (case-insensitively, migrated from 0.17.534) stays on `persist:persona`.
+ * - Any other valid Hub ID is lowercased to an isolated `persist:persona-<id>` partition.
  */
 export function resolvePersonaHubPartition(hubId: string | undefined | null): string | null {
   if (typeof hubId !== "string") {
     return null;
   }
-  const trimmed = hubId.trim();
-  if (!trimmed) {
+  const normalized = hubId.trim().toLowerCase();
+  if (!normalized) {
     return null;
   }
-  if (trimmed === DEFAULT_PERSONA_HUB_ID) {
+  if (normalized === DEFAULT_PERSONA_HUB_ID) {
     return PERSONA_WEBVIEW_PARTITION;
   }
-  if (!PERSONA_HUB_PARTITION_SUFFIX_PATTERN.test(trimmed)) {
+  if (!PERSONA_HUB_PARTITION_SUFFIX_LOWER_PATTERN.test(normalized)) {
     return null;
   }
-  return `${PERSONA_WEBVIEW_PARTITION_PREFIX}${trimmed}`;
+  return `${PERSONA_WEBVIEW_PARTITION_PREFIX}${normalized}`;
 }
 
 function parseUrl(value: string | undefined | null): URL | null {
@@ -163,9 +217,9 @@ export function normalizePersonaHubUrlList(values: unknown): string[] | null {
 
 /**
  * Normalizes a host window's per-partition Persona Hub allowlist.
- * Returns `[]` for null/undefined/empty arrays, deduplicates identical `(partition, hubUrl)` pairs,
- * and returns `null` (fail-closed) if any entry has an invalid partition, invalid Hub URL,
- * exceeds the cap, or binds the same partition to two different Hub URLs.
+ * Returns `[]` for null/undefined/empty arrays, deduplicates identical lowercase
+ * `(partition, hubUrl)` pairs, and returns `null` (fail-closed) if any entry has an invalid or
+ * non-lowercase partition, invalid Hub URL, exceeds the cap, or collides after lowercase folding.
  */
 export function normalizePersonaHubEntries(values: unknown): PersonaHubPartitionEntry[] | null {
   if (values === null || values === undefined) {
@@ -175,13 +229,14 @@ export function normalizePersonaHubEntries(values: unknown): PersonaHubPartition
     return null;
   }
   const entries: PersonaHubPartitionEntry[] = [];
-  const urlByPartition = new Map<string, string>();
+  const urlByCanonicalPartition = new Map<string, string>();
   for (const item of values) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       return null;
     }
     const record = item as { partition?: unknown; hubUrl?: unknown };
-    if (!isPersonaWebviewPartition(record.partition)) {
+    const canonicalPartition = normalizePersonaWebviewPartition(record.partition);
+    if (!canonicalPartition || canonicalPartition !== record.partition) {
       return null;
     }
     if (typeof record.hubUrl !== "string") {
@@ -191,17 +246,40 @@ export function normalizePersonaHubEntries(values: unknown): PersonaHubPartition
     if (!normalized) {
       return null;
     }
-    const existingUrl = urlByPartition.get(record.partition);
+    const existingUrl = urlByCanonicalPartition.get(canonicalPartition);
     if (existingUrl !== undefined) {
       if (existingUrl !== normalized.url) {
         return null;
       }
       continue;
     }
-    urlByPartition.set(record.partition, normalized.url);
-    entries.push({ partition: record.partition, hubUrl: normalized.url });
+    urlByCanonicalPartition.set(canonicalPartition, normalized.url);
+    entries.push({ partition: canonicalPartition, hubUrl: normalized.url });
   }
   return entries;
+}
+
+function collectLegacySingleHubEntries(
+  rawUrls: readonly unknown[],
+): Array<{ partition: string; hub: NormalizedPersonaHubUrl }> {
+  const uniqueUrls: NormalizedPersonaHubUrl[] = [];
+  const seen = new Set<string>();
+  for (const rawUrl of rawUrls) {
+    if (typeof rawUrl !== "string") {
+      return [];
+    }
+    const normalized = normalizePersonaHubUrl(rawUrl);
+    if (!normalized) {
+      return [];
+    }
+    if (!seen.has(normalized.url)) {
+      seen.add(normalized.url);
+      uniqueUrls.push(normalized);
+    }
+  }
+  return uniqueUrls.length === 1
+    ? [{ partition: PERSONA_WEBVIEW_PARTITION, hub: uniqueUrls[0] }]
+    : [];
 }
 
 function collectNormalizedHubEntries(
@@ -221,48 +299,32 @@ function collectNormalizedHubEntries(
   }
   if (typeof configuredHubs[0] === "string") {
     // Legacy unpartitioned string list: only a single unique URL can safely bind to persist:persona.
-    const uniqueUrls: NormalizedPersonaHubUrl[] = [];
-    const seen = new Set<string>();
-    for (const rawUrl of configuredHubs) {
-      if (typeof rawUrl !== "string") {
-        return [];
-      }
-      const normalized = normalizePersonaHubUrl(rawUrl);
-      if (!normalized) {
-        return [];
-      }
-      if (!seen.has(normalized.url)) {
-        seen.add(normalized.url);
-        uniqueUrls.push(normalized);
-      }
-    }
-    return uniqueUrls.length === 1
-      ? [{ partition: PERSONA_WEBVIEW_PARTITION, hub: uniqueUrls[0] }]
-      : [];
+    return collectLegacySingleHubEntries(configuredHubs);
   }
 
   const normalizedEntries: Array<{ partition: string; hub: NormalizedPersonaHubUrl }> = [];
-  const urlByPartition = new Map<string, string>();
+  const urlByCanonicalPartition = new Map<string, string>();
   for (const item of configuredHubs) {
     if (!item || typeof item !== "object" || !("partition" in item) || !("hubUrl" in item)) {
       return [];
     }
-    if (!isPersonaWebviewPartition(item.partition)) {
+    const canonicalPartition = normalizePersonaWebviewPartition(item.partition);
+    if (!canonicalPartition || canonicalPartition !== item.partition) {
       return [];
     }
     const normalized = normalizePersonaHubUrl(item.hubUrl);
     if (!normalized) {
       return [];
     }
-    const existingUrl = urlByPartition.get(item.partition);
+    const existingUrl = urlByCanonicalPartition.get(canonicalPartition);
     if (existingUrl !== undefined) {
       if (existingUrl !== normalized.url) {
         return [];
       }
       continue;
     }
-    urlByPartition.set(item.partition, normalized.url);
-    normalizedEntries.push({ partition: item.partition, hub: normalized });
+    urlByCanonicalPartition.set(canonicalPartition, normalized.url);
+    normalizedEntries.push({ partition: canonicalPartition, hub: normalized });
   }
   return normalizedEntries;
 }

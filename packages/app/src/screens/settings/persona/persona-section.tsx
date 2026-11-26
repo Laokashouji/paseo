@@ -35,6 +35,7 @@ import {
 import {
   addPersonaHubProfile,
   collectValidPersonaHubPartitionEntries,
+  DEFAULT_PERSONA_HUB_ID,
   formatPersonaHubDisplayHost,
   getActivePersonaHub,
   getPersonaHubById,
@@ -42,6 +43,7 @@ import {
   MAX_PERSONA_HUBS,
   normalizePersonaHubUrl,
   openPersonaHubInRightSplit,
+  PERSONA_WEBVIEW_PARTITION,
   removePersonaHubProfile,
   reorderPersonaHubProfiles,
   resolvePersonaHubPartition,
@@ -1131,6 +1133,7 @@ export function PersonaSettingsSection() {
   const [retryingHostId, setRetryingHostId] = useState<string | null>(null);
   const [clearingTarget, setClearingTarget] = useState<"hub" | "all" | null>(null);
   const clearInFlightRef = useRef(false);
+  const deletingHubIdsRef = useRef<Set<string>>(new Set());
 
   // Keep selectedHubId aligned when hubs are added/deleted externally.
   useEffect(() => {
@@ -1397,34 +1400,71 @@ export function PersonaSettingsSection() {
 
   const handleDeleteHub = useCallback(
     (hub: PersonaHubProfile) => {
-      if (persona.hubs.length <= 1) {
+      if (persona.hubs.length <= 1 || deletingHubIdsRef.current.has(hub.id)) {
         return;
       }
+      deletingHubIdsRef.current.add(hub.id);
       void (async () => {
-        const confirmed = await confirmDialog({
-          title: t("personaEmbed.settings.deleteHubConfirmTitle", { name: hub.name }),
-          message: t("personaEmbed.settings.deleteHubConfirmMessage"),
-          confirmLabel: t("personaEmbed.settings.mappingRemove"),
-          cancelLabel: t("common.actions.cancel"),
-          destructive: true,
-        });
-        if (!confirmed) {
-          return;
+        try {
+          const confirmed = await confirmDialog({
+            title: t("personaEmbed.settings.deleteHubConfirmTitle", { name: hub.name }),
+            message: t("personaEmbed.settings.deleteHubConfirmMessage"),
+            confirmLabel: t("personaEmbed.settings.mappingRemove"),
+            cancelLabel: t("common.actions.cancel"),
+            destructive: true,
+          });
+          if (!confirmed) {
+            return;
+          }
+          destroyResidentPersonaWebview(hub.id);
+          const desktopPersona = getDesktopHost()?.persona;
+          const basePartition = desktopPersona?.partition ?? PERSONA_WEBVIEW_PARTITION;
+          const targetPartition = resolvePersonaHubPartition(hub.id, {
+            basePartition,
+            partitionPrefix: desktopPersona?.partitionPrefix,
+          });
+          const normalizedHubUrl = normalizePersonaHubUrl(hub.hubUrl);
+          if (
+            hub.id.trim().toLowerCase() !== DEFAULT_PERSONA_HUB_ID &&
+            desktopPersona?.supportsPerHubPartitions === true &&
+            typeof desktopPersona.clearSession === "function" &&
+            targetPartition &&
+            targetPartition !== basePartition &&
+            normalizedHubUrl.ok
+          ) {
+            try {
+              // Register current entries first so main authorizes clearing this Hub's isolated partition
+              // before we remove the Hub from settings and revoke its allowlist entry.
+              await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(persona), {
+                enabled: persona.enabled,
+              });
+              await desktopPersona.clearSession({
+                partition: targetPartition,
+                hubUrl: normalizedHubUrl.url,
+              });
+            } catch {
+              // Best-effort cleanup on deletion; clear-all disk scan also sweeps any residual partitions.
+            }
+          }
+          let committedSettings = removePersonaHubProfile(persona, hub.id);
+          await updatePersona((current) => {
+            committedSettings = removePersonaHubProfile(current, hub.id);
+            return committedSettings;
+          });
+          await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(committedSettings), {
+            enabled: committedSettings.enabled,
+          });
+          setHealthResultByHubId((current) => {
+            const next = { ...current };
+            delete next[hub.id];
+            return next;
+          });
+          toast.show(t("personaEmbed.settings.hubRemovedToast", { name: hub.name }), {
+            variant: "success",
+          });
+        } finally {
+          deletingHubIdsRef.current.delete(hub.id);
         }
-        const nextSettings = removePersonaHubProfile(persona, hub.id);
-        await updatePersona((current) => removePersonaHubProfile(current, hub.id));
-        destroyResidentPersonaWebview(hub.id);
-        await syncPersonaHubEntriesWithMain(collectHostPartitionEntries(nextSettings), {
-          enabled: nextSettings.enabled,
-        });
-        setHealthResultByHubId((current) => {
-          const next = { ...current };
-          delete next[hub.id];
-          return next;
-        });
-        toast.show(t("personaEmbed.settings.hubRemovedToast", { name: hub.name }), {
-          variant: "success",
-        });
       })();
     },
     [persona, t, toast, updatePersona],

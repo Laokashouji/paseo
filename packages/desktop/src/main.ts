@@ -104,6 +104,7 @@ import {
   registerPersonaWebviewNavigationGuards,
   type PersonaHealthCheckResult,
 } from "./features/persona-webview/index.js";
+import { listPersistedPersonaPartitions } from "./features/persona-webview/disk-partitions.js";
 import { parseOpenProjectPathFromArgv } from "./open-project-routing.js";
 import {
   createDesktopWindowOwner,
@@ -145,7 +146,12 @@ const DESKTOP_WINDOW_CHROME_MODE = resolveDesktopWindowChromeMode({
 const UPDATE_QUIT_DEADLINE_MS = 5_000;
 const pendingBrowserWindowOpenRequests = new PendingBrowserWindowOpenRequests();
 const registeredPaseoHostWindowWebContentsIds = new Set<number>();
-const personaHubRegistry = createPersonaHostHubRegistry();
+const personaHubRegistry = createPersonaHostHubRegistry({
+  listPersistedPartitions: () =>
+    listPersistedPersonaPartitions(app.getPath("userData"), {
+      logWarn: (message, details) => log.warn(message, details),
+    }),
+});
 const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
 const agentNavigationInbox = new AgentNavigationInbox();
 
@@ -707,7 +713,9 @@ ipcMain.handle("paseo:persona:clear-session", async (event, rawTarget?: unknown)
   }
   const targetPartitions = target.mode === "single" ? [target.partition] : target.partitions;
   const targetSessions = targetPartitions.map((partition) =>
-    getPersonaWebviewSession(session, partition),
+    getPersonaWebviewSession(session, partition, {
+      allowLegacyDiskCase: target.mode === "all",
+    }),
   );
   await clearPersonaWebviewSession({
     personaSessions: targetSessions,

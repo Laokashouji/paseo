@@ -3,6 +3,7 @@ import {
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
   isPersonaWebviewPartition,
   matchPersonaWebviewAttachHubUrl,
   normalizePersonaHubEntries,
@@ -25,6 +26,8 @@ export {
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
+  isPersonaDiskPartitionDirName,
   isPersonaWebviewAttach,
   isPersonaWebviewPartition,
   isValidPersonaHubUrl,
@@ -33,7 +36,10 @@ export {
   normalizePersonaHubEntries,
   normalizePersonaHubUrl,
   normalizePersonaHubUrlList,
+  normalizePersonaWebviewPartition,
   parsePersonaSessionPath,
+  PERSONA_DISK_PARTITION_DIR_NAME,
+  PERSONA_DISK_PARTITION_DIR_PREFIX,
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_EVENT,
   PERSONA_GUEST_READY_EVENT_NAME,
@@ -603,12 +609,22 @@ function resolvePartitionObjectClearTarget(
   };
 }
 
+export interface CreatePersonaHostHubRegistryOptions {
+  /**
+   * Optional callback returning persisted Persona partitions discovered under Electron's
+   * `<userData>/Partitions/` directory so full `clearSession()` also clears deleted Hub cookies.
+   */
+  listPersistedPartitions?: () => readonly string[];
+}
+
 /**
  * Maintains per-host-window partition-bound Persona Hub allowlists (`persist:persona` for the
  * migrated default Hub and `persist:persona-<id>` for each additional Hub) and deterministically
  * binds every attached guest `<webview>` by its Electron `Session` instance (zero FIFO guessing).
  */
-export function createPersonaHostHubRegistry(): PersonaHostHubRegistry {
+export function createPersonaHostHubRegistry(
+  options?: CreatePersonaHostHubRegistryOptions,
+): PersonaHostHubRegistry {
   const hostStateByWebContentsId = new Map<number, InternalHostHubState>();
   const guestBindingByWebContentsId = new Map<
     number,
@@ -642,6 +658,20 @@ export function createPersonaHostHubRegistry(): PersonaHostHubRegistry {
     for (const binding of guestBindingByWebContentsId.values()) {
       if (binding.hostWebContentsId === hostWebContentsId) {
         partitions.add(binding.partition);
+      }
+    }
+    for (const otherState of hostStateByWebContentsId.values()) {
+      for (const entry of otherState.entries) {
+        partitions.add(entry.partition);
+      }
+    }
+    for (const binding of guestBindingByWebContentsId.values()) {
+      partitions.add(binding.partition);
+    }
+    const persistedPartitions = options?.listPersistedPartitions?.() ?? [];
+    for (const partition of persistedPartitions) {
+      if (isPersonaClearablePartition(partition)) {
+        partitions.add(partition);
       }
     }
     return Array.from(partitions);
@@ -981,8 +1011,12 @@ export interface PersonaNavigationGuardDeps {
 export function getPersonaWebviewSession(
   sessions: PersonaWebviewSessionsLike,
   partition: string = PERSONA_WEBVIEW_PARTITION,
+  options?: { allowLegacyDiskCase?: boolean },
 ): PersonaWebviewSession {
-  if (!isPersonaWebviewPartition(partition)) {
+  const valid = options?.allowLegacyDiskCase
+    ? isPersonaClearablePartition(partition)
+    : isPersonaWebviewPartition(partition);
+  if (!valid) {
     throw new Error("Invalid Persona partition");
   }
   return sessions.fromPartition(partition);
