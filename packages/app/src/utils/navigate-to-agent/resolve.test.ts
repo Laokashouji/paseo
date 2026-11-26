@@ -199,4 +199,29 @@ describe("resolveNavigateToAgent", () => {
     expect(byLabels.mainChatNavigations).toEqual([{ route: "/main?serverId=server-1" }]);
     expect(byLabels.tabNavigations).toEqual([]);
   });
+
+  it("forwards panel=diff to openWorkspacePanel when workspaceId is known or appends ?panel=diff to host agent route", () => {
+    const openedPanels: Array<{ serverId: string; workspaceId: string; panel: string }> = [];
+    const withWorkspace = createFakeNavigators({ agentWorkspaceId: WORKSPACE_ID });
+    withWorkspace.deps.openWorkspacePanel = (input) => {
+      openedPanels.push(input);
+    };
+    resolveNavigateToAgent(
+      { serverId: SERVER_ID, agentId: AGENT_ID, pin: true, panel: "diff" },
+      withWorkspace.deps,
+    );
+    expect(openedPanels).toEqual([
+      { serverId: SERVER_ID, workspaceId: WORKSPACE_ID, panel: "diff" },
+    ]);
+
+    const withoutWorkspace = createFakeNavigators({ agentWorkspaceId: null });
+    const route = resolveNavigateToAgent(
+      { serverId: SERVER_ID, agentId: AGENT_ID, panel: "diff" },
+      withoutWorkspace.deps,
+    );
+    expect(route).toBe("/h/server-1/agent/agent-1?panel=diff");
+    expect(withoutWorkspace.hostNavigations).toEqual([
+      { route: "/h/server-1/agent/agent-1?panel=diff" },
+    ]);
+  });
 });

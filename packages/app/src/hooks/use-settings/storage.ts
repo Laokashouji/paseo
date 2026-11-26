@@ -30,6 +30,11 @@ import { z } from "zod";
 import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY } from "./keys";
 import { migrateAppSettings } from "./migrations";
 import { DEFAULT_ARCHIVE_COMMAND } from "@/session-archive/constants";
+import {
+  DEFAULT_PERSONA_EMBED_SETTINGS,
+  PersonaEmbedSettingsSchema,
+  type PersonaEmbedSettings,
+} from "@/persona/settings";
 
 export { APP_SETTINGS_KEY } from "./keys";
 export const APP_SETTINGS_QUERY_KEY = ["app-settings"];
@@ -119,6 +124,8 @@ export interface AppSettings {
   /** Desktop-only preferences for implicit opens into the ordinary side pane. */
   openInSidePane: OpenInSidePanePreferences;
   pullRequestOpenLocation: PullRequestOpenLocation;
+  /** Desktop single-window embedded Persona configuration. */
+  persona: PersonaEmbedSettings;
 }
 
 export type AppSettingsUpdate =
@@ -178,6 +185,7 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   filePanelAssociations: {},
   openInSidePane: DEFAULT_OPEN_IN_SIDE_PANE_PREFERENCES,
   pullRequestOpenLocation: "explorer",
+  persona: DEFAULT_PERSONA_EMBED_SETTINGS,
 };
 
 export const DEFAULT_APP_SETTINGS: Settings = {
@@ -309,6 +317,7 @@ const StoredAppSettingsSchema = z
         legacyPullRequestsInSidePane: undefined,
       }),
     pullRequestOpenLocation: z.enum(["main", "side", "explorer"]).optional(),
+    persona: PersonaEmbedSettingsSchema,
     // COMPAT(explorerSidebarRouting): replaced by source-specific side-pane preferences in v0.6.
     openSupportingTabsInSidePanel: z.boolean().optional().catch(undefined),
     // COMPAT(rendererDesktopSettings): these fields used to share this renderer-owned key.

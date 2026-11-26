@@ -77,6 +77,7 @@ import {
   MainChatLifecycleMenuItems,
   useMainChatLifecycleActions,
 } from "./lifecycle-actions";
+import { useIsBuiltInMainChatHiddenByPersona } from "@/persona/use-persona-settings";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import type { StewardAccentTone } from "./steward-store";
@@ -120,6 +121,7 @@ const ARCHIVE_GUARD_ACTIONS = ["workspace.archive"] as const;
 
 /** Returns true when at least one connected host has an enabled Main Chat steward. */
 export function useShouldShowMainChatHero(): boolean {
+  const hiddenByPersona = useIsBuiltInMainChatHiddenByPersona();
   const activeWorkspace = useActiveWorkspaceSelection();
   const lastWorkspace = useLastWorkspaceSelection();
   const preferredServerId = activeWorkspace?.serverId ?? lastWorkspace?.serverId ?? null;
@@ -172,6 +174,9 @@ export function useShouldShowMainChatHero(): boolean {
     settings,
   ]);
 
+  if (hiddenByPersona) {
+    return false;
+  }
   if (roster.length > 0) {
     return true;
   }
@@ -1025,7 +1030,7 @@ const HeroTrailingPrimary = memo(function HeroTrailingPrimary({
  * Sticky, non-collapsible top-of-sidebar entry for the primary Main Chat assistant.
  * Lives outside `Pinned` and `Workspaces` so it never scrolls away or collapses with coding rooms.
  */
-export const MainChatHeroRow = memo(function MainChatHeroRow({
+const MainChatHeroRowBody = memo(function MainChatHeroRowBody({
   onBeforeNavigate,
   trailingAccessory,
   extraMenuItems,
@@ -1246,6 +1251,16 @@ export const MainChatHeroRow = memo(function MainChatHeroRow({
       />
     </>
   );
+});
+
+export const MainChatHeroRow = memo(function MainChatHeroRow(
+  props: MainChatHeroRowProps,
+): ReactElement | null {
+  const hiddenByPersona = useIsBuiltInMainChatHiddenByPersona();
+  if (hiddenByPersona) {
+    return null;
+  }
+  return <MainChatHeroRowBody {...props} />;
 });
 
 const styles = StyleSheet.create((theme) => ({

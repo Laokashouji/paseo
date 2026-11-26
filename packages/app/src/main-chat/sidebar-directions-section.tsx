@@ -43,6 +43,7 @@ import {
 } from "./directions-tree";
 import { openMainChatTaskTarget } from "./open-task-target";
 import { overviewStoreKey, useMainChatOverviewStore } from "./overview-store";
+import { useIsBuiltInMainChatHiddenByPersona } from "@/persona/use-persona-settings";
 import { selectMainChatSidebarSummary } from "./selectors";
 import { useMainChatSettingsStore } from "./settings-store";
 import { useMainChatStewardRoster } from "./use-steward-roster";
@@ -335,7 +336,7 @@ function resolveDirectionsEnabled(
  * entry and the regular coding Workspaces list. Renders the three-level direction tree
  * (`Direction -> Task -> Cross-Host Agent`), recent side threads, and quick conversation creation.
  */
-export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
+const SidebarDirectionsSectionBody = memo(function SidebarDirectionsSectionBody({
   onBeforeNavigate,
   directions = EMPTY_DIRECTIONS,
 }: SidebarDirectionsSectionProps): ReactElement | null {
@@ -612,6 +613,16 @@ export const SidebarDirectionsSection = memo(function SidebarDirectionsSection({
       <SidebarSeparator testID="sidebar-directions-separator" />
     </>
   );
+});
+
+export const SidebarDirectionsSection = memo(function SidebarDirectionsSection(
+  props: SidebarDirectionsSectionProps,
+): ReactElement | null {
+  const hiddenByPersona = useIsBuiltInMainChatHiddenByPersona();
+  if (hiddenByPersona) {
+    return null;
+  }
+  return <SidebarDirectionsSectionBody {...props} />;
 });
 
 const styles = StyleSheet.create((theme) => ({

@@ -3,7 +3,9 @@ import {
   buildHostAgentDetailRoute,
   buildMainChatConversationRoute,
   buildMainChatRoute,
+  type WorkspacePanelIntent,
 } from "@/utils/host-routes";
+import type { OpenInSidePanePreferences } from "@/hooks/use-settings/storage";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-workspace-store";
 
@@ -17,6 +19,10 @@ export interface NavigateToAgentInput {
   pin?: boolean;
   /** Opens the agent with its composer, where a compact layout would show a sheet without one. */
   asTab?: boolean;
+  /** Optional supporting workspace panel to open alongside the agent (e.g. "diff"). */
+  panel?: WorkspacePanelIntent | null;
+  isCompact?: boolean;
+  openInSidePane?: OpenInSidePanePreferences;
 }
 
 export interface AgentNavTarget {
@@ -31,6 +37,11 @@ export interface NavigateToAgentDeps {
   navigateToHostAgent: (route: string) => void;
   navigateToWorkspace: (input: NavigateToWorkspaceInput) => string;
   navigateToMainChat?: (route: string) => void;
+  openWorkspacePanel?: (input: {
+    serverId: string;
+    workspaceId: string;
+    panel: WorkspacePanelIntent;
+  }) => void;
 }
 
 export function resolveNavigateToAgent(
@@ -60,16 +71,29 @@ export function resolveNavigateToAgent(
   const workspaceId = normalizeWorkspaceOpaqueId(agentWorkspaceId);
 
   if (!workspaceId) {
-    const route = buildHostAgentDetailRoute(input.serverId, input.agentId);
+    const route = buildHostAgentDetailRoute(
+      input.serverId,
+      input.agentId,
+      undefined,
+      input.panel ? { panel: input.panel } : undefined,
+    );
     deps.navigateToHostAgent(route);
     return route;
   }
 
-  return deps.navigateToWorkspace({
+  const route = deps.navigateToWorkspace({
     serverId: input.serverId,
     workspaceId,
     target: { kind: "agent", agentId: input.agentId },
     pin: input.pin,
     asTab: input.asTab,
   });
+  if (input.panel) {
+    deps.openWorkspacePanel?.({
+      serverId: input.serverId,
+      workspaceId,
+      panel: input.panel,
+    });
+  }
+  return route;
 }

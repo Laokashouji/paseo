@@ -19,6 +19,7 @@ interface MainChatSettingsStoreState {
   usageByServerId: Record<string, MainChatTokenUsageSummary | undefined>;
   usageLoadingByServerId: Record<string, boolean | undefined>;
   loadingByServerId: Record<string, boolean | undefined>;
+  errorByServerId: Record<string, string | null | undefined>;
   lastPatrolByServerId: Record<string, MainChatPatrolResult | undefined>;
   loadSettings: (serverId: string, client: DaemonClient) => Promise<MainChatSettings | null>;
   updateSettings: (
@@ -63,6 +64,7 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
   usageByServerId: {},
   usageLoadingByServerId: {},
   loadingByServerId: {},
+  errorByServerId: {},
   lastPatrolByServerId: {},
 
   hydrateSettings(serverId, settings, nightModeStatus, cacheKeepaliveStatus) {
@@ -70,6 +72,10 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
       settingsByServerId: {
         ...state.settingsByServerId,
         [serverId]: settings,
+      },
+      errorByServerId: {
+        ...state.errorByServerId,
+        [serverId]: null,
       },
       ...(nightModeStatus
         ? {
@@ -130,10 +136,15 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
   async loadSettings(serverId, client) {
     set((state) => ({
       loadingByServerId: { ...state.loadingByServerId, [serverId]: true },
+      errorByServerId: { ...state.errorByServerId, [serverId]: null },
     }));
     try {
       const response = await client.getMainChatSettings();
       if (response.error || !response.settings) {
+        const message = response.error ?? "Failed to load main chat settings";
+        set((state) => ({
+          errorByServerId: { ...state.errorByServerId, [serverId]: message },
+        }));
         return null;
       }
       const settings = response.settings;
@@ -143,6 +154,10 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
         settingsByServerId: {
           ...state.settingsByServerId,
           [serverId]: settings,
+        },
+        errorByServerId: {
+          ...state.errorByServerId,
+          [serverId]: null,
         },
         ...(nightModeStatus
           ? {
@@ -162,6 +177,12 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
           : {}),
       }));
       return settings;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set((state) => ({
+        errorByServerId: { ...state.errorByServerId, [serverId]: message },
+      }));
+      throw error;
     } finally {
       set((state) => ({
         loadingByServerId: { ...state.loadingByServerId, [serverId]: false },
@@ -181,6 +202,10 @@ export const useMainChatSettingsStore = create<MainChatSettingsStoreState>((set)
       settingsByServerId: {
         ...state.settingsByServerId,
         [serverId]: settings,
+      },
+      errorByServerId: {
+        ...state.errorByServerId,
+        [serverId]: null,
       },
       ...(nightModeStatus
         ? {

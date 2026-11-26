@@ -86,6 +86,23 @@ import {
   listPaseoBrowserProfileGuests,
   readLegacyPaseoBrowserIds,
 } from "./features/browser-profile.js";
+import {
+  clearPersonaWebviewSession,
+  getPersonaWebviewSession,
+  isPersonaWebviewAttach,
+  isTrustedPersonaHostIpcEvent,
+  listPersonaWebviewGuests,
+  normalizePersonaHubUrl,
+  PERSONA_GUEST_READY_EVENT,
+  PERSONA_HUB_URL_ARG_PREFIX,
+  PERSONA_OPEN_SESSION_EVENT,
+  PERSONA_SESSION_METADATA_RESULT_EVENT,
+  PERSONA_WEBVIEW_PARTITION,
+  probePersonaHubHealth,
+  registerPersonaWebviewGuestIpcBridge,
+  registerPersonaWebviewNavigationGuards,
+  type PersonaHealthCheckResult,
+} from "./features/persona-webview/index.js";
 import { parseOpenProjectPathFromArgv } from "./open-project-routing.js";
 import {
   createDesktopWindowOwner,
@@ -126,6 +143,14 @@ const DESKTOP_WINDOW_CHROME_MODE = resolveDesktopWindowChromeMode({
 });
 const UPDATE_QUIT_DEADLINE_MS = 5_000;
 const pendingBrowserWindowOpenRequests = new PendingBrowserWindowOpenRequests();
+const registeredPaseoHostWindowWebContentsIds = new Set<number>();
+const personaHubStateByHostWebContentsId = new Map<number, { hubUrl: string; enabled: boolean }>();
+const pendingPersonaGuestHubUrlByHostWebContentsId = new Map<number, string[]>();
+const personaGuestHubUrlByWebContentsId = new Map<
+  number,
+  { hostWebContentsId: number; hubUrl: string }
+>();
+const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
 const agentNavigationInbox = new AgentNavigationInbox();
 
 // A second-instance launch can arrive before the packaged protocol handler,
@@ -223,6 +248,35 @@ function showBrowserWebviewContextMenu(
             },
           },
         ]),
+  ]);
+  menu.popup({ window: win });
+}
+
+function showPersonaWebviewContextMenu(
+  win: BrowserWindow,
+  contents: Electron.WebContents,
+  params: Electron.ContextMenuParams,
+): void {
+  const menu = Menu.buildFromTemplate([
+    ...buildStandardContextMenuItems(contents, params),
+    { type: "separator" as const },
+    {
+      label: "Reload",
+      click: () => {
+        if (!contents.isDestroyed()) {
+          contents.reload();
+        }
+      },
+    },
+    {
+      label: "Inspect Element",
+      click: () => {
+        if (!contents.isDestroyed()) {
+          contents.openDevTools({ mode: "detach" });
+          contents.inspectElement(params.x, params.y);
+        }
+      },
+    },
   ]);
   menu.popup({ window: win });
 }
@@ -560,6 +614,90 @@ ipcMain.handle("paseo:browser:copy-element", (_event, payload: unknown) =>
   browserCapture.copy(payload),
 );
 
+ipcMain.handle(
+  "paseo:persona:set-hub-url",
+  (event, rawHubUrl: unknown, rawOptions?: unknown): boolean => {
+    if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+      return false;
+    }
+    if (rawHubUrl === null || rawHubUrl === undefined || rawHubUrl === "") {
+      personaHubStateByHostWebContentsId.delete(event.sender.id);
+      return true;
+    }
+    if (typeof rawHubUrl !== "string") {
+      return false;
+    }
+    const normalized = normalizePersonaHubUrl(rawHubUrl);
+    if (!normalized) {
+      return false;
+    }
+    const enabled =
+      rawOptions &&
+      typeof rawOptions === "object" &&
+      typeof (rawOptions as { enabled?: unknown }).enabled === "boolean"
+        ? (rawOptions as { enabled: boolean }).enabled
+        : true;
+    personaHubStateByHostWebContentsId.set(event.sender.id, {
+      hubUrl: normalized.url,
+      enabled,
+    });
+    return true;
+  },
+);
+
+ipcMain.handle("paseo:persona:check-health", async (event): Promise<PersonaHealthCheckResult> => {
+  if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+    return {
+      ok: false,
+      code: "unauthorized_caller",
+      error: "Unauthorized IPC caller",
+    };
+  }
+  const hostState = personaHubStateByHostWebContentsId.get(event.sender.id);
+  return probePersonaHubHealth(hostState?.hubUrl ?? null);
+});
+
+ipcMain.handle("paseo:persona:clear-session", async (event) => {
+  if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+    throw new Error("Unauthorized IPC caller");
+  }
+  const personaSession = getPersonaWebviewSession(session);
+  await clearPersonaWebviewSession({
+    personaSession,
+    listGuests: () =>
+      listPersonaWebviewGuests({
+        personaSession,
+        webContents: webContents.getAllWebContents(),
+      }),
+    logReloadError: (webContentsId, error) => {
+      log.warn("[persona-webview] failed to reload guest after clearing session", {
+        webContentsId,
+        error,
+      });
+    },
+  });
+});
+
+ipcMain.handle("paseo:persona:open-devtools", (event, rawWebContentsId: unknown): boolean => {
+  if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+    return false;
+  }
+  if (typeof rawWebContentsId !== "number" || !Number.isInteger(rawWebContentsId)) {
+    return false;
+  }
+  const guest = webContents.fromId(rawWebContentsId);
+  if (
+    !guest ||
+    guest.isDestroyed() ||
+    guest.hostWebContents !== event.sender ||
+    guest.session !== session.fromPartition(PERSONA_WEBVIEW_PARTITION)
+  ) {
+    return false;
+  }
+  guest.openDevTools({ mode: "detach" });
+  return true;
+});
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: APP_SCHEME,
@@ -577,6 +715,10 @@ function getPreloadPath(): string {
 
 function getBrowserKeyboardPreloadPath(): string {
   return path.join(__dirname, "features", "browser-keyboard", "guest-preload.js");
+}
+
+function getPersonaGuestPreloadPath(): string {
+  return path.join(__dirname, "features", "persona-webview", "guest-preload.js");
 }
 
 function getAppDistDir(): string {
@@ -728,6 +870,7 @@ async function createWindow(
   applyDesktopWindowChromeMode({ win: mainWindow, mode: DESKTOP_WINDOW_CHROME_MODE });
 
   const webContentsId = mainWindow.webContents.id;
+  registeredPaseoHostWindowWebContentsIds.add(webContentsId);
   options.onCreated?.(webContentsId);
   mainWindow.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
     if (isMainFrame && !isSameDocument) {
@@ -738,6 +881,9 @@ async function createWindow(
     options.onClosed?.(webContentsId);
     agentNavigationInbox.removeWindow(webContentsId);
     unregisterPaseoBrowserHost(webContentsId);
+    registeredPaseoHostWindowWebContentsIds.delete(webContentsId);
+    personaHubStateByHostWebContentsId.delete(webContentsId);
+    pendingPersonaGuestHubUrlByHostWebContentsId.delete(webContentsId);
     browserKeyboard.detachHost(webContentsId);
   });
 
@@ -758,6 +904,44 @@ async function createWindow(
   setupDefaultContextMenu(mainWindow);
   setupDragDropPrevention(mainWindow);
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    if (params.partition === PERSONA_WEBVIEW_PARTITION) {
+      if (!registeredPaseoHostWindowWebContentsIds.has(webContentsId)) {
+        event.preventDefault();
+        return;
+      }
+      const hubState = personaHubStateByHostWebContentsId.get(webContentsId);
+      if (!hubState?.enabled || !isPersonaWebviewAttach(params, hubState.hubUrl)) {
+        event.preventDefault();
+        return;
+      }
+      webPreferences.nodeIntegration = false;
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.nodeIntegrationInWorker = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.sandbox = true;
+      webPreferences.webSecurity = true;
+      webPreferences.webviewTag = false;
+      webPreferences.allowRunningInsecureContent = false;
+      delete webPreferences.preload;
+      delete params.preload;
+      delete (webPreferences as { preloadURL?: string }).preloadURL;
+      delete (params as { preloadURL?: string }).preloadURL;
+      const existingArgs = Array.isArray(webPreferences.additionalArguments)
+        ? webPreferences.additionalArguments.filter(
+            (arg) => typeof arg === "string" && !arg.startsWith(PERSONA_HUB_URL_ARG_PREFIX),
+          )
+        : [];
+      webPreferences.additionalArguments = [
+        ...existingArgs,
+        `${PERSONA_HUB_URL_ARG_PREFIX}${hubState.hubUrl}`,
+      ];
+      webPreferences.preload = getPersonaGuestPreloadPath();
+      const pendingQueue = pendingPersonaGuestHubUrlByHostWebContentsId.get(webContentsId) ?? [];
+      pendingQueue.push(hubState.hubUrl);
+      pendingPersonaGuestHubUrlByHostWebContentsId.set(webContentsId, pendingQueue);
+      return;
+    }
+
     if (!isPaseoBrowserWebviewAttach(params)) {
       event.preventDefault();
       return;
@@ -779,6 +963,93 @@ async function createWindow(
     webPreferences.preload = getBrowserKeyboardPreloadPath();
   });
   mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
+    if (contents.session === session.fromPartition(PERSONA_WEBVIEW_PARTITION)) {
+      const pendingQueue = pendingPersonaGuestHubUrlByHostWebContentsId.get(webContentsId);
+      const pinnedHubUrl = pendingQueue?.shift() ?? null;
+      if (pendingQueue && pendingQueue.length === 0) {
+        pendingPersonaGuestHubUrlByHostWebContentsId.delete(webContentsId);
+      }
+      if (pinnedHubUrl) {
+        personaGuestHubUrlByWebContentsId.set(contents.id, {
+          hostWebContentsId: webContentsId,
+          hubUrl: pinnedHubUrl,
+        });
+      }
+      contents.once("destroyed", () => {
+        personaGuestHubUrlByWebContentsId.delete(contents.id);
+      });
+      const getAuthorizedHubUrl = (): string => {
+        const pinned = personaGuestHubUrlByWebContentsId.get(contents.id);
+        if (!pinned) {
+          return "";
+        }
+        const hostState = personaHubStateByHostWebContentsId.get(pinned.hostWebContentsId);
+        if (!hostState?.enabled) {
+          return "";
+        }
+        const pinnedNormalized = normalizePersonaHubUrl(pinned.hubUrl);
+        const hostNormalized = normalizePersonaHubUrl(hostState.hubUrl);
+        if (
+          !pinnedNormalized ||
+          !hostNormalized ||
+          pinnedNormalized.origin !== hostNormalized.origin
+        ) {
+          return "";
+        }
+        return pinned.hubUrl;
+      };
+      const sendToHostMainFrame = (channel: string, payload: unknown): void => {
+        if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+          return;
+        }
+        const hostMainFrame = mainWindow.webContents.mainFrame;
+        if (hostMainFrame && !hostMainFrame.detached) {
+          hostMainFrame.send(channel, payload);
+          return;
+        }
+        mainWindow.webContents.send(channel, payload);
+      };
+      registerPersonaWebviewNavigationGuards(contents, {
+        getConfiguredHubUrl: getAuthorizedHubUrl,
+        onOpenSession: (payload) => {
+          sendToHostMainFrame(PERSONA_OPEN_SESSION_EVENT, {
+            ...payload,
+            guestWebContentsId: contents.id,
+            frameUrl: contents.getURL(),
+          });
+        },
+        openExternalUrl,
+        logWarn: (message, details) => log.warn(message, details),
+      });
+      registerPersonaWebviewGuestIpcBridge(contents, {
+        getConfiguredHubUrl: getAuthorizedHubUrl,
+        onGuestOpenSession: (payload, context) => {
+          sendToHostMainFrame(PERSONA_OPEN_SESSION_EVENT, {
+            ...payload,
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
+        onGuestSessionMetadataResult: (payload, context) => {
+          sendToHostMainFrame(PERSONA_SESSION_METADATA_RESULT_EVENT, {
+            ...payload,
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
+        onGuestReady: (context) => {
+          sendToHostMainFrame(PERSONA_GUEST_READY_EVENT, {
+            guestWebContentsId: context.guestWebContentsId,
+            frameUrl: context.frameUrl,
+          });
+        },
+      });
+      contents.on("context-menu", (_contextMenuEvent, params) => {
+        showPersonaWebviewContextMenu(mainWindow, contents, params);
+      });
+      return;
+    }
+
     preparePaseoBrowserWebContents(contents);
     contents.once("destroyed", () => {
       pendingBrowserWindowOpenRequests.delete(contents.id);
@@ -986,7 +1257,6 @@ async function bootstrap(): Promise<void> {
   registerWindowManager({ mode: DESKTOP_WINDOW_CHROME_MODE });
   registerDialogHandlers();
   registerNotificationHandlers();
-  const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
   ipcMain.handle("paseo:opener:openUrl", (_event, value: unknown) => openExternalUrl(value));
   registerEditorTargetHandlers();
   registerBrowserAutomationIpc();

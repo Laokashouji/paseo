@@ -1,4 +1,5 @@
 import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
+import { personaEmbedLocales, personaSettingsSectionLocales } from "./persona-embed-locales";
 import { en, type TranslationResources } from "./en";
 import { mergeMainChatStyleLocale } from "./main-chat-style-locales";
 import { pluginSettings } from "./plugin-settings";
@@ -6,6 +7,7 @@ import { interactiveCardsI18n } from "./interactive-cards";
 
 export const ru: TranslationResources = {
   chatQuotes: chatQuotesLocales.ru,
+  personaEmbed: personaEmbedLocales.ru,
   mainChat: mergeMainChatStyleLocale(en.mainChat, "ru"),
   interactiveCards: interactiveCardsI18n.ru,
   pluginCombobox: {
@@ -2456,6 +2458,7 @@ export const ru: TranslationResources = {
       appearance: "Оформление",
       sidebar: "Боковая панель",
       mainChat: en.settings.sections.mainChat,
+      persona: personaSettingsSectionLocales.ru,
       terminal: "Терминал",
       browser: "Браузер",
       editor: "Редактор",

@@ -42,6 +42,75 @@ interface CapableSessionEntry {
   hasExistingMainChat: boolean;
 }
 
+interface OnlineMainChatCapableHost {
+  serverId: string;
+  clientGeneration: number;
+}
+
+/**
+ * Keeps `MainChatSettings` hydrated across every online host that supports main chat,
+ * independent of whether built-in Main Chat sidebar entries are hidden by Persona.
+ */
+export function useOnlineMainChatSettingsSync(): void {
+  const settingsByServerId = useMainChatSettingsStore((state) => state.settingsByServerId);
+  const loadingSettingsByServerId = useMainChatSettingsStore((state) => state.loadingByServerId);
+  const loadSettings = useMainChatSettingsStore((state) => state.loadSettings);
+
+  const onlineCapableHosts = useStoreWithEqualityFn(
+    useSessionStore,
+    useCallback((state): OnlineMainChatCapableHost[] => {
+      const entries: OnlineMainChatCapableHost[] = [];
+      for (const [serverId, session] of Object.entries(state.sessions)) {
+        if (!session.client || typeof session.client.getMainChatSettings !== "function") {
+          continue;
+        }
+        const hasExistingMainChat = findMainChatAgentOnHost(session, serverId) !== null;
+        const mainChatFeature = session.serverInfo?.features?.mainChat;
+        // Skip only hosts that explicitly report features without mainChat and have no mainChat agent.
+        if (
+          !hasExistingMainChat &&
+          session.serverInfo?.features !== undefined &&
+          mainChatFeature !== true
+        ) {
+          continue;
+        }
+        entries.push({ serverId, clientGeneration: session.clientGeneration });
+      }
+      return entries;
+    }, []),
+    equal,
+  );
+
+  const syncedSettingsClientsRef = useRef<Map<string, DaemonClient>>(new Map());
+
+  useEffect(() => {
+    const sessions = useSessionStore.getState().sessions;
+    const onlineIds = new Set(onlineCapableHosts.map((entry) => entry.serverId));
+    for (const trackedServerId of syncedSettingsClientsRef.current.keys()) {
+      if (!onlineIds.has(trackedServerId)) {
+        syncedSettingsClientsRef.current.delete(trackedServerId);
+      }
+    }
+
+    for (const entry of onlineCapableHosts) {
+      const client = sessions[entry.serverId]?.client;
+      if (!client || typeof client.getMainChatSettings !== "function") {
+        continue;
+      }
+      const hasSettings = Boolean(settingsByServerId[entry.serverId]);
+      const isLoadingSettings = Boolean(loadingSettingsByServerId[entry.serverId]);
+      if (
+        !hasSettings &&
+        !isLoadingSettings &&
+        syncedSettingsClientsRef.current.get(entry.serverId) !== client
+      ) {
+        syncedSettingsClientsRef.current.set(entry.serverId, client);
+        void loadSettings(entry.serverId, client).catch(() => undefined);
+      }
+    }
+  }, [loadSettings, loadingSettingsByServerId, onlineCapableHosts, settingsByServerId]);
+}
+
 /**
  * Hydrates `MainChatSettings` and `fleetHosts` across every connected host that advertises
  * `features.mainChat === true`, and mirrors enabled stewards into the persisted offline cache.

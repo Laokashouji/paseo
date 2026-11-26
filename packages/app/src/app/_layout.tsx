@@ -106,6 +106,7 @@ import { useActiveWorktreeNewAction } from "@/hooks/use-active-worktree-new-acti
 import { useGlobalNewWorkspaceAction } from "@/hooks/use-global-new-workspace-action";
 import { useLatchedBoolean } from "@/hooks/use-latched-boolean";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
+import { useOnlineMainChatSettingsSync } from "@/main-chat/use-steward-roster";
 import { useKeyboardShortcuts } from "@/keyboard/use-shortcuts";
 import { KeyboardShiftProvider } from "@/keyboard/shift";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
@@ -143,6 +144,7 @@ import {
 import {
   buildOpenProjectRoute,
   isMainChatPathname,
+  isPersonaPathname,
   parseHostWorkspaceRouteFromPathname,
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
@@ -704,6 +706,7 @@ function ProvidersWrapper({ children }: { children: ReactNode }) {
         <OfferLinkListener />
         <HostSessionManager />
         <FaviconStatusSync />
+        <OnlineMainChatSettingsSync />
         {children}
       </VoiceProvider>
     </AppearanceProvider>
@@ -894,6 +897,7 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/sessions" ||
       pathname === "/schedules" ||
       isMainChatPathname(pathname) ||
+      isPersonaPathname(pathname) ||
       routeHasKnownHost);
 
   return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
@@ -901,6 +905,11 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
 
 function FaviconStatusSync() {
   useFaviconStatus();
+  return null;
+}
+
+function OnlineMainChatSettingsSync() {
+  useOnlineMainChatSettingsSync();
   return null;
 }
 
@@ -929,6 +938,7 @@ function RootStack() {
         <Stack.Screen name="open-project" />
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
+        <Stack.Screen name="persona" />
       </Stack.Protected>
       <Stack.Screen name="main" />
       <Stack.Screen name="h/[serverId]" />

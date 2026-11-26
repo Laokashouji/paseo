@@ -168,6 +168,46 @@ export interface DesktopBrowserBridge {
   copyElement?: (payload: { text?: string; imageDataUrl?: string }) => Promise<boolean>;
 }
 
+export interface DesktopPersonaOpenSessionEvent {
+  machineId: string;
+  sessionId: string;
+  workspaceIdHint?: string | null;
+  cwdHint?: string | null;
+  view?: "chat" | "term";
+  panel?: "diff";
+  source: "window-open" | "link-click" | "header-button" | "changes-panel-button";
+  rawHref?: string;
+}
+
+export type DesktopPersonaHealthCheckResult =
+  | {
+      ok: true;
+      hubName: string;
+      version: string;
+      latencyMs: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      code?:
+        | "not_configured"
+        | "invalid_url"
+        | "unauthorized_caller"
+        | "redirect_blocked"
+        | "http_error"
+        | "invalid_payload"
+        | "timeout"
+        | "network_error";
+    };
+
+export interface DesktopPersonaBridge {
+  readonly partition?: string;
+  setHubUrl?: (hubUrl: string | null, options?: { enabled?: boolean }) => Promise<boolean>;
+  checkHealth?: () => Promise<DesktopPersonaHealthCheckResult>;
+  clearSession?: () => Promise<void>;
+  openDevTools?: (webContentsId: number) => Promise<boolean>;
+}
+
 export interface DesktopInvokeBridge {
   invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
@@ -189,6 +229,7 @@ export interface DesktopHostBridge {
   webUtils?: DesktopWebUtilsBridge;
   menu?: DesktopMenuBridge;
   browser?: DesktopBrowserBridge;
+  persona?: DesktopPersonaBridge;
 }
 
 declare global {
