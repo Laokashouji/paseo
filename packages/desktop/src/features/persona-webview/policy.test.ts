@@ -6,10 +6,14 @@ import {
   isAllowedPersonaWebviewUrl,
   isPersonaWebviewAttach,
   isValidPersonaHubUrl,
+  matchPersonaWebviewAttachHubUrl,
+  MAX_PERSONA_HUB_URLS,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
   parsePersonaSessionPath,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_WEBVIEW_PARTITION,
+  resolveAuthorizedPinnedPersonaHubUrl,
 } from "./policy.js";
 
 describe("persona-webview policy", () => {
@@ -255,6 +259,81 @@ describe("persona-webview policy", () => {
         "https://hub.example.com/other-prefix/s/n37-217-003/paseo-1",
         "https://hub.example.com/persona-ui",
       ),
+    ).toBeNull();
+  });
+
+  it("normalizes multi-Hub allowlists, deduplicates URLs, and rejects unsafe or oversized lists", () => {
+    expect(normalizePersonaHubUrlList(null)).toEqual([]);
+    expect(normalizePersonaHubUrlList(undefined)).toEqual([]);
+    expect(normalizePersonaHubUrlList([])).toEqual([]);
+    expect(
+      normalizePersonaHubUrlList([
+        "http://10.37.217.3:18660/",
+        "https://hub-b.example.com/persona///",
+        "http://10.37.217.3:18660",
+      ]),
+    ).toEqual(["http://10.37.217.3:18660", "https://hub-b.example.com/persona"]);
+
+    // Fail-closed if any element has credentials, unsafe protocol, or invalid type
+    expect(normalizePersonaHubUrlList("http://127.0.0.1:18660")).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(["http://10.37.217.3:18660", "http://user:pass@127.0.0.1:18661"]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(["http://10.37.217.3:18660", "javascript:alert(1)"]),
+    ).toBeNull();
+    expect(normalizePersonaHubUrlList(["http://10.37.217.3:18660", 123])).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(
+        Array.from({ length: MAX_PERSONA_HUB_URLS + 1 }, (_, i) => `http://127.0.0.1:${20000 + i}`),
+      ),
+    ).toBeNull();
+  });
+
+  it("matches each webview attach strictly to its single Hub URL and respects reverse-proxy basePath", () => {
+    const allowlist = [
+      "http://10.37.217.3:18660",
+      "https://proxy.example.com/hub-a",
+      "https://proxy.example.com/hub-b",
+    ];
+
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "http://10.37.217.3:18660/s/m1/s1" },
+        allowlist,
+      ),
+    ).toBe("http://10.37.217.3:18660");
+
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "https://proxy.example.com/hub-b/chat" },
+        allowlist,
+      ),
+    ).toBe("https://proxy.example.com/hub-b");
+
+    // Unregistered origin or ambiguous basePath on shared origin is rejected
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "https://evil.example.com/" },
+        allowlist,
+      ),
+    ).toBeNull();
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "https://proxy.example.com/unknown" },
+        allowlist,
+      ),
+    ).toBeNull();
+
+    // Pinned Hub authorization stays pinned to that Hub and revokes when removed
+    expect(resolveAuthorizedPinnedPersonaHubUrl("https://proxy.example.com/hub-b", allowlist)).toBe(
+      "https://proxy.example.com/hub-b",
+    );
+    expect(
+      resolveAuthorizedPinnedPersonaHubUrl("https://proxy.example.com/hub-b", [
+        "http://10.37.217.3:18660",
+        "https://proxy.example.com/hub-a",
+      ]),
     ).toBeNull();
   });
 });

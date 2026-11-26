@@ -3,13 +3,17 @@ import {
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  matchPersonaWebviewAttachHubUrl,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
   parsePersonaSessionPath,
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_IPC_CHANNEL,
   PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_WEBVIEW_PARTITION,
+  resolveAuthorizedPinnedPersonaHubUrl,
   type ParsedPersonaSessionPath,
+  type PersonaWebviewAttachParams,
 } from "./policy.js";
 
 export {
@@ -19,7 +23,10 @@ export {
   isAllowedPersonaWebviewUrl,
   isPersonaWebviewAttach,
   isValidPersonaHubUrl,
+  matchPersonaWebviewAttachHubUrl,
+  MAX_PERSONA_HUB_URLS,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
   parsePersonaSessionPath,
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_EVENT,
@@ -31,6 +38,7 @@ export {
   PERSONA_SESSION_METADATA_RESULT_EVENT,
   PERSONA_SESSION_METADATA_RESULT_EVENT_NAME,
   PERSONA_WEBVIEW_PARTITION,
+  resolveAuthorizedPinnedPersonaHubUrl,
   type NormalizedPersonaHubUrl,
   type ParsedPersonaSessionPath,
   type PersonaWebviewAttachParams,
@@ -377,6 +385,7 @@ const PERSONA_STORAGE_TYPES = [
 
 export interface PersonaWebviewSession {
   clearStorageData(options: {
+    origin?: string;
     storages: Array<(typeof PERSONA_STORAGE_TYPES)[number]>;
   }): Promise<void>;
   clearCache(): Promise<void>;
@@ -387,6 +396,255 @@ export interface PersonaWebviewGuest {
   readonly id: number;
   isDestroyed(): boolean;
   reload(): void;
+  getURL?: () => string;
+}
+
+export interface RegisteredPersonaHostHubState {
+  readonly enabled: boolean;
+  readonly hubUrls: readonly string[];
+}
+
+export type PersonaHealthCheckTargetResolution =
+  | { ok: true; hubUrl: string }
+  | { ok: false; code: "not_configured" | "invalid_url"; error: string };
+
+export type PersonaClearSessionTargetResolution =
+  | { ok: true; targetHubUrl: string | null }
+  | { ok: false; error: string };
+
+export interface PersonaHostHubRegistry {
+  setHostHubUrls(hostWebContentsId: number, rawHubUrls: unknown, rawOptions?: unknown): boolean;
+  setHostHubUrl(hostWebContentsId: number, rawHubUrl: unknown, rawOptions?: unknown): boolean;
+  getHostHubState(hostWebContentsId: number): RegisteredPersonaHostHubState | null;
+  resolveHealthCheckTarget(
+    hostWebContentsId: number,
+    rawTargetHubUrl?: unknown,
+  ): PersonaHealthCheckTargetResolution;
+  resolveClearSessionTarget(
+    hostWebContentsId: number,
+    rawTargetHubUrl?: unknown,
+  ): PersonaClearSessionTargetResolution;
+  authorizeWebviewAttach(
+    hostWebContentsId: number,
+    params: PersonaWebviewAttachParams,
+  ): string | null;
+  bindAttachedGuest(
+    hostWebContentsId: number,
+    guestWebContentsId: number,
+    initialUrl?: string,
+  ): string | null;
+  getGuestAuthorizedHubUrl(guestWebContentsId: number): string;
+  getGuestPinnedHubUrl(guestWebContentsId: number): string | null;
+  removeGuest(guestWebContentsId: number): void;
+  removeHost(hostWebContentsId: number): void;
+}
+
+function readEnabledOption(rawOptions: unknown): boolean {
+  if (
+    rawOptions &&
+    typeof rawOptions === "object" &&
+    typeof (rawOptions as { enabled?: unknown }).enabled === "boolean"
+  ) {
+    return (rawOptions as { enabled: boolean }).enabled;
+  }
+  return true;
+}
+
+function dequeuePendingPinnedHubUrl(
+  pendingQueue: string[] | undefined,
+  initialUrl?: string,
+): string | null {
+  if (!pendingQueue || pendingQueue.length === 0) {
+    return null;
+  }
+  const normalizedInitial = normalizePersonaHubUrl(initialUrl);
+  if (normalizedInitial) {
+    let bestIndex = -1;
+    let bestBasePathLength = -1;
+    for (let index = 0; index < pendingQueue.length; index += 1) {
+      const candidate = normalizePersonaHubUrl(pendingQueue[index]);
+      if (!candidate || candidate.origin !== normalizedInitial.origin) {
+        continue;
+      }
+      const pathMatches =
+        !candidate.basePath ||
+        normalizedInitial.basePath === candidate.basePath ||
+        normalizedInitial.basePath.startsWith(`${candidate.basePath}/`);
+      const score = pathMatches ? candidate.basePath.length + 1 : 0;
+      if (score > bestBasePathLength) {
+        bestBasePathLength = score;
+        bestIndex = index;
+      }
+    }
+    if (bestIndex >= 0) {
+      const [matched] = pendingQueue.splice(bestIndex, 1);
+      return matched ?? null;
+    }
+  }
+  return pendingQueue.shift() ?? null;
+}
+
+/**
+ * Maintains per-host-window multi-Hub URL allowlists and pins every attached Persona guest
+ * `<webview>` strictly to its own single Hub origin so one guest can never navigate or send
+ * IPC on behalf of another registered Hub.
+ */
+export function createPersonaHostHubRegistry(): PersonaHostHubRegistry {
+  const hostStateByWebContentsId = new Map<number, { enabled: boolean; hubUrls: string[] }>();
+  const pendingAttachQueueByHostId = new Map<number, string[]>();
+  const guestBindingByWebContentsId = new Map<
+    number,
+    { hostWebContentsId: number; hubUrl: string }
+  >();
+
+  return {
+    setHostHubUrls(hostWebContentsId, rawHubUrls, rawOptions) {
+      const normalizedUrls = normalizePersonaHubUrlList(rawHubUrls);
+      if (normalizedUrls === null) {
+        return false;
+      }
+      if (normalizedUrls.length === 0) {
+        hostStateByWebContentsId.delete(hostWebContentsId);
+        return true;
+      }
+      hostStateByWebContentsId.set(hostWebContentsId, {
+        enabled: readEnabledOption(rawOptions),
+        hubUrls: normalizedUrls,
+      });
+      return true;
+    },
+
+    setHostHubUrl(hostWebContentsId, rawHubUrl, rawOptions) {
+      if (rawHubUrl === null || rawHubUrl === undefined || rawHubUrl === "") {
+        hostStateByWebContentsId.delete(hostWebContentsId);
+        return true;
+      }
+      if (typeof rawHubUrl !== "string") {
+        return false;
+      }
+      const normalized = normalizePersonaHubUrl(rawHubUrl);
+      if (!normalized) {
+        return false;
+      }
+      hostStateByWebContentsId.set(hostWebContentsId, {
+        enabled: readEnabledOption(rawOptions),
+        hubUrls: [normalized.url],
+      });
+      return true;
+    },
+
+    getHostHubState(hostWebContentsId) {
+      return hostStateByWebContentsId.get(hostWebContentsId) ?? null;
+    },
+
+    resolveHealthCheckTarget(hostWebContentsId, rawTargetHubUrl) {
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState || hostState.hubUrls.length === 0) {
+        return {
+          ok: false,
+          code: "not_configured",
+          error: "Persona Hub URL is not registered",
+        };
+      }
+      if (rawTargetHubUrl === undefined || rawTargetHubUrl === null || rawTargetHubUrl === "") {
+        return { ok: true, hubUrl: hostState.hubUrls[0] };
+      }
+      if (typeof rawTargetHubUrl !== "string") {
+        return { ok: false, code: "invalid_url", error: "Invalid Persona Hub URL" };
+      }
+      const normalized = normalizePersonaHubUrl(rawTargetHubUrl);
+      if (!normalized) {
+        return { ok: false, code: "invalid_url", error: "Invalid Persona Hub URL" };
+      }
+      if (!hostState.hubUrls.includes(normalized.url)) {
+        return {
+          ok: false,
+          code: "not_configured",
+          error: "Persona Hub URL is not registered",
+        };
+      }
+      return { ok: true, hubUrl: normalized.url };
+    },
+
+    resolveClearSessionTarget(hostWebContentsId, rawTargetHubUrl) {
+      if (rawTargetHubUrl === undefined || rawTargetHubUrl === null || rawTargetHubUrl === "") {
+        return { ok: true, targetHubUrl: null };
+      }
+      if (typeof rawTargetHubUrl !== "string") {
+        return { ok: false, error: "Invalid Persona Hub URL" };
+      }
+      const normalized = normalizePersonaHubUrl(rawTargetHubUrl);
+      if (!normalized) {
+        return { ok: false, error: "Invalid Persona Hub URL" };
+      }
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState || !hostState.hubUrls.includes(normalized.url)) {
+        return { ok: false, error: "Persona Hub URL is not registered" };
+      }
+      return { ok: true, targetHubUrl: normalized.url };
+    },
+
+    authorizeWebviewAttach(hostWebContentsId, params) {
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState?.enabled) {
+        return null;
+      }
+      const matchedHubUrl = matchPersonaWebviewAttachHubUrl(params, hostState.hubUrls);
+      if (!matchedHubUrl) {
+        return null;
+      }
+      const queue = pendingAttachQueueByHostId.get(hostWebContentsId) ?? [];
+      queue.push(matchedHubUrl);
+      pendingAttachQueueByHostId.set(hostWebContentsId, queue);
+      return matchedHubUrl;
+    },
+
+    bindAttachedGuest(hostWebContentsId, guestWebContentsId, initialUrl) {
+      const queue = pendingAttachQueueByHostId.get(hostWebContentsId);
+      const pinnedHubUrl = dequeuePendingPinnedHubUrl(queue, initialUrl);
+      if (queue && queue.length === 0) {
+        pendingAttachQueueByHostId.delete(hostWebContentsId);
+      }
+      if (!pinnedHubUrl) {
+        return null;
+      }
+      guestBindingByWebContentsId.set(guestWebContentsId, {
+        hostWebContentsId,
+        hubUrl: pinnedHubUrl,
+      });
+      return pinnedHubUrl;
+    },
+
+    getGuestAuthorizedHubUrl(guestWebContentsId) {
+      const binding = guestBindingByWebContentsId.get(guestWebContentsId);
+      if (!binding) {
+        return "";
+      }
+      const hostState = hostStateByWebContentsId.get(binding.hostWebContentsId);
+      if (!hostState?.enabled) {
+        return "";
+      }
+      return resolveAuthorizedPinnedPersonaHubUrl(binding.hubUrl, hostState.hubUrls) ?? "";
+    },
+
+    getGuestPinnedHubUrl(guestWebContentsId) {
+      return guestBindingByWebContentsId.get(guestWebContentsId)?.hubUrl ?? null;
+    },
+
+    removeGuest(guestWebContentsId) {
+      guestBindingByWebContentsId.delete(guestWebContentsId);
+    },
+
+    removeHost(hostWebContentsId) {
+      hostStateByWebContentsId.delete(hostWebContentsId);
+      pendingAttachQueueByHostId.delete(hostWebContentsId);
+      for (const [guestId, binding] of guestBindingByWebContentsId.entries()) {
+        if (binding.hostWebContentsId === hostWebContentsId) {
+          guestBindingByWebContentsId.delete(guestId);
+        }
+      }
+    },
+  };
 }
 
 export interface PersonaWebviewContentsLike extends PersonaWebviewGuest {
@@ -447,11 +705,61 @@ export function listPersonaWebviewGuests(input: {
   );
 }
 
+function matchesGuestTargetOrigin(
+  guest: PersonaWebviewGuest,
+  targetOrigin: string,
+  getGuestHubUrl?: (guest: PersonaWebviewGuest) => string | null,
+): boolean {
+  const pinnedUrl = getGuestHubUrl?.(guest);
+  const normalizedPinned = normalizePersonaHubUrl(pinnedUrl);
+  if (normalizedPinned) {
+    return normalizedPinned.origin === targetOrigin;
+  }
+  try {
+    const liveUrl = guest.getURL?.();
+    const normalizedLive = normalizePersonaHubUrl(liveUrl);
+    return normalizedLive !== null && normalizedLive.origin === targetOrigin;
+  } catch {
+    return false;
+  }
+}
+
 export async function clearPersonaWebviewSession(input: {
   personaSession: PersonaWebviewSession;
   listGuests(): PersonaWebviewGuest[];
   logReloadError(guestId: number, error: unknown): void;
+  targetHubUrl?: string | null;
+  getGuestHubUrl?: (guest: PersonaWebviewGuest) => string | null;
 }): Promise<void> {
+  const hasTargetHubUrl =
+    input.targetHubUrl !== undefined && input.targetHubUrl !== null && input.targetHubUrl !== "";
+
+  if (hasTargetHubUrl) {
+    const normalizedTarget = normalizePersonaHubUrl(input.targetHubUrl);
+    if (!normalizedTarget) {
+      throw new Error("Invalid Persona Hub URL");
+    }
+    // Clear storage strictly for the requested Hub origin so other Hubs stay signed in.
+    await input.personaSession.clearStorageData({
+      origin: normalizedTarget.origin,
+      storages: [...PERSONA_STORAGE_TYPES],
+    });
+    for (const guest of input.listGuests()) {
+      if (
+        guest.isDestroyed() ||
+        !matchesGuestTargetOrigin(guest, normalizedTarget.origin, input.getGuestHubUrl)
+      ) {
+        continue;
+      }
+      try {
+        guest.reload();
+      } catch (error) {
+        input.logReloadError(guest.id, error);
+      }
+    }
+    return;
+  }
+
   await Promise.all([
     input.personaSession.clearStorageData({ storages: [...PERSONA_STORAGE_TYPES] }),
     input.personaSession.clearCache(),

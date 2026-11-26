@@ -202,9 +202,10 @@ export type DesktopPersonaHealthCheckResult =
 
 export interface DesktopPersonaBridge {
   readonly partition?: string;
+  setHubUrls?: (hubUrls: string[] | null, options?: { enabled?: boolean }) => Promise<boolean>;
   setHubUrl?: (hubUrl: string | null, options?: { enabled?: boolean }) => Promise<boolean>;
-  checkHealth?: () => Promise<DesktopPersonaHealthCheckResult>;
-  clearSession?: () => Promise<void>;
+  checkHealth?: (hubUrl?: string) => Promise<DesktopPersonaHealthCheckResult>;
+  clearSession?: (hubUrl?: string) => Promise<void>;
   openDevTools?: (webContentsId: number) => Promise<boolean>;
 }
 

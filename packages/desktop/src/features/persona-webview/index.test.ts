@@ -7,6 +7,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   clearPersonaWebviewSession,
+  createPersonaHostHubRegistry,
   getPersonaWebviewSession,
   isTrustedPersonaGuestMainFrameIpcEvent,
   isTrustedPersonaHostIpcEvent,
@@ -1332,5 +1333,175 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
       expect(ipcRenderer.on, scenario.label).not.toHaveBeenCalled();
       expect(ipcRenderer.send, scenario.label).not.toHaveBeenCalled();
     }
+  });
+
+  it("pins each guest in a multi-Hub host window strictly to its own single origin and revokes removed Hubs independently", () => {
+    const registry = createPersonaHostHubRegistry();
+    const hostId = 10;
+    const hubA = "http://10.37.217.3:18660";
+    const hubB = "http://127.0.0.1:18661";
+
+    expect(registry.setHostHubUrls(hostId, [hubA, hubB], { enabled: true })).toBe(true);
+    expect(registry.getHostHubState(hostId)).toEqual({
+      enabled: true,
+      hubUrls: [hubA, hubB],
+    });
+
+    // Attach two guests concurrently for Hub A and Hub B
+    const matchedA = registry.authorizeWebviewAttach(hostId, {
+      partition: PERSONA_WEBVIEW_PARTITION,
+      src: `${hubA}/`,
+    });
+    const matchedB = registry.authorizeWebviewAttach(hostId, {
+      partition: PERSONA_WEBVIEW_PARTITION,
+      src: `${hubB}/`,
+    });
+    expect(matchedA).toBe(hubA);
+    expect(matchedB).toBe(hubB);
+
+    // Unregistered Hub C is rejected even while Hub A and Hub B are authorized
+    expect(
+      registry.authorizeWebviewAttach(hostId, {
+        partition: PERSONA_WEBVIEW_PARTITION,
+        src: "https://hub-c.example.com/",
+      }),
+    ).toBeNull();
+
+    // Even if did-attach-webview fires out-of-order, initial URL matches the right pending Hub
+    expect(registry.bindAttachedGuest(hostId, 202, `${hubB}/`)).toBe(hubB);
+    expect(registry.bindAttachedGuest(hostId, 101, `${hubA}/`)).toBe(hubA);
+
+    // Each guest's navigation guard is strictly locked to its OWN single Hub origin
+    const guestA = createMockWebContents(`${hubA}/`);
+    const guestB = createMockWebContents(`${hubB}/`);
+    const externalOpenedA: string[] = [];
+    const externalOpenedB: string[] = [];
+    registerPersonaWebviewNavigationGuards(guestA.contents, {
+      getConfiguredHubUrl: () => registry.getGuestAuthorizedHubUrl(101),
+      onOpenSession: vi.fn(),
+      openExternalUrl: (url) => {
+        externalOpenedA.push(url);
+      },
+    });
+    registerPersonaWebviewNavigationGuards(guestB.contents, {
+      getConfiguredHubUrl: () => registry.getGuestAuthorizedHubUrl(202),
+      onOpenSession: vi.fn(),
+      openExternalUrl: (url) => {
+        externalOpenedB.push(url);
+      },
+    });
+
+    // Guest A navigating to Hub A stays inside; navigating to Hub B (even though registered on host!) is BLOCKED
+    expect(guestA.emitNavigation("will-navigate", `${hubA}/s/m1/s1`).prevented).toBe(false);
+    expect(guestA.emitNavigation("will-navigate", `${hubB}/s/m2/s2`).prevented).toBe(true);
+    expect(externalOpenedA).toEqual([`${hubB}/s/m2/s2`]);
+
+    // Guest B navigating to Hub B stays inside; navigating to Hub A is BLOCKED
+    expect(guestB.emitNavigation("will-navigate", `${hubB}/s/m2/s2`).prevented).toBe(false);
+    expect(guestB.emitNavigation("will-navigate", `${hubA}/s/m1/s1`).prevented).toBe(true);
+    expect(externalOpenedB).toEqual([`${hubA}/s/m1/s1`]);
+
+    // Removing Hub A from host allowlist revokes ONLY Guest A while Guest B stays authorized
+    expect(registry.setHostHubUrls(hostId, [hubB], { enabled: true })).toBe(true);
+    expect(registry.getGuestAuthorizedHubUrl(101)).toBe("");
+    expect(registry.getGuestAuthorizedHubUrl(202)).toBe(hubB);
+    expect(guestA.emitNavigation("will-navigate", `${hubA}/next`).prevented).toBe(true);
+    expect(guestB.emitNavigation("will-navigate", `${hubB}/next`).prevented).toBe(false);
+
+    // Disabling Persona revokes remaining Guest B
+    expect(registry.setHostHubUrls(hostId, [hubB], { enabled: false })).toBe(true);
+    expect(registry.getGuestAuthorizedHubUrl(202)).toBe("");
+
+    // Removing host cleans up all guest bindings
+    registry.removeHost(hostId);
+    expect(registry.getHostHubState(hostId)).toBeNull();
+    expect(registry.getGuestPinnedHubUrl(101)).toBeNull();
+    expect(registry.getGuestPinnedHubUrl(202)).toBeNull();
+  });
+
+  it("isolates per-Hub health-check targets (SSRF-safe) and origin-scoped session clearing", async () => {
+    const registry = createPersonaHostHubRegistry();
+    const hostId = 20;
+    const hubA = "http://10.37.217.3:18660";
+    const hubB = "https://hub-b.example.com/persona";
+
+    expect(registry.setHostHubUrls(hostId, [hubA, hubB], { enabled: true })).toBe(true);
+
+    // Health check resolves each registered Hub target and blocks unregistered / invalid URLs
+    expect(registry.resolveHealthCheckTarget(hostId, `${hubB}/`)).toEqual({
+      ok: true,
+      hubUrl: hubB,
+    });
+    expect(registry.resolveHealthCheckTarget(hostId)).toEqual({
+      ok: true,
+      hubUrl: hubA,
+    });
+    expect(registry.resolveHealthCheckTarget(hostId, "http://169.254.169.254/")).toEqual({
+      ok: false,
+      code: "not_configured",
+      error: "Persona Hub URL is not registered",
+    });
+    expect(registry.resolveHealthCheckTarget(hostId, "javascript:alert(1)")).toEqual({
+      ok: false,
+      code: "invalid_url",
+      error: "Invalid Persona Hub URL",
+    });
+
+    // Clear session target resolution rejects unregistered URLs
+    expect(registry.resolveClearSessionTarget(hostId, hubB)).toEqual({
+      ok: true,
+      targetHubUrl: hubB,
+    });
+    expect(registry.resolveClearSessionTarget(hostId, "https://other.example.com")).toEqual({
+      ok: false,
+      error: "Persona Hub URL is not registered",
+    });
+
+    // Clear session scoped to Hub B clears ONLY Hub B's origin storage and reloads ONLY Hub B's guest
+    const clearStorageData = vi.fn(async () => undefined);
+    const clearCache = vi.fn(async () => undefined);
+    const clearAuthCache = vi.fn(async () => undefined);
+    const guestA = { id: 301, isDestroyed: () => false, reload: vi.fn(), getURL: () => `${hubA}/` };
+    const guestB = { id: 302, isDestroyed: () => false, reload: vi.fn(), getURL: () => `${hubB}/` };
+    const pinnedMap = new Map<number, string>([
+      [301, hubA],
+      [302, hubB],
+    ]);
+
+    await clearPersonaWebviewSession({
+      personaSession: { clearStorageData, clearCache, clearAuthCache },
+      targetHubUrl: hubB,
+      getGuestHubUrl: (guest) => pinnedMap.get(guest.id) ?? null,
+      listGuests: () => [guestA, guestB],
+      logReloadError: vi.fn(),
+    });
+
+    expect(clearStorageData).toHaveBeenCalledTimes(1);
+    expect(clearStorageData).toHaveBeenCalledWith({
+      origin: "https://hub-b.example.com",
+      storages: [
+        "cookies",
+        "filesystem",
+        "indexdb",
+        "localstorage",
+        "serviceworkers",
+        "cachestorage",
+        "shadercache",
+      ],
+    });
+    expect(clearCache).not.toHaveBeenCalled();
+    expect(clearAuthCache).not.toHaveBeenCalled();
+    expect(guestA.reload).not.toHaveBeenCalled();
+    expect(guestB.reload).toHaveBeenCalledTimes(1);
+
+    // Invalid targetHubUrl throws fail-closed instead of wiping all origins
+    await expect(
+      clearPersonaWebviewSession({
+        personaSession: { clearStorageData, clearCache, clearAuthCache },
+        targetHubUrl: "javascript:bad",
+        listGuests: () => [guestA, guestB],
+        logReloadError: vi.fn(),
+      }),
+    ).rejects.toThrow("Invalid Persona Hub URL");
   });
 });

@@ -148,11 +148,14 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
   },
   persona: {
     partition: PERSONA_WEBVIEW_PARTITION,
+    setHubUrls: (hubUrls: string[] | null, options?: { enabled?: boolean }) =>
+      ipcRenderer.invoke("paseo:persona:set-hub-urls", hubUrls, options) as Promise<boolean>,
     setHubUrl: (hubUrl: string | null, options?: { enabled?: boolean }) =>
       ipcRenderer.invoke("paseo:persona:set-hub-url", hubUrl, options) as Promise<boolean>,
-    checkHealth: () =>
-      ipcRenderer.invoke("paseo:persona:check-health") as Promise<PersonaHealthCheckResult>,
-    clearSession: () => ipcRenderer.invoke("paseo:persona:clear-session") as Promise<void>,
+    checkHealth: (hubUrl?: string) =>
+      ipcRenderer.invoke("paseo:persona:check-health", hubUrl) as Promise<PersonaHealthCheckResult>,
+    clearSession: (hubUrl?: string) =>
+      ipcRenderer.invoke("paseo:persona:clear-session", hubUrl) as Promise<void>,
     openDevTools: (webContentsId: number) =>
       ipcRenderer.invoke("paseo:persona:open-devtools", webContentsId) as Promise<boolean>,
   },
