@@ -1,28 +1,44 @@
 import { router } from "expo-router";
 import {
   ArrowLeft,
+  ArrowLeftRight,
   ArrowRight,
   ArrowUpRight,
+  Check,
+  ChevronDown,
+  Columns2,
   ExternalLink,
   GitCommitHorizontal,
   Home,
   PanelLeft,
   RotateCw,
   Settings,
+  X,
 } from "lucide-react-native";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Text, View } from "react-native";
+import { Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -35,22 +51,40 @@ import { createAppOpenPersonaSessionDeps, openPersonaSession } from "./open-pers
 import {
   disableResidentPersonaWebview,
   ensureResidentPersonaWebview,
+  findResidentPersonaEntryByWebContentsId,
   getResidentPersonaWebview,
+  listResidentPersonaHubIds,
   lookupPersonaGuestSessionMetadata,
   parkResidentPersonaWebview,
   presentResidentPersonaWebview,
   readResidentPersonaWebviewContentsId,
+  reconcileResidentPersonaWebviews,
   sendPersonaGuestAllowOnce,
   sendPersonaGuestConfig,
   sendPersonaGuestRouteSync,
+  setResidentPersonaWebviewsInteractive,
+  syncPersonaHubUrlsWithMain,
   type PersonaElectronWebviewElement,
   type PersonaGuestConfigMessage,
 } from "./resident-persona-webview.electron";
 import {
+  clampPersonaSplitRatio,
+  closePersonaSplitPane,
+  collectValidPersonaHubUrls,
+  DEFAULT_PERSONA_SPLIT_RATIO,
+  formatPersonaHubDisplayHost,
+  getActivePersonaHub,
+  getPersonaHubById,
+  getSecondaryPersonaHub,
   normalizePersonaHubUrl,
   parsePersonaEmbedSessionRoute,
+  selectActivePersonaHub,
+  selectSecondaryPersonaHub,
+  swapPersonaSplitPanes,
+  togglePersonaSplitMode,
   validatePersonaGuestOpenSessionPayload,
   validatePersonaGuestReadyPayload,
+  type PersonaHubProfile,
 } from "./settings";
 import {
   usePersonaEmbedSettingsState,
@@ -62,15 +96,41 @@ const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const ThemedArrowRight = withUnistyles(ArrowRight);
 const ThemedRotateCw = withUnistyles(RotateCw);
 const ThemedPanelLeft = withUnistyles(PanelLeft);
+const ThemedColumns = withUnistyles(Columns2);
+const ThemedSwap = withUnistyles(ArrowLeftRight);
+const ThemedClose = withUnistyles(X);
 const ThemedExternalLink = withUnistyles(ExternalLink);
 const ThemedSettings = withUnistyles(Settings);
 const ThemedOpenInPaseo = withUnistyles(ArrowUpRight);
 const ThemedDiff = withUnistyles(GitCommitHorizontal);
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedCheck = withUnistyles(Check);
 const ThemedSpinner = withUnistyles(LoadingSpinner);
 
 const iconMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const iconActiveMapping = (theme: Theme) => ({ color: theme.colors.accent });
 const iconDisabledMapping = (theme: Theme) => ({ color: theme.colors.foregroundExtraMuted });
+
+const activeCheckIcon = <ThemedCheck size={13} uniProps={iconActiveMapping} />;
+const mutedSettingsIcon = <ThemedSettings size={13} uniProps={iconMutedMapping} />;
+
+const DIVIDER_HIT_AREA_STYLE: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  left: -5,
+  width: 11,
+  cursor: "col-resize",
+  touchAction: "none",
+  zIndex: 15,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+export const MIN_PERSONA_SPLIT_SURFACE_WIDTH = 900;
+const ERR_ABORTED = -3;
+const KEYBOARD_SPLIT_STEP = 0.05;
 
 interface WebviewFailLoadEvent extends Event {
   errorCode?: number;
@@ -89,8 +149,6 @@ interface LoadErrorState {
   description: string;
   url: string;
 }
-
-const ERR_ABORTED = -3;
 
 function readWebviewUrlSafely(
   webview: PersonaElectronWebviewElement | null | undefined,
@@ -125,81 +183,543 @@ function isSameOriginUrl(candidateUrl: string, expectedOrigin: string): boolean 
   }
 }
 
-function PersonaSurfaceOverlay(input: {
+function buildGuestConfigForHub(input: {
+  hubUrl: string;
+  hidePersonaSidebar: boolean;
+  interceptSessionClicks: boolean;
+  labels: PersonaGuestConfigMessage["labels"];
+}): PersonaGuestConfigMessage | null {
+  const normalized = normalizePersonaHubUrl(input.hubUrl);
+  if (!normalized.ok) {
+    return null;
+  }
+  return {
+    hubOrigin: normalized.origin,
+    hubBasePath: normalized.basePath,
+    hidePersonaSidebar: input.hidePersonaSidebar,
+    interceptSessionClicks: input.interceptSessionClicks,
+    labels: input.labels,
+  };
+}
+
+function readPositiveWebContentsIdFromPayload(raw: unknown): number | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const value = (raw as Record<string, unknown>).guestWebContentsId;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+interface PersonaPaneOverlayProps {
+  slot: "primary" | "secondary";
   validHubUrl: string | null;
   mountRejected: boolean;
   loadError: LoadErrorState | null;
   onReload: () => void;
   onOpenExternal: () => void;
   onOpenSettings: () => void;
-}): ReactElement | null {
+}
+
+const PersonaPaneOverlay = memo(function PersonaPaneOverlay({
+  slot,
+  validHubUrl,
+  mountRejected,
+  loadError,
+  onReload,
+  onOpenExternal,
+  onOpenSettings,
+}: PersonaPaneOverlayProps): ReactElement | null {
   const { t } = useTranslation();
-  if (!input.validHubUrl) {
+  const suffix = slot === "primary" ? "" : "-secondary";
+
+  if (!validHubUrl) {
     return (
-      <View style={styles.overlayCard} testID="persona-invalid-url-state">
+      <View style={styles.overlayCard} testID={`persona-invalid-url-state${suffix}`}>
         <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
         <Text style={styles.overlayDescription}>{t("personaEmbed.error.invalidUrl")}</Text>
         <View style={styles.overlayActions}>
-          <Button onPress={input.onOpenSettings}>{t("personaEmbed.toolbar.settings")}</Button>
+          <Button onPress={onOpenSettings}>{t("personaEmbed.toolbar.settings")}</Button>
         </View>
       </View>
     );
   }
-  if (input.mountRejected) {
+  if (mountRejected) {
     return (
-      <View style={styles.overlayCard} testID="persona-mount-rejected-state">
+      <View style={styles.overlayCard} testID={`persona-mount-rejected-state${suffix}`}>
         <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
         <Text style={styles.overlayDescription}>{t("personaEmbed.error.mountRejected")}</Text>
         <View style={styles.overlayActions}>
-          <Button onPress={input.onReload}>{t("personaEmbed.error.retry")}</Button>
-          <Button variant="ghost" onPress={input.onOpenSettings}>
+          <Button onPress={onReload}>{t("personaEmbed.error.retry")}</Button>
+          <Button variant="ghost" onPress={onOpenSettings}>
             {t("personaEmbed.toolbar.settings")}
           </Button>
         </View>
       </View>
     );
   }
-  if (!input.loadError) {
+  if (!loadError) {
     return null;
   }
   return (
-    <View style={styles.overlayCard} testID="persona-load-error-state">
+    <View style={styles.overlayCard} testID={`persona-load-error-state${suffix}`}>
       <Text style={styles.overlayTitle}>{t("personaEmbed.error.loadFailedTitle")}</Text>
       <Text style={styles.overlayDescription}>
         {t("personaEmbed.error.loadFailedDetail", {
-          url: input.loadError.url || input.validHubUrl,
+          url: loadError.url || validHubUrl,
         })}
       </Text>
       <Text style={styles.overlayMeta}>
-        {input.loadError.description} ({input.loadError.code})
+        {loadError.description} ({loadError.code})
       </Text>
       <View style={styles.overlayActions}>
-        <Button onPress={input.onReload}>{t("personaEmbed.error.retry")}</Button>
-        <Button variant="outline" onPress={input.onOpenExternal}>
+        <Button onPress={onReload}>{t("personaEmbed.error.retry")}</Button>
+        <Button variant="outline" onPress={onOpenExternal}>
           {t("personaEmbed.toolbar.openExternal")}
         </Button>
-        <Button variant="ghost" onPress={input.onOpenSettings}>
+        <Button variant="ghost" onPress={onOpenSettings}>
           {t("personaEmbed.toolbar.settings")}
         </Button>
       </View>
     </View>
   );
+});
+
+interface PersonaPaneHubSwitcherProps {
+  slot: "primary" | "secondary";
+  hub: PersonaHubProfile | null;
+  allHubs: readonly PersonaHubProfile[];
+  otherPaneHubId: string | null;
+  onSelectHub: (hubId: string) => void;
+  onOpenSettings: () => void;
 }
 
-export function PersonaSurface() {
+const PersonaPaneHubSwitcherItem = memo(function PersonaPaneHubSwitcherItem({
+  slot,
+  candidate,
+  isCurrent,
+  isInOtherPane,
+  onSelectHub,
+}: {
+  slot: "primary" | "secondary";
+  candidate: PersonaHubProfile;
+  isCurrent: boolean;
+  isInOtherPane: boolean;
+  onSelectHub: (hubId: string) => void;
+}): ReactElement {
   const { t } = useTranslation();
-  const toast = useToast();
-  const isCompact = useIsCompactFormFactor();
-  const { settings: personaSettings, isLoaded: settingsLoaded } = usePersonaEmbedSettingsState();
-  const updatePersonaSettings = useUpdatePersonaEmbedSettings();
-
-  const normalizedHub = useMemo(
-    () => normalizePersonaHubUrl(personaSettings.hubUrl),
-    [personaSettings.hubUrl],
+  const hostLabel = useMemo(
+    () => formatPersonaHubDisplayHost(candidate.hubUrl),
+    [candidate.hubUrl],
   );
+  const handleSelect = useCallback(() => {
+    onSelectHub(candidate.id);
+  }, [candidate.id, onSelectHub]);
+  const detailSuffix = isInOtherPane ? ` · ${t("personaEmbed.toolbar.inOtherPane")}` : "";
+  return (
+    <DropdownMenuItem
+      leading={isCurrent ? activeCheckIcon : undefined}
+      onSelect={handleSelect}
+      testID={`persona-pane-${slot}-hub-option-${candidate.id}`}
+    >
+      {hostLabel ? `${candidate.name} (${hostLabel})${detailSuffix}` : candidate.name}
+    </DropdownMenuItem>
+  );
+});
+
+const PersonaPaneHubSwitcher = memo(function PersonaPaneHubSwitcher({
+  slot,
+  hub,
+  allHubs,
+  otherPaneHubId,
+  onSelectHub,
+  onOpenSettings,
+}: PersonaPaneHubSwitcherProps): ReactElement {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+
+  const label = hub?.name ?? t("personaEmbed.sidebar.subtitleUnconfigured");
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        accessibilityRole="button"
+        accessibilityLabel={t("personaEmbed.toolbar.switchHub")}
+        style={styles.hubSwitcherTrigger}
+        testID={`persona-pane-${slot}-hub-switcher`}
+      >
+        <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hubSwitcherText}>
+          {label}
+        </Text>
+        <ThemedChevronDown size={13} uniProps={iconMutedMapping} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {allHubs.map((candidate) => (
+          <PersonaPaneHubSwitcherItem
+            key={candidate.id}
+            slot={slot}
+            candidate={candidate}
+            isCurrent={candidate.id === hub?.id}
+            isInOtherPane={candidate.id === otherPaneHubId}
+            onSelectHub={onSelectHub}
+          />
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          leading={mutedSettingsIcon}
+          onSelect={onOpenSettings}
+          testID={`persona-pane-${slot}-manage-hubs`}
+        >
+          {t("personaEmbed.toolbar.manageHubs")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+});
+
+interface PersonaPaneToolbarProps {
+  slot: "primary" | "secondary";
+  hub: PersonaHubProfile | null;
+  allHubs: readonly PersonaHubProfile[];
+  otherPaneHubId: string | null;
+  displayHost: string | null;
+  hasValidUrl: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  isLoading: boolean;
+  isSplitActive: boolean;
+  canEnableSplit: boolean;
+  splitBlockedNarrow: boolean;
+  hidePersonaSidebarPreference: boolean;
+  hasCurrentSessionRoute: boolean;
+  onSelectHub: (hubId: string) => void;
+  onGoHome: () => void;
+  onGoBack: () => void;
+  onGoForward: () => void;
+  onReload: () => void;
+  onTogglePersonaSidebar: () => void;
+  onToolbarOpenAgent: () => void;
+  onToolbarOpenDiff: () => void;
+  onToggleSplit: () => void;
+  onSwapPanes: () => void;
+  onCloseThisPane: () => void;
+  onOpenExternal: () => void;
+  onOpenSettings: () => void;
+}
+
+const PersonaPaneSessionActions = memo(function PersonaPaneSessionActions({
+  isPrimary,
+  visible,
+  onOpenAgent,
+  onOpenDiff,
+}: {
+  isPrimary: boolean;
+  visible: boolean;
+  onOpenAgent: () => void;
+  onOpenDiff: () => void;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  if (!visible) {
+    return null;
+  }
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        onPress={onOpenAgent}
+        accessibilityLabel={t("personaEmbed.guest.openInPaseoTooltip")}
+        testID={
+          isPrimary ? "persona-toolbar-open-in-paseo" : "persona-pane-secondary-open-in-paseo"
+        }
+      >
+        <ThemedOpenInPaseo size={13} uniProps={iconActiveMapping} />
+        <Text style={styles.pillButtonText}>{t("personaEmbed.toolbar.openInPaseo")}</Text>
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onPress={onOpenDiff}
+        accessibilityLabel={t("personaEmbed.guest.openDiffTooltip")}
+        testID={isPrimary ? "persona-toolbar-open-diff" : "persona-pane-secondary-open-diff"}
+      >
+        <ThemedDiff size={13} uniProps={iconMutedMapping} />
+        <Text style={styles.pillButtonText}>{t("personaEmbed.toolbar.openDiff")}</Text>
+      </Button>
+    </>
+  );
+});
+
+const PersonaPaneSplitControls = memo(function PersonaPaneSplitControls({
+  slot,
+  hubCount,
+  isSplitActive,
+  canEnableSplit,
+  splitBlockedNarrow,
+  onToggleSplit,
+  onSwapPanes,
+  onCloseThisPane,
+}: {
+  slot: "primary" | "secondary";
+  hubCount: number;
+  isSplitActive: boolean;
+  canEnableSplit: boolean;
+  splitBlockedNarrow: boolean;
+  onToggleSplit: () => void;
+  onSwapPanes: () => void;
+  onCloseThisPane: () => void;
+}): ReactElement {
+  const { t } = useTranslation();
+  if (isSplitActive) {
+    return (
+      <>
+        <ToolbarButton
+          onPress={onSwapPanes}
+          label={t("personaEmbed.toolbar.swapPanes")}
+          testID={`persona-pane-${slot}-swap`}
+        >
+          <ThemedSwap size={14} uniProps={iconMutedMapping} />
+        </ToolbarButton>
+        <ToolbarButton
+          onPress={onCloseThisPane}
+          label={t("personaEmbed.toolbar.closeSplitPane")}
+          testID={`persona-pane-${slot}-close-split`}
+        >
+          <ThemedClose size={14} uniProps={iconMutedMapping} />
+        </ToolbarButton>
+      </>
+    );
+  }
+
+  let splitToggleLabel: string;
+  if (hubCount < 2) {
+    splitToggleLabel = t("personaEmbed.toolbar.splitNeedsTwoHubs");
+  } else if (splitBlockedNarrow) {
+    splitToggleLabel = t("personaEmbed.toolbar.splitUnavailableNarrow");
+  } else {
+    splitToggleLabel = t("personaEmbed.toolbar.enableSplit");
+  }
+
+  const splitToggleIconMapping = canEnableSplit ? iconMutedMapping : iconDisabledMapping;
+
+  return (
+    <ToolbarButton
+      onPress={onToggleSplit}
+      disabled={!canEnableSplit}
+      selected={false}
+      label={splitToggleLabel}
+      testID="persona-toolbar-toggle-split"
+    >
+      <ThemedColumns size={14} uniProps={splitToggleIconMapping} />
+    </ToolbarButton>
+  );
+});
+
+const PersonaPaneToolbar = memo(function PersonaPaneToolbar({
+  slot,
+  hub,
+  allHubs,
+  otherPaneHubId,
+  displayHost,
+  hasValidUrl,
+  canGoBack,
+  canGoForward,
+  isLoading,
+  isSplitActive,
+  canEnableSplit,
+  splitBlockedNarrow,
+  hidePersonaSidebarPreference,
+  hasCurrentSessionRoute,
+  onSelectHub,
+  onGoHome,
+  onGoBack,
+  onGoForward,
+  onReload,
+  onTogglePersonaSidebar,
+  onToolbarOpenAgent,
+  onToolbarOpenDiff,
+  onToggleSplit,
+  onSwapPanes,
+  onCloseThisPane,
+  onOpenExternal,
+  onOpenSettings,
+}: PersonaPaneToolbarProps): ReactElement {
+  const { t } = useTranslation();
+  const isPrimary = slot === "primary";
+  const testIdPrefix = isPrimary ? "persona-toolbar" : "persona-pane-secondary";
+  const showHubSwitcher = allHubs.length > 1 || isSplitActive;
+  const urlActionIconMapping = hasValidUrl ? iconMutedMapping : iconDisabledMapping;
+
+  return (
+    <View style={[styles.toolbar, isSplitActive && styles.toolbarCompact]}>
+      <View style={styles.toolbarGroup}>
+        {showHubSwitcher ? (
+          <PersonaPaneHubSwitcher
+            slot={slot}
+            hub={hub}
+            allHubs={allHubs}
+            otherPaneHubId={otherPaneHubId}
+            onSelectHub={onSelectHub}
+            onOpenSettings={onOpenSettings}
+          />
+        ) : null}
+        <ToolbarButton
+          onPress={onGoHome}
+          disabled={!hasValidUrl}
+          label={t("personaEmbed.toolbar.home")}
+          testID={`${testIdPrefix}-home`}
+        >
+          <ThemedHome size={14} uniProps={urlActionIconMapping} />
+        </ToolbarButton>
+        <ToolbarButton
+          onPress={onGoBack}
+          disabled={!canGoBack}
+          label={t("personaEmbed.toolbar.back")}
+          testID={`${testIdPrefix}-back`}
+        >
+          <ThemedArrowLeft
+            size={14}
+            uniProps={canGoBack ? iconMutedMapping : iconDisabledMapping}
+          />
+        </ToolbarButton>
+        <ToolbarButton
+          onPress={onGoForward}
+          disabled={!canGoForward}
+          label={t("personaEmbed.toolbar.forward")}
+          testID={`${testIdPrefix}-forward`}
+        >
+          <ThemedArrowRight
+            size={14}
+            uniProps={canGoForward ? iconMutedMapping : iconDisabledMapping}
+          />
+        </ToolbarButton>
+        <ToolbarButton
+          onPress={onReload}
+          disabled={!hasValidUrl}
+          label={t("personaEmbed.toolbar.reload")}
+          testID={`${testIdPrefix}-reload`}
+        >
+          {isLoading ? (
+            <ThemedSpinner size="small" />
+          ) : (
+            <ThemedRotateCw size={14} uniProps={urlActionIconMapping} />
+          )}
+        </ToolbarButton>
+        {!isSplitActive ? (
+          <ToolbarButton
+            onPress={onTogglePersonaSidebar}
+            selected={hidePersonaSidebarPreference}
+            label={t("personaEmbed.toolbar.toggleSidebar")}
+            testID="persona-toolbar-toggle-sidebar"
+          >
+            <ThemedPanelLeft
+              size={14}
+              uniProps={hidePersonaSidebarPreference ? iconActiveMapping : iconMutedMapping}
+            />
+          </ToolbarButton>
+        ) : null}
+      </View>
+
+      <View style={[styles.addressChip, isSplitActive && styles.addressChipCompact]}>
+        <Text numberOfLines={1} ellipsizeMode="middle" style={styles.addressText}>
+          {displayHost ?? t("personaEmbed.sidebar.subtitleUnconfigured")}
+        </Text>
+      </View>
+
+      <View style={styles.toolbarGroup}>
+        <PersonaPaneSessionActions
+          isPrimary={isPrimary}
+          visible={hasCurrentSessionRoute}
+          onOpenAgent={onToolbarOpenAgent}
+          onOpenDiff={onToolbarOpenDiff}
+        />
+
+        <PersonaPaneSplitControls
+          slot={slot}
+          hubCount={allHubs.length}
+          isSplitActive={isSplitActive}
+          canEnableSplit={canEnableSplit}
+          splitBlockedNarrow={splitBlockedNarrow}
+          onToggleSplit={onToggleSplit}
+          onSwapPanes={onSwapPanes}
+          onCloseThisPane={onCloseThisPane}
+        />
+
+        <ToolbarButton
+          onPress={onOpenExternal}
+          disabled={!hasValidUrl}
+          label={t("personaEmbed.toolbar.openExternal")}
+          testID={`${testIdPrefix}-open-external`}
+        >
+          <ThemedExternalLink size={14} uniProps={urlActionIconMapping} />
+        </ToolbarButton>
+        {isPrimary ? (
+          <ToolbarButton
+            onPress={onOpenSettings}
+            label={t("personaEmbed.toolbar.settings")}
+            testID="persona-toolbar-settings"
+          >
+            <ThemedSettings size={14} uniProps={iconMutedMapping} />
+          </ToolbarButton>
+        ) : null}
+      </View>
+    </View>
+  );
+});
+
+interface PersonaPaneProps {
+  slot: "primary" | "secondary";
+  hub: PersonaHubProfile | null;
+  allHubs: readonly PersonaHubProfile[];
+  otherPaneHubId: string | null;
+  isSplitActive: boolean;
+  canEnableSplit: boolean;
+  splitBlockedNarrow: boolean;
+  effectiveHidePersonaSidebar: boolean;
+  hidePersonaSidebarPreference: boolean;
+  interceptSessionClicks: boolean;
+  guestLabels: PersonaGuestConfigMessage["labels"];
+  allowedHubUrls: readonly string[];
+  layoutRevision: number;
+  paneStyle?: StyleProp<ViewStyle>;
+  onSelectHub: (hubId: string) => void;
+  onToggleSplit: () => void;
+  onSwapPanes: () => void;
+  onCloseSplit: (closingSlot: "primary" | "secondary") => void;
+  onTogglePersonaSidebar: () => void;
+  onOpenSession: (hubId: string, payload: DesktopPersonaOpenSessionEvent) => void;
+  onOpenSettings: () => void;
+}
+
+const PersonaPane = memo(function PersonaPane({
+  slot,
+  hub,
+  allHubs,
+  otherPaneHubId,
+  isSplitActive,
+  canEnableSplit,
+  splitBlockedNarrow,
+  effectiveHidePersonaSidebar,
+  hidePersonaSidebarPreference,
+  interceptSessionClicks,
+  guestLabels,
+  allowedHubUrls,
+  layoutRevision,
+  paneStyle,
+  onSelectHub,
+  onToggleSplit,
+  onSwapPanes,
+  onCloseSplit,
+  onTogglePersonaSidebar,
+  onOpenSession,
+  onOpenSettings,
+}: PersonaPaneProps): ReactElement {
+  const isPrimary = slot === "primary";
+
+  const hubId = hub?.id ?? "";
+  const normalizedHub = useMemo(() => normalizePersonaHubUrl(hub?.hubUrl ?? ""), [hub?.hubUrl]);
   const validHubUrl = normalizedHub.ok ? normalizedHub.url : null;
   const authorizedHubOrigin = normalizedHub.ok ? normalizedHub.origin : null;
-  const canMountWebview = settingsLoaded && personaSettings.enabled && validHubUrl !== null;
+  const canMountWebview = Boolean(hubId) && validHubUrl !== null;
 
   const anchorRef = useRef<View | null>(null);
   const [webviewNode, setWebviewNode] = useState<PersonaElectronWebviewElement | null>(null);
@@ -211,33 +731,25 @@ export function PersonaSurface() {
   const [mountRejected, setMountRejected] = useState(false);
 
   const guestConfig = useMemo<PersonaGuestConfigMessage | null>(() => {
-    if (!normalizedHub.ok) {
+    if (!validHubUrl) {
       return null;
     }
-    return {
-      hubOrigin: normalizedHub.origin,
-      hubBasePath: normalizedHub.basePath,
-      hidePersonaSidebar: personaSettings.hidePersonaSidebar,
-      interceptSessionClicks: personaSettings.interceptSessionClicks,
-      labels: {
-        openInPaseo: t("personaEmbed.guest.openInPaseo"),
-        openDiffInPaseo: t("personaEmbed.guest.openDiffInPaseo"),
-        openInPaseoTooltip: t("personaEmbed.guest.openInPaseoTooltip"),
-        openDiffTooltip: t("personaEmbed.guest.openDiffTooltip"),
-      },
-    };
-  }, [
-    normalizedHub,
-    personaSettings.hidePersonaSidebar,
-    personaSettings.interceptSessionClicks,
-    t,
-  ]);
+    return buildGuestConfigForHub({
+      hubUrl: validHubUrl,
+      hidePersonaSidebar: effectiveHidePersonaSidebar,
+      interceptSessionClicks,
+      labels: guestLabels,
+    });
+  }, [effectiveHidePersonaSidebar, guestLabels, interceptSessionClicks, validHubUrl]);
 
   const guestConfigRef = useRef(guestConfig);
   guestConfigRef.current = guestConfig;
 
   const currentUrlRef = useRef(currentUrl);
   currentUrlRef.current = currentUrl;
+
+  const allowedHubUrlsRef = useRef(allowedHubUrls);
+  allowedHubUrlsRef.current = allowedHubUrls;
 
   const currentSessionRoute = useMemo(() => {
     if (!validHubUrl || !currentUrl) {
@@ -246,83 +758,48 @@ export function PersonaSurface() {
     return parsePersonaEmbedSessionRoute(currentUrl, validHubUrl);
   }, [currentUrl, validHubUrl]);
 
-  const handleOpenSessionRequest = useCallback(
-    (payload: DesktopPersonaOpenSessionEvent) => {
-      if (!canMountWebview || !validHubUrl) {
-        return;
-      }
-      if (!payload?.machineId || !payload?.sessionId) {
-        return;
-      }
-      const deps = createAppOpenPersonaSessionDeps({
-        toast,
-        isCompact,
-        allowPersonaFallbackNavigation: (rawHref) => {
-          sendPersonaGuestAllowOnce(rawHref);
-        },
-        lookupSessionMetadataHint: ({ machineId, sessionId }) =>
-          lookupPersonaGuestSessionMetadata({
-            machineId,
-            sessionId,
-            authorizedHubUrl: validHubUrl,
-          }),
-      });
-      void openPersonaSession(
-        {
-          machineId: payload.machineId,
-          sessionId: payload.sessionId,
-          workspaceIdHint: payload.workspaceIdHint ?? null,
-          cwdHint: payload.cwdHint ?? null,
-          panel: payload.panel === "diff" ? "diff" : null,
-          source: payload.source,
-          rawHref: payload.rawHref ?? null,
-        },
-        deps,
-      );
-    },
-    [canMountWebview, isCompact, toast, validHubUrl],
-  );
-
-  // Sync resident webview geometry with the anchor container.
   const syncAnchorGeometry = useCallback(() => {
+    if (!hubId) {
+      return;
+    }
     if (!canMountWebview || loadError || mountRejected) {
-      parkResidentPersonaWebview();
+      parkResidentPersonaWebview(hubId);
       return;
     }
     const element = anchorRef.current as unknown as HTMLElement | null;
     if (!element || typeof element.getBoundingClientRect !== "function") {
-      parkResidentPersonaWebview();
+      parkResidentPersonaWebview(hubId);
       return;
     }
     const rect = element.getBoundingClientRect();
-    presentResidentPersonaWebview(rect);
-  }, [canMountWebview, loadError, mountRejected]);
+    presentResidentPersonaWebview(hubId, rect);
+  }, [canMountWebview, hubId, loadError, mountRejected]);
 
-  // Create or reuse the resident <webview> only once settings are hydrated and Persona is enabled.
+  // Acquire or reuse this Hub's resident <webview> from the keep-alive pool.
   useEffect(() => {
     let cancelled = false;
-    if (!settingsLoaded) {
-      parkResidentPersonaWebview();
-      return;
-    }
-    if (!personaSettings.enabled) {
+    if (!hubId || !validHubUrl) {
+      if (hubId) {
+        parkResidentPersonaWebview(hubId);
+      }
       setWebviewNode(null);
       setLoadError(null);
       setMountRejected(false);
-      void disableResidentPersonaWebview();
-      return;
-    }
-    if (!validHubUrl) {
-      parkResidentPersonaWebview();
-      setWebviewNode(null);
-      setMountRejected(false);
+      setCurrentUrl("");
+      setCanGoBack(false);
+      setCanGoForward(false);
+      setIsLoading(false);
       return;
     }
 
     setLoadError(null);
     setMountRejected(false);
     void (async () => {
-      const webview = await ensureResidentPersonaWebview(validHubUrl);
+      const webview = await ensureResidentPersonaWebview({
+        hubId,
+        hubUrl: validHubUrl,
+        allowedHubUrls: allowedHubUrlsRef.current,
+      });
       if (cancelled) {
         return;
       }
@@ -339,26 +816,26 @@ export function PersonaSurface() {
         setCurrentUrl(validHubUrl);
       }
       if (guestConfigRef.current) {
-        sendPersonaGuestConfig(guestConfigRef.current);
-        sendPersonaGuestRouteSync(liveUrl);
+        sendPersonaGuestConfig(hubId, guestConfigRef.current);
+        sendPersonaGuestRouteSync(hubId, liveUrl);
       }
     })();
 
     return () => {
       cancelled = true;
-      parkResidentPersonaWebview();
+      parkResidentPersonaWebview(hubId);
     };
-  }, [authorizedHubOrigin, personaSettings.enabled, settingsLoaded, validHubUrl]);
+  }, [authorizedHubOrigin, hubId, validHubUrl]);
 
-  // Push updated config whenever hidePersonaSidebar / interceptSessionClicks / language change.
+  // Push guest config immediately when split compaction / sidebar toggle / language changes.
   useEffect(() => {
-    if (!webviewNode || !guestConfig || !canMountWebview) {
+    if (!webviewNode || !guestConfig || !hubId || !canMountWebview) {
       return;
     }
-    sendPersonaGuestConfig(guestConfig);
-  }, [canMountWebview, guestConfig, webviewNode]);
+    sendPersonaGuestConfig(hubId, guestConfig);
+  }, [canMountWebview, guestConfig, hubId, webviewNode]);
 
-  // Observe anchor bounds & viewport resize.
+  // Keep resident surface geometry locked to this pane's anchor across resize & split drags.
   useLayoutEffect(() => {
     syncAnchorGeometry();
     const element = anchorRef.current as unknown as HTMLElement | null;
@@ -380,13 +857,12 @@ export function PersonaSurface() {
       resizeObserver?.disconnect();
       window.removeEventListener("resize", syncAnchorGeometry);
       window.removeEventListener("scroll", syncAnchorGeometry, true);
-      parkResidentPersonaWebview();
     };
-  }, [syncAnchorGeometry, webviewNode]);
+  }, [isSplitActive, layoutRevision, syncAnchorGeometry, webviewNode]);
 
-  // Bind Electron <webview> lifecycle and guest IPC listeners.
+  // Bind Electron <webview> lifecycle listeners for this Hub.
   useEffect(() => {
-    if (!webviewNode || !validHubUrl || !authorizedHubOrigin || !canMountWebview) {
+    if (!webviewNode || !hubId || !validHubUrl || !authorizedHubOrigin || !canMountWebview) {
       return;
     }
 
@@ -415,15 +891,14 @@ export function PersonaSurface() {
       if (isSameOriginUrl(liveUrl, authorizedHubOrigin)) {
         setCurrentUrl(liveUrl);
         if (guestConfigRef.current) {
-          sendPersonaGuestConfig(guestConfigRef.current);
+          sendPersonaGuestConfig(hubId, guestConfigRef.current);
         }
-        sendPersonaGuestRouteSync(liveUrl);
+        sendPersonaGuestRouteSync(hubId, liveUrl);
       }
     };
 
     const onNavigate = (event: Event) => {
       const navEvent = event as WebviewNavigateEvent;
-      // Ignore subframe navigations so embedded iframes never hijack toolbar state or route sync.
       if (navEvent.isMainFrame === false) {
         return;
       }
@@ -431,7 +906,7 @@ export function PersonaSurface() {
       if (nextUrl && isSameOriginUrl(nextUrl, authorizedHubOrigin)) {
         setCurrentUrl(nextUrl);
         setLoadError(null);
-        sendPersonaGuestRouteSync(nextUrl);
+        sendPersonaGuestRouteSync(hubId, nextUrl);
       }
       refreshNavButtons();
     };
@@ -464,26 +939,528 @@ export function PersonaSurface() {
       webviewNode.removeEventListener("did-navigate-in-page", onNavigate);
       webviewNode.removeEventListener("did-fail-load", onFailLoad);
     };
-  }, [authorizedHubOrigin, canMountWebview, validHubUrl, webviewNode]);
+  }, [authorizedHubOrigin, canMountWebview, hubId, validHubUrl, webviewNode]);
 
-  // Listen for main-process verified guest main-frame events (`persona-open-session` from
-  // guest-preload / window-open and `persona-guest-ready`). Electron 44's `<webview>`
-  // `IpcMessageEvent` has no `isMainFrame`, so all guest -> host IPC is verified in main via
-  // `senderFrame === webContents.mainFrame` + registered Hub origin before forwarding here.
+  const handleGoHome = useCallback(() => {
+    if (!canMountWebview || !validHubUrl || !hubId) return;
+    setLoadError(null);
+    const webview = getResidentPersonaWebview(hubId);
+    if (webview?.loadURL) {
+      void webview.loadURL(validHubUrl).catch(() => undefined);
+    }
+  }, [canMountWebview, hubId, validHubUrl]);
+
+  const handleGoBack = useCallback(() => {
+    if (!hubId) return;
+    getResidentPersonaWebview(hubId)?.goBack?.();
+  }, [hubId]);
+
+  const handleGoForward = useCallback(() => {
+    if (!hubId) return;
+    getResidentPersonaWebview(hubId)?.goForward?.();
+  }, [hubId]);
+
+  const handleReload = useCallback(() => {
+    if (!canMountWebview || !validHubUrl || !hubId) return;
+    setLoadError(null);
+    setMountRejected(false);
+    const webview = getResidentPersonaWebview(hubId);
+    if (!webview) {
+      void (async () => {
+        const next = await ensureResidentPersonaWebview({
+          hubId,
+          hubUrl: validHubUrl,
+          allowedHubUrls: allowedHubUrlsRef.current,
+        });
+        if (!next) {
+          setMountRejected(true);
+          return;
+        }
+        setWebviewNode(next);
+      })();
+      return;
+    }
+    webview.reload?.();
+  }, [canMountWebview, hubId, validHubUrl]);
+
+  const handleOpenExternal = useCallback(() => {
+    const target = currentUrl || validHubUrl;
+    if (!target) return;
+    const openUrl = getDesktopHost()?.opener?.openUrl;
+    if (openUrl) {
+      void openUrl(target).catch(() => undefined);
+    } else if (typeof window !== "undefined") {
+      window.open(target, "_blank", "noopener,noreferrer");
+    }
+  }, [currentUrl, validHubUrl]);
+
+  const handleToolbarOpenSession = useCallback(
+    (panel?: "diff") => {
+      if (!currentSessionRoute || !hubId) return;
+      onOpenSession(hubId, {
+        machineId: currentSessionRoute.machineId,
+        sessionId: currentSessionRoute.sessionId,
+        panel,
+        source: "header-button",
+        rawHref: currentUrl,
+      });
+    },
+    [currentSessionRoute, currentUrl, hubId, onOpenSession],
+  );
+
+  const handleToolbarOpenAgent = useCallback(() => {
+    handleToolbarOpenSession(undefined);
+  }, [handleToolbarOpenSession]);
+
+  const handleToolbarOpenDiff = useCallback(() => {
+    handleToolbarOpenSession("diff");
+  }, [handleToolbarOpenSession]);
+
+  const handleCloseThisPane = useCallback(() => {
+    onCloseSplit(slot);
+  }, [onCloseSplit, slot]);
+
+  return (
+    <View style={[styles.paneContainer, paneStyle]} testID={`persona-pane-${slot}`}>
+      <PersonaPaneToolbar
+        slot={slot}
+        hub={hub}
+        allHubs={allHubs}
+        otherPaneHubId={otherPaneHubId}
+        displayHost={normalizedHub.ok ? normalizedHub.displayHost : null}
+        hasValidUrl={validHubUrl !== null}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        isLoading={isLoading}
+        isSplitActive={isSplitActive}
+        canEnableSplit={canEnableSplit}
+        splitBlockedNarrow={splitBlockedNarrow}
+        hidePersonaSidebarPreference={hidePersonaSidebarPreference}
+        hasCurrentSessionRoute={currentSessionRoute !== null}
+        onSelectHub={onSelectHub}
+        onGoHome={handleGoHome}
+        onGoBack={handleGoBack}
+        onGoForward={handleGoForward}
+        onReload={handleReload}
+        onTogglePersonaSidebar={onTogglePersonaSidebar}
+        onToolbarOpenAgent={handleToolbarOpenAgent}
+        onToolbarOpenDiff={handleToolbarOpenDiff}
+        onToggleSplit={onToggleSplit}
+        onSwapPanes={onSwapPanes}
+        onCloseThisPane={handleCloseThisPane}
+        onOpenExternal={handleOpenExternal}
+        onOpenSettings={onOpenSettings}
+      />
+
+      <View
+        ref={anchorRef}
+        style={styles.webviewAnchor}
+        testID={isPrimary ? "persona-webview-anchor" : "persona-pane-secondary-webview-anchor"}
+      >
+        <PersonaPaneOverlay
+          slot={slot}
+          validHubUrl={validHubUrl}
+          mountRejected={mountRejected}
+          loadError={loadError}
+          onReload={handleReload}
+          onOpenExternal={handleOpenExternal}
+          onOpenSettings={onOpenSettings}
+        />
+      </View>
+    </View>
+  );
+});
+
+interface PersonaSplitDividerProps {
+  ratio: number;
+  isDragging: boolean;
+  containerRef: React.RefObject<View | null>;
+  onDragStart: () => void;
+  onDragRatioChange: (nextRatio: number) => void;
+  onDragEnd: (finalRatio: number) => void;
+  onCommitRatio: (nextRatio: number) => void;
+}
+
+const PersonaSplitDivider = memo(function PersonaSplitDivider({
+  ratio,
+  isDragging,
+  containerRef,
+  onDragStart,
+  onDragRatioChange,
+  onDragEnd,
+  onCommitRatio,
+}: PersonaSplitDividerProps): ReactElement {
+  const { t } = useTranslation();
+  const [isHovered, setIsHovered] = useState(false);
+  const cleanupRef = useRef<(() => void) | null>(null);
+  const latestRatioRef = useRef(ratio);
+  latestRatioRef.current = ratio;
+
   useEffect(() => {
-    if (!canMountWebview || !validHubUrl) {
+    return () => {
+      cleanupRef.current?.();
+      cleanupRef.current = null;
+    };
+  }, []);
+
+  const handlePointerEnter = useCallback(() => setIsHovered(true), []);
+  const handlePointerLeave = useCallback(() => setIsHovered(false), []);
+
+  const handlePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const containerEl = containerRef.current as unknown as HTMLElement | null;
+      if (!containerEl || typeof containerEl.getBoundingClientRect !== "function") {
+        return;
+      }
+      const rect = containerEl.getBoundingClientRect();
+      if (rect.width <= 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      cleanupRef.current?.();
+
+      const targetEl = event.currentTarget;
+      const pointerId = event.pointerId;
+      try {
+        targetEl.setPointerCapture?.(pointerId);
+      } catch {
+        // Synthetic pointer events in browser tests may not have an active hardware pointerId.
+      }
+
+      const prevCursor = document.body.style.cursor;
+      const prevUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+
+      let currentRatio = latestRatioRef.current;
+      onDragStart();
+
+      const handleMove = (moveEvent: PointerEvent) => {
+        if (pointerId !== 0 && moveEvent.pointerId !== 0 && moveEvent.pointerId !== pointerId) {
+          return;
+        }
+        moveEvent.preventDefault();
+        const nextRatio = clampPersonaSplitRatio((moveEvent.clientX - rect.left) / rect.width);
+        currentRatio = nextRatio;
+        onDragRatioChange(nextRatio);
+      };
+
+      const finishDrag = () => {
+        cleanupRef.current = null;
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+        window.removeEventListener("pointercancel", handleUp);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevUserSelect;
+        try {
+          if (targetEl.hasPointerCapture?.(pointerId)) {
+            targetEl.releasePointerCapture(pointerId);
+          }
+        } catch {
+          // Ignore if capture was already released.
+        }
+        onDragEnd(currentRatio);
+      };
+
+      const handleUp = (upEvent: PointerEvent) => {
+        if (pointerId !== 0 && upEvent.pointerId !== 0 && upEvent.pointerId !== pointerId) {
+          return;
+        }
+        finishDrag();
+      };
+
+      cleanupRef.current = finishDrag;
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+      window.addEventListener("pointercancel", handleUp);
+    },
+    [containerRef, onDragEnd, onDragRatioChange, onDragStart],
+  );
+
+  const handleDoubleClick = useCallback(() => {
+    onCommitRatio(DEFAULT_PERSONA_SPLIT_RATIO);
+  }, [onCommitRatio]);
+
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        onCommitRatio(clampPersonaSplitRatio(latestRatioRef.current - KEYBOARD_SPLIT_STEP));
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        onCommitRatio(clampPersonaSplitRatio(latestRatioRef.current + KEYBOARD_SPLIT_STEP));
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onCommitRatio(DEFAULT_PERSONA_SPLIT_RATIO);
+      }
+    },
+    [onCommitRatio],
+  );
+
+  const highlighted = isHovered || isDragging;
+
+  return (
+    <View style={styles.dividerRail}>
+      <div
+        role="separator"
+        tabIndex={0}
+        aria-orientation="vertical"
+        aria-label={t("personaEmbed.toolbar.resizeSplitHandle")}
+        aria-valuemin={25}
+        aria-valuemax={75}
+        aria-valuenow={Math.round(ratio * 100)}
+        data-testid="persona-split-divider"
+        onPointerDown={handlePointerDown}
+        onPointerEnter={handlePointerEnter}
+        onPointerLeave={handlePointerLeave}
+        onDoubleClick={handleDoubleClick}
+        onKeyDown={handleKeyDown}
+        style={DIVIDER_HIT_AREA_STYLE}
+      >
+        <View style={[styles.dividerLine, highlighted && styles.dividerLineHighlighted]} />
+      </div>
+    </View>
+  );
+});
+
+function computeEffectiveSplitLayout(input: {
+  isCompact: boolean;
+  surfaceWidth: number;
+  hubsCount: number;
+  splitEnabled: boolean;
+  hasSecondaryHub: boolean;
+}) {
+  const splitBlockedNarrow =
+    input.isCompact ||
+    (input.surfaceWidth > 0 && input.surfaceWidth < MIN_PERSONA_SPLIT_SURFACE_WIDTH);
+  const canEnableSplit = input.hubsCount >= 2 && !splitBlockedNarrow;
+  const effectiveSplitActive =
+    input.splitEnabled && input.hubsCount >= 2 && input.hasSecondaryHub && !splitBlockedNarrow;
+  return { splitBlockedNarrow, canEnableSplit, effectiveSplitActive };
+}
+
+export function PersonaSurface() {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const isCompact = useIsCompactFormFactor();
+  const { settings: personaSettings, isLoaded: settingsLoaded } = usePersonaEmbedSettingsState();
+  const updatePersonaSettings = useUpdatePersonaEmbedSettings();
+
+  const splitContainerRef = useRef<View | null>(null);
+  const [surfaceWidth, setSurfaceWidth] = useState<number>(0);
+  const [isDraggingDivider, setIsDraggingDivider] = useState(false);
+  const [previewSplitRatio, setPreviewSplitRatio] = useState<number | null>(null);
+  const [layoutRevision, setLayoutRevision] = useState(0);
+
+  const personaSettingsRef = useRef(personaSettings);
+  personaSettingsRef.current = personaSettings;
+
+  const activeHub = useMemo(() => getActivePersonaHub(personaSettings), [personaSettings]);
+  const secondaryHub = useMemo(() => getSecondaryPersonaHub(personaSettings), [personaSettings]);
+  const allowedHubUrls = useMemo(
+    () => collectValidPersonaHubUrls(personaSettings),
+    [personaSettings],
+  );
+
+  const { splitBlockedNarrow, canEnableSplit, effectiveSplitActive } = computeEffectiveSplitLayout({
+    isCompact,
+    surfaceWidth,
+    hubsCount: personaSettings.hubs.length,
+    splitEnabled: personaSettings.splitEnabled,
+    hasSecondaryHub: secondaryHub !== null,
+  });
+  const effectiveRatio = previewSplitRatio ?? personaSettings.splitRatio;
+  // Auto-compact Persona's internal left sidebar in split mode so both panes remain usable.
+  const effectiveHidePersonaSidebar = effectiveSplitActive || personaSettings.hidePersonaSidebar;
+
+  const effectiveHideSidebarRef = useRef(effectiveHidePersonaSidebar);
+  effectiveHideSidebarRef.current = effectiveHidePersonaSidebar;
+
+  const guestLabels = useMemo<PersonaGuestConfigMessage["labels"]>(
+    () => ({
+      openInPaseo: t("personaEmbed.guest.openInPaseo"),
+      openDiffInPaseo: t("personaEmbed.guest.openDiffInPaseo"),
+      openInPaseoTooltip: t("personaEmbed.guest.openInPaseoTooltip"),
+      openDiffTooltip: t("personaEmbed.guest.openDiffTooltip"),
+    }),
+    [t],
+  );
+  const guestLabelsRef = useRef(guestLabels);
+  guestLabelsRef.current = guestLabels;
+
+  // Measure available width safely (never treat 0px hidden retained-panel geometry as narrow).
+  const applyMeasuredWidth = useCallback((nextWidth: number) => {
+    if (Number.isFinite(nextWidth) && nextWidth > 0) {
+      setSurfaceWidth((current) => (Math.abs(current - nextWidth) >= 1 ? nextWidth : current));
+    }
+  }, []);
+
+  const handleContainerLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      applyMeasuredWidth(event.nativeEvent.layout.width);
+    },
+    [applyMeasuredWidth],
+  );
+
+  useLayoutEffect(() => {
+    const element = splitContainerRef.current as unknown as HTMLElement | null;
+    if (!element) {
+      return;
+    }
+    const measure = () => {
+      if (typeof element.getBoundingClientRect === "function") {
+        applyMeasuredWidth(element.getBoundingClientRect().width);
+      }
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const entryWidth = entries[0]?.contentRect?.width;
+      if (typeof entryWidth === "number" && entryWidth > 0) {
+        applyMeasuredWidth(entryWidth);
+      } else {
+        measure();
+      }
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, [applyMeasuredWidth, settingsLoaded, personaSettings.enabled]);
+
+  // Synchronize Hub allowlist & prune deleted/URL-changed entries from the resident pool.
+  useEffect(() => {
+    if (!settingsLoaded) {
+      parkResidentPersonaWebview();
+      return;
+    }
+    if (!personaSettings.enabled) {
+      void disableResidentPersonaWebview();
+      return;
+    }
+    reconcileResidentPersonaWebviews(personaSettings.hubs);
+    void syncPersonaHubUrlsWithMain(allowedHubUrls, { enabled: true });
+  }, [allowedHubUrls, personaSettings.enabled, personaSettings.hubs, settingsLoaded]);
+
+  // Park any pooled webviews that are not currently visible in either active pane.
+  useEffect(() => {
+    if (!settingsLoaded || !personaSettings.enabled) {
+      return;
+    }
+    const visibleIds = new Set<string>();
+    if (activeHub?.id) {
+      visibleIds.add(activeHub.id);
+    }
+    if (effectiveSplitActive && secondaryHub?.id) {
+      visibleIds.add(secondaryHub.id);
+    }
+    for (const pooledHubId of listResidentPersonaHubIds()) {
+      if (!visibleIds.has(pooledHubId)) {
+        parkResidentPersonaWebview(pooledHubId);
+      }
+    }
+  }, [
+    activeHub?.id,
+    effectiveSplitActive,
+    personaSettings.enabled,
+    secondaryHub?.id,
+    settingsLoaded,
+  ]);
+
+  // Always restore interactivity and park all webviews when leaving /persona.
+  useEffect(() => {
+    return () => {
+      setResidentPersonaWebviewsInteractive(true);
+      parkResidentPersonaWebview();
+    };
+  }, []);
+
+  const handleOpenSessionForHub = useCallback(
+    (hubId: string, payload: DesktopPersonaOpenSessionEvent) => {
+      const settings = personaSettingsRef.current;
+      if (!settings.enabled || !payload?.machineId || !payload?.sessionId) {
+        return;
+      }
+      const hub = getPersonaHubById(settings, hubId);
+      if (!hub) {
+        return;
+      }
+      const normalized = normalizePersonaHubUrl(hub.hubUrl);
+      if (!normalized.ok) {
+        return;
+      }
+      const deps = createAppOpenPersonaSessionDeps({
+        toast,
+        isCompact,
+        hubId: hub.id,
+        machineServerMapOverride: hub.machineServerMap,
+        allowPersonaFallbackNavigation: (rawHref) => {
+          sendPersonaGuestAllowOnce(hub.id, rawHref);
+        },
+        lookupSessionMetadataHint: ({ machineId, sessionId }) =>
+          lookupPersonaGuestSessionMetadata({
+            hubId: hub.id,
+            machineId,
+            sessionId,
+            authorizedHubUrl: normalized.url,
+          }),
+      });
+      void openPersonaSession(
+        {
+          machineId: payload.machineId,
+          sessionId: payload.sessionId,
+          workspaceIdHint: payload.workspaceIdHint ?? null,
+          cwdHint: payload.cwdHint ?? null,
+          panel: payload.panel === "diff" ? "diff" : null,
+          source: payload.source,
+          rawHref: payload.rawHref ?? null,
+        },
+        deps,
+      );
+    },
+    [isCompact, toast],
+  );
+
+  // Centralized main-process verified guest IPC router: routes strictly by `guestWebContentsId`
+  // to the originating Hub's authorized URL and `machineServerMap`.
+  useEffect(() => {
+    if (!settingsLoaded || !personaSettings.enabled) {
       return;
     }
     let disposed = false;
     const unlisteners: Array<() => void> = [];
 
-    const readVerificationContext = () => {
-      const activeWebview = getResidentPersonaWebview();
-      const currentGuestUrl = readWebviewUrlSafely(activeWebview, "");
+    const resolveVerifiedHubEntry = (rawPayload: unknown) => {
+      const guestWebContentsId = readPositiveWebContentsIdFromPayload(rawPayload);
+      if (!guestWebContentsId) {
+        return null;
+      }
+      const entry = findResidentPersonaEntryByWebContentsId(guestWebContentsId);
+      if (!entry) {
+        return null;
+      }
+      const hub = getPersonaHubById(personaSettingsRef.current, entry.hubId);
+      if (!hub) {
+        return null;
+      }
+      const normalized = normalizePersonaHubUrl(hub.hubUrl);
+      if (!normalized.ok) {
+        return null;
+      }
+      const currentGuestUrl = readWebviewUrlSafely(entry.webview, "");
       return {
-        authorizedHubUrl: validHubUrl,
-        ...(currentGuestUrl ? { currentGuestUrl } : {}),
-        expectedGuestWebContentsId: readResidentPersonaWebviewContentsId(activeWebview),
+        hub,
+        entry,
+        normalizedUrl: normalized.url,
+        verificationContext: {
+          authorizedHubUrl: normalized.url,
+          ...(currentGuestUrl ? { currentGuestUrl } : {}),
+          expectedGuestWebContentsId: readResidentPersonaWebviewContentsId(entry.webview),
+        },
       };
     };
 
@@ -494,29 +1471,43 @@ export function PersonaSurface() {
             if (disposed) {
               return;
             }
+            const resolved = resolveVerifiedHubEntry(rawPayload);
+            if (!resolved) {
+              return;
+            }
             const validated = validatePersonaGuestOpenSessionPayload(
               rawPayload,
-              readVerificationContext(),
+              resolved.verificationContext,
             );
             if (validated) {
-              handleOpenSessionRequest(validated);
+              handleOpenSessionForHub(resolved.hub.id, validated);
             }
           }),
           listenToDesktopEvent<unknown>("persona-guest-ready", (rawPayload) => {
             if (disposed) {
               return;
             }
+            const resolved = resolveVerifiedHubEntry(rawPayload);
+            if (!resolved) {
+              return;
+            }
             const validated = validatePersonaGuestReadyPayload(
               rawPayload,
-              readVerificationContext(),
+              resolved.verificationContext,
             );
             if (!validated) {
               return;
             }
-            if (guestConfigRef.current) {
-              sendPersonaGuestConfig(guestConfigRef.current);
+            const config = buildGuestConfigForHub({
+              hubUrl: resolved.normalizedUrl,
+              hidePersonaSidebar: effectiveHideSidebarRef.current,
+              interceptSessionClicks: personaSettingsRef.current.interceptSessionClicks,
+              labels: guestLabelsRef.current,
+            });
+            if (config) {
+              sendPersonaGuestConfig(resolved.hub.id, config);
             }
-            sendPersonaGuestRouteSync(validated.frameUrl);
+            sendPersonaGuestRouteSync(resolved.hub.id, validated.frameUrl);
           }),
         ]);
         if (disposed) {
@@ -536,86 +1527,90 @@ export function PersonaSurface() {
         dispose();
       }
     };
-  }, [canMountWebview, handleOpenSessionRequest, validHubUrl]);
+  }, [handleOpenSessionForHub, personaSettings.enabled, settingsLoaded]);
 
-  const handleGoHome = useCallback(() => {
-    if (!canMountWebview || !validHubUrl) return;
-    setLoadError(null);
-    const webview = getResidentPersonaWebview();
-    if (webview?.loadURL) {
-      void webview.loadURL(validHubUrl).catch(() => undefined);
-    }
-  }, [canMountWebview, validHubUrl]);
+  const handleSelectPrimaryHub = useCallback(
+    (hubId: string) => {
+      void updatePersonaSettings((current) => selectActivePersonaHub(current, hubId));
+    },
+    [updatePersonaSettings],
+  );
 
-  const handleGoBack = useCallback(() => {
-    getResidentPersonaWebview()?.goBack?.();
-  }, []);
+  const handleSelectSecondaryHub = useCallback(
+    (hubId: string) => {
+      void updatePersonaSettings((current) => selectSecondaryPersonaHub(current, hubId));
+    },
+    [updatePersonaSettings],
+  );
 
-  const handleGoForward = useCallback(() => {
-    getResidentPersonaWebview()?.goForward?.();
-  }, []);
+  const handleToggleSplit = useCallback(() => {
+    void updatePersonaSettings((current) => togglePersonaSplitMode(current));
+  }, [updatePersonaSettings]);
 
-  const handleReload = useCallback(() => {
-    if (!canMountWebview || !validHubUrl) return;
-    setLoadError(null);
-    setMountRejected(false);
-    const webview = getResidentPersonaWebview();
-    if (!webview) {
-      void (async () => {
-        const next = await ensureResidentPersonaWebview(validHubUrl);
-        if (!next) {
-          setMountRejected(true);
-          return;
-        }
-        setWebviewNode(next);
-      })();
-      return;
-    }
-    webview.reload?.();
-  }, [canMountWebview, validHubUrl]);
+  const handleSwapPanes = useCallback(() => {
+    void updatePersonaSettings((current) => swapPersonaSplitPanes(current));
+  }, [updatePersonaSettings]);
+
+  const handleCloseSplit = useCallback(
+    (closingSlot: "primary" | "secondary") => {
+      void updatePersonaSettings((current) => closePersonaSplitPane(current, closingSlot));
+    },
+    [updatePersonaSettings],
+  );
 
   const handleTogglePersonaSidebar = useCallback(() => {
-    void updatePersonaSettings({
-      hidePersonaSidebar: !personaSettings.hidePersonaSidebar,
-    });
-  }, [personaSettings.hidePersonaSidebar, updatePersonaSettings]);
-
-  const handleOpenExternal = useCallback(() => {
-    const target = currentUrl || validHubUrl;
-    if (!target) return;
-    const openUrl = getDesktopHost()?.opener?.openUrl;
-    if (openUrl) {
-      void openUrl(target).catch(() => undefined);
-    } else if (typeof window !== "undefined") {
-      window.open(target, "_blank", "noopener,noreferrer");
-    }
-  }, [currentUrl, validHubUrl]);
+    void updatePersonaSettings((current) => ({
+      hidePersonaSidebar: !current.hidePersonaSidebar,
+    }));
+  }, [updatePersonaSettings]);
 
   const handleOpenSettings = useCallback(() => {
     router.push(buildSettingsSectionRoute("persona"));
   }, []);
 
-  const handleToolbarOpenSession = useCallback(
-    (panel?: "diff") => {
-      if (!currentSessionRoute) return;
-      handleOpenSessionRequest({
-        machineId: currentSessionRoute.machineId,
-        sessionId: currentSessionRoute.sessionId,
-        panel,
-        source: "header-button",
-        rawHref: currentUrl,
-      });
+  const handleDragStart = useCallback(() => {
+    setIsDraggingDivider(true);
+    setResidentPersonaWebviewsInteractive(false);
+  }, []);
+
+  const handleDragRatioChange = useCallback((nextRatio: number) => {
+    setPreviewSplitRatio(nextRatio);
+    setLayoutRevision((rev) => rev + 1);
+  }, []);
+
+  const handleDragEnd = useCallback(
+    (finalRatio: number) => {
+      const clamped = clampPersonaSplitRatio(finalRatio);
+      setIsDraggingDivider(false);
+      setPreviewSplitRatio(null);
+      setResidentPersonaWebviewsInteractive(true);
+      setLayoutRevision((rev) => rev + 1);
+      void updatePersonaSettings({ splitRatio: clamped });
     },
-    [currentSessionRoute, currentUrl, handleOpenSessionRequest],
+    [updatePersonaSettings],
   );
 
-  const handleToolbarOpenAgent = useCallback(() => {
-    handleToolbarOpenSession(undefined);
-  }, [handleToolbarOpenSession]);
+  const handleCommitRatio = useCallback(
+    (nextRatio: number) => {
+      const clamped = clampPersonaSplitRatio(nextRatio);
+      setLayoutRevision((rev) => rev + 1);
+      void updatePersonaSettings({ splitRatio: clamped });
+    },
+    [updatePersonaSettings],
+  );
 
-  const handleToolbarOpenDiff = useCallback(() => {
-    handleToolbarOpenSession("diff");
-  }, [handleToolbarOpenSession]);
+  const primaryPaneFlexStyle = useMemo<ViewStyle>(
+    () =>
+      effectiveSplitActive
+        ? { flexGrow: effectiveRatio, flexShrink: 1, flexBasis: 0 }
+        : { flex: 1 },
+    [effectiveRatio, effectiveSplitActive],
+  );
+
+  const secondaryPaneFlexStyle = useMemo<ViewStyle>(
+    () => ({ flexGrow: 1 - effectiveRatio, flexShrink: 1, flexBasis: 0 }),
+    [effectiveRatio],
+  );
 
   if (!settingsLoaded) {
     return (
@@ -643,136 +1638,79 @@ export function PersonaSurface() {
     );
   }
 
-  const overlayContent = (
-    <PersonaSurfaceOverlay
-      validHubUrl={validHubUrl}
-      mountRejected={mountRejected}
-      loadError={loadError}
-      onReload={handleReload}
-      onOpenExternal={handleOpenExternal}
-      onOpenSettings={handleOpenSettings}
-    />
-  );
-
   return (
-    <View style={styles.container} testID="persona-surface-electron">
-      <View style={styles.toolbar}>
-        <View style={styles.toolbarGroup}>
-          <ToolbarButton
-            onPress={handleGoHome}
-            disabled={!validHubUrl}
-            label={t("personaEmbed.toolbar.home")}
-            testID="persona-toolbar-home"
-          >
-            <ThemedHome size={15} uniProps={validHubUrl ? iconMutedMapping : iconDisabledMapping} />
-          </ToolbarButton>
-          <ToolbarButton
-            onPress={handleGoBack}
-            disabled={!canGoBack}
-            label={t("personaEmbed.toolbar.back")}
-            testID="persona-toolbar-back"
-          >
-            <ThemedArrowLeft
-              size={15}
-              uniProps={canGoBack ? iconMutedMapping : iconDisabledMapping}
-            />
-          </ToolbarButton>
-          <ToolbarButton
-            onPress={handleGoForward}
-            disabled={!canGoForward}
-            label={t("personaEmbed.toolbar.forward")}
-            testID="persona-toolbar-forward"
-          >
-            <ThemedArrowRight
-              size={15}
-              uniProps={canGoForward ? iconMutedMapping : iconDisabledMapping}
-            />
-          </ToolbarButton>
-          <ToolbarButton
-            onPress={handleReload}
-            disabled={!validHubUrl}
-            label={t("personaEmbed.toolbar.reload")}
-            testID="persona-toolbar-reload"
-          >
-            {isLoading ? (
-              <ThemedSpinner size="small" />
-            ) : (
-              <ThemedRotateCw
-                size={15}
-                uniProps={validHubUrl ? iconMutedMapping : iconDisabledMapping}
-              />
-            )}
-          </ToolbarButton>
-          <ToolbarButton
-            onPress={handleTogglePersonaSidebar}
-            selected={personaSettings.hidePersonaSidebar}
-            label={t("personaEmbed.toolbar.toggleSidebar")}
-            testID="persona-toolbar-toggle-sidebar"
-          >
-            <ThemedPanelLeft
-              size={15}
-              uniProps={personaSettings.hidePersonaSidebar ? iconActiveMapping : iconMutedMapping}
-            />
-          </ToolbarButton>
-        </View>
+    <View
+      ref={splitContainerRef}
+      onLayout={handleContainerLayout}
+      style={styles.container}
+      testID="persona-surface-electron"
+    >
+      <View style={styles.panesRow} testID="persona-panes-row">
+        <PersonaPane
+          slot="primary"
+          hub={activeHub}
+          allHubs={personaSettings.hubs}
+          otherPaneHubId={effectiveSplitActive ? (secondaryHub?.id ?? null) : null}
+          isSplitActive={effectiveSplitActive}
+          canEnableSplit={canEnableSplit}
+          splitBlockedNarrow={splitBlockedNarrow}
+          effectiveHidePersonaSidebar={effectiveHidePersonaSidebar}
+          hidePersonaSidebarPreference={personaSettings.hidePersonaSidebar}
+          interceptSessionClicks={personaSettings.interceptSessionClicks}
+          guestLabels={guestLabels}
+          allowedHubUrls={allowedHubUrls}
+          layoutRevision={layoutRevision}
+          paneStyle={primaryPaneFlexStyle}
+          onSelectHub={handleSelectPrimaryHub}
+          onToggleSplit={handleToggleSplit}
+          onSwapPanes={handleSwapPanes}
+          onCloseSplit={handleCloseSplit}
+          onTogglePersonaSidebar={handleTogglePersonaSidebar}
+          onOpenSession={handleOpenSessionForHub}
+          onOpenSettings={handleOpenSettings}
+        />
 
-        <View style={styles.addressChip}>
-          <Text numberOfLines={1} ellipsizeMode="middle" style={styles.addressText}>
-            {normalizedHub.ok
-              ? normalizedHub.displayHost
-              : t("personaEmbed.sidebar.subtitleUnconfigured")}
-          </Text>
-        </View>
-
-        <View style={styles.toolbarGroup}>
-          {currentSessionRoute ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onPress={handleToolbarOpenAgent}
-                accessibilityLabel={t("personaEmbed.guest.openInPaseoTooltip")}
-                testID="persona-toolbar-open-in-paseo"
-              >
-                <ThemedOpenInPaseo size={13} uniProps={iconActiveMapping} />
-                <Text style={styles.pillButtonText}>{t("personaEmbed.toolbar.openInPaseo")}</Text>
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onPress={handleToolbarOpenDiff}
-                accessibilityLabel={t("personaEmbed.guest.openDiffTooltip")}
-                testID="persona-toolbar-open-diff"
-              >
-                <ThemedDiff size={13} uniProps={iconMutedMapping} />
-                <Text style={styles.pillButtonText}>{t("personaEmbed.toolbar.openDiff")}</Text>
-              </Button>
-            </>
-          ) : null}
-          <ToolbarButton
-            onPress={handleOpenExternal}
-            disabled={!validHubUrl}
-            label={t("personaEmbed.toolbar.openExternal")}
-            testID="persona-toolbar-open-external"
-          >
-            <ThemedExternalLink
-              size={15}
-              uniProps={validHubUrl ? iconMutedMapping : iconDisabledMapping}
+        {effectiveSplitActive && secondaryHub ? (
+          <>
+            <PersonaSplitDivider
+              ratio={effectiveRatio}
+              isDragging={isDraggingDivider}
+              containerRef={splitContainerRef}
+              onDragStart={handleDragStart}
+              onDragRatioChange={handleDragRatioChange}
+              onDragEnd={handleDragEnd}
+              onCommitRatio={handleCommitRatio}
             />
-          </ToolbarButton>
-          <ToolbarButton
-            onPress={handleOpenSettings}
-            label={t("personaEmbed.toolbar.settings")}
-            testID="persona-toolbar-settings"
-          >
-            <ThemedSettings size={15} uniProps={iconMutedMapping} />
-          </ToolbarButton>
-        </View>
+            <PersonaPane
+              slot="secondary"
+              hub={secondaryHub}
+              allHubs={personaSettings.hubs}
+              otherPaneHubId={activeHub?.id ?? null}
+              isSplitActive={effectiveSplitActive}
+              canEnableSplit={canEnableSplit}
+              splitBlockedNarrow={splitBlockedNarrow}
+              effectiveHidePersonaSidebar={effectiveHidePersonaSidebar}
+              hidePersonaSidebarPreference={personaSettings.hidePersonaSidebar}
+              interceptSessionClicks={personaSettings.interceptSessionClicks}
+              guestLabels={guestLabels}
+              allowedHubUrls={allowedHubUrls}
+              layoutRevision={layoutRevision}
+              paneStyle={secondaryPaneFlexStyle}
+              onSelectHub={handleSelectSecondaryHub}
+              onToggleSplit={handleToggleSplit}
+              onSwapPanes={handleSwapPanes}
+              onCloseSplit={handleCloseSplit}
+              onTogglePersonaSidebar={handleTogglePersonaSidebar}
+              onOpenSession={handleOpenSessionForHub}
+              onOpenSettings={handleOpenSettings}
+            />
+          </>
+        ) : null}
       </View>
 
-      <View ref={anchorRef} style={styles.webviewAnchor} testID="persona-webview-anchor">
-        {overlayContent}
-      </View>
+      {isDraggingDivider ? (
+        <View style={styles.dragShield} testID="persona-split-drag-shield" />
+      ) : null}
     </View>
   );
 }
@@ -780,6 +1718,19 @@ export function PersonaSurface() {
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
+    position: "relative",
+    backgroundColor: theme.colors.surface0,
+  },
+  panesRow: {
+    flex: 1,
+    flexDirection: "row",
+    minWidth: 0,
+    minHeight: 0,
+  },
+  paneContainer: {
+    minWidth: 0,
+    minHeight: 0,
+    flexDirection: "column",
     backgroundColor: theme.colors.surface0,
   },
   disabledContainer: {
@@ -800,13 +1751,38 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
   },
+  toolbarCompact: {
+    height: 36,
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+  },
   toolbarGroup: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],
+    flexShrink: 0,
+  },
+  hubSwitcherTrigger: {
+    height: 26,
+    maxWidth: 160,
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface2,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  hubSwitcherText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+    flexShrink: 1,
   },
   addressChip: {
     flex: 1,
+    minWidth: 0,
     maxWidth: 360,
     height: 26,
     paddingHorizontal: theme.spacing[2],
@@ -815,6 +1791,10 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderColor: theme.colors.border,
     justifyContent: "center",
+  },
+  addressChipCompact: {
+    maxWidth: 220,
+    height: 24,
   },
   addressText: {
     color: theme.colors.foregroundMuted,
@@ -827,10 +1807,37 @@ const styles = StyleSheet.create((theme) => ({
   },
   webviewAnchor: {
     flex: 1,
+    minWidth: 0,
+    minHeight: 0,
     position: "relative",
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: theme.colors.surface0,
+  },
+  dividerRail: {
+    width: 1,
+    alignSelf: "stretch",
+    position: "relative",
+    backgroundColor: theme.colors.border,
+    flexShrink: 0,
+    zIndex: 12,
+  },
+  dividerLine: {
+    width: 1,
+    height: "100%",
+    backgroundColor: theme.colors.border,
+  },
+  dividerLineHighlighted: {
+    width: 3,
+    backgroundColor: theme.colors.accent,
+  },
+  dragShield: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 20,
   },
   overlayCard: {
     maxWidth: 460,

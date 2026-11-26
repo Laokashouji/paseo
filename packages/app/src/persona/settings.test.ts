@@ -1,15 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
 import { normalizeAppSettings } from "@/hooks/use-settings/storage";
 import {
+  addPersonaHubProfile,
+  clampPersonaSplitRatio,
+  closePersonaSplitPane,
+  collectValidPersonaHubUrls,
   DEFAULT_PERSONA_EMBED_SETTINGS,
+  DEFAULT_PERSONA_HUB_ID,
+  DEFAULT_PERSONA_HUB_NAME,
   DEFAULT_PERSONA_HUB_URL,
+  DEFAULT_PERSONA_SPLIT_RATIO,
   formatPersonaHubDisplayHost,
+  getActivePersonaHub,
+  getSecondaryPersonaHub,
   isMixedContentIframeBlocked,
+  MAX_PERSONA_HUBS,
+  MAX_PERSONA_SPLIT_RATIO,
+  MIN_PERSONA_SPLIT_RATIO,
   normalizePersonaEmbedSettings,
   normalizePersonaHubUrl,
+  openPersonaHubInRightSplit,
   parsePersonaEmbedSessionRoute,
+  removePersonaHubProfile,
+  reorderPersonaHubProfiles,
   sanitizeMachineServerMap,
+  selectActivePersonaHub,
+  selectSecondaryPersonaHub,
+  swapPersonaSplitPanes,
   testPersonaHubHealth,
+  togglePersonaSplitMode,
+  updatePersonaHubProfile,
   validatePersonaGuestOpenSessionPayload,
   validatePersonaGuestReadyPayload,
   validatePersonaSessionMetadataResult,
@@ -85,12 +105,270 @@ describe("persona embed settings", () => {
     });
     expect(recovered).toEqual({
       enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: DEFAULT_PERSONA_HUB_NAME,
+          hubUrl: DEFAULT_PERSONA_HUB_URL,
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+      splitEnabled: false,
+      secondaryHubId: null,
+      splitRatio: DEFAULT_PERSONA_SPLIT_RATIO,
+      sidebarExpanded: false,
       hubUrl: DEFAULT_PERSONA_HUB_URL,
       machineServerMap: {},
       hidePersonaSidebar: false,
       hideBuiltInMainChatWhenEnabled: true,
       interceptSessionClicks: true,
     });
+  });
+
+  it("migrates 0.17.534 single-Hub settings with zero loss and strictly strips credentials or unsafe protocols", () => {
+    const migrated = normalizeAppSettings({
+      persona: {
+        enabled: true,
+        hubUrl: "https://corp-hub.example.com/persona///",
+        machineServerMap: {
+          "n37-217-003": "srv_devbox",
+          "mac-ml9": "srv_mac",
+        },
+        hidePersonaSidebar: true,
+        hideBuiltInMainChatWhenEnabled: false,
+        interceptSessionClicks: true,
+        // Unknown credential-like fields must never survive migration
+        token: "secret-should-not-persist",
+        password: "secret-password",
+      },
+    });
+
+    expect(migrated.persona).toEqual({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "corp-hub.example.com/persona",
+          hubUrl: "https://corp-hub.example.com/persona",
+          machineServerMap: {
+            "n37-217-003": "srv_devbox",
+            "mac-ml9": "srv_mac",
+          },
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+      splitEnabled: false,
+      secondaryHubId: null,
+      splitRatio: DEFAULT_PERSONA_SPLIT_RATIO,
+      sidebarExpanded: false,
+      hubUrl: "https://corp-hub.example.com/persona",
+      machineServerMap: {
+        "n37-217-003": "srv_devbox",
+        "mac-ml9": "srv_mac",
+      },
+      hidePersonaSidebar: true,
+      hideBuiltInMainChatWhenEnabled: false,
+      interceptSessionClicks: true,
+    });
+    expect("token" in migrated.persona).toBe(false);
+    expect("password" in migrated.persona).toBe(false);
+
+    // Multi-Hub payload drops entries with credentials or non-HTTP(S) schemes, strips extra keys,
+    // deduplicates IDs, clamps splitRatio, and enforces active/secondary invariants.
+    const normalizedMulti = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "hub-work",
+          name: " Work Hub \n ",
+          hubUrl: "http://10.37.217.3:18660/",
+          machineServerMap: { dev: "srv_work" },
+          apiKey: "must-strip",
+          cookie: "must-strip",
+        },
+        {
+          id: "hub-bad-creds",
+          name: "Creds",
+          hubUrl: "http://admin:secret@10.37.217.4:18660",
+          machineServerMap: {},
+        },
+        {
+          id: "hub-bad-proto",
+          name: "Proto",
+          hubUrl: "file:///etc/passwd",
+          machineServerMap: {},
+        },
+        {
+          id: "hub-work", // duplicate id gets uniquified
+          name: "Home Hub",
+          hubUrl: "http://127.0.0.1:18661/",
+          machineServerMap: { dev: "srv_home" },
+        },
+      ],
+      activeHubId: "hub-work",
+      splitEnabled: true,
+      secondaryHubId: "hub-work", // cannot equal activeHubId -> auto-resolved to second hub
+      splitRatio: 0.92, // clamped to MAX_PERSONA_SPLIT_RATIO
+      sidebarExpanded: true,
+    });
+
+    expect(normalizedMulti.hubs).toEqual([
+      {
+        id: "hub-work",
+        name: "Work Hub",
+        hubUrl: "http://10.37.217.3:18660",
+        machineServerMap: { dev: "srv_work" },
+      },
+      {
+        id: "hub-work-2",
+        name: "Home Hub",
+        hubUrl: "http://127.0.0.1:18661",
+        machineServerMap: { dev: "srv_home" },
+      },
+    ]);
+    expect("apiKey" in normalizedMulti.hubs[0]).toBe(false);
+    expect("cookie" in normalizedMulti.hubs[0]).toBe(false);
+    expect(normalizedMulti.activeHubId).toBe("hub-work");
+    expect(normalizedMulti.secondaryHubId).toBe("hub-work-2");
+    expect(normalizedMulti.splitEnabled).toBe(true);
+    expect(normalizedMulti.splitRatio).toBe(MAX_PERSONA_SPLIT_RATIO);
+    expect(normalizedMulti.sidebarExpanded).toBe(true);
+    expect(normalizedMulti.hubUrl).toBe("http://10.37.217.3:18660");
+    expect(normalizedMulti.machineServerMap).toEqual({ dev: "srv_work" });
+
+    // Single hub cannot stay in split mode
+    const singleHubSplit = normalizePersonaEmbedSettings({
+      hubs: [{ id: "only", name: "Only", hubUrl: "http://127.0.0.1:18660", machineServerMap: {} }],
+      activeHubId: "only",
+      splitEnabled: true,
+      secondaryHubId: "only",
+      splitRatio: 0.05,
+    });
+    expect(singleHubSplit.splitEnabled).toBe(false);
+    expect(singleHubSplit.secondaryHubId).toBeNull();
+    expect(singleHubSplit.splitRatio).toBe(MIN_PERSONA_SPLIT_RATIO);
+    expect(clampPersonaSplitRatio(Number.NaN)).toBe(DEFAULT_PERSONA_SPLIT_RATIO);
+  });
+
+  it("supports multi-Hub CRUD, reordering, split toggle/swap/close, and validation boundaries", () => {
+    let state = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "hub-a",
+          name: "Hub A",
+          hubUrl: "http://10.37.217.3:18660",
+          machineServerMap: { m1: "srv_a" },
+        },
+      ],
+      activeHubId: "hub-a",
+    });
+
+    // Rejects unsafe URLs on add
+    expect(addPersonaHubProfile(state, { name: "Bad", hubUrl: "ftp://bad.host" })).toEqual({
+      ok: false,
+      error: "invalid_protocol",
+    });
+    expect(
+      addPersonaHubProfile(state, { name: "Creds", hubUrl: "https://u:p@hub.example.com" }),
+    ).toEqual({
+      ok: false,
+      error: "credentials_not_allowed",
+    });
+
+    // Adds second and third hubs
+    const addB = addPersonaHubProfile(state, {
+      id: "hub-b",
+      name: "Hub B",
+      hubUrl: "http://127.0.0.1:18661/",
+      machineServerMap: { m1: "srv_b" },
+    });
+    expect(addB.ok).toBe(true);
+    if (!addB.ok) return;
+    state = addB.settings;
+
+    const addC = addPersonaHubProfile(state, {
+      id: "hub-c",
+      name: "Hub C",
+      hubUrl: "https://hub-c.example.com/persona/",
+    });
+    expect(addC.ok).toBe(true);
+    if (!addC.ok) return;
+    state = addC.settings;
+
+    expect(collectValidPersonaHubUrls(state)).toEqual([
+      "http://10.37.217.3:18660",
+      "http://127.0.0.1:18661",
+      "https://hub-c.example.com/persona",
+    ]);
+
+    // Enable split, open Hub C in right split, swap panes, select secondary as active swaps cleanly
+    state = openPersonaHubInRightSplit(state, "hub-c");
+    expect(state.splitEnabled).toBe(true);
+    expect(getActivePersonaHub(state)?.id).toBe("hub-a");
+    expect(getSecondaryPersonaHub(state)?.id).toBe("hub-c");
+
+    state = swapPersonaSplitPanes(state);
+    expect(state.activeHubId).toBe("hub-c");
+    expect(state.secondaryHubId).toBe("hub-a");
+
+    // Selecting current secondary hub as primary swaps panes without collapsing split
+    state = selectActivePersonaHub(state, "hub-a");
+    expect(state.activeHubId).toBe("hub-a");
+    expect(state.secondaryHubId).toBe("hub-c");
+    expect(state.splitEnabled).toBe(true);
+
+    // Selecting current primary hub in right pane swaps panes cleanly
+    state = selectSecondaryPersonaHub(state, "hub-a");
+    expect(state.activeHubId).toBe("hub-c");
+    expect(state.secondaryHubId).toBe("hub-a");
+
+    // Closing primary pane promotes secondary to active and exits split
+    state = closePersonaSplitPane(state, "primary");
+    expect(state.splitEnabled).toBe(false);
+    expect(state.activeHubId).toBe("hub-a");
+
+    // Reordering preserves activeHubId & updates order
+    state = reorderPersonaHubProfiles(state, 2, 0);
+    expect(state.hubs.map((h) => h.id)).toEqual(["hub-c", "hub-a", "hub-b"]);
+    expect(state.activeHubId).toBe("hub-a");
+
+    // Updating a Hub's map keeps other Hubs isolated
+    const updatedB = updatePersonaHubProfile(state, "hub-b", {
+      name: "Home Mini",
+      machineServerMap: { m1: "srv_home_updated" },
+    });
+    expect(updatedB.ok).toBe(true);
+    if (!updatedB.ok) return;
+    state = updatedB.settings;
+    expect(state.hubs.find((h) => h.id === "hub-a")?.machineServerMap).toEqual({ m1: "srv_a" });
+    expect(state.hubs.find((h) => h.id === "hub-b")?.machineServerMap).toEqual({
+      m1: "srv_home_updated",
+    });
+
+    // Removing Hubs downgrades split cleanly when < 2 remain
+    state = togglePersonaSplitMode(state, true);
+    expect(state.splitEnabled).toBe(true);
+    state = removePersonaHubProfile(state, "hub-c");
+    expect(state.splitEnabled).toBe(true);
+    state = removePersonaHubProfile(state, "hub-b");
+    expect(state.hubs.map((h) => h.id)).toEqual(["hub-a"]);
+    expect(state.splitEnabled).toBe(false);
+    expect(state.secondaryHubId).toBeNull();
+
+    // Cap enforcement at MAX_PERSONA_HUBS
+    const fullState = normalizePersonaEmbedSettings({
+      hubs: Array.from({ length: MAX_PERSONA_HUBS }, (_, idx) => ({
+        id: `hub-${idx}`,
+        name: `Hub ${idx}`,
+        hubUrl: `http://127.0.0.1:${20000 + idx}`,
+        machineServerMap: {},
+      })),
+    });
+    expect(
+      addPersonaHubProfile(fullState, { name: "Overflow", hubUrl: "http://127.0.0.1:29999" }),
+    ).toEqual({ ok: false, error: "max_hubs_reached" });
   });
 
   it("tests Persona Hub health without sending credentials or tokens", async () => {
@@ -134,16 +412,17 @@ describe("persona embed settings", () => {
 
   it("delegates Electron health check to main process and distinguishes Web CORS unreadable vs network failure", async () => {
     // Electron path uses main-process checkHealth without calling fetch
-    const electronCheckHealth = vi.fn(async () => ({
+    const electronCheckHealth = vi.fn(async (_hubUrl?: string) => ({
       ok: true as const,
       hubName: "main-probed-hub",
       version: "2.0.0",
       latencyMs: 12,
     }));
-    const electronResult = await testPersonaHubHealth("http://127.0.0.1:18660", {
+    const electronResult = await testPersonaHubHealth("http://127.0.0.1:18660/", {
       electronCheckHealth,
     });
     expect(electronCheckHealth).toHaveBeenCalledTimes(1);
+    expect(electronCheckHealth).toHaveBeenCalledWith("http://127.0.0.1:18660");
     expect(electronResult).toEqual({
       ok: true,
       hubName: "main-probed-hub",

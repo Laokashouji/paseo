@@ -85,22 +85,33 @@ export function useIsBuiltInMainChatHiddenByPersona(): boolean {
   return persona.enabled && persona.hideBuiltInMainChatWhenEnabled;
 }
 
+export type PersonaEmbedSettingsUpdater =
+  | Partial<PersonaEmbedSettings>
+  | ((current: PersonaEmbedSettings) => PersonaEmbedSettings | Partial<PersonaEmbedSettings>);
+
 export function useUpdatePersonaEmbedSettings(): (
-  patch: Partial<PersonaEmbedSettings>,
+  patchOrUpdater: PersonaEmbedSettingsUpdater,
 ) => Promise<void> {
   const contextClient = useContext(QueryClientContext);
   const queryClient = contextClient ?? appQueryClient;
 
   return useCallback(
-    async (patch: Partial<PersonaEmbedSettings>) => {
+    async (patchOrUpdater: PersonaEmbedSettingsUpdater) => {
       await saveAppSettings({
         queryClient,
-        updates: (current) => ({
-          persona: normalizePersonaEmbedSettings({
-            ...current.persona,
-            ...patch,
-          }),
-        }),
+        updates: (current) => {
+          const normalizedCurrent = normalizePersonaEmbedSettings(current.persona);
+          const nextPatch =
+            typeof patchOrUpdater === "function"
+              ? patchOrUpdater(normalizedCurrent)
+              : patchOrUpdater;
+          return {
+            persona: normalizePersonaEmbedSettings({
+              ...normalizedCurrent,
+              ...nextPatch,
+            }),
+          };
+        },
       });
     },
     [queryClient],

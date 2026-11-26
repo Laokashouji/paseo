@@ -2,13 +2,18 @@ import { listenToDesktopEvent } from "@/desktop/electron/events";
 import { getDesktopHost } from "@/desktop/host";
 import { WEB_SURFACE_PLANE } from "@/lib/overlay-root";
 import type { PersonaGuestConfigMessage } from "./resident-persona-webview";
-import { validatePersonaSessionMetadataResult, type PersonaSessionMetadataHints } from "./settings";
+import {
+  DEFAULT_PERSONA_HUB_ID,
+  validatePersonaSessionMetadataResult,
+  type PersonaSessionMetadataHints,
+} from "./settings";
 
 export type { PersonaGuestConfigMessage } from "./resident-persona-webview";
 
 export const PERSONA_RESIDENT_HOST_ID = "paseo-persona-resident-webview";
-const PERSONA_SURFACE_ATTR = "data-paseo-persona-surface";
-const PERSONA_WEBVIEW_ATTR = "data-paseo-persona-webview";
+export const PERSONA_SURFACE_ATTR = "data-paseo-persona-surface";
+export const PERSONA_WEBVIEW_ATTR = "data-paseo-persona-webview";
+export const PERSONA_HUB_ID_ATTR = "data-paseo-persona-hub-id";
 const DEFAULT_PARTITION = "persist:persona";
 const METADATA_LOOKUP_TIMEOUT_MS = 1_500;
 
@@ -29,14 +34,24 @@ export interface PersonaElectronWebviewElement extends HTMLElement {
   removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
 }
 
-interface ResidentPersonaState {
+export interface ResidentPersonaEntry {
+  hubId: string;
+  hubUrl: string;
   webview: PersonaElectronWebviewElement;
   surface: HTMLElement;
-  hubUrl: string;
 }
 
-let residentState: ResidentPersonaState | null = null;
-let lifecycleGeneration = 0;
+export interface PersonaSurfaceRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+const residentPoolByHubId = new Map<string, ResidentPersonaEntry>();
+const generationByHubId = new Map<string, number>();
+let globalLifecycleGeneration = 0;
+let webviewsInteractive = true;
 let hubSyncQueue: Promise<unknown> = Promise.resolve();
 let nextMetadataRequestSeq = 0;
 
@@ -63,7 +78,8 @@ function applyHostContainerStyle(host: HTMLElement): void {
   host.style.zIndex = String(WEB_SURFACE_PLANE.browser);
 }
 
-function applyParkedSurfaceStyle(surface: HTMLElement): void {
+function applyParkedSurfaceStyle(entry: ResidentPersonaEntry): void {
+  const { surface, webview } = entry;
   surface.setAttribute("aria-hidden", "true");
   surface.style.position = "fixed";
   surface.style.left = "0";
@@ -75,12 +91,12 @@ function applyParkedSurfaceStyle(surface: HTMLElement): void {
   surface.style.pointerEvents = "none";
   surface.style.display = "block";
   surface.style.visibility = "visible";
+  webview.style.pointerEvents = "none";
 }
 
-function applyPresentedSurfaceStyle(
-  surface: HTMLElement,
-  rect: { left: number; top: number; width: number; height: number },
-): void {
+function applyPresentedSurfaceStyle(entry: ResidentPersonaEntry, rect: PersonaSurfaceRect): void {
+  const { surface, webview } = entry;
+  const pointerEvents = webviewsInteractive ? "auto" : "none";
   surface.removeAttribute("aria-hidden");
   surface.style.position = "fixed";
   surface.style.left = `${Math.round(rect.left)}px`;
@@ -89,9 +105,10 @@ function applyPresentedSurfaceStyle(
   surface.style.height = `${Math.max(1, Math.round(rect.height))}px`;
   surface.style.overflow = "hidden";
   surface.style.opacity = "1";
-  surface.style.pointerEvents = "auto";
+  surface.style.pointerEvents = pointerEvents;
   surface.style.display = "block";
   surface.style.visibility = "visible";
+  webview.style.pointerEvents = pointerEvents;
 }
 
 function applyWebviewFillStyle(webview: HTMLElement): void {
@@ -125,72 +142,137 @@ function enqueueHubSync<T>(operation: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function invokeSetHubUrl(hubUrl: string | null, options?: { enabled?: boolean }): Promise<boolean> {
+function invokeSetHubUrls(
+  hubUrls: readonly string[] | null,
+  options?: { enabled?: boolean },
+): Promise<boolean> {
   return enqueueHubSync(async () => {
-    const setter = getDesktopHost()?.persona?.setHubUrl;
-    if (typeof setter !== "function") {
+    const personaBridge = getDesktopHost()?.persona;
+    if (!personaBridge) {
       return false;
     }
+    const normalizedList = Array.isArray(hubUrls)
+      ? Array.from(new Set(hubUrls.map((url) => url.trim()).filter((url) => url.length > 0)))
+      : [];
     try {
-      const accepted = await setter(hubUrl, options);
-      return accepted === true;
+      if (typeof personaBridge.setHubUrls === "function") {
+        const accepted = await personaBridge.setHubUrls(
+          normalizedList.length > 0 ? normalizedList : null,
+          options,
+        );
+        return accepted === true;
+      }
+      if (typeof personaBridge.setHubUrl === "function") {
+        const accepted = await personaBridge.setHubUrl(normalizedList[0] ?? null, options);
+        return accepted === true;
+      }
+      return false;
     } catch {
       return false;
     }
   });
 }
 
+export async function syncPersonaHubUrlsWithMain(
+  hubUrls: readonly string[] | null,
+  options?: { enabled?: boolean },
+): Promise<boolean> {
+  return invokeSetHubUrls(hubUrls, options);
+}
+
 export async function syncPersonaHubUrlWithMain(
   hubUrl: string | null,
   options?: { enabled?: boolean },
 ): Promise<boolean> {
-  return invokeSetHubUrl(hubUrl, options);
+  return invokeSetHubUrls(hubUrl ? [hubUrl] : null, options);
 }
 
-function removeResidentDomOnly(): void {
-  if (residentState) {
-    residentState.webview.remove();
-    residentState.surface.remove();
-    residentState = null;
+function removeEntryDomOnly(entry: ResidentPersonaEntry): void {
+  entry.webview.remove();
+  entry.surface.remove();
+}
+
+function resolveTargetEntry(hubId?: string): ResidentPersonaEntry | null {
+  if (hubId) {
+    const entry = residentPoolByHubId.get(hubId);
+    return entry?.webview.isConnected && entry.surface.isConnected ? entry : null;
   }
+  for (const entry of residentPoolByHubId.values()) {
+    if (entry.webview.isConnected && entry.surface.isConnected) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+export interface EnsureResidentPersonaWebviewInput {
+  hubId: string;
+  hubUrl: string;
+  allowedHubUrls?: readonly string[];
 }
 
 export async function ensureResidentPersonaWebview(
-  hubUrl: string,
+  input: string | EnsureResidentPersonaWebviewInput,
 ): Promise<PersonaElectronWebviewElement | null> {
   const ownerDocument = readDocument();
-  const normalizedHubUrl = hubUrl.trim();
-  if (!ownerDocument || !normalizedHubUrl) {
+  const normalizedInput: EnsureResidentPersonaWebviewInput =
+    typeof input === "string" ? { hubId: DEFAULT_PERSONA_HUB_ID, hubUrl: input } : input;
+  const hubId = normalizedInput.hubId.trim();
+  const normalizedHubUrl = normalizedInput.hubUrl.trim();
+  if (!ownerDocument || !hubId || !normalizedHubUrl) {
     return null;
   }
 
-  const generation = ++lifecycleGeneration;
-  const registered = await invokeSetHubUrl(normalizedHubUrl, { enabled: true });
+  const nextHubGeneration = (generationByHubId.get(hubId) ?? 0) + 1;
+  generationByHubId.set(hubId, nextHubGeneration);
+  const myGlobalGeneration = globalLifecycleGeneration;
 
-  // Cancel creation if another destroy/disable/ensure call superseded us while awaiting IPC,
+  const pooledUrlsExcludingSelf = Array.from(residentPoolByHubId.values())
+    .filter((entry) => entry.hubId !== hubId)
+    .map((entry) => entry.hubUrl);
+  const allowlist = Array.from(
+    new Set(
+      normalizedInput.allowedHubUrls !== undefined
+        ? [...normalizedInput.allowedHubUrls, normalizedHubUrl]
+        : [...pooledUrlsExcludingSelf, normalizedHubUrl],
+    ),
+  ).filter((url) => url.trim().length > 0);
+
+  const registered = await invokeSetHubUrls(allowlist, { enabled: true });
+
+  // Cancel creation if a destroy/disable/re-ensure superseded us while awaiting IPC,
   // or if the main process rejected Hub registration.
-  if (!registered || generation !== lifecycleGeneration) {
+  if (
+    !registered ||
+    myGlobalGeneration !== globalLifecycleGeneration ||
+    generationByHubId.get(hubId) !== nextHubGeneration
+  ) {
     return null;
   }
 
+  const existing = residentPoolByHubId.get(hubId);
   if (
-    residentState &&
-    residentState.webview.isConnected &&
-    residentState.surface.isConnected &&
-    residentState.hubUrl === normalizedHubUrl
+    existing &&
+    existing.webview.isConnected &&
+    existing.surface.isConnected &&
+    existing.hubUrl === normalizedHubUrl
   ) {
-    return residentState.webview;
+    return existing.webview;
   }
 
-  removeResidentDomOnly();
+  if (existing) {
+    removeEntryDomOnly(existing);
+    residentPoolByHubId.delete(hubId);
+  }
 
   const host = ensureHostContainer(ownerDocument);
   const surface = ownerDocument.createElement("div");
   surface.setAttribute(PERSONA_SURFACE_ATTR, "true");
-  applyParkedSurfaceStyle(surface);
+  surface.setAttribute(PERSONA_HUB_ID_ATTR, hubId);
 
   const webview = ownerDocument.createElement("webview") as PersonaElectronWebviewElement;
   webview.setAttribute(PERSONA_WEBVIEW_ATTR, "true");
+  webview.setAttribute(PERSONA_HUB_ID_ATTR, hubId);
   webview.setAttribute("partition", getPersonaPartition());
   webview.setAttribute("allowpopups", "true");
   webview.setAttribute("spellcheck", "false");
@@ -198,49 +280,87 @@ export async function ensureResidentPersonaWebview(
   applyWebviewFillStyle(webview);
   webview.src = normalizedHubUrl;
 
+  const entry: ResidentPersonaEntry = {
+    hubId,
+    hubUrl: normalizedHubUrl,
+    webview,
+    surface,
+  };
+  applyParkedSurfaceStyle(entry);
+
   surface.appendChild(webview);
   host.appendChild(surface);
 
-  residentState = {
-    webview,
-    surface,
-    hubUrl: normalizedHubUrl,
-  };
+  residentPoolByHubId.set(hubId, entry);
   return webview;
 }
 
-export function getResidentPersonaWebview(): PersonaElectronWebviewElement | null {
-  if (!residentState || !residentState.webview.isConnected) {
-    return null;
-  }
-  return residentState.webview;
+export function getResidentPersonaWebview(hubId?: string): PersonaElectronWebviewElement | null {
+  return resolveTargetEntry(hubId)?.webview ?? null;
 }
 
-export function presentResidentPersonaWebview(rect: {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}): void {
-  if (!residentState || !residentState.surface.isConnected) {
+export function listResidentPersonaHubIds(): string[] {
+  const activeIds: string[] = [];
+  for (const [hubId, entry] of residentPoolByHubId.entries()) {
+    if (entry.webview.isConnected && entry.surface.isConnected) {
+      activeIds.push(hubId);
+    }
+  }
+  return activeIds;
+}
+
+export function presentResidentPersonaWebview(
+  hubIdOrRect: string | PersonaSurfaceRect,
+  maybeRect?: PersonaSurfaceRect,
+): void {
+  const hubId = typeof hubIdOrRect === "string" ? hubIdOrRect : undefined;
+  const rect = typeof hubIdOrRect === "string" ? maybeRect : hubIdOrRect;
+  const entry = resolveTargetEntry(hubId);
+  if (!entry || !rect) {
     return;
   }
   if (rect.width <= 0 || rect.height <= 0) {
-    applyParkedSurfaceStyle(residentState.surface);
+    applyParkedSurfaceStyle(entry);
     return;
   }
-  applyPresentedSurfaceStyle(residentState.surface, rect);
+  applyPresentedSurfaceStyle(entry, rect);
 }
 
-export function parkResidentPersonaWebview(): void {
-  if (!residentState || !residentState.surface.isConnected) {
+export function parkResidentPersonaWebview(hubId?: string): void {
+  if (hubId) {
+    const entry = resolveTargetEntry(hubId);
+    if (entry) {
+      applyParkedSurfaceStyle(entry);
+    }
     return;
   }
-  applyParkedSurfaceStyle(residentState.surface);
+  for (const entry of residentPoolByHubId.values()) {
+    if (entry.surface.isConnected) {
+      applyParkedSurfaceStyle(entry);
+    }
+  }
 }
 
-export function reloadResidentPersonaWebview(): void {
-  const webview = getResidentPersonaWebview();
+/**
+ * Toggles pointer-events on all presented Persona webviews.
+ * Called with `false` while dragging the split divider so Chromium `<webview>` surfaces
+ * cannot steal pointermove / pointerup events during resizing.
+ */
+export function setResidentPersonaWebviewsInteractive(interactive: boolean): void {
+  webviewsInteractive = interactive;
+  for (const entry of residentPoolByHubId.values()) {
+    if (!entry.surface.isConnected) {
+      continue;
+    }
+    const isParked = entry.surface.getAttribute("aria-hidden") === "true";
+    const pointerEvents = !isParked && interactive ? "auto" : "none";
+    entry.surface.style.pointerEvents = pointerEvents;
+    entry.webview.style.pointerEvents = pointerEvents;
+  }
+}
+
+export function reloadResidentPersonaWebview(hubId?: string): void {
+  const webview = getResidentPersonaWebview(hubId);
   if (!webview) {
     return;
   }
@@ -251,18 +371,63 @@ export function reloadResidentPersonaWebview(): void {
   }
 }
 
-export function destroyResidentPersonaWebview(): void {
-  lifecycleGeneration += 1;
-  removeResidentDomOnly();
+export function destroyResidentPersonaWebview(hubId?: string): void {
+  if (hubId) {
+    generationByHubId.set(hubId, (generationByHubId.get(hubId) ?? 0) + 1);
+    const entry = residentPoolByHubId.get(hubId);
+    if (entry) {
+      removeEntryDomOnly(entry);
+      residentPoolByHubId.delete(hubId);
+    }
+    return;
+  }
+
+  globalLifecycleGeneration += 1;
+  generationByHubId.clear();
+  for (const entry of residentPoolByHubId.values()) {
+    removeEntryDomOnly(entry);
+  }
+  residentPoolByHubId.clear();
+  webviewsInteractive = true;
+}
+
+/**
+ * Tears down pool entries whose Hub was removed or whose URL changed, while leaving all
+ * unchanged Hubs alive (parked at 1x1 when off-screen) for 0ms flicker-free switching.
+ */
+export function reconcileResidentPersonaWebviews(
+  hubs: ReadonlyArray<{ id: string; hubUrl: string }>,
+): void {
+  const urlByHubId = new Map<string, string>();
+  for (const hub of hubs) {
+    const trimmedUrl = hub.hubUrl.trim();
+    if (hub.id && trimmedUrl) {
+      urlByHubId.set(hub.id, trimmedUrl);
+    }
+  }
+  for (const [hubId, entry] of Array.from(residentPoolByHubId.entries())) {
+    const expectedUrl = urlByHubId.get(hubId);
+    if (!expectedUrl || expectedUrl !== entry.hubUrl) {
+      destroyResidentPersonaWebview(hubId);
+    }
+  }
 }
 
 export async function disableResidentPersonaWebview(): Promise<void> {
   destroyResidentPersonaWebview();
-  await invokeSetHubUrl(null, { enabled: false });
+  await invokeSetHubUrls(null, { enabled: false });
 }
 
-export function sendPersonaGuestConfig(config: PersonaGuestConfigMessage): void {
-  const webview = getResidentPersonaWebview();
+export function sendPersonaGuestConfig(
+  hubIdOrConfig: string | PersonaGuestConfigMessage,
+  maybeConfig?: PersonaGuestConfigMessage,
+): void {
+  const hubId = typeof hubIdOrConfig === "string" ? hubIdOrConfig : undefined;
+  const config = typeof hubIdOrConfig === "string" ? maybeConfig : hubIdOrConfig;
+  if (!config) {
+    return;
+  }
+  const webview = getResidentPersonaWebview(hubId);
   if (!webview || typeof webview.send !== "function") {
     return;
   }
@@ -273,8 +438,10 @@ export function sendPersonaGuestConfig(config: PersonaGuestConfigMessage): void 
   }
 }
 
-export function sendPersonaGuestRouteSync(url: string): void {
-  const webview = getResidentPersonaWebview();
+export function sendPersonaGuestRouteSync(hubIdOrUrl: string, maybeUrl?: string): void {
+  const hubId = maybeUrl !== undefined ? hubIdOrUrl : undefined;
+  const url = maybeUrl !== undefined ? maybeUrl : hubIdOrUrl;
+  const webview = getResidentPersonaWebview(hubId);
   if (!webview || typeof webview.send !== "function") {
     return;
   }
@@ -285,8 +452,10 @@ export function sendPersonaGuestRouteSync(url: string): void {
   }
 }
 
-export function sendPersonaGuestAllowOnce(url: string): void {
-  const webview = getResidentPersonaWebview();
+export function sendPersonaGuestAllowOnce(hubIdOrUrl: string, maybeUrl?: string): void {
+  const hubId = maybeUrl !== undefined ? hubIdOrUrl : undefined;
+  const url = maybeUrl !== undefined ? maybeUrl : hubIdOrUrl;
+  const webview = getResidentPersonaWebview(hubId);
   if (!webview || typeof webview.send !== "function") {
     return;
   }
@@ -311,18 +480,37 @@ export function readResidentPersonaWebviewContentsId(
   }
 }
 
+export function findResidentPersonaEntryByWebContentsId(
+  webContentsId: number,
+): ResidentPersonaEntry | null {
+  if (!Number.isInteger(webContentsId) || webContentsId <= 0) {
+    return null;
+  }
+  for (const entry of residentPoolByHubId.values()) {
+    if (!entry.webview.isConnected) {
+      continue;
+    }
+    if (readResidentPersonaWebviewContentsId(entry.webview) === webContentsId) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 /**
- * Requests same-origin session metadata (`workspace_id`, `cwd`) from the authorized Persona guest.
- * Receives replies exclusively via the main-process `persona-session-metadata-result` channel
- * after `senderFrame === contents.mainFrame` + registered Hub origin verification.
+ * Requests same-origin session metadata (`workspace_id`, `cwd`) from the authorized Persona guest
+ * belonging to `hubId`. Receives replies exclusively via the main-process
+ * `persona-session-metadata-result` channel after `senderFrame === contents.mainFrame` +
+ * registered Hub origin verification.
  */
 export function lookupPersonaGuestSessionMetadata(input: {
+  hubId?: string;
   machineId: string;
   sessionId: string;
   authorizedHubUrl: string;
   timeoutMs?: number;
 }): Promise<PersonaSessionMetadataHints | null> {
-  const webview = getResidentPersonaWebview();
+  const webview = getResidentPersonaWebview(input.hubId);
   if (!webview || typeof webview.send !== "function") {
     return Promise.resolve(null);
   }

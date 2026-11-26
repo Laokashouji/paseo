@@ -35,6 +35,7 @@ import {
   type PersonaSessionResolution,
   type PersonaSessionResolverHost,
 } from "./session-resolver";
+import { getActivePersonaHub, getPersonaHubById } from "./settings";
 import { readPersonaEmbedSettingsSnapshot } from "./use-persona-settings";
 
 const HYDRATION_WAIT_TIMEOUT_MS = 3_000;
@@ -958,6 +959,8 @@ async function fetchMissingDaemonConfigsForProviderRoots(
 export function createAppOpenPersonaSessionDeps(options: {
   toast: ToastApi;
   isCompact: boolean;
+  hubId?: string | null;
+  machineServerMapOverride?: Readonly<Record<string, string>>;
   allowPersonaFallbackNavigation?: (rawHref: string) => void;
   lookupSessionMetadataHint?: OpenPersonaSessionDeps["lookupSessionMetadataHint"];
 }): OpenPersonaSessionDeps {
@@ -967,7 +970,16 @@ export function createAppOpenPersonaSessionDeps(options: {
       .map((host) => ({ serverId: host.serverId, label: host.label }));
 
   return {
-    getMachineServerMap: () => readPersonaEmbedSettingsSnapshot().machineServerMap,
+    getMachineServerMap: () => {
+      if (options.machineServerMapOverride) {
+        return options.machineServerMapOverride;
+      }
+      const settings = readPersonaEmbedSettingsSnapshot();
+      if (options.hubId) {
+        return getPersonaHubById(settings, options.hubId)?.machineServerMap ?? {};
+      }
+      return getActivePersonaHub(settings)?.machineServerMap ?? {};
+    },
     getHosts,
     getSessions: () => useSessionStore.getState().sessions,
     getConnectionStatusByServerId: () => {

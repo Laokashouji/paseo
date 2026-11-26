@@ -13,34 +13,64 @@ export interface PersonaGuestConfigMessage {
   };
 }
 
-export function reloadResidentPersonaWebview(): void {
+export function reloadResidentPersonaWebview(_hubId?: string): void {
   // No-op outside Electron desktop runtime.
 }
 
-export function destroyResidentPersonaWebview(): void {
+export function destroyResidentPersonaWebview(_hubId?: string): void {
   // No-op outside Electron desktop runtime.
+}
+
+export function reconcileResidentPersonaWebviews(
+  _hubs: ReadonlyArray<{ id: string; hubUrl: string }>,
+): void {
+  // No-op outside Electron desktop runtime.
+}
+
+export async function syncPersonaHubUrlsWithMain(
+  hubUrls: readonly string[] | null,
+  options?: { enabled?: boolean },
+): Promise<boolean> {
+  const personaBridge = getDesktopHost()?.persona;
+  if (!personaBridge) {
+    return false;
+  }
+  const normalizedList = Array.isArray(hubUrls)
+    ? hubUrls.map((url) => url.trim()).filter((url) => url.length > 0)
+    : [];
+  try {
+    if (typeof personaBridge.setHubUrls === "function") {
+      const accepted = await personaBridge.setHubUrls(
+        normalizedList.length > 0 ? normalizedList : null,
+        options,
+      );
+      return accepted === true;
+    }
+    if (typeof personaBridge.setHubUrl === "function") {
+      const accepted = await personaBridge.setHubUrl(normalizedList[0] ?? null, options);
+      return accepted === true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export async function syncPersonaHubUrlWithMain(
   hubUrl: string | null,
   options?: { enabled?: boolean },
 ): Promise<boolean> {
-  const setter = getDesktopHost()?.persona?.setHubUrl;
-  if (typeof setter !== "function") {
-    return false;
-  }
-  try {
-    const accepted = await setter(hubUrl, options);
-    return accepted === true;
-  } catch {
-    return false;
-  }
+  return syncPersonaHubUrlsWithMain(hubUrl ? [hubUrl] : null, options);
 }
 
 export async function disableResidentPersonaWebview(): Promise<void> {
-  await syncPersonaHubUrlWithMain(null, { enabled: false });
+  await syncPersonaHubUrlsWithMain(null, { enabled: false });
 }
 
-export function parkResidentPersonaWebview(): void {
+export function parkResidentPersonaWebview(_hubId?: string): void {
+  // No-op outside Electron desktop runtime.
+}
+
+export function setResidentPersonaWebviewsInteractive(_interactive: boolean): void {
   // No-op outside Electron desktop runtime.
 }
