@@ -1047,13 +1047,24 @@ export function listPersonaWebviewGuests(input: {
   );
 }
 
+export const PERSONA_SESSION_CLEAR_BATCH_SIZE = 16;
+
+function normalizeSessionClearBatchSize(batchSize: number | undefined): number {
+  if (typeof batchSize !== "number" || !Number.isFinite(batchSize)) {
+    return PERSONA_SESSION_CLEAR_BATCH_SIZE;
+  }
+  return Math.max(1, Math.floor(batchSize));
+}
+
 /**
  * Clears storage, HTTP cache, and auth cache strictly for the specified isolated Persona
- * partition session(s) and reloads ONLY the guest webviews attached to those session(s).
+ * partition session(s) in bounded batches and reloads ONLY the guest webviews attached to those
+ * session(s).
  */
 export async function clearPersonaWebviewSession(input: {
   personaSession?: PersonaWebviewSession;
   personaSessions?: readonly PersonaWebviewSession[];
+  batchSize?: number;
   listGuests(): PersonaWebviewGuest[];
   logReloadError(guestId: number, error: unknown): void;
 }): Promise<void> {
@@ -1064,13 +1075,18 @@ export async function clearPersonaWebviewSession(input: {
     ]),
   );
 
-  await Promise.all(
-    sessions.flatMap((personaSession) => [
-      personaSession.clearStorageData({ storages: [...PERSONA_STORAGE_TYPES] }),
-      personaSession.clearCache(),
-      personaSession.clearAuthCache(),
-    ]),
-  );
+  // Batch session clears to avoid unbounded concurrency spikes when sweeping many residual partitions.
+  const batchSize = normalizeSessionClearBatchSize(input.batchSize);
+  for (let start = 0; start < sessions.length; start += batchSize) {
+    const batch = sessions.slice(start, start + batchSize);
+    await Promise.all(
+      batch.flatMap((personaSession) => [
+        personaSession.clearStorageData({ storages: [...PERSONA_STORAGE_TYPES] }),
+        personaSession.clearCache(),
+        personaSession.clearAuthCache(),
+      ]),
+    );
+  }
 
   for (const guest of input.listGuests()) {
     if (guest.isDestroyed()) {

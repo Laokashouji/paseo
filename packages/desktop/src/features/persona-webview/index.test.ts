@@ -20,6 +20,7 @@ import {
   PERSONA_GUEST_READY_IPC_CHANNEL,
   PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_HUB_URL_ARG_PREFIX,
+  PERSONA_SESSION_CLEAR_BATCH_SIZE,
   PERSONA_WEBVIEW_PARTITION,
   probePersonaHubHealth,
   registerPersonaWebviewGuestIpcBridge,
@@ -1955,6 +1956,126 @@ describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame a
         "persist:persona-hub-work-a1b2c3d4",
       ]);
       expect(sessionByPartition.has("persist:paseo-browser")).toBe(false);
+    } finally {
+      rmSync(tempUserData, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers and clears 257+ persisted persona-* disk partitions without truncation in bounded batches", async () => {
+    const tempUserData = mkdtempSync(join(tmpdir(), "paseo-persona-many-partitions-"));
+    try {
+      const partitionsDir = join(tempUserData, "Partitions");
+      mkdirSync(partitionsDir, { recursive: true });
+      mkdirSync(join(partitionsDir, "persona"));
+
+      const extraCount = 260; // 261 valid persona partitions total (> 256)
+      const expectedPartitions = ["persist:persona"];
+      for (let index = 1; index <= extraCount; index += 1) {
+        const dirName = `persona-hub-${String(index).padStart(3, "0")}`;
+        mkdirSync(join(partitionsDir, dirName));
+        expectedPartitions.push(`persist:${dirName}`);
+      }
+
+      // Unrelated and invalid entries must still be strictly ignored
+      mkdirSync(join(partitionsDir, "paseo-browser"));
+      mkdirSync(join(partitionsDir, "persona-"));
+      mkdirSync(join(partitionsDir, "persona-invalid.dot"));
+      writeFileSync(join(partitionsDir, "persona-file-only"), "plain file");
+      symlinkSync(
+        join(partitionsDir, "paseo-browser"),
+        join(partitionsDir, "persona-symlink-outside"),
+      );
+
+      const logWarn = vi.fn();
+      const discovered = listPersistedPersonaPartitions(tempUserData, { logWarn });
+      expect(logWarn).not.toHaveBeenCalled();
+      expect(discovered).toHaveLength(extraCount + 1);
+      expect(discovered).toContain("persist:persona-hub-256");
+      expect(discovered).toContain("persist:persona-hub-257");
+      expect(discovered).toContain("persist:persona-hub-260");
+      expect(discovered).toEqual(
+        [...expectedPartitions].sort((left, right) => left.localeCompare(right)),
+      );
+
+      const registry = createPersonaHostHubRegistry({
+        listPersistedPartitions: () => listPersistedPersonaPartitions(tempUserData, { logWarn }),
+      });
+      const hostId = 41;
+      expect(
+        registry.setHostHubEntries(
+          hostId,
+          [{ partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660" }],
+          { enabled: true },
+        ),
+      ).toBe(true);
+
+      const clearAllTarget = registry.resolveClearSessionTarget(hostId);
+      expect(clearAllTarget.ok && clearAllTarget.mode === "all").toBe(true);
+      if (!clearAllTarget.ok || clearAllTarget.mode !== "all") {
+        return;
+      }
+      expect(clearAllTarget.partitions).toHaveLength(extraCount + 1);
+      expect(clearAllTarget.partitions).toContain("persist:persona-hub-257");
+      expect(clearAllTarget.partitions).toContain("persist:persona-hub-260");
+      expect(clearAllTarget.partitions).not.toContain("persist:paseo-browser");
+
+      const clearedStorage = new Set<string>();
+      const clearedCache = new Set<string>();
+      const clearedAuthCache = new Set<string>();
+      const inFlightSessions = new Set<string>();
+      let maxConcurrentSessions = 0;
+
+      const yieldTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const sessionByPartition = new Map<string, PersonaWebviewSession>();
+      const fromPartition = (partition: string): PersonaWebviewSession => {
+        let existing = sessionByPartition.get(partition);
+        if (!existing) {
+          let activeOps = 0;
+          const runOp = async (recordSet: Set<string>) => {
+            if (activeOps === 0) {
+              inFlightSessions.add(partition);
+              maxConcurrentSessions = Math.max(maxConcurrentSessions, inFlightSessions.size);
+            }
+            activeOps += 1;
+            try {
+              await yieldTick();
+              recordSet.add(partition);
+            } finally {
+              activeOps -= 1;
+              if (activeOps === 0) {
+                inFlightSessions.delete(partition);
+              }
+            }
+          };
+          existing = {
+            clearStorageData: vi.fn(() => runOp(clearedStorage)),
+            clearCache: vi.fn(() => runOp(clearedCache)),
+            clearAuthCache: vi.fn(() => runOp(clearedAuthCache)),
+          };
+          sessionByPartition.set(partition, existing);
+        }
+        return existing;
+      };
+
+      const targetSessions = clearAllTarget.partitions.map((partition) =>
+        getPersonaWebviewSession({ fromPartition }, partition, { allowLegacyDiskCase: true }),
+      );
+      const guestReload = vi.fn();
+      await clearPersonaWebviewSession({
+        personaSessions: targetSessions,
+        listGuests: () => [{ id: 901, isDestroyed: () => false, reload: guestReload }],
+        logReloadError: vi.fn(),
+      });
+
+      expect(maxConcurrentSessions).toBeGreaterThan(1);
+      expect(maxConcurrentSessions).toBeLessThanOrEqual(PERSONA_SESSION_CLEAR_BATCH_SIZE);
+      expect(clearedStorage.size).toBe(extraCount + 1);
+      expect(clearedCache.size).toBe(extraCount + 1);
+      expect(clearedAuthCache.size).toBe(extraCount + 1);
+      expect(clearedStorage.has("persist:persona-hub-257")).toBe(true);
+      expect(clearedStorage.has("persist:persona-hub-260")).toBe(true);
+      expect(sessionByPartition.has("persist:paseo-browser")).toBe(false);
+      expect(guestReload).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(tempUserData, { recursive: true, force: true });
     }

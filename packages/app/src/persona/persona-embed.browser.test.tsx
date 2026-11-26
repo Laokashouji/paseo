@@ -2242,7 +2242,7 @@ describe("Persona C2 embed Chromium browser regressions", () => {
     });
     expect(clearSessionSpy).not.toHaveBeenCalled();
 
-    // Step 6: Case-colliding config disambiguates cleanly and main registry blocks raw uppercase collisions
+    // Step 6: Case-colliding config prioritizes exact lowercase IDs and main registry blocks raw uppercase collisions
     const normalizedCaseConfig = normalizePersonaEmbedSettings({
       enabled: true,
       hubs: [
@@ -2253,9 +2253,26 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       splitEnabled: true,
       secondaryHubId: "hub-Case",
     });
-    expect(normalizedCaseConfig.hubs.map((hub) => hub.id)).toEqual(["hub-case", "hub-case-2"]);
-    expect(normalizedCaseConfig.activeHubId).toBe("hub-case-2");
-    expect(normalizedCaseConfig.secondaryHubId).toBe("hub-case");
+    expect(normalizedCaseConfig.hubs.map((hub) => hub.id)).toEqual(["hub-case-2", "hub-case"]);
+    expect(normalizedCaseConfig.activeHubId).toBe("hub-case");
+    expect(normalizedCaseConfig.secondaryHubId).toBe("hub-case-2");
+
+    const normalizedDefaultCaseConfig = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        { id: "Hub-Default", name: "Mixed Default", hubUrl: workUrl, machineServerMap: {} },
+        { id: DEFAULT_PERSONA_HUB_ID, name: "Default", hubUrl: defaultUrl, machineServerMap: {} },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+      splitEnabled: true,
+      secondaryHubId: "Hub-Default",
+    });
+    expect(normalizedDefaultCaseConfig.hubs.map((hub) => hub.id)).toEqual([
+      "hub-default-2",
+      DEFAULT_PERSONA_HUB_ID,
+    ]);
+    expect(normalizedDefaultCaseConfig.activeHubId).toBe(DEFAULT_PERSONA_HUB_ID);
+    expect(normalizedDefaultCaseConfig.secondaryHubId).toBe("hub-default-2");
     expect(
       registry.setHostHubEntries(
         hostId,

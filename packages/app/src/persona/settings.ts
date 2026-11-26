@@ -310,10 +310,17 @@ function allocateUniqueHubId(
   rawId: unknown,
   usedIds: Set<string>,
   reservedLowerIds: ReadonlySet<string>,
+  reservedExactLowerIds: ReadonlySet<string>,
   index: number,
 ): string {
-  const sanitized = sanitizePersonaHubId(rawId);
-  if (sanitized && !usedIds.has(sanitized)) {
+  const rawTrimmedId = typeof rawId === "string" ? rawId.trim() : "";
+  const sanitized = sanitizePersonaHubId(rawTrimmedId);
+  const isExactLower = sanitized !== null && rawTrimmedId === sanitized;
+  if (
+    sanitized &&
+    !usedIds.has(sanitized) &&
+    (isExactLower || !reservedExactLowerIds.has(sanitized))
+  ) {
     usedIds.add(sanitized);
     return sanitized;
   }
@@ -355,6 +362,7 @@ function sanitizeHubProfileList(rawHubs: unknown[]): SanitizedHubProfileListResu
     sanitizedId: string | null;
   }> = [];
   const reservedLowerIds = new Set<string>();
+  const reservedExactLowerIds = new Set<string>();
 
   for (
     let index = 0;
@@ -380,6 +388,9 @@ function sanitizeHubProfileList(rawHubs: unknown[]): SanitizedHubProfileListResu
     const sanitizedId = sanitizePersonaHubId(record.id);
     if (sanitizedId) {
       reservedLowerIds.add(sanitizedId);
+      if (rawTrimmedId === sanitizedId) {
+        reservedExactLowerIds.add(sanitizedId);
+      }
     }
     validRecords.push({ record, normalizedUrl, rawTrimmedId, sanitizedId });
   }
@@ -390,11 +401,17 @@ function sanitizeHubProfileList(rawHubs: unknown[]): SanitizedHubProfileListResu
   const lowerIdToAllocatedId = new Map<string, string>();
 
   for (const { record, normalizedUrl, rawTrimmedId, sanitizedId } of validRecords) {
-    const id = allocateUniqueHubId(record.id, usedIds, reservedLowerIds, hubs.length);
+    const id = allocateUniqueHubId(
+      record.id,
+      usedIds,
+      reservedLowerIds,
+      reservedExactLowerIds,
+      hubs.length,
+    );
     if (rawTrimmedId && !rawIdToAllocatedId.has(rawTrimmedId)) {
       rawIdToAllocatedId.set(rawTrimmedId, id);
     }
-    if (sanitizedId && !lowerIdToAllocatedId.has(sanitizedId)) {
+    if (sanitizedId && (id === sanitizedId || !lowerIdToAllocatedId.has(sanitizedId))) {
       lowerIdToAllocatedId.set(sanitizedId, id);
     }
     const name = sanitizePersonaHubName(record.name, normalizedUrl);

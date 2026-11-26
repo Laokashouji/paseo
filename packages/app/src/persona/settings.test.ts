@@ -827,10 +827,11 @@ describe("persona embed settings", () => {
     }
   });
 
-  it("canonicalizes and disambiguates case-colliding Hub IDs (hub-Case vs hub-case) while preserving activeHubId/secondaryHubId references", () => {
+  it("prioritizes exact lowercase Hub IDs over earlier mixed-case collisions while preserving activeHubId/secondaryHubId references", () => {
     expect(resolvePersonaHubPartition("hub-Case")).toBe("persist:persona-hub-case");
     expect(resolvePersonaHubPartition("HUB-DEFAULT")).toBe(PERSONA_WEBVIEW_PARTITION);
 
+    // [hub-Case, hub-case]: exact lowercase hub-case retains its canonical ID & partition
     const normalized = normalizePersonaEmbedSettings({
       enabled: true,
       hubs: [
@@ -853,21 +854,22 @@ describe("persona embed settings", () => {
     });
 
     expect(normalized.hubs.map((h) => ({ id: h.id, name: h.name }))).toEqual([
-      { id: "hub-case", name: "Upper Hub" },
-      { id: "hub-case-2", name: "Lower Hub" },
+      { id: "hub-case-2", name: "Upper Hub" },
+      { id: "hub-case", name: "Lower Hub" },
     ]);
     // Exact raw ID references survive disambiguation without flipping primary and secondary panes
-    expect(normalized.activeHubId).toBe("hub-case-2");
-    expect(normalized.secondaryHubId).toBe("hub-case");
+    expect(normalized.activeHubId).toBe("hub-case");
+    expect(normalized.secondaryHubId).toBe("hub-case-2");
     expect(normalized.splitEnabled).toBe(true);
     expect(normalized.hubUrl).toBe("http://127.0.0.1:18661");
     expect(normalized.machineServerMap).toEqual({ box: "srv_lower" });
     expect(collectValidPersonaHubPartitionEntries(normalized)).toEqual([
-      { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" },
-      { partition: "persist:persona-hub-case-2", hubUrl: "http://127.0.0.1:18661" },
+      { partition: "persist:persona-hub-case-2", hubUrl: "http://127.0.0.1:18660" },
+      { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18661" },
     ]);
+    expect(normalizePersonaEmbedSettings(normalized)).toEqual(normalized);
 
-    // Existing hub-case-2 keeps its own ID when hub-Case and hub-case collide
+    // Existing hub-case and hub-case-2 both keep their exact lowercase IDs when hub-Case collides
     const withExistingSuffix = normalizePersonaEmbedSettings({
       enabled: true,
       hubs: [
@@ -882,17 +884,106 @@ describe("persona embed settings", () => {
       ],
       activeHubId: "hub-case-2",
       splitEnabled: true,
-      secondaryHubId: "hub-case",
+      secondaryHubId: "hub-Case",
     });
     expect(withExistingSuffix.hubs.map((h) => h.id)).toEqual([
-      "hub-case",
       "hub-case-3",
+      "hub-case",
       "hub-case-2",
     ]);
     expect(withExistingSuffix.activeHubId).toBe("hub-case-2");
     expect(withExistingSuffix.secondaryHubId).toBe("hub-case-3");
 
-    // Hub-Default + hub-default disambiguate to distinct partitions, and max-length IDs stay <= 64 chars
+    // When neither colliding entry is exact lowercase, the first entry claims the canonical ID
+    const mixedOnly = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "hub-Case",
+          name: "Mixed One",
+          hubUrl: "http://127.0.0.1:18660",
+          machineServerMap: {},
+        },
+        {
+          id: "HUB-CASE",
+          name: "Mixed Two",
+          hubUrl: "http://127.0.0.1:18661",
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: "HUB-CASE",
+      splitEnabled: true,
+      secondaryHubId: "hub-Case",
+    });
+    expect(mixedOnly.hubs.map((h) => h.id)).toEqual(["hub-case", "hub-case-2"]);
+    expect(mixedOnly.activeHubId).toBe("hub-case-2");
+    expect(mixedOnly.secondaryHubId).toBe("hub-case");
+
+    // [Hub-Default, hub-default]: exact lowercase hub-default keeps DEFAULT_PERSONA_HUB_ID & persist:persona
+    const defaultCollisionPrimaryLower = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "Hub-Default",
+          name: "Mixed Default",
+          hubUrl: "http://127.0.0.1:18660",
+          machineServerMap: { box: "srv_mixed" },
+        },
+        {
+          id: "  hub-default  ",
+          name: "Exact Default",
+          hubUrl: "http://127.0.0.1:18661",
+          machineServerMap: { box: "srv_default" },
+        },
+      ],
+      activeHubId: "hub-default",
+      secondaryHubId: "Hub-Default",
+      splitEnabled: true,
+    });
+    expect(defaultCollisionPrimaryLower.hubs.map((h) => ({ id: h.id, name: h.name }))).toEqual([
+      { id: "hub-default-2", name: "Mixed Default" },
+      { id: DEFAULT_PERSONA_HUB_ID, name: "Exact Default" },
+    ]);
+    expect(defaultCollisionPrimaryLower.activeHubId).toBe(DEFAULT_PERSONA_HUB_ID);
+    expect(defaultCollisionPrimaryLower.secondaryHubId).toBe("hub-default-2");
+    expect(defaultCollisionPrimaryLower.hubUrl).toBe("http://127.0.0.1:18661");
+    expect(defaultCollisionPrimaryLower.machineServerMap).toEqual({ box: "srv_default" });
+    expect(collectValidPersonaHubPartitionEntries(defaultCollisionPrimaryLower)).toEqual([
+      { partition: "persist:persona-hub-default-2", hubUrl: "http://127.0.0.1:18660" },
+      { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18661" },
+    ]);
+
+    // Even when mixed-case Hub-Default is selected as activeHubId, hub-default still owns persist:persona
+    const defaultCollisionPrimaryMixed = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        {
+          id: "Hub-Default",
+          name: "Mixed Default",
+          hubUrl: "http://127.0.0.1:18660",
+          machineServerMap: { box: "srv_mixed" },
+        },
+        {
+          id: "hub-default",
+          name: "Exact Default",
+          hubUrl: "http://127.0.0.1:18661",
+          machineServerMap: { box: "srv_default" },
+        },
+      ],
+      activeHubId: "Hub-Default",
+      secondaryHubId: "HUB-DEFAULT",
+      splitEnabled: true,
+    });
+    expect(defaultCollisionPrimaryMixed.hubs.map((h) => h.id)).toEqual([
+      "hub-default-2",
+      DEFAULT_PERSONA_HUB_ID,
+    ]);
+    expect(defaultCollisionPrimaryMixed.activeHubId).toBe("hub-default-2");
+    expect(defaultCollisionPrimaryMixed.secondaryHubId).toBe(DEFAULT_PERSONA_HUB_ID);
+    expect(defaultCollisionPrimaryMixed.hubUrl).toBe("http://127.0.0.1:18660");
+    expect(defaultCollisionPrimaryMixed.machineServerMap).toEqual({ box: "srv_mixed" });
+
+    // Hub-Default + hub-default and max-length 64-char collisions preserve exact lowercase owners & <= 64 chars
     const maxLenLower = "a".repeat(MAX_PERSONA_HUB_ID_LENGTH);
     const maxLenUpper = "A".repeat(MAX_PERSONA_HUB_ID_LENGTH);
     const edgeCase = normalizePersonaEmbedSettings({
@@ -927,13 +1018,14 @@ describe("persona embed settings", () => {
       secondaryHubId: "Hub-Default",
       splitEnabled: true,
     });
-    expect(edgeCase.hubs[0]?.id).toBe("hub-default");
-    expect(edgeCase.hubs[1]?.id).toBe("hub-default-2");
-    expect(edgeCase.hubs[2]?.id).toBe(maxLenLower);
-    expect(edgeCase.hubs[3]?.id.length).toBeLessThanOrEqual(MAX_PERSONA_HUB_ID_LENGTH);
-    expect(edgeCase.hubs[3]?.id).not.toBe(maxLenLower);
-    expect(edgeCase.activeHubId).toBe(edgeCase.hubs[3]?.id);
-    expect(edgeCase.secondaryHubId).toBe("hub-default");
+    expect(edgeCase.hubs[0]?.id).toBe("hub-default-2");
+    expect(edgeCase.hubs[1]?.id).toBe(DEFAULT_PERSONA_HUB_ID);
+    expect(resolvePersonaHubPartition(edgeCase.hubs[1]?.id)).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(edgeCase.hubs[2]?.id.length).toBeLessThanOrEqual(MAX_PERSONA_HUB_ID_LENGTH);
+    expect(edgeCase.hubs[2]?.id).not.toBe(maxLenLower);
+    expect(edgeCase.hubs[3]?.id).toBe(maxLenLower);
+    expect(edgeCase.activeHubId).toBe(maxLenLower);
+    expect(edgeCase.secondaryHubId).toBe("hub-default-2");
     const entries = collectValidPersonaHubPartitionEntries(edgeCase);
     expect(entries).toHaveLength(4);
     expect(new Set(entries.map((entry) => entry.partition)).size).toBe(4);

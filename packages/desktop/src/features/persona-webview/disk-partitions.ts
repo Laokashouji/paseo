@@ -2,8 +2,6 @@ import { readdirSync, type Dirent } from "node:fs";
 import path from "node:path";
 import { isPersonaDiskPartitionDirName } from "./policy.js";
 
-export const MAX_DISCOVERED_PERSONA_DISK_PARTITIONS = 256;
-
 export interface ListPersistedPersonaPartitionsOptions {
   logWarn?: (message: string, details?: unknown) => void;
 }
@@ -48,9 +46,6 @@ export function listPersistedPersonaPartitions(
   const discovered = new Set<string>();
   const sortedEntries = [...entries].sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of sortedEntries) {
-    if (discovered.size >= MAX_DISCOVERED_PERSONA_DISK_PARTITIONS) {
-      break;
-    }
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
       continue;
     }
