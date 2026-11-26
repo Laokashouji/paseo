@@ -521,10 +521,15 @@ describe("openPersonaSession executor", () => {
 describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    noopToast.show.mockClear();
+    noopToast.error.mockClear();
+    noopToast.copied.mockClear();
     appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_devbox") });
     appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_mac") });
+    appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_other") });
     appQueryClient.removeQueries({ queryKey: ["providersSnapshot", "srv_devbox"] });
     appQueryClient.removeQueries({ queryKey: ["providersSnapshot", "srv_mac"] });
+    appQueryClient.removeQueries({ queryKey: ["providersSnapshot", "srv_other"] });
     useSessionStore.setState({ sessions: {}, agentLastActivity: new Map() });
   });
 
@@ -718,34 +723,137 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
     });
   });
 
-  it("derives custom provider roots from cached providersSnapshot catalog when daemonConfig is absent", async () => {
-    const codexThread = "33333333-4444-4555-8666-777777777777";
-    const claudeSid = "fedcba98-7654-4321-8fed-cba987654321";
+  it("does not short-circuit on L3 hit under cold cache and returns ambiguous_machine when unmapped dual online hosts share the same thread", async () => {
+    const sharedThread = "33333333-4444-4555-8666-777777777777";
+    const macCodexAgent = makeAgent({
+      id: "ag_mac_builtin_codex",
+      serverId: "srv_mac",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: { provider: "codex", sessionId: sharedThread },
+    });
+    const otherCustomCodexAgent = makeAgent({
+      id: "ag_other_my_codex",
+      serverId: "srv_other",
+      provider: "my-codex",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: sharedThread },
+    });
 
-    const codexAgent = makeAgent({
-      id: "ag_snapshot_codex",
+    const macGetDaemonConfig = vi.fn(async () => ({
+      config: { providers: {} } as unknown as MutableDaemonConfig,
+    }));
+    const otherGetDaemonConfig = vi.fn(async () => ({
+      config: {
+        providers: {
+          "my-codex": { extends: "codex" },
+        },
+      } as unknown as MutableDaemonConfig,
+    }));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          client: { getDaemonConfig: macGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([[macCodexAgent.id, macCodexAgent]]),
+        }),
+        srv_other: makeSession("srv_other", {
+          client: { getDaemonConfig: otherGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_other", hostname: "other-workstation", version: "0.17.533" },
+          agents: new Map([[otherCustomCodexAgent.id, otherCustomCodexAgent]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_other", label: "Other Host", status: "online" },
+    ]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const result = await openPersonaSession(
+      {
+        machineId: "unmapped-workstation",
+        sessionId: sharedThread,
+        source: "link-click",
+      },
+      deps,
+    );
+
+    expect(otherGetDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(macGetDaemonConfig).not.toHaveBeenCalled();
+    expect(result.handled).toBe(false);
+    expect(result.resolution).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous_machine",
+      machineId: "unmapped-workstation",
+      sessionId: sharedThread,
+      resolvedServerId: null,
+      candidateServerIds: ["srv_mac", "srv_other"],
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(noopToast.show).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ testID: "persona-ambiguous-machine-toast" }),
+    );
+    expect(appQueryClient.getQueryData(daemonConfigQueryKey("srv_other"))).toBeDefined();
+  });
+
+  it("never misclassifies an acp custom provider declaring auto-review/full-access modes as codex under cold cache", async () => {
+    const acpThread = "44444444-5555-4666-8777-888888888888";
+    const claudeLikeAcpSid = "fedcba98-7654-4321-8fed-cba987654321";
+
+    const acpCodexModesAgent = makeAgent({
+      id: "ag_acp_codex_modes",
       serverId: "srv_devbox",
-      provider: "codex-sub2api",
+      provider: "custom-acp",
       workspaceId: "wks_3333333333333333",
       persistence: null,
-      runtimeInfo: { provider: "codex-sub2api", sessionId: codexThread },
+      runtimeInfo: { provider: "custom-acp", sessionId: acpThread },
+      availableModes: [
+        { id: "auto", label: "Default" },
+        { id: "auto-review", label: "Auto-review" },
+        { id: "full-access", label: "Full Access" },
+      ],
     });
-    const claudeAgent = makeAgent({
-      id: "ag_snapshot_claude",
+    const acpClaudeModesAgent = makeAgent({
+      id: "ag_acp_claude_modes",
       serverId: "srv_devbox",
-      provider: "claude-magpie",
+      provider: "custom-acp-claude-modes",
       workspaceId: "wks_3333333333333333",
       persistence: null,
-      runtimeInfo: { provider: "claude-magpie", sessionId: claudeSid },
+      runtimeInfo: { provider: "custom-acp-claude-modes", sessionId: claudeLikeAcpSid },
+      availableModes: [
+        { id: "default", label: "Always Ask" },
+        { id: "acceptEdits", label: "Accept File Edits" },
+        { id: "bypassPermissions", label: "Bypass" },
+      ],
     });
+
+    const getDaemonConfig = vi.fn(async () => ({
+      config: {
+        providers: {
+          "custom-acp": { extends: "acp" },
+          "custom-acp-claude-modes": { extends: "acp" },
+        },
+      } as unknown as MutableDaemonConfig,
+    }));
 
     useSessionStore.setState({
       sessions: {
         srv_devbox: makeSession("srv_devbox", {
+          client: { getDaemonConfig } as unknown as DaemonClient,
           serverInfo: { serverId: "srv_devbox", hostname: "n37-217-003", version: "0.17.533" },
           agents: new Map([
-            [codexAgent.id, codexAgent],
-            [claudeAgent.id, claudeAgent],
+            [acpCodexModesAgent.id, acpCodexModesAgent],
+            [acpClaudeModesAgent.id, acpClaudeModesAgent],
           ]),
         }),
       },
@@ -753,10 +861,12 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
     });
     setupRuntimeHosts([{ serverId: "srv_devbox", label: "DevBox", status: "online" }]);
 
+    // Even when providersSnapshot advertises Codex/Claude-like mode names, cold cache MUST fetch
+    // authoritative daemonConfig and refuse heuristic L3 matching.
     appQueryClient.setQueryData(providersSnapshotQueryKey("srv_devbox", null), {
       entries: [
         {
-          provider: "codex-sub2api",
+          provider: "custom-acp",
           status: "ready",
           enabled: true,
           source: "custom",
@@ -767,7 +877,7 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
           ],
         },
         {
-          provider: "claude-magpie",
+          provider: "custom-acp-claude-modes",
           status: "ready",
           enabled: true,
           source: "custom",
@@ -785,28 +895,167 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
       isCompact: false,
     });
 
-    const codexRes = await openPersonaSession(
-      { machineId: "n37-217-003", sessionId: codexThread, source: "link-click" },
+    const acpRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: acpThread, source: "header-button" },
       deps,
     );
-    expect(codexRes.handled).toBe(true);
-    expect(codexRes.resolution).toMatchObject({
-      kind: "agent",
-      level: "provider_thread_id",
-      serverId: "srv_devbox",
-      agentId: "ag_snapshot_codex",
+    expect(getDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(acpRes.handled).toBe(false);
+    expect(acpRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: acpThread,
+      resolvedServerId: "srv_devbox",
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.navigate).not.toHaveBeenCalled();
+
+    // Warm cache reuses cached authoritative daemonConfig without re-fetching.
+    const acpWarmRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: claudeLikeAcpSid, source: "header-button" },
+      deps,
+    );
+    expect(getDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(acpWarmRes.handled).toBe(false);
+    expect(acpWarmRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: claudeLikeAcpSid,
+      resolvedServerId: "srv_devbox",
     });
 
-    const claudeRes = await openPersonaSession(
-      { machineId: "n37-217-003", sessionId: claudeSid, source: "link-click" },
+    // When authoritative daemonConfig cannot be loaded at all, unknown custom providers MUST NOT
+    // participate in L3 guesswork matching via availableModes or providersSnapshot.
+    appQueryClient.removeQueries({ queryKey: daemonConfigQueryKey("srv_devbox") });
+    useSessionStore.setState({
+      sessions: {
+        srv_devbox: makeSession("srv_devbox", {
+          client: null,
+          serverInfo: { serverId: "srv_devbox", hostname: "n37-217-003", version: "0.17.533" },
+          agents: new Map([
+            [acpCodexModesAgent.id, acpCodexModesAgent],
+            [acpClaudeModesAgent.id, acpClaudeModesAgent],
+          ]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+
+    const unconfirmedCodexModeRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: acpThread, source: "header-button" },
       deps,
     );
-    expect(claudeRes.handled).toBe(true);
-    expect(claudeRes.resolution).toMatchObject({
+    expect(unconfirmedCodexModeRes.handled).toBe(false);
+    expect(unconfirmedCodexModeRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: acpThread,
+      resolvedServerId: "srv_devbox",
+    });
+
+    const unconfirmedClaudeModeRes = await openPersonaSession(
+      { machineId: "n37-217-003", sessionId: claudeLikeAcpSid, source: "header-button" },
+      deps,
+    );
+    expect(unconfirmedClaudeModeRes.handled).toBe(false);
+    expect(unconfirmedClaudeModeRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "not_found",
+      machineId: "n37-217-003",
+      sessionId: claudeLikeAcpSid,
+      resolvedServerId: "srv_devbox",
+    });
+  });
+
+  it("refreshes only the mapped target host daemonConfig on an initial L3 hit without probing unrelated online hosts", async () => {
+    const sharedThread = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    const archivedBuiltinCodex = makeAgent({
+      id: "ag_mac_archived_codex",
+      serverId: "srv_mac",
+      provider: "codex",
+      workspaceId: "wks_1111111111111111",
+      archivedAt: new Date("2026-11-24T00:00:00.000Z"),
+      persistence: { provider: "codex", sessionId: sharedThread },
+    });
+    const activeCustomCodex = makeAgent({
+      id: "ag_mac_active_my_codex",
+      serverId: "srv_mac",
+      provider: "my-codex",
+      workspaceId: "wks_1111111111111111",
+      persistence: null,
+      runtimeInfo: { provider: "my-codex", sessionId: sharedThread },
+    });
+    const unrelatedOtherCustom = makeAgent({
+      id: "ag_other_custom",
+      serverId: "srv_other",
+      provider: "other-codex",
+      workspaceId: "wks_2222222222222222",
+      persistence: null,
+      runtimeInfo: { provider: "other-codex", sessionId: sharedThread },
+    });
+
+    const macGetDaemonConfig = vi.fn(async () => ({
+      config: {
+        providers: {
+          "my-codex": { extends: "codex" },
+        },
+      } as unknown as MutableDaemonConfig,
+    }));
+    const otherGetDaemonConfig = vi.fn(async () => ({
+      config: {
+        providers: {
+          "other-codex": { extends: "codex" },
+        },
+      } as unknown as MutableDaemonConfig,
+    }));
+
+    useSessionStore.setState({
+      sessions: {
+        srv_mac: makeSession("srv_mac", {
+          client: { getDaemonConfig: macGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_mac", hostname: "ML9YK34K66", version: "0.17.533" },
+          agents: new Map([
+            [archivedBuiltinCodex.id, archivedBuiltinCodex],
+            [activeCustomCodex.id, activeCustomCodex],
+          ]),
+        }),
+        srv_other: makeSession("srv_other", {
+          client: { getDaemonConfig: otherGetDaemonConfig } as unknown as DaemonClient,
+          serverInfo: { serverId: "srv_other", hostname: "other-host", version: "0.17.533" },
+          agents: new Map([[unrelatedOtherCustom.id, unrelatedOtherCustom]]),
+        }),
+      },
+      agentLastActivity: new Map(),
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_mac", label: "MacBook", status: "online" },
+      { serverId: "srv_other", label: "Other Host", status: "online" },
+    ]);
+
+    const deps = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+    });
+
+    const result = await openPersonaSession(
+      { machineId: "ML9YK34K66", sessionId: sharedThread, source: "link-click" },
+      deps,
+    );
+
+    expect(macGetDaemonConfig).toHaveBeenCalledTimes(1);
+    expect(otherGetDaemonConfig).not.toHaveBeenCalled();
+    expect(result.handled).toBe(true);
+    expect(result.resolution).toEqual({
       kind: "agent",
       level: "provider_thread_id",
-      serverId: "srv_devbox",
-      agentId: "ag_snapshot_claude",
+      serverId: "srv_mac",
+      agentId: "ag_mac_active_my_codex",
+      workspaceId: "wks_1111111111111111",
+      archived: false,
+      panel: null,
     });
   });
 

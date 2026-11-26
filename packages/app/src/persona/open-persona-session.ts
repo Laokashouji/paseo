@@ -1,8 +1,4 @@
-import type { AgentMode } from "@getpaseo/protocol/agent-types";
-import type {
-  GetProvidersSnapshotResponseMessage,
-  MutableDaemonConfig,
-} from "@getpaseo/protocol/messages";
+import type { MutableDaemonConfig } from "@getpaseo/protocol/messages";
 import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import { router, type Href } from "expo-router";
 import { createElement } from "react";
@@ -11,7 +7,6 @@ import { StyleSheet } from "react-native-unistyles";
 import type { ToastApi } from "@/components/toast-host";
 import { Button } from "@/components/ui/button";
 import { daemonConfigQueryKey } from "@/data/daemon-config";
-import { providersSnapshotQueryRoot } from "@/data/providers-snapshot";
 import { queryClient as appQueryClient } from "@/data/query-client";
 import {
   APP_SETTINGS_QUERY_KEY,
@@ -33,6 +28,7 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import {
+  resolveMachineToServerId,
   resolvePersonaSession,
   type PersonaSessionOpenRequest,
   type PersonaSessionResolution,
@@ -52,6 +48,7 @@ export interface OpenPersonaSessionDeps {
   getProviderRootsByServerId?: () => Readonly<
     Record<string, Readonly<Record<string, string>> | undefined>
   >;
+  hasDaemonConfigCache?: (serverId: string) => boolean;
   ensureProviderRoots?: (serverIds: readonly string[]) => Promise<boolean>;
   getOpenInSidePanePreferences: () => OpenInSidePanePreferences;
   getIsCompact: () => boolean;
@@ -370,24 +367,6 @@ function handleHydrationTimeout(
   return { resolution, handled: false };
 }
 
-function inferBuiltInProviderRootFromModes(
-  modes: readonly Pick<AgentMode, "id">[] | undefined,
-): "claude" | "codex" | null {
-  if (!modes || modes.length === 0) {
-    return null;
-  }
-  const modeIds = new Set(modes.map((mode) => mode.id));
-  const hasClaudeSignature = modeIds.has("acceptEdits") && modeIds.has("bypassPermissions");
-  const hasCodexSignature = modeIds.has("auto-review") && modeIds.has("full-access");
-  if (hasClaudeSignature && !hasCodexSignature) {
-    return "claude";
-  }
-  if (hasCodexSignature && !hasClaudeSignature) {
-    return "codex";
-  }
-  return null;
-}
-
 /**
  * Mirrors Persona `providerRoots(config)` (`integrations/paseo/lib/map.js:115-128`):
  * resolves each configured provider through its `extends` chain with cycle protection.
@@ -472,51 +451,21 @@ function recordPersistedAgentProviderRoots(
   }
 }
 
-function recordSnapshotProviderRoots(
-  snapshots: readonly (GetProvidersSnapshotResponseMessage["payload"] | undefined)[] | undefined,
-  roots: Record<string, string>,
-): void {
-  for (const snapshot of snapshots ?? []) {
-    for (const entry of snapshot?.entries ?? []) {
-      const providerId = readCustomProviderId(entry?.provider, roots);
-      const inferred = providerId ? inferBuiltInProviderRootFromModes(entry.modes) : null;
-      if (providerId && inferred) {
-        roots[providerId] = inferred;
-      }
-    }
-  }
-}
-
-function recordAgentModeProviderRoots(
-  agents: readonly Agent[],
-  roots: Record<string, string>,
-): void {
-  for (const agent of agents) {
-    const providerId = readCustomProviderId(agent.provider, roots);
-    const inferred = providerId ? inferBuiltInProviderRootFromModes(agent.availableModes) : null;
-    if (providerId && inferred) {
-      roots[providerId] = inferred;
-    }
-  }
-}
-
 /**
- * Derives a per-host `providerId -> built-in root` map from authoritative host data:
+ * Derives a per-host `providerId -> built-in root` map strictly from authoritative host data:
  * 1. Daemon config `providers[id].extends` chains (highest precedence, matches Persona `providerRoots`)
  * 2. Persisted `persistence.metadata.provider` recorded on sibling agents on the same host
- * 3. Host provider catalog snapshots (`providersSnapshot`) mode signatures
- * 4. Agent runtime `availableModes` directory signatures as a final cached fallback
+ *
+ * Unknown custom providers without a confirmed authoritative root are intentionally omitted so
+ * mode-name heuristics never misclassify non-Claude/Codex providers (e.g. `extends: "acp"`) in L3.
  */
 export function deriveProviderRootsForServer(input: {
   daemonConfig?: MutableDaemonConfig | null;
-  providerSnapshots?: readonly (GetProvidersSnapshotResponseMessage["payload"] | undefined)[];
   session?: SessionState | undefined;
 }): Record<string, string> {
   const roots = deriveProviderRootsFromDaemonConfig(input.daemonConfig?.providers);
   const agents = collectSessionAgentValues(input.session);
   recordPersistedAgentProviderRoots(agents, roots);
-  recordSnapshotProviderRoots(input.providerSnapshots, roots);
-  recordAgentModeProviderRoots(agents, roots);
   return roots;
 }
 
@@ -541,14 +490,8 @@ export function collectAppProviderRootsByServerId(input: {
     const daemonConfig = appQueryClient.getQueryData<MutableDaemonConfig>(
       daemonConfigQueryKey(serverId),
     );
-    const providerSnapshots = appQueryClient
-      .getQueriesData<GetProvidersSnapshotResponseMessage["payload"]>({
-        queryKey: providersSnapshotQueryRoot(serverId),
-      })
-      .map(([, data]) => data);
     const roots = deriveProviderRootsForServer({
       daemonConfig,
-      providerSnapshots,
       session: input.sessions[serverId],
     });
     if (Object.keys(roots).length > 0) {
@@ -556,6 +499,31 @@ export function collectAppProviderRootsByServerId(input: {
     }
   }
   return byServerId;
+}
+
+function readAgentPersistedProviderRoot(agent: Agent): string | null {
+  const metadata = agent.persistence?.metadata;
+  const persistedRoot =
+    metadata && typeof metadata === "object"
+      ? (metadata as { provider?: unknown }).provider
+      : undefined;
+  if (typeof persistedRoot === "string" && persistedRoot.trim().length > 0) {
+    return persistedRoot.trim();
+  }
+  return null;
+}
+
+function hasCustomProviderAgentMissingPersistedRoot(session: SessionState | undefined): boolean {
+  for (const agent of collectSessionAgentValues(session)) {
+    const providerId = typeof agent.provider === "string" ? agent.provider.trim() : "";
+    if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
+      continue;
+    }
+    if (readAgentPersistedProviderRoot(agent) === null) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function hasUnresolvedCustomProviderAgent(
@@ -567,12 +535,7 @@ function hasUnresolvedCustomProviderAgent(
     if (!providerId || BUILTIN_PROVIDER_ID_SET.has(providerId)) {
       continue;
     }
-    const metadata = agent.persistence?.metadata;
-    const persistedRoot =
-      metadata && typeof metadata === "object"
-        ? (metadata as { provider?: unknown }).provider
-        : undefined;
-    if (typeof persistedRoot === "string" && persistedRoot.trim().length > 0) {
+    if (readAgentPersistedProviderRoot(agent) !== null) {
       continue;
     }
     if (!providerRoots || !(providerId in providerRoots)) {
@@ -582,46 +545,85 @@ function hasUnresolvedCustomProviderAgent(
   return false;
 }
 
+function shouldRefreshProviderRootsForResolution(resolution: PersonaSessionResolution): boolean {
+  if (resolution.kind === "agent") {
+    return resolution.level === "provider_thread_id";
+  }
+  if (resolution.kind === "workspace") {
+    return true;
+  }
+  return resolution.kind === "unresolved" && resolution.reason !== "host_offline";
+}
+
+function collectCandidateServerIdsForProviderRoots(
+  request: PersonaSessionOpenRequest,
+  hosts: readonly PersonaSessionResolverHost[],
+  sessions: Readonly<Record<string, SessionState | undefined>>,
+  machineServerMap: Readonly<Record<string, string>>,
+): Set<string> {
+  const machineMatch = resolveMachineToServerId({
+    machineId: request.machineId,
+    machineServerMap,
+    hosts,
+    sessions,
+  });
+
+  const candidateServerIds = new Set<string>();
+  if (machineMatch.serverId) {
+    candidateServerIds.add(machineMatch.serverId);
+    return candidateServerIds;
+  }
+
+  for (const host of hosts) {
+    if (host.serverId) {
+      candidateServerIds.add(host.serverId);
+    }
+  }
+  for (const serverId of Object.keys(sessions)) {
+    if (serverId) {
+      candidateServerIds.add(serverId);
+    }
+  }
+  return candidateServerIds;
+}
+
 async function refreshProviderRootsIfNeeded(
   request: PersonaSessionOpenRequest,
   resolution: PersonaSessionResolution,
   deps: OpenPersonaSessionDeps,
 ): Promise<PersonaSessionResolution> {
-  if (!deps.ensureProviderRoots) {
+  if (!deps.ensureProviderRoots || !shouldRefreshProviderRootsForResolution(resolution)) {
     return resolution;
   }
 
-  const candidateServerIds = new Set<string>();
-  if (resolution.kind === "workspace") {
-    candidateServerIds.add(resolution.serverId);
-  } else if (resolution.kind === "unresolved") {
-    if (resolution.reason === "not_found" && resolution.resolvedServerId) {
-      candidateServerIds.add(resolution.resolvedServerId);
-    } else if (resolution.reason === "unmapped_machine") {
-      for (const host of deps.getHosts()) {
-        candidateServerIds.add(host.serverId);
-      }
-      for (const serverId of Object.keys(deps.getSessions())) {
-        candidateServerIds.add(serverId);
-      }
-    }
-  }
+  const hosts = deps.getHosts();
+  const sessions = deps.getSessions();
+  const candidateServerIds = collectCandidateServerIdsForProviderRoots(
+    request,
+    hosts,
+    sessions,
+    deps.getMachineServerMap(),
+  );
 
   if (candidateServerIds.size === 0) {
     return resolution;
   }
 
-  const sessions = deps.getSessions();
   const statuses = deps.getConnectionStatusByServerId();
-  const currentRootsByServer = deps.getProviderRootsByServerId?.();
+  const currentRootsByServer = deps.hasDaemonConfigCache
+    ? undefined
+    : deps.getProviderRootsByServerId?.();
   const serverIdsNeedingConfig: string[] = [];
 
   for (const serverId of candidateServerIds) {
-    const status = statuses[serverId];
-    if (status === "offline" || status === "error") {
+    if (statuses[serverId] !== "online") {
       continue;
     }
-    if (hasUnresolvedCustomProviderAgent(sessions[serverId], currentRootsByServer?.[serverId])) {
+    const needsConfig = deps.hasDaemonConfigCache
+      ? hasCustomProviderAgentMissingPersistedRoot(sessions[serverId]) &&
+        !deps.hasDaemonConfigCache(serverId)
+      : hasUnresolvedCustomProviderAgent(sessions[serverId], currentRootsByServer?.[serverId]);
+    if (needsConfig) {
       serverIdsNeedingConfig.push(serverId);
     }
   }
@@ -812,6 +814,15 @@ async function fetchDaemonConfigWithTimeout(
   }
 }
 
+function hasCachedDaemonConfig(serverId: string): boolean {
+  const key = daemonConfigQueryKey(serverId);
+  const config = appQueryClient.getQueryData<MutableDaemonConfig>(key);
+  if (config === undefined) {
+    return false;
+  }
+  return appQueryClient.getQueryState(key)?.isInvalidated !== true;
+}
+
 async function fetchMissingDaemonConfigsForProviderRoots(
   serverIds: readonly string[],
 ): Promise<boolean> {
@@ -825,7 +836,7 @@ async function fetchMissingDaemonConfigsForProviderRoots(
   let updatedAny = false;
   await Promise.all(
     serverIds.map(async (serverId) => {
-      if (appQueryClient.getQueryData<MutableDaemonConfig>(daemonConfigQueryKey(serverId))) {
+      if (hasCachedDaemonConfig(serverId)) {
         return;
       }
       const client =
@@ -874,6 +885,7 @@ export function createAppOpenPersonaSessionDeps(options: {
         hosts: getHosts(),
         sessions: useSessionStore.getState().sessions,
       }),
+    hasDaemonConfigCache: hasCachedDaemonConfig,
     ensureProviderRoots: fetchMissingDaemonConfigsForProviderRoots,
     getOpenInSidePanePreferences: () => {
       const cached = appQueryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY);

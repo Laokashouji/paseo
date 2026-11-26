@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   clearPersonaWebviewSession,
@@ -10,6 +14,7 @@ import {
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_IPC_CHANNEL,
   PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
+  PERSONA_HUB_URL_ARG_PREFIX,
   PERSONA_WEBVIEW_PARTITION,
   probePersonaHubHealth,
   registerPersonaWebviewGuestIpcBridge,
@@ -713,5 +718,619 @@ describe("persona-webview runtime helpers", () => {
     expect(onGuestOpenSession).not.toHaveBeenCalled();
     expect(onGuestSessionMetadataResult).not.toHaveBeenCalled();
     expect(onGuestReady).not.toHaveBeenCalled();
+  });
+
+  it("enforces Electron 44 main-frame identity metadata on privileged host IPC events", () => {
+    const registeredHosts = new Set<number>([10]);
+    const hostMainFrame: {
+      detached: boolean;
+      parent: object | null;
+      top?: object | null;
+      processId: number;
+      routingId: number;
+    } = {
+      detached: false,
+      parent: null,
+      processId: 3,
+      routingId: 1,
+    };
+    hostMainFrame.top = hostMainFrame;
+
+    const hostSubFrame = {
+      detached: false,
+      parent: hostMainFrame,
+      top: hostMainFrame,
+      processId: 3,
+      routingId: 2,
+    };
+
+    const hostSender = {
+      id: 10,
+      mainFrame: hostMainFrame,
+      isDestroyed: () => false,
+      getType: () => "window",
+    };
+
+    expect(
+      isTrustedPersonaHostIpcEvent(
+        { sender: hostSender, senderFrame: hostMainFrame, processId: 3, frameId: 1 },
+        registeredHosts,
+      ),
+    ).toBe(true);
+
+    // Rejects same-origin subframe, detached frame, and mismatched processId/frameId
+    expect(
+      isTrustedPersonaHostIpcEvent(
+        { sender: hostSender, senderFrame: hostSubFrame, processId: 3, frameId: 2 },
+        registeredHosts,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPersonaHostIpcEvent(
+        { sender: hostSender, senderFrame: hostMainFrame, processId: 3, frameId: 99 },
+        registeredHosts,
+      ),
+    ).toBe(false);
+    expect(
+      isTrustedPersonaHostIpcEvent(
+        { sender: hostSender, senderFrame: hostMainFrame, processId: 99, frameId: 1 },
+        registeredHosts,
+      ),
+    ).toBe(false);
+
+    const detachedHostFrame = { ...hostMainFrame, detached: true };
+    detachedHostFrame.top = detachedHostFrame;
+    expect(
+      isTrustedPersonaHostIpcEvent(
+        {
+          sender: { ...hostSender, mainFrame: detachedHostFrame },
+          senderFrame: detachedHostFrame,
+          processId: 3,
+          frameId: 1,
+        },
+        registeredHosts,
+      ),
+    ).toBe(false);
+  });
+});
+
+interface Electron44MockFrame extends PersonaGuestFrameLike {
+  readonly osProcessId: number;
+  readonly frameTreeNodeId: number;
+  readonly frameToken: string;
+  frames: Electron44MockFrame[];
+  framesInSubtree: Electron44MockFrame[];
+  top: Electron44MockFrame | null;
+}
+
+function compilePersonaGuestPreloadArtifact(): { compiledJs: string } {
+  const currentDir = dirname(fileURLToPath(import.meta.url));
+  const desktopRoot = join(currentDir, "..", "..", "..");
+  const tsconfigPath = join(desktopRoot, "tsconfig.json");
+  const guestPreloadPath = join(currentDir, "guest-preload.ts");
+
+  const configFile = ts.readConfigFile(tsconfigPath, (filePath) => readFileSync(filePath, "utf8"));
+  expect(configFile.error).toBeUndefined();
+  const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, desktopRoot);
+  const source = readFileSync(guestPreloadPath, "utf8");
+  const result = ts.transpileModule(source, {
+    fileName: guestPreloadPath,
+    compilerOptions: {
+      ...parsedConfig.options,
+      declaration: false,
+      declarationMap: false,
+      sourceMap: false,
+    },
+    reportDiagnostics: true,
+  });
+
+  expect(result.diagnostics ?? []).toEqual([]);
+  return { compiledJs: result.outputText };
+}
+
+function inspectCompiledPreloadArtifact(compiledJs: string): {
+  runtimeRequires: string[];
+  usesContextBridge: boolean;
+  usesSendToHost: boolean;
+} {
+  const sourceFile = ts.createSourceFile(
+    "guest-preload.js",
+    compiledJs,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const runtimeRequires: string[] = [];
+  let usesContextBridge = false;
+  let usesSendToHost = false;
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      if (isRequire || isDynamicImport) {
+        const arg = node.arguments[0];
+        if (arg && ts.isStringLiteralLike(arg)) {
+          runtimeRequires.push(arg.text);
+        }
+      }
+    }
+    if (ts.isIdentifier(node)) {
+      if (node.text === "contextBridge") {
+        usesContextBridge = true;
+      } else if (node.text === "sendToHost") {
+        usesSendToHost = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return { runtimeRequires, usesContextBridge, usesSendToHost };
+}
+
+function createSandboxedGuestDom(options: {
+  href: string;
+  isSubFrame?: boolean;
+  fetchImpl?: typeof fetch;
+}) {
+  class FakeNode {
+    public parentElement: FakeElement | null = null;
+  }
+  class FakeElement extends FakeNode {
+    public closest(_selector: string): FakeElement | null {
+      return null;
+    }
+  }
+  class FakeHTMLElement extends FakeElement {}
+  class FakeHTMLButtonElement extends FakeHTMLElement {}
+  class FakeHTMLAnchorElement extends FakeHTMLElement {
+    public constructor(private readonly hrefValue: string) {
+      super();
+    }
+    public override closest(selector: string): FakeElement | null {
+      return selector === "a[href]" ? this : null;
+    }
+    public getAttribute(name: string): string | null {
+      return name === "href" ? this.hrefValue : null;
+    }
+  }
+
+  const docClickListeners: Array<(event: unknown) => void> = [];
+  const winListeners = new Map<string, Array<(event: unknown) => void>>();
+  const parsedUrl = new URL(options.href);
+
+  const win: Record<string, unknown> = {
+    location: {
+      href: parsedUrl.href,
+      origin: parsedUrl.origin,
+      protocol: parsedUrl.protocol,
+      host: parsedUrl.host,
+      pathname: parsedUrl.pathname,
+      search: parsedUrl.search,
+      assign: vi.fn(),
+    },
+    Element: FakeElement,
+    Node: FakeNode,
+    HTMLElement: FakeHTMLElement,
+    HTMLAnchorElement: FakeHTMLAnchorElement,
+    HTMLButtonElement: FakeHTMLButtonElement,
+    localStorage: { getItem: () => null },
+    sessionStorage: { getItem: () => null },
+    fetch: options.fetchImpl,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    requestAnimationFrame: (callback: () => void) => {
+      callback();
+      return 1;
+    },
+    cancelAnimationFrame: vi.fn(),
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      const list = winListeners.get(type) ?? [];
+      list.push(listener);
+      winListeners.set(type, list);
+    },
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
+      const list = winListeners.get(type);
+      if (!list) return;
+      const index = list.indexOf(listener);
+      if (index >= 0) {
+        list.splice(index, 1);
+      }
+    },
+  };
+  win.self = win;
+  win.top = options.isSubFrame ? {} : win;
+
+  const doc = {
+    readyState: "complete",
+    baseURI: parsedUrl.href,
+    head: null,
+    documentElement: null,
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => new FakeHTMLElement(),
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      if (type === "click") {
+        docClickListeners.push(listener);
+      }
+    },
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
+      if (type === "click") {
+        const index = docClickListeners.indexOf(listener);
+        if (index >= 0) {
+          docClickListeners.splice(index, 1);
+        }
+      }
+    },
+  };
+
+  return {
+    win,
+    doc,
+    dispatchAnchorClick(href: string) {
+      const anchor = new FakeHTMLAnchorElement(href);
+      let defaultPrevented = false;
+      let stoppedImmediate = false;
+      const event = {
+        target: anchor,
+        button: 0,
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        get defaultPrevented() {
+          return defaultPrevented;
+        },
+        preventDefault: () => {
+          defaultPrevented = true;
+        },
+        stopImmediatePropagation: () => {
+          stoppedImmediate = true;
+        },
+      };
+      for (const listener of docClickListeners) {
+        listener(event);
+      }
+      return { defaultPrevented, stoppedImmediate };
+    },
+  };
+}
+
+function executeCompiledGuestPreloadInSandbox(
+  compiledJs: string,
+  options: {
+    argv: string[];
+    dom: ReturnType<typeof createSandboxedGuestDom>;
+    ipcRenderer: {
+      on: (channel: string, listener: (event: unknown, payload: unknown) => void) => void;
+      removeListener: (
+        channel: string,
+        listener: (event: unknown, payload: unknown) => void,
+      ) => void;
+      send: (channel: string, ...args: unknown[]) => void;
+    };
+  },
+): void {
+  const exportsObj: Record<string, unknown> = {};
+  const moduleObj = { exports: exportsObj };
+  const sandboxRequire = (specifier: string) => {
+    if (specifier !== "electron") {
+      throw new Error(`Sandbox blocked non-allowlisted require("${specifier}")`);
+    }
+    return { ipcRenderer: options.ipcRenderer };
+  };
+  const runner = new Function(
+    "require",
+    "exports",
+    "module",
+    "process",
+    "window",
+    "document",
+    compiledJs,
+  );
+  runner(
+    sandboxRequire,
+    exportsObj,
+    moduleObj,
+    { argv: options.argv },
+    options.dom.win,
+    options.dom.doc,
+  );
+}
+
+function createElectron44GuestWebContentsFixture(options: {
+  mainUrl: string;
+  subFrameUrl: string;
+}) {
+  let ipcListener:
+    | ((event: PersonaGuestIpcMainEventLike, channel: string, ...args: unknown[]) => void)
+    | null = null;
+  let destroyed = false;
+
+  const mainFrame: Electron44MockFrame = {
+    url: options.mainUrl,
+    origin: new URL(options.mainUrl).origin,
+    detached: false,
+    parent: null,
+    top: null,
+    processId: 6,
+    routingId: 4,
+    osProcessId: 41001,
+    frameTreeNodeId: 3,
+    frameToken: "electron-main-frame-token",
+    frames: [],
+    framesInSubtree: [],
+  };
+  mainFrame.top = mainFrame;
+
+  const subFrame: Electron44MockFrame = {
+    url: options.subFrameUrl,
+    origin: new URL(options.subFrameUrl).origin,
+    detached: false,
+    parent: mainFrame,
+    top: mainFrame,
+    processId: 6,
+    routingId: 5,
+    osProcessId: 41001,
+    frameTreeNodeId: 4,
+    frameToken: "electron-sub-frame-token",
+    frames: [],
+    framesInSubtree: [],
+  };
+  subFrame.framesInSubtree = [subFrame];
+  mainFrame.frames = [subFrame];
+  mainFrame.framesInSubtree = [mainFrame, subFrame];
+
+  const contents: PersonaGuestIpcWebContentsLike = {
+    id: 2,
+    mainFrame,
+    isDestroyed: () => destroyed,
+    getType: () => "webview",
+    getURL: () => mainFrame.url,
+    on: (event, listener) => {
+      if (event === "ipc-message") {
+        ipcListener = listener;
+      }
+    },
+  };
+
+  return {
+    contents,
+    mainFrame,
+    subFrame,
+    setDestroyed: (next: boolean) => {
+      destroyed = next;
+    },
+    emitFromFrame: (frame: PersonaGuestFrameLike | null, channel: string, ...args: unknown[]) => {
+      const event: PersonaGuestIpcMainEventLike & { type: "frame"; ports: unknown[] } = {
+        sender: contents,
+        senderFrame: frame,
+        processId: frame?.processId,
+        frameId: frame?.routingId,
+        type: "frame",
+        ports: [],
+      };
+      ipcListener?.(event, channel, ...args);
+    },
+  };
+}
+
+describe("compiled guest-preload artifact and Electron 44 main-frame/sub-frame auth contract", () => {
+  it("emits a sandbox-safe CJS guest-preload artifact that uses ipcRenderer.send and bridges end-to-end with main-process frame auth", async () => {
+    const { compiledJs } = compilePersonaGuestPreloadArtifact();
+    const inspection = inspectCompiledPreloadArtifact(compiledJs);
+
+    expect(inspection.runtimeRequires).toEqual(["electron"]);
+    expect(inspection.usesContextBridge).toBe(false);
+    expect(inspection.usesSendToHost).toBe(false);
+
+    const hubUrl = "http://127.0.0.1:18660";
+    const mainUrl = `${hubUrl}/s/n37-217-003/sess_1`;
+    const subFrameUrl = `${hubUrl}/embedded-iframe`;
+    const guest = createElectron44GuestWebContentsFixture({ mainUrl, subFrameUrl });
+
+    const onGuestOpenSession = vi.fn();
+    const onGuestSessionMetadataResult = vi.fn();
+    const onGuestReady = vi.fn();
+    registerPersonaWebviewGuestIpcBridge(guest.contents, {
+      getConfiguredHubUrl: () => hubUrl,
+      onGuestOpenSession,
+      onGuestSessionMetadataResult,
+      onGuestReady,
+    });
+
+    const hostToGuestListeners = new Map<
+      string,
+      Array<(event: unknown, payload: unknown) => void>
+    >();
+    const mainIpcRenderer = {
+      on: vi.fn((channel: string, listener: (event: unknown, payload: unknown) => void) => {
+        const list = hostToGuestListeners.get(channel) ?? [];
+        list.push(listener);
+        hostToGuestListeners.set(channel, list);
+      }),
+      removeListener: vi.fn(),
+      send: vi.fn((channel: string, ...args: unknown[]) => {
+        guest.emitFromFrame(guest.mainFrame, channel, ...args);
+      }),
+    };
+
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const parsed = new URL(String(url));
+      expect(parsed.origin).toBe(hubUrl);
+      expect(parsed.pathname).toBe("/api/v1/sessions");
+      const sessionId = parsed.searchParams.get("session_id");
+      return new Response(
+        JSON.stringify({
+          sessions: [
+            {
+              machine_id: "n37-217-003",
+              session_id: sessionId,
+              workspace_id: "wks_0123456789abcdef",
+              cwd: "/data00/repo/paseo-fork",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const mainDom = createSandboxedGuestDom({
+      href: mainUrl,
+      isSubFrame: false,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    executeCompiledGuestPreloadInSandbox(compiledJs, {
+      argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}${hubUrl}`],
+      dom: mainDom,
+      ipcRenderer: mainIpcRenderer,
+    });
+
+    // Compiled preload immediately emits ready via ipcRenderer.send and passes main-process mainFrame auth
+    expect(onGuestReady).toHaveBeenCalledTimes(1);
+    expect(onGuestReady).toHaveBeenCalledWith({
+      guestWebContentsId: 2,
+      frameUrl: mainUrl,
+    });
+
+    // Clicking a session anchor is intercepted by compiled preload and bridged via main-process auth
+    const clickOutcome = mainDom.dispatchAnchorClick("/s/n37-217-003/sess_2");
+    expect(clickOutcome).toEqual({ defaultPrevented: true, stoppedImmediate: true });
+    await vi.waitFor(() => {
+      expect(onGuestOpenSession).toHaveBeenCalledTimes(1);
+    });
+    expect(onGuestOpenSession).toHaveBeenCalledWith(
+      {
+        machineId: "n37-217-003",
+        sessionId: "sess_2",
+        workspaceIdHint: "wks_0123456789abcdef",
+        cwdHint: "/data00/repo/paseo-fork",
+        source: "link-click",
+        rawHref: `${hubUrl}/s/n37-217-003/sess_2`,
+      },
+      { guestWebContentsId: 2, frameUrl: mainUrl },
+    );
+
+    // Host metadata lookup request routes through compiled preload -> main-process bridge
+    for (const listener of hostToGuestListeners.get("paseo:persona:lookup-session-metadata") ??
+      []) {
+      listener({}, { requestId: "req-42", machineId: "n37-217-003", sessionId: "sess_2" });
+    }
+    await vi.waitFor(() => {
+      expect(onGuestSessionMetadataResult).toHaveBeenCalledTimes(1);
+    });
+    expect(onGuestSessionMetadataResult).toHaveBeenCalledWith(
+      {
+        requestId: "req-42",
+        machineId: "n37-217-003",
+        sessionId: "sess_2",
+        workspaceIdHint: "wks_0123456789abcdef",
+        cwdHint: "/data00/repo/paseo-fork",
+      },
+      { guestWebContentsId: 2, frameUrl: mainUrl },
+    );
+
+    // Main-process bridge rejects same-origin Electron 44 subframe and structurally cloned mainFrame
+    onGuestOpenSession.mockClear();
+    onGuestSessionMetadataResult.mockClear();
+    onGuestReady.mockClear();
+
+    guest.emitFromFrame(guest.subFrame, PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL, {
+      machineId: "n37-217-003",
+      sessionId: "sess_sub",
+      source: "link-click",
+    });
+    guest.emitFromFrame(guest.subFrame, PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL, {
+      requestId: "req-sub",
+      machineId: "n37-217-003",
+      sessionId: "sess_sub",
+    });
+    guest.emitFromFrame(guest.subFrame, PERSONA_GUEST_READY_IPC_CHANNEL, { url: subFrameUrl });
+
+    const clonedMainFrame: PersonaGuestFrameLike = {
+      url: guest.mainFrame.url,
+      origin: guest.mainFrame.origin,
+      detached: false,
+      parent: null,
+      processId: guest.mainFrame.processId,
+      routingId: guest.mainFrame.routingId,
+    };
+    Object.assign(clonedMainFrame, { top: clonedMainFrame });
+    guest.emitFromFrame(clonedMainFrame, PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL, {
+      machineId: "n37-217-003",
+      sessionId: "sess_cloned",
+      source: "link-click",
+    });
+
+    expect(onGuestOpenSession).not.toHaveBeenCalled();
+    expect(onGuestSessionMetadataResult).not.toHaveBeenCalled();
+    expect(onGuestReady).not.toHaveBeenCalled();
+  });
+
+  it("keeps compiled guest-preload inert in same-origin subframes, off-origin documents, and invalid Hub args", () => {
+    const { compiledJs } = compilePersonaGuestPreloadArtifact();
+    const hubUrl = "http://127.0.0.1:18660";
+
+    const scenarios: Array<{ label: string; argv: string[]; href: string; isSubFrame: boolean }> = [
+      {
+        label: "same-origin subframe",
+        argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}${hubUrl}`],
+        href: `${hubUrl}/s/n37-217-003/sess_1`,
+        isSubFrame: true,
+      },
+      {
+        label: "off-origin top-level page",
+        argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}${hubUrl}`],
+        href: "https://evil.example.com/s/n37-217-003/sess_1",
+        isSubFrame: false,
+      },
+      {
+        label: "about:blank top-level page",
+        argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}${hubUrl}`],
+        href: "about:blank",
+        isSubFrame: false,
+      },
+      {
+        label: "missing hub argv",
+        argv: ["electron"],
+        href: `${hubUrl}/s/n37-217-003/sess_1`,
+        isSubFrame: false,
+      },
+      {
+        label: "invalid about:blank hub argv",
+        argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}about:blank`],
+        href: `${hubUrl}/s/n37-217-003/sess_1`,
+        isSubFrame: false,
+      },
+      {
+        label: "credentialed hub argv",
+        argv: ["electron", `${PERSONA_HUB_URL_ARG_PREFIX}http://user:pass@127.0.0.1:18660`],
+        href: `${hubUrl}/s/n37-217-003/sess_1`,
+        isSubFrame: false,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const ipcRenderer = {
+        on: vi.fn(),
+        removeListener: vi.fn(),
+        send: vi.fn(),
+      };
+      const dom = createSandboxedGuestDom({
+        href: scenario.href,
+        isSubFrame: scenario.isSubFrame,
+      });
+
+      executeCompiledGuestPreloadInSandbox(compiledJs, {
+        argv: scenario.argv,
+        dom,
+        ipcRenderer,
+      });
+
+      expect(ipcRenderer.on, scenario.label).not.toHaveBeenCalled();
+      expect(ipcRenderer.send, scenario.label).not.toHaveBeenCalled();
+    }
   });
 });

@@ -65,16 +65,58 @@ export interface PersonaHealthCheckFailure {
 
 export type PersonaHealthCheckResult = PersonaHealthCheckSuccess | PersonaHealthCheckFailure;
 
+export interface PersonaIpcFrameLike {
+  readonly detached?: boolean;
+  readonly parent?: object | null;
+  readonly top?: object | null;
+  readonly processId?: number;
+  readonly routingId?: number;
+}
+
 export interface PersonaIpcSenderLike {
   readonly id: number;
-  readonly mainFrame?: object | null;
+  readonly mainFrame?: PersonaIpcFrameLike | null;
   isDestroyed(): boolean;
   getType?: () => string;
 }
 
 export interface PersonaIpcEventLike {
   readonly sender: PersonaIpcSenderLike | null | undefined;
-  readonly senderFrame?: object | null;
+  readonly senderFrame?: PersonaIpcFrameLike | null;
+  readonly processId?: number;
+  readonly frameId?: number;
+}
+
+function isMatchingMainFrameIdentity(
+  event: {
+    readonly senderFrame?: PersonaIpcFrameLike | null;
+    readonly processId?: number;
+    readonly frameId?: number;
+  },
+  mainFrame: PersonaIpcFrameLike | null | undefined,
+): boolean {
+  const senderFrame = event.senderFrame;
+  if (!mainFrame || !senderFrame || senderFrame !== mainFrame) {
+    return false;
+  }
+  if (senderFrame.detached === true) {
+    return false;
+  }
+  if (senderFrame.parent !== undefined && senderFrame.parent !== null) {
+    return false;
+  }
+  if (senderFrame.top !== undefined && senderFrame.top !== senderFrame) {
+    return false;
+  }
+  const processMismatch =
+    typeof event.processId === "number" &&
+    typeof senderFrame.processId === "number" &&
+    event.processId !== senderFrame.processId;
+  const frameMismatch =
+    typeof event.frameId === "number" &&
+    typeof senderFrame.routingId === "number" &&
+    event.frameId !== senderFrame.routingId;
+  return !processMismatch && !frameMismatch;
 }
 
 /**
@@ -95,10 +137,10 @@ export function isTrustedPersonaHostIpcEvent(
   if (typeof sender.getType === "function" && sender.getType() !== "window") {
     return false;
   }
-  if (!event?.senderFrame || !sender.mainFrame) {
+  if (!event) {
     return false;
   }
-  return event.senderFrame === sender.mainFrame;
+  return isMatchingMainFrameIdentity(event, sender.mainFrame);
 }
 
 function readTrimmedString(value: unknown, fallback: string): string {
@@ -529,14 +571,9 @@ export function registerPersonaWebviewNavigationGuards(
   });
 }
 
-export interface PersonaGuestFrameLike {
+export interface PersonaGuestFrameLike extends PersonaIpcFrameLike {
   readonly url: string;
   readonly origin?: string;
-  readonly detached?: boolean;
-  readonly parent?: object | null;
-  readonly top?: object | null;
-  readonly processId?: number;
-  readonly routingId?: number;
 }
 
 export interface PersonaGuestIpcMainEventLike {
@@ -596,34 +633,6 @@ function isSameOriginHttpUrlStrict(urlString: unknown, expectedOrigin: string): 
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function isMatchingMainFrameIdentity(
-  event: PersonaGuestIpcMainEventLike,
-  mainFrame: PersonaGuestFrameLike | null | undefined,
-): boolean {
-  const senderFrame = event.senderFrame;
-  if (!mainFrame || !senderFrame || senderFrame !== mainFrame) {
-    return false;
-  }
-  if (senderFrame.detached === true) {
-    return false;
-  }
-  if (senderFrame.parent !== undefined && senderFrame.parent !== null) {
-    return false;
-  }
-  if (senderFrame.top !== undefined && senderFrame.top !== senderFrame) {
-    return false;
-  }
-  const processMismatch =
-    typeof event.processId === "number" &&
-    typeof senderFrame.processId === "number" &&
-    event.processId !== senderFrame.processId;
-  const frameMismatch =
-    typeof event.frameId === "number" &&
-    typeof senderFrame.routingId === "number" &&
-    event.frameId !== senderFrame.routingId;
-  return !processMismatch && !frameMismatch;
 }
 
 function isAuthorizedGuestMainFrameOrigin(
