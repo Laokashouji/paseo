@@ -119,6 +119,19 @@ function isCleanLegacyPathDecode(value: string): boolean {
   return isLegacyPathLikeWorkspaceValue(value) && !hasLegacyDecodeNoise(value);
 }
 
+export type WorkspacePanelIntent = "diff";
+
+export function parseHostPanelParam(
+  value: string | string[] | undefined,
+): WorkspacePanelIntent | null {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  const normalized = trimNonEmpty(candidate)?.toLowerCase();
+  if (normalized === "diff") {
+    return "diff";
+  }
+  return null;
+}
+
 export type WorkspaceOpenIntent =
   | { kind: "agent"; agentId: string }
   | { kind: "terminal"; terminalId: string }
@@ -372,28 +385,42 @@ export function buildHostWorkspaceOpenRoute(
   return `${base}?open=${encodeURIComponent(normalizedOpenIntent)}` as const;
 }
 
-export function buildHostAgentDetailRoute(serverId: string, agentId: string, workspaceId?: string) {
+export function buildHostAgentDetailRoute(
+  serverId: string,
+  agentId: string,
+  workspaceId?: string,
+  options?: { panel?: WorkspacePanelIntent },
+) {
+  const panelSuffix = options?.panel === "diff" ? "panel=diff" : null;
   const normalizedWorkspaceId = trimNonEmpty(workspaceId);
   if (normalizedWorkspaceId) {
     const normalizedAgentId = trimNonEmpty(agentId);
     if (!normalizedAgentId) {
       return "/" as const;
     }
-    return buildHostWorkspaceOpenRoute(
+    const base = buildHostWorkspaceOpenRoute(
       serverId,
       normalizedWorkspaceId,
       `agent:${normalizedAgentId}`,
     );
+    if (base === "/" || !panelSuffix) {
+      return base;
+    }
+    return `${base}${base.includes("?") ? "&" : "?"}${panelSuffix}` as const;
   }
   const normalizedServerId = trimNonEmpty(serverId);
   const normalizedAgentId = trimNonEmpty(agentId);
   if (!normalizedServerId || !normalizedAgentId) {
     return "/" as const;
   }
-  return buildAgentDeepLinkRoute({
+  const base = buildAgentDeepLinkRoute({
     serverId: normalizedServerId,
     agentId: normalizedAgentId,
   });
+  if (!panelSuffix) {
+    return base;
+  }
+  return `${base}?${panelSuffix}` as const;
 }
 
 export function buildHostRootRoute(serverId: string) {
@@ -494,6 +521,7 @@ export const SETTINGS_SECTION_SLUGS = [
   "appearance",
   "sidebar",
   "main-chat",
+  "persona",
   "chat",
   "terminal",
   "browser",
@@ -544,6 +572,19 @@ export function normalizeHostSectionSlug(value: string): HostSectionSlug | null 
     return value;
   }
   return LEGACY_HOST_SECTION_SLUGS[value] ?? null;
+}
+
+export function buildPersonaRoute() {
+  return "/persona" as const;
+}
+
+export function isPersonaPathname(pathname: NullableString): boolean {
+  const normalized = trimNonEmpty(pathname);
+  if (!normalized) {
+    return false;
+  }
+  const clean = stripSearchAndHash(normalized).replace(/\/+$/, "") || "/";
+  return clean === "/persona";
 }
 
 export function buildMainChatRoute(serverId?: NullableString) {

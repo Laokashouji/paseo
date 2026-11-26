@@ -89,6 +89,7 @@ import { openSettingsFromSidebar } from "@/navigation/settings-navigation";
 import { UsageSidebarItem, UsageSidebarRoot, useUsageSummary, useOpenSidebarUsage } from "@/usage";
 import { MainChatHeroRow, useShouldShowMainChatHero } from "@/main-chat/hero-row";
 import { SidebarDirectionsSection } from "@/main-chat/sidebar-directions-section";
+import { PersonaHeroRow, useShouldShowPersonaHero } from "@/persona/hero-row";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -607,13 +608,14 @@ function MobileSidebar({
     [insetsTop, insetsBottom, theme.colors.surfaceSidebar],
   );
 
+  const showPersonaHero = useShouldShowPersonaHero();
   const showMainChatHero = useShouldShowMainChatHero();
 
   const navRows = (
     <SidebarNavRows
       style={styles.mobileNavRowsGroup}
       onBeforeNavigate={closeSidebar}
-      firstRowTrailing={showMainChatHero ? undefined : closeButton}
+      firstRowTrailing={showPersonaHero || showMainChatHero ? undefined : closeButton}
     />
   );
 
@@ -625,9 +627,13 @@ function MobileSidebar({
     >
       <View style={styles.sidebarContent} pointerEvents="auto">
         <WindowChromeSafeArea placement="below" />
+        <PersonaHeroRow
+          onBeforeNavigate={closeSidebar}
+          trailingAccessory={showPersonaHero ? closeButton : undefined}
+        />
         <MainChatHeroRow
           onBeforeNavigate={closeSidebar}
-          trailingAccessory={showMainChatHero ? closeButton : undefined}
+          trailingAccessory={!showPersonaHero && showMainChatHero ? closeButton : undefined}
         />
         <SidebarDirectionsSection onBeforeNavigate={closeSidebar} />
         <SidebarNavScroll closeGestureRef={closeGestureRef}>{navRows}</SidebarNavScroll>
@@ -802,8 +808,10 @@ function DesktopSidebar({
   // With every top item hidden the sidebar starts at the Workspaces section, as before the
   // nav scroller existed: no strip above it and no divider below it.
   const hasNavRows = useVisibleSidebarNavItems().length > 0;
+  const showPersonaHero = useShouldShowPersonaHero();
   const showMainChatHero = useShouldShowMainChatHero();
-  const showsDragStrip = (hasNavRows || showMainChatHero) && !showsChromeRow && !inTopBand;
+  const showsDragStrip =
+    (hasNavRows || showMainChatHero || showPersonaHero) && !showsChromeRow && !inTopBand;
   return (
     <MobilePanelOverlay
       panel="agent-list"
@@ -838,6 +846,7 @@ function DesktopSidebar({
               </View>
             ) : null}
           </View>
+          <PersonaHeroRow onBeforeNavigate={closeSidebar} />
           <MainChatHeroRow onBeforeNavigate={closeSidebar} />
           <SidebarDirectionsSection onBeforeNavigate={closeSidebar} />
           {/* The drag overlay stays above this viewport: Electron does not clip

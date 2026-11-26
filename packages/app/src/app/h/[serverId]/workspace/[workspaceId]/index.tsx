@@ -16,7 +16,14 @@ import { useHasHydratedWorkspaces, useWorkspaceExists } from "@/stores/session-s
 import { useDirectoryDemand } from "@/hooks/use-directory-demand";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { WorkspaceScreen } from "@/screens/workspace/workspace-screen";
-import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import {
+  useWorkspaceLayoutStore,
+  useWorkspaceLayoutStoreHydrated,
+} from "@/stores/workspace-layout-store";
+import { useIsCompactFormFactor } from "@/constants/layout";
+import { useAppSettings } from "@/hooks/use-settings";
+import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
+import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import {
   areRetainedWorkspaceSelectionListsEqual,
   areWorkspaceSelectionsEqual,
@@ -31,6 +38,7 @@ import {
 } from "@/screens/workspace/workspace-deck-retention";
 import {
   decodeWorkspaceIdFromPathSegment,
+  parseHostPanelParam,
   parseWorkspaceOpenIntent,
   type WorkspaceOpenIntent,
 } from "@/utils/host-routes";
@@ -94,6 +102,27 @@ function clearConsumedOpenIntent(input: {
   }
 }
 
+function stripPanelSearchParamFromBrowserUrl() {
+  if (!isWeb || typeof window === "undefined") {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("panel")) {
+    return;
+  }
+  url.searchParams.delete("panel");
+  replaceBrowserRouteWithCanonicalHostWorkspaceRoute(`${url.pathname}${url.search}${url.hash}`);
+}
+
+function clearConsumedPanelIntent(input: {
+  navigation: { setParams: (params: { panel?: string | undefined }) => void };
+}) {
+  input.navigation.setParams({ panel: undefined });
+  if (isWeb) {
+    window.setTimeout(stripPanelSearchParamFromBrowserUrl, 0);
+  }
+}
+
 export default function HostWorkspaceIndexRoute() {
   return (
     <HostRouteBootstrapBoundary>
@@ -104,10 +133,14 @@ export default function HostWorkspaceIndexRoute() {
 
 function HostWorkspaceRouteContent() {
   const navigation = useNavigation();
+  const isCompact = useIsCompactFormFactor();
+  const { settings } = useAppSettings();
+  const hasHydratedLayout = useWorkspaceLayoutStoreHydrated();
   const params = useLocalSearchParams<{
     serverId?: string | string[];
     workspaceId?: string | string[];
     open?: string | string[];
+    panel?: string | string[];
   }>();
   const serverId = getParamValue(params.serverId);
   const workspaceValue = getParamValue(params.workspaceId);
@@ -115,6 +148,8 @@ function HostWorkspaceRouteContent() {
     ? (decodeWorkspaceIdFromPathSegment(workspaceValue) ?? "")
     : "";
   const openValue = getParamValue(params.open);
+  const panelValue = getParamValue(params.panel);
+  const panelIntent = parseHostPanelParam(panelValue);
   // A restored workspace with no open chat has nothing else demanding its host's directory on a
   // phone, where the sidebar only demands while its panel is active. Without demand the deck
   // waits on workspace hydration that never starts.
@@ -162,6 +197,42 @@ function HostWorkspaceRouteContent() {
       },
     });
   }, [navigation, openValue, serverId, workspaceId]);
+
+  useEffect(() => {
+    if (!panelValue || !serverId || !workspaceId) {
+      return;
+    }
+    if (panelIntent === "diff") {
+      if (!hasHydratedLayout) {
+        return;
+      }
+      const session = useSessionStore.getState().sessions[serverId];
+      const resolvedWorkspaceId =
+        resolveWorkspaceMapKeyByIdentity({
+          workspaces: session?.workspaces,
+          workspaceId,
+        }) ?? workspaceId;
+      openWorkspaceChanges({
+        isCompact,
+        workspaceKey: `${serverId}:${resolvedWorkspaceId}`,
+        preferences: settings.openInSidePane,
+      });
+    }
+    clearConsumedPanelIntent({
+      navigation: navigation as unknown as {
+        setParams: (params: { panel?: string | undefined }) => void;
+      },
+    });
+  }, [
+    hasHydratedLayout,
+    isCompact,
+    navigation,
+    panelIntent,
+    panelValue,
+    serverId,
+    settings.openInSidePane,
+    workspaceId,
+  ]);
 
   return <WorkspaceDeck />;
 }

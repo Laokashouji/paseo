@@ -100,6 +100,22 @@ describe("routeKeyboardShortcut — dispatch passthroughs", () => {
       ),
     ).toEqual<ShortcutAction>({ kind: "none" });
   });
+
+  it("routes main-chat.open to /persona when Persona replaces built-in Main Chat", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "main-chat.open", payload: null },
+        makeCtx({ pathname: "/h/srv_1/workspace/wks_1", preferPersonaForMainChatShortcut: true }),
+      ),
+    ).toEqual<ShortcutAction>({ kind: "router-push", route: "/persona" });
+
+    expect(
+      routeKeyboardShortcut(
+        { action: "main-chat.open", payload: null },
+        makeCtx({ pathname: "/persona", preferPersonaForMainChatShortcut: true }),
+      ),
+    ).toEqual<ShortcutAction>({ kind: "none" });
+  });
 });
 
 describe("routeKeyboardShortcut — workspace.tab.navigate", () => {

@@ -1,10 +1,12 @@
 import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
+import { personaEmbedLocales, personaSettingsSectionLocales } from "./persona-embed-locales";
 import { pluginGallery } from "./plugin-gallery";
 import { interactiveCardsI18n } from "./interactive-cards";
 
 export const en = {
   interactiveCards: interactiveCardsI18n.en,
   chatQuotes: chatQuotesLocales.en,
+  personaEmbed: personaEmbedLocales.en,
   pluginCombobox: {
     searching: "Searching…",
     empty: "No results",
@@ -2447,6 +2449,7 @@ export const en = {
       appearance: "Appearance",
       sidebar: "Sidebar",
       mainChat: "Conversation Steward",
+      persona: personaSettingsSectionLocales.en,
       editor: "Editor",
       files: "Files",
       terminal: "Terminal",

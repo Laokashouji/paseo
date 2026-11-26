@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { queryClient as appQueryClient } from "@/data/query-client";
 import type { AppLanguage } from "@/i18n/locales";
+import { DEFAULT_PERSONA_EMBED_SETTINGS, type PersonaEmbedSettings } from "@/persona/settings";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   loadDesktopSettings,
@@ -59,6 +60,7 @@ export {
   APP_SETTINGS_KEY,
   DEFAULT_APP_SETTINGS,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_PERSONA_EMBED_SETTINGS,
   DEFAULT_CODE_FONT_SIZE,
   DEFAULT_CONTENT_FONT_SIZE,
   DEFAULT_CONTENT_MAX_WIDTH,
@@ -85,6 +87,7 @@ export type {
   ContentWidthPreset,
   AppLanguage,
   OpenInSidePanePreferences,
+  PersonaEmbedSettings,
   PullRequestOpenLocation,
   DesktopSettingsBridge,
   KeyValueStorage,

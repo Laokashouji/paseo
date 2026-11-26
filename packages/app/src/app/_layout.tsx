@@ -143,6 +143,7 @@ import {
 import {
   buildOpenProjectRoute,
   isMainChatPathname,
+  isPersonaPathname,
   parseHostWorkspaceRouteFromPathname,
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
@@ -894,6 +895,7 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
       pathname === "/sessions" ||
       pathname === "/schedules" ||
       isMainChatPathname(pathname) ||
+      isPersonaPathname(pathname) ||
       routeHasKnownHost);
 
   return <AppContainer chromeEnabled={shouldShowAppChrome}>{children}</AppContainer>;
@@ -929,6 +931,7 @@ function RootStack() {
         <Stack.Screen name="open-project" />
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
+        <Stack.Screen name="persona" />
       </Stack.Protected>
       <Stack.Screen name="main" />
       <Stack.Screen name="h/[serverId]" />

@@ -1,4 +1,5 @@
 import { chatQuotesLocales, quoteMessageActionLocales } from "./chat-quotes-locales";
+import { personaEmbedLocales, personaSettingsSectionLocales } from "./persona-embed-locales";
 import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 import { interactiveCardsI18n } from "./interactive-cards";
@@ -6,6 +7,7 @@ import { interactiveCardsI18n } from "./interactive-cards";
 export const zhCN: TranslationResources = {
   interactiveCards: interactiveCardsI18n.zhCN,
   chatQuotes: chatQuotesLocales["zh-CN"],
+  personaEmbed: personaEmbedLocales["zh-CN"],
   pluginCombobox: {
     searching: "搜索中…",
     empty: "无结果",
@@ -2399,6 +2401,7 @@ export const zhCN: TranslationResources = {
       appearance: "外观",
       sidebar: "侧边栏",
       mainChat: "对话管理",
+      persona: personaSettingsSectionLocales["zh-CN"],
       terminal: "终端",
       browser: "浏览器",
       editor: "编辑器",

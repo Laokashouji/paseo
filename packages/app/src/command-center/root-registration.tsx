@@ -5,6 +5,7 @@ import { router, type Href } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import {
+  Bot,
   CalendarClock,
   CircleDashed,
   Copy,
@@ -33,6 +34,7 @@ import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { selectMainChatSidebarSummary } from "@/main-chat/selectors";
 import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { useMainChatStewardRoster } from "@/main-chat/use-steward-roster";
+import { usePersonaEmbedSettings } from "@/persona/use-persona-settings";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -42,6 +44,7 @@ import { copyToClipboard } from "@/utils/copy-to-clipboard";
 import {
   buildMainChatRoute,
   buildOpenProjectRoute,
+  buildPersonaRoute,
   buildSchedulesRoute,
   buildSessionsRoute,
   buildSettingsRoute,
@@ -80,6 +83,9 @@ const ThemedPanelLeft = withUnistyles(PanelLeft, (theme) => ({
 const ThemedSparkles = withUnistyles(Sparkles, (theme) => ({
   color: theme.colors.foregroundMuted,
 }));
+const ThemedBot = withUnistyles(Bot, (theme) => ({
+  color: theme.colors.foregroundMuted,
+}));
 const BrowserHostCopyIcon = getCommandCenterIcon(Copy);
 
 function PlusIcon({ size }: CommandCenterIconProps) {
@@ -108,6 +114,10 @@ function KeyboardIcon({ size }: CommandCenterIconProps) {
 
 function HomeIcon({ size }: CommandCenterIconProps) {
   return <ThemedHome size={size} strokeWidth={2.2} />;
+}
+
+function PersonaIcon({ size }: CommandCenterIconProps) {
+  return <ThemedBot size={size} strokeWidth={2.2} />;
 }
 
 function ImportIcon({ size }: CommandCenterIconProps) {
@@ -168,6 +178,10 @@ export function CommandCenterRootActions() {
   );
   const mainChatEnabled =
     stewardRoster.length > 0 ? true : configuredMainChatSettings?.enabled !== false;
+  const personaSettings = usePersonaEmbedSettings();
+  const personaEnabled = personaSettings.enabled;
+  const hideBuiltInMainChat = personaEnabled && personaSettings.hideBuiltInMainChatWhenEnabled;
+  const personaRoute = useMemo<Href>(() => buildPersonaRoute(), []);
   const mainChatTitle =
     configuredMainChatSettings?.title?.trim() ||
     activeSteward?.title ||
@@ -308,7 +322,35 @@ export function CommandCenterRootActions() {
           icon: SchedulesIcon,
         },
       },
-      ...((stewardRoster.length > 0 || mainChatSummary.supportsMainChat) && mainChatEnabled
+      ...(personaEnabled
+        ? [
+            {
+              id: "open-persona",
+              group: "actions" as const,
+              groupRank: 0,
+              rank: 5.4,
+              keywords: ["persona", "steward", "assistant", "hub", "管家", "主对话"],
+              visibility: "always" as const,
+              run: () => {
+                clearCommandCenterFocusRestoreElement();
+                router.push(personaRoute);
+              },
+              presentation: {
+                kind: "action" as const,
+                title: t("personaEmbed.commands.openPersona"),
+                sectionTitle: t("shell.commandCenter.actions"),
+                icon: PersonaIcon,
+                shortcutKeys: hideBuiltInMainChat
+                  ? (resolveShortcutKeysForAction("open-main-chat", overrides, shortcutPlatform) ??
+                    undefined)
+                  : undefined,
+              },
+            },
+          ]
+        : []),
+      ...(!hideBuiltInMainChat &&
+      (stewardRoster.length > 0 || mainChatSummary.supportsMainChat) &&
+      mainChatEnabled
         ? [
             {
               id: "open-main-chat",
@@ -485,6 +527,7 @@ export function CommandCenterRootActions() {
     browserHostLabel,
     groupMode,
     hasMultipleStewards,
+    hideBuiltInMainChat,
     homeRoute,
     keyboardActionDispatcher,
     mainChatEnabled,
@@ -493,6 +536,8 @@ export function CommandCenterRootActions() {
     openAddProject,
     openImportSession,
     overrides,
+    personaEnabled,
+    personaRoute,
     schedulesRoute,
     selectSteward,
     sessionsRoute,

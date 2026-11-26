@@ -2,6 +2,7 @@ import type { KeyboardShortcutPayload, MessageInputKeyboardActionKind } from "@/
 import type { KeyboardActionDefinition } from "@/keyboard/keyboard-action-dispatcher";
 import {
   buildMainChatRoute,
+  buildPersonaRoute,
   buildSettingsRoute,
   parseHostWorkspaceRouteFromPathname,
 } from "@/utils/host-routes";
@@ -17,6 +18,7 @@ export interface ShortcutRoutingContext {
   navigationActiveWorkspace: SidebarShortcutWorkspaceTarget | null;
   commandCenterOpen: boolean;
   shortcutsDialogOpen: boolean;
+  preferPersonaForMainChatShortcut?: boolean;
 }
 
 export interface ShortcutRoutingInput {
@@ -208,11 +210,15 @@ export function routeKeyboardShortcut(
       return routeWorkspaceNavigateIndex(input.payload, ctx);
     case "workspace.navigate.relative":
       return routeWorkspaceNavigateRelative(input.payload, ctx);
-    case "main-chat.open":
-      if (ctx.pathname === buildMainChatRoute()) {
+    case "main-chat.open": {
+      const targetRoute = ctx.preferPersonaForMainChatShortcut
+        ? buildPersonaRoute()
+        : buildMainChatRoute();
+      if (ctx.pathname === targetRoute) {
         return NONE;
       }
-      return { kind: "router-push", route: buildMainChatRoute() };
+      return { kind: "router-push", route: targetRoute };
+    }
     case "message-input.action":
       return routeMessageInputAction(input.payload);
     case "agent.new":

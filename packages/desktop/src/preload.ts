@@ -9,6 +9,7 @@ import type { DesktopWindowChromeMode } from "./window/chrome.js";
 // with PASEO_BROWSER_PROFILE_PARTITION in features/browser-profile.ts; preload-sandbox.test.ts
 // guards both the no-local-import rule and this drift. Type-only imports are fine (erased at emit).
 const PASEO_BROWSER_PROFILE_PARTITION = "persist:paseo-browser";
+const PERSONA_WEBVIEW_PARTITION = "persist:persona";
 
 type EventHandler = (payload: unknown) => void;
 
@@ -143,5 +144,13 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
     ) => ipcRenderer.invoke("paseo:browser:capture-element", browserId, rect),
     copyElement: (payload: { text?: string; imageDataUrl?: string }) =>
       ipcRenderer.invoke("paseo:browser:copy-element", payload),
+  },
+  persona: {
+    partition: PERSONA_WEBVIEW_PARTITION,
+    setHubUrl: (hubUrl: string | null) =>
+      ipcRenderer.invoke("paseo:persona:set-hub-url", hubUrl) as Promise<boolean>,
+    clearSession: () => ipcRenderer.invoke("paseo:persona:clear-session") as Promise<void>,
+    openDevTools: (webContentsId: number) =>
+      ipcRenderer.invoke("paseo:persona:open-devtools", webContentsId) as Promise<boolean>,
   },
 });

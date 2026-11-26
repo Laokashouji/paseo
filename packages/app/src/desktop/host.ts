@@ -168,6 +168,22 @@ export interface DesktopBrowserBridge {
   copyElement?: (payload: { text?: string; imageDataUrl?: string }) => Promise<boolean>;
 }
 
+export interface DesktopPersonaOpenSessionEvent {
+  machineId: string;
+  sessionId: string;
+  view?: "chat" | "term";
+  panel?: "diff";
+  source: "window-open" | "link-click" | "header-button" | "changes-panel-button";
+  rawHref?: string;
+}
+
+export interface DesktopPersonaBridge {
+  readonly partition?: string;
+  setHubUrl?: (hubUrl: string | null) => Promise<boolean>;
+  clearSession?: () => Promise<void>;
+  openDevTools?: (webContentsId: number) => Promise<boolean>;
+}
+
 export interface DesktopInvokeBridge {
   invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
@@ -189,6 +205,7 @@ export interface DesktopHostBridge {
   webUtils?: DesktopWebUtilsBridge;
   menu?: DesktopMenuBridge;
   browser?: DesktopBrowserBridge;
+  persona?: DesktopPersonaBridge;
 }
 
 declare global {

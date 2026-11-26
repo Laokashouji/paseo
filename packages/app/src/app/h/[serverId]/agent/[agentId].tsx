@@ -10,11 +10,14 @@ import { useDirectoryDemand } from "@/hooks/use-directory-demand";
 import { useWorkspaceLayoutStoreHydrated } from "@/stores/workspace-layout-store";
 import { useSessionStore } from "@/stores/session-store";
 import { getHostRuntimeStore, useHostRuntimeSnapshot, useHosts } from "@/runtime/host-runtime";
+import { useIsCompactFormFactor } from "@/constants/layout";
+import { useAppSettings } from "@/hooks/use-settings";
 import {
   buildHostRootRoute,
   buildMainChatConversationRoute,
   buildMainChatRoute,
   buildSettingsHostRoute,
+  parseHostPanelParam,
 } from "@/utils/host-routes";
 import { toErrorMessage } from "@/utils/error-messages";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
@@ -137,13 +140,17 @@ function useHostAgentRouteLookup(input: {
 
 function HostAgentReadyRouteContent() {
   const router = useRouter();
+  const isCompact = useIsCompactFormFactor();
+  const { settings } = useAppSettings();
   const params = useLocalSearchParams<{
     serverId?: string;
     agentId?: string;
+    panel?: string | string[];
   }>();
   const handledNavigationRef = useRef<string | null>(null);
   const serverId = typeof params.serverId === "string" ? params.serverId : "";
   const agentId = typeof params.agentId === "string" ? params.agentId : "";
+  const panelIntent = parseHostPanelParam(params.panel);
   const hosts = useHosts();
   const runtimeSnapshot = useHostRuntimeSnapshot(serverId);
   const client = runtimeSnapshot?.client ?? null;
@@ -193,9 +200,13 @@ function HostAgentReadyRouteContent() {
   });
 
   useEffect(() => {
-    const navigationKey = conversationId
+    const baseNavigationKey = conversationId
       ? buildMainChatConversationRoute(conversationId, serverId)
       : resolveHostAgentNavigationKey(resolvedIsMainChat, serverId, resolution);
+    const navigationKey =
+      baseNavigationKey && panelIntent
+        ? `${baseNavigationKey}?panel=${panelIntent}`
+        : baseNavigationKey;
     if (!navigationKey || handledNavigationRef.current === navigationKey) {
       return;
     }
@@ -216,11 +227,25 @@ function HostAgentReadyRouteContent() {
         workspaceId: resolution.workspaceId,
         labels,
         pin: true,
+        panel: panelIntent,
+        isCompact,
+        openInSidePane: settings.openInSidePane,
       });
       return;
     }
     router.replace(resolution.kind === "invalid" ? ("/" as Href) : buildHostRootRoute(serverId));
-  }, [agentId, conversationId, labels, resolution, resolvedIsMainChat, router, serverId]);
+  }, [
+    agentId,
+    conversationId,
+    isCompact,
+    labels,
+    panelIntent,
+    resolution,
+    resolvedIsMainChat,
+    router,
+    serverId,
+    settings.openInSidePane,
+  ]);
 
   const handleRetry = useCallback(() => {
     if (resolution.kind === "lookupError") {

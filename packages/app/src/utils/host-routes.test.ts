@@ -9,6 +9,7 @@ import {
   buildMainChatRoute,
   buildNewWorkspaceRoute,
   buildOpenProjectRoute,
+  buildPersonaRoute,
   resolveKnownHostRoute,
   buildSessionsRoute,
   buildProjectSettingsRoute,
@@ -18,11 +19,13 @@ import {
   encodeFilePathForPathSegment,
   encodeWorkspaceIdForPathSegment,
   isMainChatPathname,
+  isPersonaPathname,
   isSettingsSectionSlug,
   normalizeHostSectionSlug,
   normalizeProjectSettingsRouteId,
   buildProviderSettingsRoute,
   parseHostAgentRouteFromPathname,
+  parseHostPanelParam,
   parseHostWorkspaceOpenIntentFromPathname,
   parseHostWorkspaceRouteFromPathname,
   parseMainChatConversationIdFromPathname,
@@ -296,12 +299,40 @@ describe("host settings section slugs", () => {
 });
 
 describe("settings section slugs", () => {
-  it("includes desktop notification settings", () => {
+  it("includes desktop notification and persona settings", () => {
     expect(isSettingsSectionSlug("notifications")).toBe(true);
+    expect(isSettingsSectionSlug("persona")).toBe(true);
   });
 
   it("no longer treats daemon as a valid app-level settings section", () => {
     expect(isSettingsSectionSlug("daemon")).toBe(false);
+  });
+});
+
+describe("persona routes and ?panel=diff", () => {
+  it("builds and matches /persona pathname", () => {
+    expect(buildPersonaRoute()).toBe("/persona");
+    expect(isPersonaPathname("/persona")).toBe(true);
+    expect(isPersonaPathname("/persona/")).toBe(true);
+    expect(isPersonaPathname("/persona?foo=1")).toBe(true);
+    expect(isPersonaPathname("/persona/sub")).toBe(false);
+    expect(isPersonaPathname("/settings/persona")).toBe(false);
+    expect(isPersonaPathname(null)).toBe(false);
+  });
+
+  it("parses ?panel=diff and appends it to agent detail routes", () => {
+    expect(parseHostPanelParam("diff")).toBe("diff");
+    expect(parseHostPanelParam(" DIFF ")).toBe("diff");
+    expect(parseHostPanelParam(["diff", "other"])).toBe("diff");
+    expect(parseHostPanelParam("unknown")).toBeNull();
+    expect(parseHostPanelParam(undefined)).toBeNull();
+
+    expect(buildHostAgentDetailRoute("srv_1", "ag_1", undefined, { panel: "diff" })).toBe(
+      "/h/srv_1/agent/ag_1?panel=diff",
+    );
+    expect(
+      buildHostAgentDetailRoute("srv_1", "ag_1", "wks_0123456789abcdef", { panel: "diff" }),
+    ).toBe("/h/srv_1/workspace/wks_0123456789abcdef?open=agent%3Aag_1&panel=diff");
   });
 });
 

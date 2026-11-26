@@ -52,6 +52,7 @@ import { OpenLocationSection } from "@/screens/settings/open-location/open-locat
 import { TerminalSection } from "@/screens/settings/terminal/terminal-section";
 import { ChatSection } from "@/screens/settings/chat/chat-section";
 import { MainChatSettingsSection } from "@/screens/settings/main-chat/main-chat-section";
+import { PersonaSettingsSection } from "@/screens/settings/persona/persona-section";
 import { SidebarNavSection } from "@/screens/settings/sidebar/sidebar-nav-section";
 import { SendingSection } from "@/screens/settings/general/sending-section";
 import {
@@ -180,6 +181,12 @@ const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
     labelKey: "settings.sections.mainChat",
     icon: Sparkles,
     Content: MainChatSettingsSection,
+  },
+  {
+    id: "persona",
+    labelKey: "settings.sections.persona",
+    icon: Bot,
+    Content: PersonaSettingsSection,
   },
   { id: "chat", labelKey: "settings.sections.chat", icon: MessageSquare, Content: ChatSection },
   {
