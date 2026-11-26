@@ -569,4 +569,128 @@ describe("main-chat turn-queue: preemption, priority merge, silent audit & missi
 
     queue.stop();
   });
+
+  it("does not cancel non-preemptible idle_precompact on foreground user input and lets foreground wait for completion", async () => {
+    const store = createMainChatStore(tempDir);
+    await store.load();
+    const queue = createMainChatTurnQueue({
+      agentManager,
+      agentStorage,
+      store,
+      logger: createSilentLogger(),
+      now: () => nowMs,
+      drainDelayMs: 5,
+    });
+    queue.start();
+
+    let finishCompaction!: () => void;
+    let observedSignalAborted = false;
+    const compactionPromise = queue.enqueueBackground({
+      mainAgentId: "agent_main",
+      dedupeKey: "compaction:idle_precompact",
+      trigger: "idle_precompact",
+      summary: "上下文占用已达阈值，后台静默执行空闲自动压缩",
+      requeueOnPreempt: false,
+      preemptible: false,
+      customExecute: async (signal) => {
+        await new Promise<void>((resolve) => {
+          finishCompaction = resolve;
+        });
+        observedSignalAborted = signal.aborted;
+        return { summary: "空闲预压缩完成", silent: true };
+      },
+    });
+
+    await flushMicrotasks(10);
+    expect(queue.isBackgroundBusy("agent_main")).toBe(true);
+    expect(queue.isCompacting("agent_main")).toBe(true);
+
+    // Queue a patrol turn behind compaction; it must NOT cut in ahead of the waiting foreground send.
+    let patrolDispatched = false;
+    await queue.enqueueBackground({
+      mainAgentId: "agent_main",
+      dedupeKey: "patrol:after_compact",
+      trigger: "patrol_wakeup",
+      summary: "压缩后巡检",
+      buildPrompt: () => {
+        patrolDispatched = true;
+        return "巡检";
+      },
+    });
+
+    const releaseForeground = queue.beginForegroundDispatch("agent_main");
+    const preemption = await queue.preemptForForegroundUser("agent_main");
+    expect(preemption.preempted).toBe(false);
+    expect(preemption.waitingForBackground).toBeDefined();
+    expect(cancelCalls).toEqual([]);
+    expect(store.getMetrics().preemptedTurns).toBe(0);
+
+    let waitedDone = false;
+    const waitTask = (async () => {
+      await preemption.waitingForBackground!;
+      waitedDone = true;
+    })();
+    await flushMicrotasks(10);
+    expect(waitedDone).toBe(false);
+
+    // Finish compaction cleanly.
+    finishCompaction();
+    await compactionPromise;
+    await waitTask;
+    await flushMicrotasks(15);
+
+    expect(waitedDone).toBe(true);
+    expect(observedSignalAborted).toBe(false);
+    expect(queue.isCompacting("agent_main")).toBe(false);
+    expect(queue.isBackgroundBusy("agent_main")).toBe(false);
+    expect(patrolDispatched).toBe(false);
+
+    releaseForeground();
+    queue.stop();
+  });
+
+  it("tracks foreground compaction loading and completed timeline states via isCompacting", async () => {
+    const store = createMainChatStore(tempDir);
+    await store.load();
+    const queue = createMainChatTurnQueue({
+      agentManager,
+      agentStorage,
+      store,
+      logger: createSilentLogger(),
+      now: () => nowMs,
+      drainDelayMs: 5,
+    });
+    queue.start();
+
+    emit({
+      type: "agent_stream",
+      agentId: "agent_main",
+      event: { type: "turn_started", provider: "claude" },
+    });
+    expect(queue.isCompacting("agent_main")).toBe(false);
+
+    emit({
+      type: "agent_stream",
+      agentId: "agent_main",
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "compaction", status: "loading" },
+      },
+    });
+    expect(queue.isCompacting("agent_main")).toBe(true);
+
+    emit({
+      type: "agent_stream",
+      agentId: "agent_main",
+      event: {
+        type: "timeline",
+        provider: "claude",
+        item: { type: "compaction", status: "completed", trigger: "manual" },
+      },
+    });
+    expect(queue.isCompacting("agent_main")).toBe(false);
+
+    queue.stop();
+  });
 });

@@ -493,9 +493,11 @@ export interface MainChatService {
   }): Promise<MainChatPatrolResult>;
   beginForegroundUserSend(agentId: string): (() => void) | null;
   abortForegroundUserSend(agentId: string): void;
+  isCompacting(agentId: string): boolean;
   prepareUserPromptForMainChat(
     agentId: string,
     prompt: AgentPromptInput,
+    options?: { onDeferredForCompaction?: () => void },
   ): Promise<AgentPromptInput>;
   getCompactionState(mainAgentId?: string): Promise<MainChatCompactionState>;
   compactMainChat(
@@ -4695,6 +4697,14 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
           });
           if (dispatch.disposition === "turn_started") {
             await dispatch.started;
+            if (
+              typeof deps.agentManager.waitForAgentEvent === "function" &&
+              deps.agentManager.hasInFlightRun(mainAgentId)
+            ) {
+              await deps.agentManager
+                .waitForAgentEvent(mainAgentId, { waitForActive: true })
+                .catch(() => undefined);
+            }
           }
         }
 
@@ -4816,6 +4826,7 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       priority: 1,
       summary: `上下文占用已达 ${windowLabel}，后台静默执行空闲自动压缩`,
       requeueOnPreempt: false,
+      preemptible: false,
       customExecute: async (signal) => {
         if (signal.aborted || turnQueue.isForegroundActive(mainAgentId)) {
           return { summary: "用户恢复活跃，空闲预压缩已让路", silent: true };
@@ -6063,7 +6074,11 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       turnQueue.abortForegroundDispatch(agentId);
     },
 
-    async prepareUserPromptForMainChat(agentId, prompt) {
+    isCompacting(agentId) {
+      return compactionInFlightByAgent.has(agentId) || turnQueue.isCompacting(agentId);
+    },
+
+    async prepareUserPromptForMainChat(agentId, prompt, options) {
       const live = deps.agentManager.getAgent(agentId);
       const stored = live ? null : await deps.agentStorage.get(agentId);
       const labels = live?.labels ?? stored?.labels;
@@ -6076,7 +6091,26 @@ export function createMainChatService(deps: MainChatServiceDependencies): MainCh
       }
       supervisor.notifyUserForegroundActivity(getNowMs());
       cacheKeepalive.notifyRealActivity(agentId);
-      await turnQueue.preemptForForegroundUser(agentId);
+      const preemption = await turnQueue.preemptForForegroundUser(agentId);
+      let pendingBackground = preemption.waitingForBackground ?? null;
+      let pendingCompaction = compactionInFlightByAgent.get(agentId) ?? null;
+      if (pendingBackground || pendingCompaction) {
+        // 压缩进行中不强行取消，先通知调用方进入排队态并等待压缩完成再基于最新上下文发送。
+        options?.onDeferredForCompaction?.();
+        while (pendingBackground || pendingCompaction) {
+          const currentBackground = pendingBackground;
+          const currentCompaction = pendingCompaction;
+          pendingBackground = null;
+          await Promise.all([
+            currentBackground?.catch(() => undefined),
+            currentCompaction?.catch(() => undefined),
+          ]);
+          const nextCompaction = compactionInFlightByAgent.get(agentId) ?? null;
+          pendingCompaction = nextCompaction === currentCompaction ? null : nextCompaction;
+        }
+        supervisor.notifyUserForegroundActivity(getNowMs());
+        cacheKeepalive.notifyRealActivity(agentId);
+      }
       const handoffSummary = await store.consumePendingHandoffSummary(agentId);
       const snapshot = await contextSnapshots.buildTurnContext(agentId, {
         foreground: true,

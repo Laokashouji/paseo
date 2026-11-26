@@ -59,6 +59,7 @@ function makeWave2Harness(paseoHome: string, repoDir: string, options: HarnessOp
     clientMessageId?: string;
   }> = [];
   const modelSwitches: Array<{ agentId: string; modelId: string | null }> = [];
+  const cancelCalls: string[] = [];
 
   const nowMs = options.nowMs ?? (() => Date.now());
   const emit = (event: AgentManagerEvent) => {
@@ -332,7 +333,9 @@ function makeWave2Harness(paseoHome: string, repoDir: string, options: HarnessOp
     closeAgent: async (agentId: string) => {
       agents.delete(agentId);
     },
-    cancelAgentRun: async () => undefined,
+    cancelAgentRun: async (agentId: string) => {
+      cancelCalls.push(agentId);
+    },
     notifyAgentState: () => undefined,
     unarchiveSnapshot: async () => false,
   } as unknown as AgentManager;
@@ -478,6 +481,7 @@ function makeWave2Harness(paseoHome: string, repoDir: string, options: HarnessOp
     timelines,
     sentPrompts,
     modelSwitches,
+    cancelCalls,
     emit,
     makeLiveAgent,
     repoDir,
@@ -607,6 +611,83 @@ describe("Wave 2 (P0-3 / P0-4 / P0-5): compaction cap, cache keepalive, routines
         getMainChatBackgroundTurnMetadata(item.metadata)?.kind === "compaction",
     );
     expect(row).toBeDefined();
+
+    harness.service.stop();
+  });
+
+  it("defers foreground user prompt until in-flight idle_precompact finishes instead of cancelling /compact", async () => {
+    let currentMs = new Date(2026, 10, 26, 11, 0, 0, 0).getTime();
+    let finishCompactStream: (() => void) | null = null;
+    const harness = makeWave2Harness(tmpDir, repoDir, {
+      nowMs: () => currentMs,
+      supportsNativeCompact: true,
+      emitStreamLifecycle: true,
+      onStreamStarted: (_agentId, finish) => {
+        finishCompactStream = finish;
+      },
+    });
+    await harness.service.start();
+    await harness.service.updateSettings({
+      enabled: true,
+      compaction: { windowCapTokens: 400_000, idlePrecompactMinIdleMin: 10 },
+    });
+    const { agentId: mainId } = await harness.service.ensureMainChat();
+
+    // 先发送一轮前台消息，让快照进入增量模式；再推进空闲时间并达到 80% 阈值触发后台空闲压缩。
+    const firstPrepared = await harness.service.prepareUserPromptForMainChat(mainId, "第一句");
+    expect(
+      typeof firstPrepared === "string" && firstPrepared.includes("以下是 Paseo 自动注入"),
+    ).toBe(true);
+    const liveMain = harness.agents.get(mainId)!;
+    liveMain.lastUsage = {
+      contextWindowUsedTokens: 360_000,
+      contextWindowMaxTokens: 1_000_000,
+    };
+    currentMs += 11 * 60_000;
+
+    const precompactTask = harness.service.checkIdlePrecompaction(mainId);
+    // 等待 /compact 真正发出并进入执行中
+    await vi.waitFor(() => {
+      expect(finishCompactStream).not.toBeNull();
+    });
+    expect(harness.sentPrompts.some((entry) => entry.prompt === "/compact")).toBe(true);
+    expect(harness.service.isCompacting(mainId)).toBe(true);
+
+    // 压缩进行中用户发来新消息：应立即触发 onDeferredForCompaction，绝不取消压缩，并等待压缩完成后再返回完整快照。
+    let deferredCount = 0;
+    let promptResolved = false;
+    const releaseForeground = harness.service.beginForegroundUserSend(mainId);
+    const pendingUserPrompt = harness.service
+      .prepareUserPromptForMainChat(mainId, "BM我也找人改了，可以再看看", {
+        onDeferredForCompaction: () => {
+          deferredCount += 1;
+        },
+      })
+      .then((value) => {
+        promptResolved = true;
+        return value;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(deferredCount).toBe(1);
+    expect(promptResolved).toBe(false);
+    expect(harness.cancelCalls).toEqual([]);
+
+    // 放行 /compact 完成
+    finishCompactStream!();
+    expect(await precompactTask).toBe(true);
+    const preparedAfterCompact = await pendingUserPrompt;
+    releaseForeground?.();
+
+    expect(promptResolved).toBe(true);
+    expect(harness.cancelCalls).toEqual([]);
+    expect(harness.service.isCompacting(mainId)).toBe(false);
+    expect(typeof preparedAfterCompact).toBe("string");
+    // 压缩完成后 resetDelta 已执行，后续用户消息应拿到完整快照而非增量快照
+    expect(String(preparedAfterCompact)).toContain("以下是 Paseo 自动注入");
+    expect(String(preparedAfterCompact)).toContain("BM我也找人改了，可以再看看");
+    const compactState = await harness.service.getCompactionState(mainId);
+    expect(compactState.status).toBe("succeeded");
 
     harness.service.stop();
   });

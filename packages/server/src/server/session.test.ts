@@ -355,6 +355,7 @@ interface SessionForTestOptions {
   pluginRuntime?: SessionOptions["pluginRuntime"];
   orchestrationSkills?: SessionOptions["orchestrationSkills"];
   workspaceLabelService?: WorkspaceLabelService;
+  mainChatService?: SessionOptions["mainChatService"];
 }
 
 function createSessionForTest(options: SessionForTestOptions = {}): Session {
@@ -468,6 +469,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     daemonVersion: options.daemonVersion,
     daemonRuntimeConfig: options.daemonRuntimeConfig,
     permissions: options.permissions ?? OWNER_PERMISSIONS,
+    mainChatService: options.mainChatService,
   };
   if (options.sendToSource) sessionOptions.onMessageToSource = options.sendToSource;
   return new Session(sessionOptions);
@@ -6660,4 +6662,150 @@ test("does not publish internal agents' background work to subscribed clients", 
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(messages.some((message) => message.type === "agent.background_work.update")).toBe(false);
+});
+
+test("send_agent_message_request returns queued immediately when main chat defers for compaction and dispatches once compaction settles", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111112";
+  const messages: SessionOutboundMessage[] = [];
+  let releaseCompaction!: () => void;
+  const dispatchedPrompts: unknown[] = [];
+
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      getAgent: vi.fn(() => ({
+        id: agentId,
+        provider: "claude",
+        lifecycle: "idle",
+        labels: {},
+      })),
+      hasInFlightRun: vi.fn(() => false),
+      tryRunOutOfBand: vi.fn(async () => false),
+      reloadStalePluginSession: vi.fn(async () => undefined),
+      streamAgent: vi.fn((_id: string, prompt: unknown) => {
+        dispatchedPrompts.push(prompt);
+        return (async function* () {
+          yield { type: "turn_started", provider: "claude" } as never;
+          yield { type: "turn_completed", provider: "claude" } as never;
+        })();
+      }),
+    },
+    agentStorage: {
+      get: vi.fn().mockResolvedValue({
+        id: agentId,
+        provider: "claude",
+        title: "对话管理",
+        archivedAt: null,
+      }),
+    },
+    mainChatService: {
+      beginForegroundUserSend: vi.fn(() => () => {}),
+      abortForegroundUserSend: vi.fn(),
+      isCompacting: vi.fn(() => false),
+      prepareUserPromptForMainChat: vi.fn(
+        async (
+          _id: string,
+          prompt: unknown,
+          options?: { onDeferredForCompaction?: () => void },
+        ) => {
+          options?.onDeferredForCompaction?.();
+          await new Promise<void>((resolve) => {
+            releaseCompaction = resolve;
+          });
+          return `POST_COMPACT:${String(prompt)}`;
+        },
+      ),
+    } as unknown as SessionOptions["mainChatService"],
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "req-compact-queued",
+    agentId,
+    text: "压缩完再发我这条",
+    messageId: "msg-compact-queued",
+  });
+
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "req-compact-queued",
+      agentId,
+      accepted: true,
+      deliveryStatus: "queued",
+      error: null,
+    },
+  });
+  expect(dispatchedPrompts).toEqual([]);
+
+  releaseCompaction();
+  await expect.poll(() => dispatchedPrompts).toEqual(["POST_COMPACT:压缩完再发我这条"]);
+});
+
+test("send_agent_message_request forces steer instead of interrupt while main chat is compacting", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111113";
+  const messages: SessionOutboundMessage[] = [];
+  const steerCalls: unknown[] = [];
+  const replaceCalls: unknown[] = [];
+
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+      getAgent: vi.fn(() => ({
+        id: agentId,
+        provider: "claude",
+        lifecycle: "running",
+        labels: {},
+      })),
+      hasInFlightRun: vi.fn(() => true),
+      tryRunOutOfBand: vi.fn(async () => false),
+      reloadStalePluginSession: vi.fn(async () => undefined),
+      steerOrReplaceActiveTurn: vi.fn(async (_id: string, prompt: unknown) => {
+        steerCalls.push(prompt);
+        return { status: "steered" as const };
+      }),
+      replaceAgentRun: vi.fn(async (_id: string, prompt: unknown) => {
+        replaceCalls.push(prompt);
+        return (async function* () {
+          yield { type: "turn_started", provider: "claude" } as never;
+        })();
+      }),
+    },
+    agentStorage: {
+      get: vi.fn().mockResolvedValue({
+        id: agentId,
+        provider: "claude",
+        title: "对话管理",
+        archivedAt: null,
+      }),
+    },
+    mainChatService: {
+      beginForegroundUserSend: vi.fn(() => () => {}),
+      abortForegroundUserSend: vi.fn(),
+      isCompacting: vi.fn(() => true),
+      prepareUserPromptForMainChat: vi.fn(async (_id: string, prompt: unknown) => prompt),
+    } as unknown as SessionOptions["mainChatService"],
+  });
+
+  await session.handleMessage({
+    type: "send_agent_message_request",
+    requestId: "req-compact-steer",
+    agentId,
+    text: "等手动压缩完再处理",
+    messageId: "msg-compact-steer",
+  });
+
+  expect(steerCalls).toEqual(["等手动压缩完再处理"]);
+  expect(replaceCalls).toEqual([]);
+  expect(messages).toContainEqual({
+    type: "send_agent_message_response",
+    payload: {
+      requestId: "req-compact-steer",
+      agentId,
+      accepted: true,
+      error: null,
+    },
+  });
 });

@@ -9167,6 +9167,29 @@ export class Session {
     }
   }
 
+  private async prepareForegroundUserPrompt(
+    agentId: string,
+    prompt: ReturnType<typeof buildAgentPrompt>,
+    onDeferredForCompaction: () => void,
+  ): Promise<ReturnType<typeof buildAgentPrompt>> {
+    let effectivePrompt = this.mainChatService
+      ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt, {
+          onDeferredForCompaction,
+        })
+      : prompt;
+    if (
+      this.interactiveCardsService &&
+      typeof effectivePrompt === "string" &&
+      !(typeof prompt === "string" && prompt.trimStart().startsWith("/"))
+    ) {
+      const feedback = await this.interactiveCardsService.consumePendingValidationFeedback(agentId);
+      if (feedback) {
+        effectivePrompt = `${feedback}\n\n${effectivePrompt}`;
+      }
+    }
+    return effectivePrompt;
+  }
+
   private async handleSendAgentMessageRequest(
     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
   ): Promise<void> {
@@ -9228,27 +9251,23 @@ export class Session {
         }
         const releaseForeground = this.mainChatService?.beginForegroundUserSend(agentId) ?? null;
         try {
-          let effectivePrompt = this.mainChatService
-            ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
-            : prompt;
-          if (
-            this.interactiveCardsService &&
-            typeof effectivePrompt === "string" &&
-            !(typeof prompt === "string" && prompt.trimStart().startsWith("/"))
-          ) {
-            const feedback =
-              await this.interactiveCardsService.consumePendingValidationFeedback(agentId);
-            if (feedback) {
-              effectivePrompt = `${feedback}\n\n${effectivePrompt}`;
+          const effectivePrompt = await this.prepareForegroundUserPrompt(agentId, prompt, () => {
+            if (deliveryStatus !== "queued") {
+              deliveryStatus = "queued";
+              queued();
             }
-          }
+          });
+          // 前台手动 /compact 或引擎自动压缩进行中时，一律走 steer 排队等待压缩完成，避免 interrupt 打断压缩。
+          const effectiveActiveTurnBehavior = this.mainChatService?.isCompacting(agentId)
+            ? "steer"
+            : (msg.activeTurnBehavior ?? "interrupt");
           const result = await sendPromptToAgent({
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             agentId,
             prompt: effectivePrompt,
             messageId: msg.messageId,
-            activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+            activeTurnBehavior: effectiveActiveTurnBehavior,
             sessionMode: msg.sessionMode,
             clearPendingPermissions: true,
             beforeDispatch,
@@ -9259,7 +9278,7 @@ export class Session {
               this.agentManager,
               agentId,
               result.started,
-              this.delivery.requestSignal,
+              deliveryStatus === "queued" ? undefined : this.delivery.requestSignal,
             );
           }
         } catch (error) {
