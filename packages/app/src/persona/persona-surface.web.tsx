@@ -1,7 +1,7 @@
 import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
 import { Copy, ExternalLink, Settings } from "lucide-react-native";
-import { useCallback, useMemo, useState, type CSSProperties } from "react";
+import { memo, useCallback, useMemo, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -11,8 +11,18 @@ import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/contexts/toast-context";
 import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
-import { isMixedContentIframeBlocked, normalizePersonaHubUrl } from "./settings";
-import { usePersonaEmbedSettingsState } from "./use-persona-settings";
+import {
+  formatPersonaHubDisplayHost,
+  getActivePersonaHub,
+  isMixedContentIframeBlocked,
+  normalizePersonaHubUrl,
+  selectActivePersonaHub,
+  type PersonaHubProfile,
+} from "./settings";
+import {
+  usePersonaEmbedSettingsState,
+  useUpdatePersonaEmbedSettings,
+} from "./use-persona-settings";
 
 const ThemedExternalLink = withUnistyles(ExternalLink);
 const ThemedCopy = withUnistyles(Copy);
@@ -30,6 +40,130 @@ const iframeStyle: CSSProperties = {
   border: "0",
 };
 
+const WebHubOptionButton = memo(function WebHubOptionButton({
+  hub,
+  isSelected,
+  onSelect,
+}: {
+  hub: PersonaHubProfile;
+  isSelected: boolean;
+  onSelect: (hubId: string) => void;
+}) {
+  const displayHost = useMemo(() => formatPersonaHubDisplayHost(hub.hubUrl), [hub.hubUrl]);
+  const handlePress = useCallback(() => {
+    onSelect(hub.id);
+  }, [hub.id, onSelect]);
+  const label = displayHost && displayHost !== hub.name ? `${hub.name} · ${displayHost}` : hub.name;
+  return (
+    <Button
+      size="sm"
+      variant={isSelected ? "default" : "outline"}
+      onPress={handlePress}
+      testID={`persona-web-hub-option-${hub.id}`}
+    >
+      <Text style={isSelected ? styles.primaryButtonText : styles.secondaryButtonText}>
+        {label}
+      </Text>
+    </Button>
+  );
+});
+
+const WebHubSwitcher = memo(function WebHubSwitcher({
+  hubs,
+  activeHubId,
+  onSelect,
+}: {
+  hubs: readonly PersonaHubProfile[];
+  activeHubId: string | undefined;
+  onSelect: (hubId: string) => void;
+}) {
+  const { t } = useTranslation();
+  if (hubs.length <= 1) {
+    return null;
+  }
+  return (
+    <View style={styles.hubSwitcherSection} testID="persona-web-hub-switcher">
+      <Text style={styles.hubSwitcherLabel}>{t("personaEmbed.webFallback.hubSelectorLabel")}</Text>
+      <View style={styles.hubSwitcherRow}>
+        {hubs.map((hub) => (
+          <WebHubOptionButton
+            key={hub.id}
+            hub={hub}
+            isSelected={hub.id === activeHubId}
+            onSelect={onSelect}
+          />
+        ))}
+      </View>
+    </View>
+  );
+});
+
+const WebIframePreviewControls = memo(function WebIframePreviewControls({
+  validHubUrl,
+  enabled,
+  mixedContentBlocked,
+  onToggle,
+}: {
+  validHubUrl: string | null;
+  enabled: boolean;
+  mixedContentBlocked: boolean;
+  onToggle: (value: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  if (!validHubUrl) {
+    return null;
+  }
+  return (
+    <View style={styles.iframeToggleSection}>
+      <View style={styles.iframeToggleRow}>
+        <Text style={styles.iframeToggleLabel}>{t("personaEmbed.webFallback.iframeToggle")}</Text>
+        <Switch
+          value={enabled}
+          onValueChange={onToggle}
+          accessibilityLabel={t("personaEmbed.webFallback.iframeToggle")}
+          testID="persona-web-iframe-toggle"
+        />
+      </View>
+      {enabled && mixedContentBlocked ? (
+        <View style={styles.warningBox} testID="persona-web-mixed-content-warning">
+          <Text style={styles.warningText}>
+            {t("personaEmbed.webFallback.mixedContentBlocked", { url: validHubUrl })}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+});
+
+const WebIframePreviewFrame = memo(function WebIframePreviewFrame({
+  validHubUrl,
+  activeHub,
+  enabled,
+  mixedContentBlocked,
+}: {
+  validHubUrl: string | null;
+  activeHub: PersonaHubProfile | null;
+  enabled: boolean;
+  mixedContentBlocked: boolean;
+}) {
+  const { t } = useTranslation();
+  if (!validHubUrl || !enabled || mixedContentBlocked) {
+    return null;
+  }
+  return (
+    <View style={styles.iframeContainer} testID="persona-web-iframe-container">
+      <iframe
+        key={activeHub?.id ?? validHubUrl}
+        src={validHubUrl}
+        title={activeHub?.name ?? t("personaEmbed.sidebar.title")}
+        sandbox={PERSONA_WEB_IFRAME_SANDBOX}
+        referrerPolicy="no-referrer"
+        style={iframeStyle}
+      />
+    </View>
+  );
+});
+
 export interface PersonaWebFallbackProps {
   /** Test hook for simulating HTTPS mixed-content blocking in unit/browser tests. */
   pageProtocolOverride?: string;
@@ -39,11 +173,13 @@ export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps
   const { t } = useTranslation();
   const toast = useToast();
   const { settings: personaSettings, isLoaded } = usePersonaEmbedSettingsState();
+  const updatePersonaSettings = useUpdatePersonaEmbedSettings();
   const [iframePreviewEnabled, setIframePreviewEnabled] = useState(false);
 
+  const activeHub = useMemo(() => getActivePersonaHub(personaSettings), [personaSettings]);
   const normalizedHub = useMemo(
-    () => normalizePersonaHubUrl(personaSettings.hubUrl),
-    [personaSettings.hubUrl],
+    () => normalizePersonaHubUrl(activeHub?.hubUrl ?? ""),
+    [activeHub?.hubUrl],
   );
   const validHubUrl = normalizedHub.ok ? normalizedHub.url : null;
 
@@ -51,6 +187,13 @@ export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps
     pageProtocolOverride ?? (typeof window !== "undefined" ? window.location.protocol : undefined);
   const mixedContentBlocked =
     validHubUrl !== null && isMixedContentIframeBlocked(pageProtocol, validHubUrl);
+
+  const handleSelectHub = useCallback(
+    (hubId: string) => {
+      void updatePersonaSettings((current) => selectActivePersonaHub(current, hubId));
+    },
+    [updatePersonaSettings],
+  );
 
   const handleOpenInNewTab = useCallback(() => {
     if (!validHubUrl || typeof window === "undefined") {
@@ -103,7 +246,18 @@ export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps
         <Text style={styles.title}>{t("personaEmbed.webFallback.title")}</Text>
         <Text style={styles.description}>{t("personaEmbed.webFallback.description")}</Text>
 
+        <WebHubSwitcher
+          hubs={personaSettings.hubs}
+          activeHubId={activeHub?.id}
+          onSelect={handleSelectHub}
+        />
+
         <View style={styles.urlBox}>
+          {activeHub ? (
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hubNameText}>
+              {activeHub.name}
+            </Text>
+          ) : null}
           <Text numberOfLines={1} ellipsizeMode="middle" style={styles.urlText}>
             {validHubUrl ?? t("personaEmbed.error.invalidUrl")}
           </Text>
@@ -135,41 +289,20 @@ export function PersonaSurface({ pageProtocolOverride }: PersonaWebFallbackProps
           </Button>
         </View>
 
-        {validHubUrl ? (
-          <View style={styles.iframeToggleSection}>
-            <View style={styles.iframeToggleRow}>
-              <Text style={styles.iframeToggleLabel}>
-                {t("personaEmbed.webFallback.iframeToggle")}
-              </Text>
-              <Switch
-                value={iframePreviewEnabled}
-                onValueChange={setIframePreviewEnabled}
-                accessibilityLabel={t("personaEmbed.webFallback.iframeToggle")}
-                testID="persona-web-iframe-toggle"
-              />
-            </View>
-            {iframePreviewEnabled && mixedContentBlocked ? (
-              <View style={styles.warningBox} testID="persona-web-mixed-content-warning">
-                <Text style={styles.warningText}>
-                  {t("personaEmbed.webFallback.mixedContentBlocked", { url: validHubUrl })}
-                </Text>
-              </View>
-            ) : null}
-          </View>
-        ) : null}
+        <WebIframePreviewControls
+          validHubUrl={validHubUrl}
+          enabled={iframePreviewEnabled}
+          mixedContentBlocked={mixedContentBlocked}
+          onToggle={setIframePreviewEnabled}
+        />
       </View>
 
-      {validHubUrl && iframePreviewEnabled && !mixedContentBlocked ? (
-        <View style={styles.iframeContainer} testID="persona-web-iframe-container">
-          <iframe
-            src={validHubUrl}
-            title={t("personaEmbed.sidebar.title")}
-            sandbox={PERSONA_WEB_IFRAME_SANDBOX}
-            referrerPolicy="no-referrer"
-            style={iframeStyle}
-          />
-        </View>
-      ) : null}
+      <WebIframePreviewFrame
+        validHubUrl={validHubUrl}
+        activeHub={activeHub}
+        enabled={iframePreviewEnabled}
+        mixedContentBlocked={mixedContentBlocked}
+      />
     </View>
   );
 }
@@ -203,6 +336,19 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     lineHeight: 20,
   },
+  hubSwitcherSection: {
+    gap: theme.spacing[2],
+  },
+  hubSwitcherLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  hubSwitcherRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
+  },
   urlBox: {
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],
@@ -210,6 +356,12 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface2,
     borderWidth: 1,
     borderColor: theme.colors.border,
+    gap: 2,
+  },
+  hubNameText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.code,
+    fontWeight: theme.fontWeight.medium,
   },
   urlText: {
     color: theme.colors.foreground,

@@ -1,6 +1,6 @@
 import * as Linking from "expo-linking";
 import { router } from "expo-router";
-import { useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -8,21 +8,62 @@ import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { Theme } from "@/styles/theme";
 import { buildSettingsSectionRoute } from "@/utils/host-routes";
-import { normalizePersonaHubUrl } from "./settings";
-import { usePersonaEmbedSettingsState } from "./use-persona-settings";
+import {
+  getActivePersonaHub,
+  normalizePersonaHubUrl,
+  selectActivePersonaHub,
+  type PersonaHubProfile,
+} from "./settings";
+import {
+  usePersonaEmbedSettingsState,
+  useUpdatePersonaEmbedSettings,
+} from "./use-persona-settings";
 
 const ThemedSpinner = withUnistyles(LoadingSpinner);
 const mutedIcon = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
+const NativeHubOptionButton = memo(function NativeHubOptionButton({
+  hub,
+  isSelected,
+  onSelect,
+}: {
+  hub: PersonaHubProfile;
+  isSelected: boolean;
+  onSelect: (hubId: string) => void;
+}) {
+  const handlePress = useCallback(() => {
+    onSelect(hub.id);
+  }, [hub.id, onSelect]);
+  return (
+    <Button
+      size="sm"
+      variant={isSelected ? "default" : "outline"}
+      onPress={handlePress}
+      testID={`persona-native-hub-option-${hub.id}`}
+    >
+      {hub.name}
+    </Button>
+  );
+});
+
 export function PersonaSurface() {
   const { t } = useTranslation();
   const { settings: personaSettings, isLoaded } = usePersonaEmbedSettingsState();
+  const updatePersonaSettings = useUpdatePersonaEmbedSettings();
 
+  const activeHub = useMemo(() => getActivePersonaHub(personaSettings), [personaSettings]);
   const normalizedHub = useMemo(
-    () => normalizePersonaHubUrl(personaSettings.hubUrl),
-    [personaSettings.hubUrl],
+    () => normalizePersonaHubUrl(activeHub?.hubUrl ?? ""),
+    [activeHub?.hubUrl],
   );
   const validHubUrl = normalizedHub.ok ? normalizedHub.url : null;
+
+  const handleSelectHub = useCallback(
+    (hubId: string) => {
+      void updatePersonaSettings((current) => selectActivePersonaHub(current, hubId));
+    },
+    [updatePersonaSettings],
+  );
 
   const handleOpenExternal = useCallback(() => {
     if (!validHubUrl) {
@@ -62,7 +103,31 @@ export function PersonaSurface() {
       <View style={styles.card}>
         <Text style={styles.title}>{t("personaEmbed.webFallback.title")}</Text>
         <Text style={styles.description}>{t("personaEmbed.webFallback.description")}</Text>
+
+        {personaSettings.hubs.length > 1 ? (
+          <View style={styles.hubSwitcherSection} testID="persona-native-hub-switcher">
+            <Text style={styles.hubSwitcherLabel}>
+              {t("personaEmbed.webFallback.hubSelectorLabel")}
+            </Text>
+            <View style={styles.hubSwitcherRow}>
+              {personaSettings.hubs.map((hub) => (
+                <NativeHubOptionButton
+                  key={hub.id}
+                  hub={hub}
+                  isSelected={hub.id === activeHub?.id}
+                  onSelect={handleSelectHub}
+                />
+              ))}
+            </View>
+          </View>
+        ) : null}
+
         <View style={styles.urlBox}>
+          {activeHub ? (
+            <Text numberOfLines={1} ellipsizeMode="tail" style={styles.hubNameText}>
+              {activeHub.name}
+            </Text>
+          ) : null}
           <Text numberOfLines={1} ellipsizeMode="middle" style={styles.urlText}>
             {validHubUrl ?? t("personaEmbed.error.invalidUrl")}
           </Text>
@@ -108,6 +173,19 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     lineHeight: 20,
   },
+  hubSwitcherSection: {
+    gap: theme.spacing[2],
+  },
+  hubSwitcherLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  hubSwitcherRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
+  },
   urlBox: {
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],
@@ -115,6 +193,12 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface2,
     borderWidth: 1,
     borderColor: theme.colors.border,
+    gap: 2,
+  },
+  hubNameText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.code,
+    fontWeight: theme.fontWeight.medium,
   },
   urlText: {
     color: theme.colors.foreground,

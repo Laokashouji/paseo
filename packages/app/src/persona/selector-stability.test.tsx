@@ -4,7 +4,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { createDefaultMainChatSettings } from "@getpaseo/protocol/main-chat";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
-import React, { type ComponentProps } from "react";
+import React, { Profiler, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
 import {
@@ -19,7 +19,11 @@ import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { PersonaSettingsSection } from "@/screens/settings/persona/persona-section";
 import { useSessionStore, type Agent, type SessionState } from "@/stores/session-store";
 import { PersonaHeroRow } from "./hero-row";
-import { DEFAULT_PERSONA_EMBED_SETTINGS, type PersonaEmbedSettings } from "./settings";
+import {
+  DEFAULT_PERSONA_EMBED_SETTINGS,
+  normalizePersonaEmbedSettings,
+  type PersonaEmbedSettings,
+} from "./settings";
 import { usePersonaEmbedSettings } from "./use-persona-settings";
 
 const mockHosts = [
@@ -177,13 +181,27 @@ function makeQueryClient(personaPatch: Partial<PersonaEmbedSettings>): QueryClie
   });
   const settings: AppSettings = {
     ...DEFAULT_CLIENT_SETTINGS,
-    persona: {
+    persona: normalizePersonaEmbedSettings({
       ...DEFAULT_PERSONA_EMBED_SETTINGS,
       ...personaPatch,
-    },
+    }),
   };
   qc.setQueryData(APP_SETTINGS_QUERY_KEY, settings);
   return qc;
+}
+
+function createProfilerTracker() {
+  let commitCount = 0;
+  const phases: string[] = [];
+  const onRender: React.ProfilerOnRenderCallback = (_id, phase) => {
+    commitCount += 1;
+    phases.push(phase);
+  };
+  return {
+    onRender,
+    getCommitCount: () => commitCount,
+    getPhases: () => phases,
+  };
 }
 
 function hasSnapshotLoopError(calls: unknown[][]): boolean {
@@ -226,48 +244,60 @@ describe("Persona embed React selector stability and mutual exclusion", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps PersonaHeroRow render count flat across unrelated session.agents updates", () => {
+  it("keeps PersonaHeroRow subtree render count flat across unrelated session.agents updates (React Profiler)", () => {
     const qc = makeQueryClient({ enabled: true, hubUrl: "http://10.37.217.3:18660" });
-    let renderCount = 0;
-    function TrackedPersonaHero() {
-      renderCount += 1;
-      return <PersonaHeroRow />;
-    }
+    const profiler = createProfilerTracker();
 
     const view = render(
       <QueryClientProvider client={qc}>
         <ToastApiProvider api={noopToastApi}>
-          <TrackedPersonaHero />
+          <Profiler id="persona-hero-single" onRender={profiler.onRender}>
+            <PersonaHeroRow />
+          </Profiler>
         </ToastApiProvider>
       </QueryClientProvider>,
     );
 
     expect(view.container.textContent).toContain("personaEmbed.sidebar.title");
     expect(view.container.textContent).toContain("10.37.217.3:18660");
-    const rendersAfterMount = renderCount;
-    expect(rendersAfterMount).toBeLessThan(6);
+    const commitsAfterMount = profiler.getCommitCount();
+    expect(commitsAfterMount).toBeGreaterThanOrEqual(1);
+    expect(commitsAfterMount).toBeLessThan(6);
+    expect(profiler.getPhases()[0]).toBe("mount");
 
     act(() => {
       pushUnrelatedAgents(6);
     });
 
-    expect(renderCount).toBe(rendersAfterMount);
+    // React Profiler observes internal subtree commits directly -> 0 re-renders on unrelated store churn
+    expect(profiler.getCommitCount()).toBe(commitsAfterMount);
+
+    // Sanity check: an actual Persona settings update DOES increment Profiler commits (proves live instrumentation)
+    act(() => {
+      qc.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, {
+        ...DEFAULT_CLIENT_SETTINGS,
+        persona: normalizePersonaEmbedSettings({
+          enabled: true,
+          hubUrl: "http://127.0.0.1:18660",
+        }),
+      });
+    });
+    expect(profiler.getCommitCount()).toBeGreaterThan(commitsAfterMount);
+    expect(view.container.textContent).toContain("127.0.0.1:18660");
     expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
   });
 
-  it("renders PersonaSettingsSection without React #185 loops across store updates", () => {
+  it("renders PersonaSettingsSection subtree without React #185 loops across store updates (React Profiler)", () => {
     const qc = makeQueryClient({ enabled: true });
-    let renderCount = 0;
-    function TrackedSettings() {
-      renderCount += 1;
-      return <PersonaSettingsSection />;
-    }
+    const profiler = createProfilerTracker();
 
     const view = render(
       <QueryClientProvider client={qc}>
         <ToastApiProvider api={noopToastApi}>
           <KeyboardActionDispatcherProvider>
-            <TrackedSettings />
+            <Profiler id="persona-settings-section" onRender={profiler.onRender}>
+              <PersonaSettingsSection />
+            </Profiler>
           </KeyboardActionDispatcherProvider>
         </ToastApiProvider>
       </QueryClientProvider>,
@@ -275,14 +305,15 @@ describe("Persona embed React selector stability and mutual exclusion", () => {
 
     expect(view.container.textContent).toContain("personaEmbed.settings.enabledLabel");
     expect(view.container.textContent).toContain("personaEmbed.settings.mainChatStillActiveBanner");
-    const rendersAfterMount = renderCount;
-    expect(rendersAfterMount).toBeLessThan(8);
+    const commitsAfterMount = profiler.getCommitCount();
+    expect(commitsAfterMount).toBeGreaterThanOrEqual(1);
+    expect(commitsAfterMount).toBeLessThan(8);
 
     act(() => {
       pushUnrelatedAgents(5);
     });
 
-    expect(renderCount).toBe(rendersAfterMount);
+    expect(profiler.getCommitCount()).toBe(commitsAfterMount);
     expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
   });
 
@@ -490,6 +521,77 @@ describe("Persona embed React selector stability and mutual exclusion", () => {
       expect(personaEmbedLocales[locale].webFallback.title).not.toBe(
         personaEmbedLocales.en.webFallback.title,
       );
+      const identicalCount = enKeys.filter((key) => localeFlat[key] === enFlat[key]).length;
+      expect(identicalCount).toBeLessThan(Math.ceil(enKeys.length * 0.1));
     }
+  });
+
+  it("keeps multi-Hub expanded PersonaHeroRow subtree render count flat across unrelated session.agents updates (React Profiler)", () => {
+    const queryClient = makeQueryClient({
+      enabled: true,
+      hubs: [
+        { id: "hub-a", name: "Work Hub", hubUrl: "http://10.37.217.3:18660", machineServerMap: {} },
+        { id: "hub-b", name: "Home Hub", hubUrl: "http://127.0.0.1:18661", machineServerMap: {} },
+      ],
+      activeHubId: "hub-a",
+      splitEnabled: true,
+      secondaryHubId: "hub-b",
+      sidebarExpanded: true,
+    });
+
+    const profiler = createProfilerTracker();
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <ToastApiProvider api={noopToastApi}>
+          <KeyboardActionDispatcherProvider>
+            <Profiler id="persona-hero-multi-hub" onRender={profiler.onRender}>
+              <PersonaHeroRow />
+            </Profiler>
+          </KeyboardActionDispatcherProvider>
+        </ToastApiProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(view.queryByTestId("sidebar-persona-hub-list")).not.toBeNull();
+    expect(view.queryByTestId("sidebar-persona-split-badge")).not.toBeNull();
+    const initialCommits = profiler.getCommitCount();
+    expect(initialCommits).toBeGreaterThanOrEqual(1);
+
+    act(() => {
+      pushUnrelatedAgents(6);
+    });
+
+    expect(profiler.getCommitCount()).toBe(initialCommits);
+
+    // Sanity check: switching active Hub triggers an internal PersonaHeroRow commit measured by Profiler
+    act(() => {
+      queryClient.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, {
+        ...DEFAULT_CLIENT_SETTINGS,
+        persona: normalizePersonaEmbedSettings({
+          enabled: true,
+          hubs: [
+            {
+              id: "hub-a",
+              name: "Work Hub",
+              hubUrl: "http://10.37.217.3:18660",
+              machineServerMap: {},
+            },
+            {
+              id: "hub-b",
+              name: "Home Hub",
+              hubUrl: "http://127.0.0.1:18661",
+              machineServerMap: {},
+            },
+          ],
+          activeHubId: "hub-b",
+          splitEnabled: true,
+          secondaryHubId: "hub-a",
+          sidebarExpanded: true,
+        }),
+      });
+    });
+    expect(profiler.getCommitCount()).toBeGreaterThan(initialCommits);
+    expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
   });
 });

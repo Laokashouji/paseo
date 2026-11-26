@@ -1,15 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPersonaHealthCheckUrl,
+  DEFAULT_PERSONA_HUB_ID,
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
+  isPersonaDiskPartitionDirName,
   isPersonaWebviewAttach,
+  isPersonaWebviewPartition,
   isValidPersonaHubUrl,
+  matchPersonaWebviewAttachHubUrl,
+  MAX_PERSONA_HUB_URLS,
+  normalizePersonaHubEntries,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
+  normalizePersonaWebviewPartition,
   parsePersonaSessionPath,
+  PERSONA_DISK_PARTITION_DIR_NAME,
+  PERSONA_DISK_PARTITION_DIR_PREFIX,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_WEBVIEW_PARTITION,
+  PERSONA_WEBVIEW_PARTITION_PREFIX,
+  resolveAuthorizedPinnedPersonaHubUrl,
+  resolvePersonaHubPartition,
 } from "./policy.js";
 
 describe("persona-webview policy", () => {
@@ -256,5 +270,204 @@ describe("persona-webview policy", () => {
         "https://hub.example.com/persona-ui",
       ),
     ).toBeNull();
+  });
+
+  it("normalizes multi-Hub allowlists, deduplicates URLs, and rejects unsafe or oversized lists", () => {
+    expect(normalizePersonaHubUrlList(null)).toEqual([]);
+    expect(normalizePersonaHubUrlList(undefined)).toEqual([]);
+    expect(normalizePersonaHubUrlList([])).toEqual([]);
+    expect(
+      normalizePersonaHubUrlList([
+        "http://10.37.217.3:18660/",
+        "https://hub-b.example.com/persona///",
+        "http://10.37.217.3:18660",
+      ]),
+    ).toEqual(["http://10.37.217.3:18660", "https://hub-b.example.com/persona"]);
+
+    // Fail-closed if any element has credentials, unsafe protocol, or invalid type
+    expect(normalizePersonaHubUrlList("http://127.0.0.1:18660")).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(["http://10.37.217.3:18660", "http://user:pass@127.0.0.1:18661"]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(["http://10.37.217.3:18660", "javascript:alert(1)"]),
+    ).toBeNull();
+    expect(normalizePersonaHubUrlList(["http://10.37.217.3:18660", 123])).toBeNull();
+    expect(
+      normalizePersonaHubUrlList(
+        Array.from({ length: MAX_PERSONA_HUB_URLS + 1 }, (_, i) => `http://127.0.0.1:${20000 + i}`),
+      ),
+    ).toBeNull();
+  });
+
+  it("validates per-Hub persistent partitions and preserves persist:persona for hub-default", () => {
+    expect(PERSONA_WEBVIEW_PARTITION_PREFIX).toBe("persist:persona-");
+    expect(resolvePersonaHubPartition(DEFAULT_PERSONA_HUB_ID)).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(resolvePersonaHubPartition("hub-b")).toBe("persist:persona-hub-b");
+    expect(resolvePersonaHubPartition("hub_work-2")).toBe("persist:persona-hub_work-2");
+
+    expect(resolvePersonaHubPartition("")).toBeNull();
+    expect(resolvePersonaHubPartition("../evil")).toBeNull();
+    expect(resolvePersonaHubPartition("hub with space")).toBeNull();
+    expect(resolvePersonaHubPartition("hub.dot")).toBeNull();
+
+    expect(isPersonaWebviewPartition(PERSONA_WEBVIEW_PARTITION)).toBe(true);
+    expect(isPersonaWebviewPartition("persist:persona-hub-b")).toBe(true);
+    expect(isPersonaWebviewPartition("persist:persona-")).toBe(false);
+    expect(isPersonaWebviewPartition("persist:persona-../escape")).toBe(false);
+    expect(isPersonaWebviewPartition("persist:paseo-browser")).toBe(false);
+    expect(isPersonaWebviewPartition("persona-hub-b")).toBe(false);
+
+    // normalizePersonaHubEntries deduplicates identical pairs and fails closed on conflicting duplicate partitions
+    expect(
+      normalizePersonaHubEntries([
+        { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660/" },
+        { partition: "persist:persona-hub-b", hubUrl: "http://127.0.0.1:18661/" },
+        { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toEqual([
+      { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660" },
+      { partition: "persist:persona-hub-b", hubUrl: "http://127.0.0.1:18661" },
+    ]);
+
+    expect(
+      normalizePersonaHubEntries([
+        { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18660" },
+        { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://127.0.0.1:18661" },
+      ]),
+    ).toBeNull();
+
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:paseo-browser", hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("matches each webview attach strictly by partition and respects reverse-proxy basePath", () => {
+    const entries = [
+      { partition: PERSONA_WEBVIEW_PARTITION, hubUrl: "http://10.37.217.3:18660" },
+      { partition: "persist:persona-hub-a", hubUrl: "https://proxy.example.com/hub-a" },
+      { partition: "persist:persona-hub-b", hubUrl: "https://proxy.example.com/hub-b" },
+    ];
+
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "http://10.37.217.3:18660/s/m1/s1" },
+        entries,
+      ),
+    ).toBe("http://10.37.217.3:18660");
+
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-b", src: "https://proxy.example.com/hub-b/chat" },
+        entries,
+      ),
+    ).toBe("https://proxy.example.com/hub-b");
+
+    // Cross-partition attach (Hub B partition requesting Hub A path or Hub default origin) is rejected
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-b", src: "https://proxy.example.com/hub-a/chat" },
+        entries,
+      ),
+    ).toBeNull();
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-unknown", src: "http://10.37.217.3:18660/" },
+        entries,
+      ),
+    ).toBeNull();
+
+    // Unregistered origin or ambiguous basePath is rejected
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: PERSONA_WEBVIEW_PARTITION, src: "https://evil.example.com/" },
+        entries,
+      ),
+    ).toBeNull();
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-a", src: "https://proxy.example.com/unknown" },
+        entries,
+      ),
+    ).toBeNull();
+
+    // Pinned Hub authorization stays pinned to that Hub and revokes when removed
+    expect(
+      resolveAuthorizedPinnedPersonaHubUrl("https://proxy.example.com/hub-b", [
+        "https://proxy.example.com/hub-b",
+      ]),
+    ).toBe("https://proxy.example.com/hub-b");
+    expect(
+      resolveAuthorizedPinnedPersonaHubUrl("https://proxy.example.com/hub-b", [
+        "http://10.37.217.3:18660",
+        "https://proxy.example.com/hub-a",
+      ]),
+    ).toBeNull();
+  });
+
+  it("canonicalizes Hub partitions to lowercase, rejects uppercase/case-colliding entries fail-closed, and strictly validates on-disk partition directory names", () => {
+    expect(PERSONA_DISK_PARTITION_DIR_NAME).toBe("persona");
+    expect(PERSONA_DISK_PARTITION_DIR_PREFIX).toBe("persona-");
+
+    // Hub ID resolution folds ASCII case to canonical lowercase and maps Hub-Default -> persist:persona
+    expect(resolvePersonaHubPartition("hub-Case")).toBe("persist:persona-hub-case");
+    expect(resolvePersonaHubPartition("hub-case")).toBe("persist:persona-hub-case");
+    expect(resolvePersonaHubPartition("HUB-DEFAULT")).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(normalizePersonaWebviewPartition("persist:persona-hub-Case")).toBe(
+      "persist:persona-hub-case",
+    );
+    expect(normalizePersonaWebviewPartition("PERSIST:persona")).toBeNull();
+    expect(normalizePersonaWebviewPartition("persist:PERSONA")).toBeNull();
+
+    // Active partition validator requires canonical lowercase (prevents Electron Session vs FS divergence)
+    expect(isPersonaWebviewPartition("persist:persona-hub-case")).toBe(true);
+    expect(isPersonaWebviewPartition("persist:persona-hub-Case")).toBe(false);
+    expect(isPersonaWebviewPartition("PERSIST:persona")).toBe(false);
+    expect(isPersonaWebviewPartition("persist:PERSONA")).toBe(false);
+
+    // Case-colliding or non-lowercase entries fail closed in normalizePersonaHubEntries & attach matching
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+        { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18661" },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+        { partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizePersonaHubEntries([
+        { partition: "persist:persona-hub-Case", hubUrl: "http://127.0.0.1:18660" },
+      ]),
+    ).toBeNull();
+    expect(
+      matchPersonaWebviewAttachHubUrl(
+        { partition: "persist:persona-hub-Case", src: "http://127.0.0.1:18660/" },
+        [{ partition: "persist:persona-hub-case", hubUrl: "http://127.0.0.1:18660" }],
+      ),
+    ).toBeNull();
+
+    // Disk partition scanner validator allows exact persona / safe persona-* dirs (incl. legacy mixed case)
+    // while strictly excluding paseo-browser and malformed/unsafe names
+    expect(isPersonaDiskPartitionDirName("persona")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-work")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-work-a1b2c3d4")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("persona-hub-LegacyCase")).toBe(true);
+    expect(isPersonaDiskPartitionDirName("paseo-browser")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona_other")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-../escape")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("persona-bad.dot")).toBe(false);
+    expect(isPersonaDiskPartitionDirName("PERSONA")).toBe(false);
+
+    expect(isPersonaClearablePartition("persist:persona")).toBe(true);
+    expect(isPersonaClearablePartition("persist:persona-hub-LegacyCase")).toBe(true);
+    expect(isPersonaClearablePartition("persist:paseo-browser")).toBe(false);
+    expect(isPersonaClearablePartition("PERSIST:persona")).toBe(false);
   });
 });

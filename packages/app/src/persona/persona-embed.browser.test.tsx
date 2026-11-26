@@ -5,6 +5,7 @@ import React, { act, type ComponentProps, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { I18nextProvider } from "react-i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
 import PersonaRoute from "@/app/persona";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
 import type { DesktopHostBridge } from "@/desktop/host";
@@ -27,11 +28,13 @@ import {
   type PersonaGuestIpcLike,
 } from "../../../desktop/src/features/persona-webview/guest-preload";
 import {
+  createPersonaHostHubRegistry,
   registerPersonaWebviewGuestIpcBridge,
   type PersonaGuestFrameLike,
   type PersonaGuestIpcMainEventLike,
   type PersonaGuestIpcWebContentsLike,
 } from "../../../desktop/src/features/persona-webview/index";
+import { WEB_SURFACE_PLANE } from "@/lib/overlay-root";
 import { PersonaHeroRow } from "./hero-row";
 import { PersonaSurface as ElectronPersonaSurface } from "./persona-surface.electron";
 import { PersonaSurface } from "./persona-surface.web";
@@ -39,12 +42,21 @@ import {
   destroyResidentPersonaWebview,
   disableResidentPersonaWebview,
   ensureResidentPersonaWebview,
+  getResidentPersonaPoolDiagnostics,
   getResidentPersonaWebview,
   parkResidentPersonaWebview,
   PERSONA_RESIDENT_HOST_ID,
   presentResidentPersonaWebview,
+  reconcileResidentPersonaWebviews,
 } from "./resident-persona-webview.electron";
-import { DEFAULT_PERSONA_EMBED_SETTINGS, type PersonaEmbedSettings } from "./settings";
+import {
+  DEFAULT_PERSONA_EMBED_SETTINGS,
+  DEFAULT_PERSONA_HUB_ID,
+  normalizePersonaEmbedSettings,
+  PERSONA_WEBVIEW_PARTITION,
+  PERSONA_WEBVIEW_PARTITION_PREFIX,
+  type PersonaEmbedSettings,
+} from "./settings";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -117,13 +129,27 @@ function makeQueryClient(personaPatch: Partial<PersonaEmbedSettings> = {}): Quer
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
+  const persona = personaPatch.hubs
+    ? normalizePersonaEmbedSettings({
+        ...DEFAULT_PERSONA_EMBED_SETTINGS,
+        ...personaPatch,
+      })
+    : normalizePersonaEmbedSettings({
+        enabled: personaPatch.enabled ?? DEFAULT_PERSONA_EMBED_SETTINGS.enabled,
+        hubUrl: personaPatch.hubUrl ?? getLoopbackHubUrl(),
+        machineServerMap: personaPatch.machineServerMap ?? {},
+        hidePersonaSidebar:
+          personaPatch.hidePersonaSidebar ?? DEFAULT_PERSONA_EMBED_SETTINGS.hidePersonaSidebar,
+        hideBuiltInMainChatWhenEnabled:
+          personaPatch.hideBuiltInMainChatWhenEnabled ??
+          DEFAULT_PERSONA_EMBED_SETTINGS.hideBuiltInMainChatWhenEnabled,
+        interceptSessionClicks:
+          personaPatch.interceptSessionClicks ??
+          DEFAULT_PERSONA_EMBED_SETTINGS.interceptSessionClicks,
+      });
   qc.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, {
     ...DEFAULT_CLIENT_SETTINGS,
-    persona: {
-      ...DEFAULT_PERSONA_EMBED_SETTINGS,
-      hubUrl: getLoopbackHubUrl(),
-      ...personaPatch,
-    },
+    persona,
   });
   return qc;
 }
@@ -132,6 +158,19 @@ function installDesktopPersonaMock(
   overrides: Partial<NonNullable<DesktopHostBridge["persona"]>> = {},
 ) {
   const setHubUrl = overrides.setHubUrl ?? vi.fn(async () => true);
+  const setHubUrls =
+    overrides.setHubUrls ??
+    vi.fn(async (urls: string[] | null, options?: { enabled?: boolean }) =>
+      setHubUrl(urls?.[0] ?? null, options),
+    );
+  const setHubEntries =
+    overrides.setHubEntries ??
+    vi.fn(
+      async (
+        entries: Array<{ partition: string; hubUrl: string }> | null,
+        options?: { enabled?: boolean },
+      ) => setHubUrls(entries ? entries.map((entry) => entry.hubUrl) : null, options),
+    );
   const checkHealth =
     overrides.checkHealth ??
     vi.fn(async () => ({
@@ -142,10 +181,14 @@ function installDesktopPersonaMock(
     }));
   const clearSession = overrides.clearSession ?? vi.fn(async () => undefined);
   const openDevTools = overrides.openDevTools ?? vi.fn(async () => true);
+  const dialogAsk = vi.fn(async () => true);
   const eventListeners = new Map<string, Set<(payload: unknown) => void>>();
 
   window.paseoDesktop = {
     platform: "darwin",
+    dialog: {
+      ask: dialogAsk,
+    },
     events: {
       on: async (eventName, handler) => {
         const set = eventListeners.get(eventName) ?? new Set();
@@ -157,7 +200,11 @@ function installDesktopPersonaMock(
       },
     },
     persona: {
-      partition: "persist:persona",
+      partition: PERSONA_WEBVIEW_PARTITION,
+      partitionPrefix: PERSONA_WEBVIEW_PARTITION_PREFIX,
+      supportsPerHubPartitions: true,
+      setHubEntries,
+      setHubUrls,
       setHubUrl,
       checkHealth,
       clearSession,
@@ -167,10 +214,13 @@ function installDesktopPersonaMock(
   };
 
   return {
+    setHubEntries,
+    setHubUrls,
     setHubUrl,
     checkHealth,
     clearSession,
     openDevTools,
+    dialogAsk,
     emitDesktopEvent(eventName: string, payload: unknown) {
       for (const handler of eventListeners.get(eventName) ?? []) {
         handler(payload);
@@ -1052,5 +1102,1186 @@ describe("Persona C2 embed Chromium browser regressions", () => {
       controller.dispose();
       guestStage.remove();
     }
+  });
+
+  it("renders single-Hub hero cleanly and supports multi-Hub sidebar expand/collapse, instant switch, and one-click right split", async () => {
+    const hubAUrl = `${window.location.origin}/__persona-hub-a`;
+    const hubBUrl = `${window.location.origin}/__persona-hub-b`;
+    const hubCUrl = `${window.location.origin}/__persona-hub-c`;
+
+    // 1. Single Hub stays a clean single row without expand toggle or sub-list
+    const singleQc = makeQueryClient({ enabled: true, hubUrl: hubAUrl });
+    await renderInBrowser(singleQc, <PersonaHeroRow />);
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hero"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-expand-toggle"]')).toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-list"]')).toBeNull();
+
+    // 2. Multi-Hub starts collapsed with expand toggle and active Hub summary
+    const multiQc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        { id: "hub-a", name: "Work Hub", hubUrl: hubAUrl, machineServerMap: {} },
+        { id: "hub-b", name: "Home Hub", hubUrl: hubBUrl, machineServerMap: {} },
+        { id: "hub-c", name: "Lab Hub", hubUrl: hubCUrl, machineServerMap: {} },
+      ],
+      activeHubId: "hub-a",
+      splitEnabled: false,
+      secondaryHubId: null,
+      sidebarExpanded: false,
+    });
+    await renderInBrowser(multiQc, <PersonaHeroRow />);
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-expand-toggle"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-list"]')).toBeNull();
+    expect(hostEl.textContent).toContain("Work Hub");
+
+    // Expand Hub list -> vertical sub-rows show all Hubs with short names & hosts
+    const expandBtn = hostEl.querySelector(
+      '[data-testid="sidebar-persona-expand-toggle"]',
+    ) as HTMLElement | null;
+    await act(async () => {
+      expandBtn?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-list"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-row-hub-a"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-row-hub-b"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-row-hub-c"]')).not.toBeNull();
+
+    // Click Hub B sub-row -> switches activeHubId immediately
+    const selectB = hostEl.querySelector(
+      '[data-testid="sidebar-persona-hub-select-hub-b"]',
+    ) as HTMLElement | null;
+    await act(async () => {
+      selectB?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(multiQc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.activeHubId).toBe(
+      "hub-b",
+    );
+
+    // One-click add Hub C to right split pane
+    const splitC = hostEl.querySelector(
+      '[data-testid="sidebar-persona-hub-split-hub-c"]',
+    ) as HTMLElement | null;
+    expect(splitC).not.toBeNull();
+    await act(async () => {
+      splitC?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const afterSplit = multiQc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona;
+    expect(afterSplit?.splitEnabled).toBe(true);
+    expect(afterSplit?.activeHubId).toBe("hub-b");
+    expect(afterSplit?.secondaryHubId).toBe("hub-c");
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-split-badge"]')).not.toBeNull();
+
+    // Collapse back -> hides sub-rows while displaying split summary & split badge
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="sidebar-persona-expand-toggle"]') as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-hub-list"]')).toBeNull();
+    expect(hostEl.querySelector('[data-testid="sidebar-persona-split-badge"]')).not.toBeNull();
+    expect(hostEl.textContent).toContain("Home Hub · Lab Hub");
+  });
+
+  async function clickTestId(rootNode: ParentNode, testId: string, delayMs = 30): Promise<void> {
+    await act(async () => {
+      (rootNode.querySelector(`[data-testid="${testId}"]`) as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    });
+  }
+
+  async function dragSplitDivider(
+    divider: HTMLElement,
+    surfaceRect: DOMRect,
+    fromRatio: number,
+    toRatio: number,
+    onMidDrag: () => void,
+  ): Promise<void> {
+    await act(async () => {
+      divider.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          clientX: surfaceRect.left + surfaceRect.width * fromRatio,
+          pointerId: 1,
+        }),
+      );
+    });
+    onMidDrag();
+    await act(async () => {
+      const targetX = surfaceRect.left + surfaceRect.width * toRatio;
+      window.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          clientX: targetX,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          clientX: targetX,
+          pointerId: 1,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+  }
+
+  async function resizeHostViewport(widthPx: number): Promise<void> {
+    await act(async () => {
+      hostEl.style.width = `${widthPx}px`;
+      window.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+  }
+
+  function attachPersonaConfigSpy(
+    hubId: string,
+    webContentsId: number,
+    sentConfigsByHub: Map<string, Array<Record<string, unknown>>>,
+  ) {
+    const wv = getResidentPersonaWebview(hubId)!;
+    wv.getWebContentsId = () => webContentsId;
+    wv.getURL = () => wv.src;
+    wv.send = vi.fn((channel: string, payload?: unknown) => {
+      if (channel !== "paseo:persona:config" || !payload || typeof payload !== "object") {
+        return;
+      }
+      const list = sentConfigsByHub.get(hubId) ?? [];
+      list.push(payload as Record<string, unknown>);
+      sentConfigsByHub.set(hubId, list);
+    });
+    return wv;
+  }
+
+  async function setActiveHubInCache(qc: QueryClient, hubId: string): Promise<void> {
+    const updateActive = (prev: AppSettings | undefined): AppSettings | undefined =>
+      prev
+        ? {
+            ...prev,
+            persona: normalizePersonaEmbedSettings({ ...prev.persona, activeHubId: hubId }),
+          }
+        : prev;
+    await act(async () => {
+      qc.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, updateActive);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+  }
+
+  function readPersistedPersona(qc: QueryClient) {
+    return qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)!.persona;
+  }
+
+  it("keeps multi-Hub resident webviews alive across switches and supports split drag, compaction, narrow fallback, and swap/close", async () => {
+    const hubAUrl = `${window.location.origin}/__persona-split-a`;
+    const hubBUrl = `${window.location.origin}/__persona-split-b`;
+    hostEl.style.width = "1120px";
+    hostEl.style.height = "720px";
+    hostEl.style.display = "flex";
+
+    installDesktopPersonaMock();
+    const sentConfigsByHub = new Map<string, Array<Record<string, unknown>>>();
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hidePersonaSidebar: false,
+      hubs: [
+        { id: "hub-a", name: "Hub A", hubUrl: hubAUrl, machineServerMap: {} },
+        { id: "hub-b", name: "Hub B", hubUrl: hubBUrl, machineServerMap: {} },
+      ],
+      activeHubId: "hub-a",
+      splitEnabled: false,
+      secondaryHubId: null,
+      splitRatio: 0.5,
+    });
+
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+
+    const webviewA = attachPersonaConfigSpy("hub-a", 701, sentConfigsByHub);
+    expect(webviewA.parentElement?.getAttribute("aria-hidden")).toBeNull();
+
+    // Switch to Hub B via primary pane Hub switcher -> Hub A parks at 1x1 without unmounting
+    await clickTestId(hostEl, "persona-pane-primary-hub-switcher", 20);
+    await clickTestId(document, "persona-pane-primary-hub-option-hub-b", 40);
+
+    const webviewB = attachPersonaConfigSpy("hub-b", 702, sentConfigsByHub);
+    expect(webviewA.isConnected).toBe(true);
+    expect(webviewA.parentElement?.style.width).toBe("1px");
+    expect(webviewA.parentElement?.getAttribute("aria-hidden")).toBe("true");
+    expect(webviewB.parentElement?.getAttribute("aria-hidden")).toBeNull();
+
+    // Switch back to Hub A -> reuses exact same DOM node (0ms keep-alive)
+    await setActiveHubInCache(qc, "hub-a");
+    expect(getResidentPersonaWebview("hub-a")).toBe(webviewA);
+    expect(webviewA.parentElement?.getAttribute("aria-hidden")).toBeNull();
+    expect(webviewB.parentElement?.style.width).toBe("1px");
+
+    // Toggle split view -> mounts both panes side-by-side and auto-compacts Persona sidebar
+    await clickTestId(hostEl, "persona-toolbar-toggle-split", 50);
+    expect(hostEl.querySelector('[data-testid="persona-pane-primary"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="persona-pane-secondary"]')).not.toBeNull();
+    expect(sentConfigsByHub.get("hub-a")?.at(-1)?.hidePersonaSidebar).toBe(true);
+    expect(sentConfigsByHub.get("hub-b")?.at(-1)?.hidePersonaSidebar).toBe(true);
+
+    // Draggable split divider disables webview pointer-events during drag & persists clamped ratio
+    const divider = document.querySelector('[data-testid="persona-split-divider"]') as HTMLElement;
+    expect(divider).not.toBeNull();
+    await dragSplitDivider(divider, hostEl.getBoundingClientRect(), 0.5, 0.65, () => {
+      expect(document.querySelector('[data-testid="persona-split-drag-shield"]')).not.toBeNull();
+      expect(webviewA.parentElement?.style.pointerEvents).toBe("none");
+      expect(webviewB.parentElement?.style.pointerEvents).toBe("none");
+    });
+    expect(document.querySelector('[data-testid="persona-split-drag-shield"]')).toBeNull();
+    expect(webviewA.parentElement?.style.pointerEvents).toBe("auto");
+    expect(webviewB.parentElement?.style.pointerEvents).toBe("auto");
+    expect(readPersistedPersona(qc).splitRatio).toBeGreaterThan(0.6);
+
+    // Narrow viewport auto-falls back to single pane without clobbering persisted splitEnabled
+    await resizeHostViewport(740);
+    expect(hostEl.querySelector('[data-testid="persona-pane-secondary"]')).toBeNull();
+    expect(webviewB.parentElement?.style.width).toBe("1px");
+    expect(readPersistedPersona(qc).splitEnabled).toBe(true);
+
+    // Widening restores split, swap panes, and close primary pane promotes secondary & restores sidebar
+    await resizeHostViewport(1120);
+    expect(hostEl.querySelector('[data-testid="persona-pane-secondary"]')).not.toBeNull();
+
+    await clickTestId(hostEl, "persona-pane-secondary-swap");
+    expect(readPersistedPersona(qc).activeHubId).toBe("hub-b");
+
+    await clickTestId(hostEl, "persona-pane-primary-close-split");
+    expect(hostEl.querySelector('[data-testid="persona-pane-secondary"]')).toBeNull();
+    expect(readPersistedPersona(qc).splitEnabled).toBe(false);
+    expect(readPersistedPersona(qc).activeHubId).toBe("hub-a");
+    expect(sentConfigsByHub.get("hub-a")?.at(-1)?.hidePersonaSidebar).toBe(false);
+  });
+
+  it("routes multi-Hub guest IPC session lookups strictly by guestWebContentsId and rejects cross-Hub spoofs", async () => {
+    const hubAUrl = `${window.location.origin}/__persona-route-a`;
+    const hubBUrl = `${window.location.origin}/__persona-route-b`;
+    hostEl.style.width = "1120px";
+    hostEl.style.height = "720px";
+    hostEl.style.display = "flex";
+
+    const desktopMock = installDesktopPersonaMock();
+    const wsA = {
+      id: "wks_aaaaaaaaaaaaaaaa",
+      projectKey: "proj-a",
+      workspaceDirectory: "/repo/work",
+      name: "Work Repo",
+      cwd: "/repo/work",
+      status: "ready",
+      agentIds: [],
+      isArchived: false,
+      createdAt: new Date("2026-11-26T00:00:00.000Z"),
+    } as unknown as WorkspaceDescriptor;
+    const wsB = {
+      id: "wks_bbbbbbbbbbbbbbbb",
+      projectKey: "proj-b",
+      workspaceDirectory: "/repo/home",
+      name: "Home Repo",
+      cwd: "/repo/home",
+      status: "ready",
+      agentIds: [],
+      isArchived: false,
+      createdAt: new Date("2026-11-26T00:00:00.000Z"),
+    } as unknown as WorkspaceDescriptor;
+    useSessionStore.setState({
+      sessions: {
+        srv_devbox: {
+          serverId: "srv_devbox",
+          client: null,
+          clientGeneration: 1,
+          viewedTimelineSync: null,
+          serverInfo: { serverId: "srv_devbox", hostname: "host-a", version: "0.17.535" },
+          hasHydratedAgents: true,
+          hasHydratedWorkspaces: true,
+          hasWorkspaceDirectorySnapshot: true,
+          agents: new Map(),
+          agentDetails: new Map(),
+          workspaces: new Map([[wsA.id, wsA]]),
+          projects: new Map(),
+        } as unknown as SessionState,
+        srv_mac: {
+          serverId: "srv_mac",
+          client: null,
+          clientGeneration: 1,
+          viewedTimelineSync: null,
+          serverInfo: { serverId: "srv_mac", hostname: "host-b", version: "0.17.535" },
+          hasHydratedAgents: true,
+          hasHydratedWorkspaces: true,
+          hasWorkspaceDirectorySnapshot: true,
+          agents: new Map(),
+          agentDetails: new Map(),
+          workspaces: new Map([[wsB.id, wsB]]),
+          projects: new Map(),
+        } as unknown as SessionState,
+      },
+      agentLastActivity: new Map(),
+    });
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: "hub-a",
+          name: "Hub A",
+          hubUrl: hubAUrl,
+          machineServerMap: { "shared-box": "srv_devbox" },
+        },
+        {
+          id: "hub-b",
+          name: "Hub B",
+          hubUrl: hubBUrl,
+          machineServerMap: { "shared-box": "srv_mac" },
+        },
+      ],
+      activeHubId: "hub-a",
+      splitEnabled: true,
+      secondaryHubId: "hub-b",
+    });
+
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    const webviewA = getResidentPersonaWebview("hub-a")!;
+    const webviewB = getResidentPersonaWebview("hub-b")!;
+    webviewA.getWebContentsId = () => 701;
+    webviewA.getURL = () => webviewA.src;
+    webviewB.getWebContentsId = () => 702;
+    webviewB.getURL = () => webviewB.src;
+
+    mockNavigateToWorkspace.mockClear();
+    await act(async () => {
+      desktopMock.emitDesktopEvent("persona-open-session", {
+        machineId: "shared-box",
+        sessionId: "sess-only-in-hub-a",
+        workspaceIdHint: wsA.id,
+        source: "link-click",
+        rawHref: `${hubAUrl}/s/shared-box/sess-only-in-hub-a`,
+        guestWebContentsId: 701,
+        frameUrl: `${hubAUrl}/s/shared-box/sess-only-in-hub-a`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(mockNavigateToWorkspace).toHaveBeenCalledWith({
+      serverId: "srv_devbox",
+      workspaceId: wsA.id,
+      target: undefined,
+    });
+
+    mockNavigateToWorkspace.mockClear();
+    await act(async () => {
+      desktopMock.emitDesktopEvent("persona-open-session", {
+        machineId: "shared-box",
+        sessionId: "sess-only-in-hub-b",
+        workspaceIdHint: wsB.id,
+        source: "link-click",
+        rawHref: `${hubBUrl}/s/shared-box/sess-only-in-hub-b`,
+        guestWebContentsId: 702,
+        frameUrl: `${hubBUrl}/s/shared-box/sess-only-in-hub-b`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(mockNavigateToWorkspace).toHaveBeenCalledWith({
+      serverId: "srv_mac",
+      workspaceId: wsB.id,
+      target: undefined,
+    });
+
+    // Cross-Hub spoof (Hub A guestWebContentsId 701 claiming Hub B frameUrl) fails closed
+    mockNavigateToWorkspace.mockClear();
+    await act(async () => {
+      desktopMock.emitDesktopEvent("persona-open-session", {
+        machineId: "shared-box",
+        sessionId: "sess-spoof",
+        workspaceIdHint: wsB.id,
+        source: "link-click",
+        rawHref: `${hubBUrl}/s/shared-box/sess-spoof`,
+        guestWebContentsId: 701,
+        frameUrl: `${hubBUrl}/s/shared-box/sess-spoof`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(mockNavigateToWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("manages multiple Hubs in Settings (add, reorder, per-Hub health check & clear session, isolated mappings) and switches Hubs in Web fallback", async () => {
+    const hubAUrl = `${window.location.origin}/__persona-settings-a`;
+    const hubBUrl = `${window.location.origin}/__persona-settings-b`;
+
+    const desktopMock = installDesktopPersonaMock({
+      checkHealth: vi.fn(async (targetUrl?: string) => ({
+        ok: true as const,
+        hubName: targetUrl === hubBUrl ? "hub-b-live" : "hub-a-live",
+        version: "1.2.3",
+        latencyMs: 6,
+      })),
+    });
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "Work Hub",
+          hubUrl: hubAUrl,
+          machineServerMap: { "box-a": "srv_devbox" },
+        },
+        {
+          id: "hub-b",
+          name: "Home Hub",
+          hubUrl: hubBUrl,
+          machineServerMap: { "box-b": "srv_mac" },
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+    });
+
+    await renderInBrowser(qc, <PersonaSettingsSection />);
+    expect(hostEl.querySelector('[data-testid="persona-mapping-row-box-a"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="persona-mapping-row-box-b"]')).toBeNull();
+
+    // Select Hub B in list -> shows ONLY Hub B's mapping and runs isolated health check & session clear
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-hub-select-hub-b"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(hostEl.querySelector('[data-testid="persona-mapping-row-box-b"]')).not.toBeNull();
+    expect(hostEl.querySelector('[data-testid="persona-mapping-row-box-a"]')).toBeNull();
+
+    // Health check probes ONLY Hub B's URL
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-test-connection"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(desktopMock.checkHealth).toHaveBeenCalledWith(hubBUrl);
+    expect(hostEl.textContent).toContain("hub-b-live");
+
+    // Per-Hub clear session targets ONLY Hub B's isolated partition & URL
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-clear-hub-session"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(desktopMock.clearSession).toHaveBeenCalledWith({
+      partition: "persist:persona-hub-b",
+      hubUrl: hubBUrl,
+    });
+
+    // Move Hub B up -> reorders list to [hub-b, hub-default]
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-hub-move-up-hub-b"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(
+      qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs.map((h) => h.id),
+    ).toEqual(["hub-b", DEFAULT_PERSONA_HUB_ID]);
+
+    // Add Hub form: rejects credentialed URL, then adds valid Hub C and deletes it cleanly
+    const setInputValue = (testId: string, value: string) => {
+      const input = hostEl.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-add-hub"]') as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Creds Hub");
+      setInputValue("persona-settings-new-hub-url", "http://user:pass@127.0.0.1:18669");
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-new-hub-submit"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(hostEl.querySelector('[data-testid="persona-settings-new-hub-error"]')).not.toBeNull();
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs).toHaveLength(2);
+
+    const hubCUrl = `${window.location.origin}/__persona-settings-c`;
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Lab Hub");
+      setInputValue("persona-settings-new-hub-url", hubCUrl);
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          '[data-testid="persona-settings-new-hub-submit"]',
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    const hubsAfterAdd = qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs ?? [];
+    expect(hubsAfterAdd).toHaveLength(3);
+    const addedHubC = hubsAfterAdd.find((h) => h.hubUrl === hubCUrl);
+    expect(addedHubC?.name).toBe("Lab Hub");
+
+    // Delete Hub C via confirm dialog -> returns to 2 Hubs cleanly
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          `[data-testid="persona-settings-hub-delete-${addedHubC?.id}"]`,
+        ) as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs).toHaveLength(2);
+
+    // Web fallback switcher switches active Hub cleanly
+    delete window.paseoDesktop;
+    await renderInBrowser(qc, <PersonaSurface pageProtocolOverride="http:" />);
+    expect(hostEl.querySelector('[data-testid="persona-web-hub-switcher"]')).not.toBeNull();
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-web-hub-option-hub-b"]') as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.activeHubId).toBe("hub-b");
+    expect(hostEl.textContent).toContain(hubBUrl);
+  });
+
+  it("P1-3: visits Hub A, edits Hub A URL, and returns to Persona without mountRejected race (both via Settings and via unpruned cache update)", async () => {
+    const urlV1 = `${window.location.origin}/__persona-url-v1`;
+    const urlV2 = `${window.location.origin}/__persona-url-v2`;
+    const urlV3 = `${window.location.origin}/__persona-url-v3`;
+    hostEl.style.width = "1024px";
+    hostEl.style.height = "720px";
+    hostEl.style.display = "flex";
+
+    installDesktopPersonaMock();
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "Primary Hub",
+          hubUrl: urlV1,
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+    });
+
+    // Step 1: Visit /persona -> Hub A mounts at urlV1
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    const webviewV1 = getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID);
+    expect(webviewV1).not.toBeNull();
+    expect(webviewV1?.src).toBe(urlV1);
+    expect(webviewV1?.getAttribute("partition")).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(hostEl.querySelector('[data-testid="persona-mount-rejected-state"]')).toBeNull();
+
+    // Step 2: Navigate to Settings -> edit Hub A URL to urlV2 and save
+    await renderInBrowser(qc, <PersonaSettingsSection />);
+    const urlInput = hostEl.querySelector(
+      '[data-testid="persona-settings-hub-url-input"]',
+    ) as HTMLInputElement | null;
+    expect(urlInput).not.toBeNull();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(urlInput, urlV2);
+      urlInput?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-save-url"]') as HTMLElement | null
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs[0]?.hubUrl).toBe(
+      urlV2,
+    );
+
+    // Step 3: Return to /persona -> mounts cleanly at urlV2 without mountRejected
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    const webviewV2 = getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID);
+    expect(webviewV2).not.toBeNull();
+    expect(webviewV2?.src).toBe(urlV2);
+    expect(hostEl.querySelector('[data-testid="persona-mount-rejected-state"]')).toBeNull();
+
+    // Step 4: Hard race check — leave Persona (so urlV2 stays parked in residentPoolByHubId),
+    // mutate Hub A's URL directly to urlV3 WITHOUT calling destroyResidentPersonaWebview,
+    // and verify an in-flight ensureResidentPersonaWebview for urlV3 is NOT canceled by
+    // reconcileResidentPersonaWebviews when returning to Persona!
+    await renderInBrowser(qc, <div data-testid="away-route" />);
+    expect(getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID)?.src).toBe(urlV2);
+
+    const deferredSync: { resolve: ((ok: boolean) => void) | null } = { resolve: null };
+    installDesktopPersonaMock({
+      setHubEntries: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            deferredSync.resolve = resolve;
+          }),
+      ),
+    });
+
+    // Directly exercise module-level race: start in-flight ensure for urlV3 while urlV2 is still in pool,
+    // then immediately invoke reconcileResidentPersonaWebviews([{ id, hubUrl: urlV3 }]) mid-flight!
+    const inFlightMount = ensureResidentPersonaWebview({
+      hubId: DEFAULT_PERSONA_HUB_ID,
+      hubUrl: urlV3,
+      allowedHubEntries: [{ partition: PERSONA_WEBVIEW_PARTITION, hubUrl: urlV3 }],
+    });
+    reconcileResidentPersonaWebviews([{ id: DEFAULT_PERSONA_HUB_ID, hubUrl: urlV3 }]);
+    // Stale urlV2 DOM was pruned immediately, while the in-flight urlV3 mount stays alive
+    expect(getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID)).toBeNull();
+    expect(getResidentPersonaPoolDiagnostics().inFlightHubIds).toEqual([DEFAULT_PERSONA_HUB_ID]);
+    // Yield a macrotask so hubSyncQueue invokes setHubEntries and binds deferredSync.resolve
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deferredSync.resolve).not.toBeNull();
+    deferredSync.resolve?.(true);
+    const webviewV3 = await inFlightMount;
+    expect(webviewV3).not.toBeNull();
+    expect(webviewV3?.src).toBe(urlV3);
+    expect(getResidentPersonaPoolDiagnostics().inFlightHubIds).toEqual([]);
+
+    // Now re-mount ElectronPersonaSurface with urlV3 in QueryClient cache (even if old entry was parked)
+    installDesktopPersonaMock();
+    qc.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, {
+      ...DEFAULT_CLIENT_SETTINGS,
+      persona: normalizePersonaEmbedSettings({
+        enabled: true,
+        hubs: [
+          {
+            id: DEFAULT_PERSONA_HUB_ID,
+            name: "Primary Hub",
+            hubUrl: `${window.location.origin}/__persona-url-v4`,
+            machineServerMap: {},
+          },
+        ],
+        activeHubId: DEFAULT_PERSONA_HUB_ID,
+      }),
+    });
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID)?.src).toBe(
+      `${window.location.origin}/__persona-url-v4`,
+    );
+    expect(hostEl.querySelector('[data-testid="persona-mount-rejected-state"]')).toBeNull();
+  });
+
+  it("P1-4 & P2-1: keeps divider body hit-testing 100% above webviews at 940px/25%, completes real coordinate drag, and keeps narrow (~234px) toolbar buttons strictly inside pane bounds", async () => {
+    await page.viewport(1280, 800);
+    const hubAUrl = `${window.location.origin}/__persona-split-940-a`;
+    const hubBUrl = `${window.location.origin}/__persona-split-940-b`;
+    hostEl.style.width = "940px";
+    hostEl.style.height = "720px";
+    hostEl.style.display = "flex";
+
+    installDesktopPersonaMock();
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "Enterprise Production DevBox Hub Long Name",
+          hubUrl: hubAUrl,
+          machineServerMap: {},
+        },
+        {
+          id: "hub-b",
+          name: "Home Workstation Secondary Hub",
+          hubUrl: hubBUrl,
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+      splitEnabled: true,
+      secondaryHubId: "hub-b",
+      splitRatio: 0.25,
+    });
+
+    await renderInBrowser(qc, <ElectronPersonaSurface />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+
+    const webviewA = getResidentPersonaWebview(DEFAULT_PERSONA_HUB_ID)!;
+    const webviewB = getResidentPersonaWebview("hub-b")!;
+    expect(webviewA).not.toBeNull();
+    expect(webviewB).not.toBeNull();
+    // Per-Hub persistent partitions: hub-default -> persist:persona, hub-b -> persist:persona-hub-b
+    expect(webviewA.getAttribute("partition")).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(webviewB.getAttribute("partition")).toBe("persist:persona-hub-b");
+
+    // Simulate active session route on left pane so session-action buttons are also exercised under ~234px width
+    await act(async () => {
+      const navEvent = new Event("did-navigate") as Event & { url?: string; isMainFrame?: boolean };
+      navEvent.url = `${hubAUrl}/s/n37-217-003/paseo-ag_narrow`;
+      navEvent.isMainFrame = true;
+      webviewA.dispatchEvent(navEvent);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    const primaryPane = hostEl.querySelector('[data-testid="persona-pane-primary"]') as HTMLElement;
+    const primaryToolbar = hostEl.querySelector(
+      '[data-testid="persona-pane-primary-toolbar"]',
+    ) as HTMLElement;
+    const paneRect = primaryPane.getBoundingClientRect();
+    const toolbarRect = primaryToolbar.getBoundingClientRect();
+    expect(paneRect.width).toBeGreaterThanOrEqual(230);
+    expect(paneRect.width).toBeLessThanOrEqual(240);
+
+    // P2-1: EVERY visible button inside the narrow (~234px) toolbar MUST satisfy right <= paneRect.right
+    const toolbarButtons = Array.from(
+      primaryToolbar.querySelectorAll<HTMLElement>('[role="button"], button'),
+    ).filter((el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    });
+    expect(toolbarButtons.length).toBeGreaterThanOrEqual(4);
+    for (const btn of toolbarButtons) {
+      const btnRect = btn.getBoundingClientRect();
+      expect(
+        btnRect.left,
+        `button ${btn.getAttribute("data-testid") ?? btn.getAttribute("aria-label")} left overflow`,
+      ).toBeGreaterThanOrEqual(paneRect.left - 0.5);
+      expect(
+        btnRect.right,
+        `button ${btn.getAttribute("data-testid") ?? btn.getAttribute("aria-label")} right overflow`,
+      ).toBeLessThanOrEqual(paneRect.right + 0.01);
+    }
+
+    // Overflow menu exposes collapsed actions cleanly without clipping
+    const moreBtn = primaryToolbar.querySelector(
+      '[data-testid="persona-pane-primary-more-actions"]',
+    ) as HTMLElement | null;
+    expect(moreBtn).not.toBeNull();
+    await act(async () => {
+      moreBtn?.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(
+      document.querySelector('[data-testid="persona-pane-primary-more-open-in-paseo"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[data-testid="persona-pane-primary-more-home"]')).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="persona-pane-primary-more-settings"]'),
+    ).not.toBeNull();
+    // Close overflow menu before divider hit-testing
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    // P1-4: Verify divider sits in #overlay-root strictly above WEB_SURFACE_PLANE.browser and
+    // neither webview surface overlaps the divider hit zone
+    const overlayRoot = document.getElementById("overlay-root")!;
+    const residentHost = document.getElementById(PERSONA_RESIDENT_HOST_ID)!;
+    expect(overlayRoot).not.toBeNull();
+    expect(residentHost).not.toBeNull();
+    expect(Number(window.getComputedStyle(overlayRoot).zIndex)).toBeGreaterThan(
+      WEB_SURFACE_PLANE.browser,
+    );
+    expect(Number(window.getComputedStyle(residentHost).zIndex)).toBe(WEB_SURFACE_PLANE.browser);
+
+    const divider = document.querySelector('[data-testid="persona-split-divider"]') as HTMLElement;
+    expect(divider).not.toBeNull();
+    expect(overlayRoot.contains(divider)).toBe(true);
+
+    const dividerRect = divider.getBoundingClientRect();
+    const leftSurfaceRect = webviewA.parentElement!.getBoundingClientRect();
+    const rightSurfaceRect = webviewB.parentElement!.getBoundingClientRect();
+    expect(leftSurfaceRect.right).toBeLessThanOrEqual(dividerRect.left);
+    expect(rightSurfaceRect.left).toBeGreaterThanOrEqual(dividerRect.right);
+
+    // Pixel-by-pixel elementFromPoint sweep across the ENTIRE body zone of the divider
+    const bodyTop = Math.ceil(toolbarRect.bottom) + 2;
+    const bodyBottom = Math.floor(dividerRect.bottom) - 2;
+    const sampleYs = [
+      bodyTop,
+      Math.round(bodyTop + (bodyBottom - bodyTop) * 0.25),
+      Math.round(bodyTop + (bodyBottom - bodyTop) * 0.5),
+      Math.round(bodyTop + (bodyBottom - bodyTop) * 0.75),
+      bodyBottom,
+    ];
+    const minX = Math.ceil(dividerRect.left);
+    const maxX = Math.floor(dividerRect.right) - 1;
+    expect(maxX - minX + 1).toBeGreaterThanOrEqual(9);
+    for (const y of sampleYs) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const hit = document.elementFromPoint(x, y);
+        expect(hit, `elementFromPoint(${x}, ${y}) must hit split divider, not webview`).toBe(
+          divider,
+        );
+      }
+    }
+    const centerX = Math.floor((dividerRect.left + dividerRect.right) / 2);
+    for (let y = bodyTop; y <= bodyBottom; y += 12) {
+      const hit = document.elementFromPoint(centerX, y);
+      expect(hit, `vertical sweep elementFromPoint(${centerX}, ${y}) must hit split divider`).toBe(
+        divider,
+      );
+    }
+
+    // Real coordinate drag starting directly from the body-zone elementFromPoint hit target!
+    const containerRect = hostEl.getBoundingClientRect();
+    const dragStartY = Math.round((bodyTop + bodyBottom) / 2);
+    const dragStartTarget = document.elementFromPoint(centerX, dragStartY) as HTMLElement;
+    expect(dragStartTarget).toBe(divider);
+
+    const dragTargetX = Math.round(containerRect.left + containerRect.width * 0.62);
+    await act(async () => {
+      dragStartTarget.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          clientX: centerX,
+          clientY: dragStartY,
+          pointerId: 1,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(document.querySelector('[data-testid="persona-split-drag-shield"]')).not.toBeNull();
+    expect(webviewA.parentElement?.style.pointerEvents).toBe("none");
+    expect(webviewB.parentElement?.style.pointerEvents).toBe("none");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          clientX: dragTargetX,
+          clientY: dragStartY,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          clientX: dragTargetX,
+          clientY: dragStartY,
+          pointerId: 1,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+
+    expect(document.querySelector('[data-testid="persona-split-drag-shield"]')).toBeNull();
+    expect(webviewA.parentElement?.style.pointerEvents).toBe("auto");
+    expect(webviewB.parentElement?.style.pointerEvents).toBe("auto");
+    const updatedRatio =
+      qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.splitRatio ?? 0;
+    expect(updatedRatio).toBeGreaterThan(0.55);
+    expect(updatedRatio).toBeLessThan(0.7);
+
+    // After drag stabilizes, the new divider body center STILL hits divider (not webview)
+    const afterRect = divider.getBoundingClientRect();
+    const afterCenterX = Math.floor((afterRect.left + afterRect.right) / 2);
+    expect(document.elementFromPoint(afterCenterX, dragStartY)).toBe(divider);
+  });
+
+  it("P2-2 & legacy desktop shell compat: cleans pool diagnostics on Hub deletion and gracefully degrades when desktop lacks per-Hub partition support", async () => {
+    const hubAUrl = `${window.location.origin}/__persona-diag-a`;
+    const hubBUrl = `${window.location.origin}/__persona-diag-b`;
+
+    installDesktopPersonaMock();
+    await ensureResidentPersonaWebview({ hubId: DEFAULT_PERSONA_HUB_ID, hubUrl: hubAUrl });
+    await ensureResidentPersonaWebview({ hubId: "hub-ephemeral", hubUrl: hubBUrl });
+    expect(getResidentPersonaPoolDiagnostics()).toEqual({
+      pooledHubIds: [DEFAULT_PERSONA_HUB_ID, "hub-ephemeral"],
+      inFlightHubIds: [],
+    });
+
+    // Deleting a Hub via destroyResidentPersonaWebview leaves zero leaked keys
+    destroyResidentPersonaWebview("hub-ephemeral");
+    expect(getResidentPersonaPoolDiagnostics()).toEqual({
+      pooledHubIds: [DEFAULT_PERSONA_HUB_ID],
+      inFlightHubIds: [],
+    });
+
+    // Reconcile removing remaining Hub also leaves zero leaked keys
+    reconcileResidentPersonaWebviews([]);
+    expect(getResidentPersonaPoolDiagnostics()).toEqual({
+      pooledHubIds: [],
+      inFlightHubIds: [],
+    });
+
+    // Legacy 0.17.534 desktop shell (no supportsPerHubPartitions / no setHubEntries):
+    // falls back to single persist:persona partition, calls setHubUrl, and hides scoped clear-hub button
+    const legacySetHubUrl = vi.fn(async () => true);
+    const legacyClearSession = vi.fn(async () => undefined);
+    window.paseoDesktop = {
+      platform: "darwin",
+      dialog: { ask: vi.fn(async () => true) },
+      persona: {
+        partition: PERSONA_WEBVIEW_PARTITION,
+        setHubUrl: legacySetHubUrl,
+        clearSession: legacyClearSession,
+      },
+    };
+
+    const legacyWebview = await ensureResidentPersonaWebview({
+      hubId: "hub-b",
+      hubUrl: hubBUrl,
+    });
+    expect(legacyWebview).not.toBeNull();
+    expect(legacyWebview?.getAttribute("partition")).toBe(PERSONA_WEBVIEW_PARTITION);
+    expect(legacySetHubUrl).toHaveBeenCalledWith(hubBUrl, { enabled: true });
+
+    const legacyQc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        { id: DEFAULT_PERSONA_HUB_ID, name: "Work Hub", hubUrl: hubAUrl, machineServerMap: {} },
+        { id: "hub-b", name: "Home Hub", hubUrl: hubBUrl, machineServerMap: {} },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+    });
+    await renderInBrowser(legacyQc, <PersonaSettingsSection />);
+    expect(hostEl.querySelector('[data-testid="persona-settings-clear-hub-session"]')).toBeNull();
+    expect(hostEl.querySelector('[data-testid="persona-settings-clear-session"]')).not.toBeNull();
+  });
+
+  it("clears deleted non-default Hub partition, sweeps residual disk partitions on Clear All, never reuses deleted Work ID, and blocks case-colliding partitions in registry", async () => {
+    const defaultUrl = `${window.location.origin}/__persona-default-iso`;
+    const workUrl = `${window.location.origin}/__persona-work-iso`;
+    const hostId = 88;
+    const simulatedDiskPartitions = new Set<string>([
+      PERSONA_WEBVIEW_PARTITION,
+      "persist:persona-hub-work", // legacy residual on-disk partition
+      "persist:paseo-browser", // unrelated browser partition — must never be cleared
+    ]);
+    const clearedPartitionsHistory: string[] = [];
+
+    const registry = createPersonaHostHubRegistry({
+      listPersistedPartitions: () => Array.from(simulatedDiskPartitions),
+    });
+
+    const clearSessionSpy = vi.fn(
+      async (target?: string | { partition?: string; hubUrl?: string }) => {
+        const resolved = registry.resolveClearSessionTarget(hostId, target);
+        if (!resolved.ok) {
+          throw new Error(resolved.error);
+        }
+        const partitions = resolved.mode === "single" ? [resolved.partition] : resolved.partitions;
+        for (const partition of partitions) {
+          clearedPartitionsHistory.push(partition);
+        }
+      },
+    );
+
+    installDesktopPersonaMock({
+      setHubEntries: vi.fn(async (entries, options) =>
+        registry.setHostHubEntries(hostId, entries, options),
+      ),
+      clearSession: clearSessionSpy,
+    });
+
+    const qc = makeQueryClient({
+      enabled: true,
+      hubs: [
+        {
+          id: DEFAULT_PERSONA_HUB_ID,
+          name: "Default Hub",
+          hubUrl: defaultUrl,
+          machineServerMap: {},
+        },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+    });
+
+    await renderInBrowser(qc, <PersonaSettingsSection />);
+
+    const setInputValue = (testId: string, value: string) => {
+      const input = hostEl.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    // Step 1: Create "Work" Hub -> gets non-reusable random lowercase ID (not static "hub-work")
+    await act(async () => {
+      (hostEl.querySelector('[data-testid="persona-settings-add-hub"]') as HTMLElement)?.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Work");
+      setInputValue("persona-settings-new-hub-url", workUrl);
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-new-hub-submit"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+
+    const workHub1 = qc
+      .getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)
+      ?.persona.hubs.find((hub) => hub.name === "Work");
+    expect(workHub1).toBeDefined();
+    expect(workHub1!.id).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workHub1!.id).not.toBe("hub-work");
+    const workPartition1 = `${PERSONA_WEBVIEW_PARTITION_PREFIX}${workHub1!.id}`;
+    simulatedDiskPartitions.add(workPartition1);
+
+    // Step 2: Delete non-default "Work" Hub -> synchronously clears its isolated partition & revokes allowlist
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          `[data-testid="persona-settings-hub-delete-${workHub1!.id}"]`,
+        ) as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(qc.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)?.persona.hubs).toHaveLength(1);
+    expect(clearSessionSpy).toHaveBeenCalledWith({
+      partition: workPartition1,
+      hubUrl: workUrl,
+    });
+    expect(clearedPartitionsHistory).toContain(workPartition1);
+    // Deleted partition is revoked from main registry immediately after deletion
+    expect(
+      registry.authorizeWebviewAttach(hostId, { partition: workPartition1, src: `${workUrl}/` }),
+    ).toBeNull();
+
+    // Step 3: Click Clear All -> sweeps default + deleted Work + legacy persist:persona-hub-work, never paseo-browser
+    clearedPartitionsHistory.length = 0;
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-clear-session"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(clearedPartitionsHistory).toEqual(
+      expect.arrayContaining([
+        PERSONA_WEBVIEW_PARTITION,
+        "persist:persona-hub-work",
+        workPartition1,
+      ]),
+    );
+    expect(clearedPartitionsHistory).not.toContain("persist:paseo-browser");
+
+    // Step 4: Re-create another Hub named "Work" -> gets a brand new lowercase ID & partition
+    await act(async () => {
+      (hostEl.querySelector('[data-testid="persona-settings-add-hub"]') as HTMLElement)?.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    await act(async () => {
+      setInputValue("persona-settings-new-hub-name", "Work");
+      setInputValue("persona-settings-new-hub-url", workUrl);
+    });
+    await act(async () => {
+      (
+        hostEl.querySelector('[data-testid="persona-settings-new-hub-submit"]') as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    const workHub2 = qc
+      .getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY)
+      ?.persona.hubs.find((hub) => hub.name === "Work");
+    expect(workHub2).toBeDefined();
+    expect(workHub2!.id).toMatch(/^hub-work-[0-9a-f]{8}$/);
+    expect(workHub2!.id).not.toBe(workHub1!.id);
+    expect(workHub2!.id).not.toBe("hub-work");
+
+    // Step 5: Deleting hub-default does NOT call single-partition clearSession on persist:persona
+    clearSessionSpy.mockClear();
+    await act(async () => {
+      (
+        hostEl.querySelector(
+          `[data-testid="persona-settings-hub-delete-${DEFAULT_PERSONA_HUB_ID}"]`,
+        ) as HTMLElement
+      )?.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(clearSessionSpy).not.toHaveBeenCalled();
+
+    // Step 6: Case-colliding config prioritizes exact lowercase IDs and main registry blocks raw uppercase collisions
+    const normalizedCaseConfig = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        { id: "hub-Case", name: "Upper", hubUrl: defaultUrl, machineServerMap: {} },
+        { id: "hub-case", name: "Lower", hubUrl: workUrl, machineServerMap: {} },
+      ],
+      activeHubId: "hub-case",
+      splitEnabled: true,
+      secondaryHubId: "hub-Case",
+    });
+    expect(normalizedCaseConfig.hubs.map((hub) => hub.id)).toEqual(["hub-case-2", "hub-case"]);
+    expect(normalizedCaseConfig.activeHubId).toBe("hub-case");
+    expect(normalizedCaseConfig.secondaryHubId).toBe("hub-case-2");
+
+    const normalizedDefaultCaseConfig = normalizePersonaEmbedSettings({
+      enabled: true,
+      hubs: [
+        { id: "Hub-Default", name: "Mixed Default", hubUrl: workUrl, machineServerMap: {} },
+        { id: DEFAULT_PERSONA_HUB_ID, name: "Default", hubUrl: defaultUrl, machineServerMap: {} },
+      ],
+      activeHubId: DEFAULT_PERSONA_HUB_ID,
+      splitEnabled: true,
+      secondaryHubId: "Hub-Default",
+    });
+    expect(normalizedDefaultCaseConfig.hubs.map((hub) => hub.id)).toEqual([
+      "hub-default-2",
+      DEFAULT_PERSONA_HUB_ID,
+    ]);
+    expect(normalizedDefaultCaseConfig.activeHubId).toBe(DEFAULT_PERSONA_HUB_ID);
+    expect(normalizedDefaultCaseConfig.secondaryHubId).toBe("hub-default-2");
+    expect(
+      registry.setHostHubEntries(
+        hostId,
+        [
+          { partition: "persist:persona-hub-Case", hubUrl: defaultUrl },
+          { partition: "persist:persona-hub-case", hubUrl: workUrl },
+        ],
+        { enabled: true },
+      ),
+    ).toBe(false);
   });
 });

@@ -88,21 +88,23 @@ import {
 } from "./features/browser-profile.js";
 import {
   clearPersonaWebviewSession,
+  configurePersonaWebviewSession,
+  createPersonaHostHubRegistry,
   getPersonaWebviewSession,
-  isPersonaWebviewAttach,
+  installPersonaWebviewFailClosedGuards,
+  isPersonaWebviewPartition,
   isTrustedPersonaHostIpcEvent,
   listPersonaWebviewGuests,
-  normalizePersonaHubUrl,
   PERSONA_GUEST_READY_EVENT,
   PERSONA_HUB_URL_ARG_PREFIX,
   PERSONA_OPEN_SESSION_EVENT,
   PERSONA_SESSION_METADATA_RESULT_EVENT,
-  PERSONA_WEBVIEW_PARTITION,
   probePersonaHubHealth,
   registerPersonaWebviewGuestIpcBridge,
   registerPersonaWebviewNavigationGuards,
   type PersonaHealthCheckResult,
 } from "./features/persona-webview/index.js";
+import { listPersistedPersonaPartitions } from "./features/persona-webview/disk-partitions.js";
 import { parseOpenProjectPathFromArgv } from "./open-project-routing.js";
 import {
   createDesktopWindowOwner,
@@ -144,12 +146,12 @@ const DESKTOP_WINDOW_CHROME_MODE = resolveDesktopWindowChromeMode({
 const UPDATE_QUIT_DEADLINE_MS = 5_000;
 const pendingBrowserWindowOpenRequests = new PendingBrowserWindowOpenRequests();
 const registeredPaseoHostWindowWebContentsIds = new Set<number>();
-const personaHubStateByHostWebContentsId = new Map<number, { hubUrl: string; enabled: boolean }>();
-const pendingPersonaGuestHubUrlByHostWebContentsId = new Map<number, string[]>();
-const personaGuestHubUrlByWebContentsId = new Map<
-  number,
-  { hostWebContentsId: number; hubUrl: string }
->();
+const personaHubRegistry = createPersonaHostHubRegistry({
+  listPersistedPartitions: () =>
+    listPersistedPersonaPartitions(app.getPath("userData"), {
+      logWarn: (message, details) => log.warn(message, details),
+    }),
+});
 const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
 const agentNavigationInbox = new AgentNavigationInbox();
 
@@ -614,59 +616,112 @@ ipcMain.handle("paseo:browser:copy-element", (_event, payload: unknown) =>
   browserCapture.copy(payload),
 );
 
+function ensurePersonaPartitionSessionHardened(partition: string): Electron.Session {
+  const partitionSession = session.fromPartition(partition);
+  configurePersonaWebviewSession(partitionSession, {
+    partition,
+    getAuthorizedHubUrlForWebContents: (guestId) =>
+      personaHubRegistry.getGuestAuthorizedHubUrl(guestId),
+    isOriginAuthorizedForPartition: (targetPartition, origin) =>
+      personaHubRegistry.isOriginAuthorizedForPartition(targetPartition, origin),
+  });
+  return partitionSession;
+}
+
+ipcMain.handle(
+  "paseo:persona:set-hub-entries",
+  (event, rawEntries: unknown, rawOptions?: unknown): boolean => {
+    if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+      return false;
+    }
+    const accepted = personaHubRegistry.setHostHubEntries(event.sender.id, rawEntries, rawOptions);
+    if (accepted) {
+      const hostState = personaHubRegistry.getHostHubState(event.sender.id);
+      if (hostState) {
+        for (const entry of hostState.entries) {
+          ensurePersonaPartitionSessionHardened(entry.partition);
+        }
+      }
+    }
+    return accepted;
+  },
+);
+
+ipcMain.handle(
+  "paseo:persona:set-hub-urls",
+  (event, rawHubUrls: unknown, rawOptions?: unknown): boolean => {
+    if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+      return false;
+    }
+    const accepted = personaHubRegistry.setHostHubUrls(event.sender.id, rawHubUrls, rawOptions);
+    if (accepted) {
+      const hostState = personaHubRegistry.getHostHubState(event.sender.id);
+      if (hostState) {
+        for (const entry of hostState.entries) {
+          ensurePersonaPartitionSessionHardened(entry.partition);
+        }
+      }
+    }
+    return accepted;
+  },
+);
+
 ipcMain.handle(
   "paseo:persona:set-hub-url",
   (event, rawHubUrl: unknown, rawOptions?: unknown): boolean => {
     if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
       return false;
     }
-    if (rawHubUrl === null || rawHubUrl === undefined || rawHubUrl === "") {
-      personaHubStateByHostWebContentsId.delete(event.sender.id);
-      return true;
+    const accepted = personaHubRegistry.setHostHubUrl(event.sender.id, rawHubUrl, rawOptions);
+    if (accepted) {
+      const hostState = personaHubRegistry.getHostHubState(event.sender.id);
+      if (hostState) {
+        for (const entry of hostState.entries) {
+          ensurePersonaPartitionSessionHardened(entry.partition);
+        }
+      }
     }
-    if (typeof rawHubUrl !== "string") {
-      return false;
-    }
-    const normalized = normalizePersonaHubUrl(rawHubUrl);
-    if (!normalized) {
-      return false;
-    }
-    const enabled =
-      rawOptions &&
-      typeof rawOptions === "object" &&
-      typeof (rawOptions as { enabled?: unknown }).enabled === "boolean"
-        ? (rawOptions as { enabled: boolean }).enabled
-        : true;
-    personaHubStateByHostWebContentsId.set(event.sender.id, {
-      hubUrl: normalized.url,
-      enabled,
-    });
-    return true;
+    return accepted;
   },
 );
 
-ipcMain.handle("paseo:persona:check-health", async (event): Promise<PersonaHealthCheckResult> => {
-  if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
-    return {
-      ok: false,
-      code: "unauthorized_caller",
-      error: "Unauthorized IPC caller",
-    };
-  }
-  const hostState = personaHubStateByHostWebContentsId.get(event.sender.id);
-  return probePersonaHubHealth(hostState?.hubUrl ?? null);
-});
+ipcMain.handle(
+  "paseo:persona:check-health",
+  async (event, rawTargetHubUrl?: unknown): Promise<PersonaHealthCheckResult> => {
+    if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
+      return {
+        ok: false,
+        code: "unauthorized_caller",
+        error: "Unauthorized IPC caller",
+      };
+    }
+    const target = personaHubRegistry.resolveHealthCheckTarget(event.sender.id, rawTargetHubUrl);
+    if (!target.ok) {
+      return target;
+    }
+    return probePersonaHubHealth(target.hubUrl);
+  },
+);
 
-ipcMain.handle("paseo:persona:clear-session", async (event) => {
+ipcMain.handle("paseo:persona:clear-session", async (event, rawTarget?: unknown) => {
   if (!isTrustedPersonaHostIpcEvent(event, registeredPaseoHostWindowWebContentsIds)) {
     throw new Error("Unauthorized IPC caller");
   }
-  const personaSession = getPersonaWebviewSession(session);
+  const target = personaHubRegistry.resolveClearSessionTarget(event.sender.id, rawTarget);
+  if (!target.ok) {
+    throw new Error(target.error);
+  }
+  const targetPartitions = target.mode === "single" ? [target.partition] : target.partitions;
+  const targetSessions = targetPartitions.map((partition) =>
+    getPersonaWebviewSession(session, partition, {
+      allowLegacyDiskCase: target.mode === "all",
+    }),
+  );
   await clearPersonaWebviewSession({
-    personaSession,
+    personaSessions: targetSessions,
     listGuests: () =>
       listPersonaWebviewGuests({
-        personaSession,
+        personaSessions: targetSessions,
         webContents: webContents.getAllWebContents(),
       }),
     logReloadError: (webContentsId, error) => {
@@ -686,11 +741,14 @@ ipcMain.handle("paseo:persona:open-devtools", (event, rawWebContentsId: unknown)
     return false;
   }
   const guest = webContents.fromId(rawWebContentsId);
+  const boundPartition = personaHubRegistry.getGuestPartition(rawWebContentsId);
   if (
     !guest ||
     guest.isDestroyed() ||
     guest.hostWebContents !== event.sender ||
-    guest.session !== session.fromPartition(PERSONA_WEBVIEW_PARTITION)
+    !boundPartition ||
+    !personaHubRegistry.getGuestAuthorizedHubUrl(rawWebContentsId) ||
+    guest.session !== session.fromPartition(boundPartition)
   ) {
     return false;
   }
@@ -882,8 +940,7 @@ async function createWindow(
     agentNavigationInbox.removeWindow(webContentsId);
     unregisterPaseoBrowserHost(webContentsId);
     registeredPaseoHostWindowWebContentsIds.delete(webContentsId);
-    personaHubStateByHostWebContentsId.delete(webContentsId);
-    pendingPersonaGuestHubUrlByHostWebContentsId.delete(webContentsId);
+    personaHubRegistry.removeHost(webContentsId);
     browserKeyboard.detachHost(webContentsId);
   });
 
@@ -904,16 +961,17 @@ async function createWindow(
   setupDefaultContextMenu(mainWindow);
   setupDragDropPrevention(mainWindow);
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-    if (params.partition === PERSONA_WEBVIEW_PARTITION) {
+    if (isPersonaWebviewPartition(params.partition)) {
       if (!registeredPaseoHostWindowWebContentsIds.has(webContentsId)) {
         event.preventDefault();
         return;
       }
-      const hubState = personaHubStateByHostWebContentsId.get(webContentsId);
-      if (!hubState?.enabled || !isPersonaWebviewAttach(params, hubState.hubUrl)) {
+      const matched = personaHubRegistry.authorizeWebviewAttach(webContentsId, params);
+      if (!matched) {
         event.preventDefault();
         return;
       }
+      ensurePersonaPartitionSessionHardened(matched.partition);
       webPreferences.nodeIntegration = false;
       webPreferences.nodeIntegrationInSubFrames = false;
       webPreferences.nodeIntegrationInWorker = false;
@@ -933,12 +991,9 @@ async function createWindow(
         : [];
       webPreferences.additionalArguments = [
         ...existingArgs,
-        `${PERSONA_HUB_URL_ARG_PREFIX}${hubState.hubUrl}`,
+        `${PERSONA_HUB_URL_ARG_PREFIX}${matched.hubUrl}`,
       ];
       webPreferences.preload = getPersonaGuestPreloadPath();
-      const pendingQueue = pendingPersonaGuestHubUrlByHostWebContentsId.get(webContentsId) ?? [];
-      pendingQueue.push(hubState.hubUrl);
-      pendingPersonaGuestHubUrlByHostWebContentsId.set(webContentsId, pendingQueue);
       return;
     }
 
@@ -963,41 +1018,19 @@ async function createWindow(
     webPreferences.preload = getBrowserKeyboardPreloadPath();
   });
   mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
-    if (contents.session === session.fromPartition(PERSONA_WEBVIEW_PARTITION)) {
-      const pendingQueue = pendingPersonaGuestHubUrlByHostWebContentsId.get(webContentsId);
-      const pinnedHubUrl = pendingQueue?.shift() ?? null;
-      if (pendingQueue && pendingQueue.length === 0) {
-        pendingPersonaGuestHubUrlByHostWebContentsId.delete(webContentsId);
-      }
-      if (pinnedHubUrl) {
-        personaGuestHubUrlByWebContentsId.set(contents.id, {
-          hostWebContentsId: webContentsId,
-          hubUrl: pinnedHubUrl,
-        });
-      }
+    const boundPersonaTarget = personaHubRegistry.bindAttachedGuestBySession({
+      hostWebContentsId: webContentsId,
+      guestWebContentsId: contents.id,
+      guestSession: contents.session,
+      resolvePartitionSession: (partition) => session.fromPartition(partition),
+    });
+    if (boundPersonaTarget) {
+      ensurePersonaPartitionSessionHardened(boundPersonaTarget.partition);
       contents.once("destroyed", () => {
-        personaGuestHubUrlByWebContentsId.delete(contents.id);
+        personaHubRegistry.removeGuest(contents.id);
       });
-      const getAuthorizedHubUrl = (): string => {
-        const pinned = personaGuestHubUrlByWebContentsId.get(contents.id);
-        if (!pinned) {
-          return "";
-        }
-        const hostState = personaHubStateByHostWebContentsId.get(pinned.hostWebContentsId);
-        if (!hostState?.enabled) {
-          return "";
-        }
-        const pinnedNormalized = normalizePersonaHubUrl(pinned.hubUrl);
-        const hostNormalized = normalizePersonaHubUrl(hostState.hubUrl);
-        if (
-          !pinnedNormalized ||
-          !hostNormalized ||
-          pinnedNormalized.origin !== hostNormalized.origin
-        ) {
-          return "";
-        }
-        return pinned.hubUrl;
-      };
+      const getAuthorizedHubUrl = (): string =>
+        personaHubRegistry.getGuestAuthorizedHubUrl(contents.id);
       const sendToHostMainFrame = (channel: string, payload: unknown): void => {
         if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
           return;
@@ -1050,19 +1083,28 @@ async function createWindow(
       return;
     }
 
-    preparePaseoBrowserWebContents(contents);
-    contents.once("destroyed", () => {
-      pendingBrowserWindowOpenRequests.delete(contents.id);
+    if (contents.session === getPaseoBrowserProfileSession(session)) {
+      preparePaseoBrowserWebContents(contents);
+      contents.once("destroyed", () => {
+        pendingBrowserWindowOpenRequests.delete(contents.id);
+      });
+      installBrowserWindowOpenHandler({
+        contents,
+        sourceContents: contents,
+        mainWindow,
+      });
+      contents.on("context-menu", (_contextMenuEvent, params) => {
+        showBrowserWebviewContextMenu(mainWindow, contents, params);
+      });
+      registerBrowserWebviewNavigationGuards(contents);
+      return;
+    }
+
+    log.warn("[persona-webview] rejected attached webview from unknown partition", {
+      hostWebContentsId: webContentsId,
+      guestWebContentsId: contents.id,
     });
-    installBrowserWindowOpenHandler({
-      contents,
-      sourceContents: contents,
-      mainWindow,
-    });
-    contents.on("context-menu", (_contextMenuEvent, params) => {
-      showBrowserWebviewContextMenu(mainWindow, contents, params);
-    });
-    registerBrowserWebviewNavigationGuards(contents);
+    installPersonaWebviewFailClosedGuards(contents);
   });
 
   showWindowWhenReady(mainWindow, {

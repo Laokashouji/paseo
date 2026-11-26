@@ -3,24 +3,43 @@ import {
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
+  isPersonaWebviewPartition,
+  matchPersonaWebviewAttachHubUrl,
+  normalizePersonaHubEntries,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
   parsePersonaSessionPath,
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_IPC_CHANNEL,
   PERSONA_GUEST_SESSION_METADATA_RESULT_IPC_CHANNEL,
   PERSONA_WEBVIEW_PARTITION,
+  resolveAuthorizedPinnedPersonaHubUrl,
   type ParsedPersonaSessionPath,
+  type PersonaHubPartitionEntry,
+  type PersonaWebviewAttachParams,
 } from "./policy.js";
 
 export {
   buildPersonaHealthCheckUrl,
+  DEFAULT_PERSONA_HUB_ID,
   isAllowedPersonaHealthCheckTarget,
   isAllowedPersonaTargetOrigin,
   isAllowedPersonaWebviewUrl,
+  isPersonaClearablePartition,
+  isPersonaDiskPartitionDirName,
   isPersonaWebviewAttach,
+  isPersonaWebviewPartition,
   isValidPersonaHubUrl,
+  matchPersonaWebviewAttachHubUrl,
+  MAX_PERSONA_HUB_URLS,
+  normalizePersonaHubEntries,
   normalizePersonaHubUrl,
+  normalizePersonaHubUrlList,
+  normalizePersonaWebviewPartition,
   parsePersonaSessionPath,
+  PERSONA_DISK_PARTITION_DIR_NAME,
+  PERSONA_DISK_PARTITION_DIR_PREFIX,
   PERSONA_GUEST_OPEN_SESSION_IPC_CHANNEL,
   PERSONA_GUEST_READY_EVENT,
   PERSONA_GUEST_READY_EVENT_NAME,
@@ -31,8 +50,12 @@ export {
   PERSONA_SESSION_METADATA_RESULT_EVENT,
   PERSONA_SESSION_METADATA_RESULT_EVENT_NAME,
   PERSONA_WEBVIEW_PARTITION,
+  PERSONA_WEBVIEW_PARTITION_PREFIX,
+  resolveAuthorizedPinnedPersonaHubUrl,
+  resolvePersonaHubPartition,
   type NormalizedPersonaHubUrl,
   type ParsedPersonaSessionPath,
+  type PersonaHubPartitionEntry,
   type PersonaWebviewAttachParams,
 } from "./policy.js";
 
@@ -375,18 +398,573 @@ const PERSONA_STORAGE_TYPES = [
   "shadercache",
 ] as const;
 
+const PERSONA_ALLOWED_SESSION_PERMISSIONS = new Set([
+  "clipboard-read",
+  "clipboard-sanitized-write",
+  "fullscreen",
+  "notifications",
+]);
+
+export interface PersonaPermissionWebContentsLike {
+  readonly id?: number;
+  getURL?: () => string;
+}
+
+export interface PersonaPermissionRequestDetailsLike {
+  readonly requestingUrl?: string;
+}
+
 export interface PersonaWebviewSession {
   clearStorageData(options: {
+    origin?: string;
     storages: Array<(typeof PERSONA_STORAGE_TYPES)[number]>;
   }): Promise<void>;
   clearCache(): Promise<void>;
   clearAuthCache(): Promise<void>;
+  setPermissionRequestHandler?: (
+    handler:
+      | ((
+          webContents: PersonaPermissionWebContentsLike | null,
+          permission: string,
+          callback: (permissionGranted: boolean) => void,
+          details?: PersonaPermissionRequestDetailsLike,
+        ) => void)
+      | null,
+  ) => void;
+  setPermissionCheckHandler?: (
+    handler:
+      | ((
+          webContents: PersonaPermissionWebContentsLike | null,
+          permission: string,
+          requestingOrigin: string,
+          details?: PersonaPermissionRequestDetailsLike,
+        ) => boolean)
+      | null,
+  ) => void;
 }
 
 export interface PersonaWebviewGuest {
   readonly id: number;
   isDestroyed(): boolean;
   reload(): void;
+  getURL?: () => string;
+}
+
+export interface RegisteredPersonaHostHubState {
+  readonly enabled: boolean;
+  readonly entries: readonly PersonaHubPartitionEntry[];
+  readonly hubUrls: readonly string[];
+}
+
+export type PersonaHealthCheckTargetResolution =
+  | { ok: true; hubUrl: string }
+  | { ok: false; code: "not_configured" | "invalid_url"; error: string };
+
+export type PersonaClearSessionTargetResolution =
+  | { ok: true; mode: "all"; partitions: string[] }
+  | { ok: true; mode: "single"; partition: string; hubUrl: string }
+  | { ok: false; error: string };
+
+export interface PersonaAuthorizedAttachTarget {
+  readonly partition: string;
+  readonly hubUrl: string;
+}
+
+export interface PersonaBindAttachedGuestBySessionInput {
+  hostWebContentsId: number;
+  guestWebContentsId: number;
+  guestSession: object;
+  resolvePartitionSession: (partition: string) => object;
+}
+
+export interface PersonaHostHubRegistry {
+  setHostHubEntries(hostWebContentsId: number, rawEntries: unknown, rawOptions?: unknown): boolean;
+  setHostHubUrls(hostWebContentsId: number, rawHubUrls: unknown, rawOptions?: unknown): boolean;
+  setHostHubUrl(hostWebContentsId: number, rawHubUrl: unknown, rawOptions?: unknown): boolean;
+  getHostHubState(hostWebContentsId: number): RegisteredPersonaHostHubState | null;
+  resolveHealthCheckTarget(
+    hostWebContentsId: number,
+    rawTargetHubUrl?: unknown,
+  ): PersonaHealthCheckTargetResolution;
+  resolveClearSessionTarget(
+    hostWebContentsId: number,
+    rawTarget?: unknown,
+  ): PersonaClearSessionTargetResolution;
+  authorizeWebviewAttach(
+    hostWebContentsId: number,
+    params: PersonaWebviewAttachParams,
+  ): PersonaAuthorizedAttachTarget | null;
+  bindAttachedGuestBySession(
+    input: PersonaBindAttachedGuestBySessionInput,
+  ): PersonaAuthorizedAttachTarget | null;
+  getGuestAuthorizedHubUrl(guestWebContentsId: number): string;
+  getGuestPinnedHubUrl(guestWebContentsId: number): string | null;
+  getGuestPartition(guestWebContentsId: number): string | null;
+  isOriginAuthorizedForPartition(partition: string, origin: string): boolean;
+  removeGuest(guestWebContentsId: number): void;
+  removeHost(hostWebContentsId: number): void;
+}
+
+interface InternalHostHubState {
+  enabled: boolean;
+  entries: PersonaHubPartitionEntry[];
+  entriesByPartition: Map<string, string>;
+  hubUrls: string[];
+}
+
+function readEnabledOption(rawOptions: unknown): boolean {
+  if (
+    rawOptions &&
+    typeof rawOptions === "object" &&
+    typeof (rawOptions as { enabled?: unknown }).enabled === "boolean"
+  ) {
+    return (rawOptions as { enabled: boolean }).enabled;
+  }
+  return true;
+}
+
+function buildInternalHostHubState(
+  entries: PersonaHubPartitionEntry[],
+  enabled: boolean,
+): InternalHostHubState {
+  const entriesByPartition = new Map<string, string>();
+  const hubUrls: string[] = [];
+  const seenUrls = new Set<string>();
+  for (const entry of entries) {
+    entriesByPartition.set(entry.partition, entry.hubUrl);
+    if (!seenUrls.has(entry.hubUrl)) {
+      seenUrls.add(entry.hubUrl);
+      hubUrls.push(entry.hubUrl);
+    }
+  }
+  return { enabled, entries, entriesByPartition, hubUrls };
+}
+
+function resolveHubUrlClearTarget(
+  hostState: InternalHostHubState | undefined,
+  rawHubUrl: unknown,
+): PersonaClearSessionTargetResolution {
+  if (typeof rawHubUrl !== "string") {
+    return { ok: false, error: "Invalid Persona Hub target" };
+  }
+  const normalized = normalizePersonaHubUrl(rawHubUrl);
+  if (!normalized) {
+    return { ok: false, error: "Invalid Persona Hub URL" };
+  }
+  if (!hostState) {
+    return { ok: false, error: "Persona Hub URL is not registered" };
+  }
+  const matchingEntries = hostState.entries.filter((entry) => entry.hubUrl === normalized.url);
+  if (matchingEntries.length === 0) {
+    return { ok: false, error: "Persona Hub URL is not registered" };
+  }
+  if (matchingEntries.length > 1) {
+    return { ok: false, error: "Ambiguous Persona Hub target; partition is required" };
+  }
+  return {
+    ok: true,
+    mode: "single",
+    partition: matchingEntries[0].partition,
+    hubUrl: matchingEntries[0].hubUrl,
+  };
+}
+
+function resolvePartitionObjectClearTarget(
+  hostState: InternalHostHubState | undefined,
+  record: { partition?: unknown; hubUrl?: unknown },
+  allPartitions: () => string[],
+): PersonaClearSessionTargetResolution {
+  const hasPartition =
+    record.partition !== undefined && record.partition !== null && record.partition !== "";
+  const hasHubUrl = record.hubUrl !== undefined && record.hubUrl !== null && record.hubUrl !== "";
+
+  if (!hasPartition && !hasHubUrl) {
+    return { ok: true, mode: "all", partitions: allPartitions() };
+  }
+  if (!hasPartition) {
+    return resolveHubUrlClearTarget(hostState, record.hubUrl);
+  }
+  if (!isPersonaWebviewPartition(record.partition)) {
+    return { ok: false, error: "Invalid Persona partition" };
+  }
+  const registeredHubUrl = hostState?.entriesByPartition.get(record.partition);
+  if (!registeredHubUrl) {
+    return { ok: false, error: "Persona partition is not registered" };
+  }
+  if (hasHubUrl) {
+    const normalized =
+      typeof record.hubUrl === "string" ? normalizePersonaHubUrl(record.hubUrl) : null;
+    if (!normalized) {
+      return { ok: false, error: "Invalid Persona Hub URL" };
+    }
+    if (normalized.url !== registeredHubUrl) {
+      return { ok: false, error: "Persona Hub URL does not match partition" };
+    }
+  }
+  return {
+    ok: true,
+    mode: "single",
+    partition: record.partition,
+    hubUrl: registeredHubUrl,
+  };
+}
+
+export interface CreatePersonaHostHubRegistryOptions {
+  /**
+   * Optional callback returning persisted Persona partitions discovered under Electron's
+   * `<userData>/Partitions/` directory so full `clearSession()` also clears deleted Hub cookies.
+   */
+  listPersistedPartitions?: () => readonly string[];
+}
+
+/**
+ * Maintains per-host-window partition-bound Persona Hub allowlists (`persist:persona` for the
+ * migrated default Hub and `persist:persona-<id>` for each additional Hub) and deterministically
+ * binds every attached guest `<webview>` by its Electron `Session` instance (zero FIFO guessing).
+ */
+export function createPersonaHostHubRegistry(
+  options?: CreatePersonaHostHubRegistryOptions,
+): PersonaHostHubRegistry {
+  const hostStateByWebContentsId = new Map<number, InternalHostHubState>();
+  const guestBindingByWebContentsId = new Map<
+    number,
+    { hostWebContentsId: number; partition: string; hubUrl: string }
+  >();
+
+  const setEntriesForHost = (
+    hostWebContentsId: number,
+    entries: PersonaHubPartitionEntry[],
+    rawOptions?: unknown,
+  ): boolean => {
+    if (entries.length === 0) {
+      hostStateByWebContentsId.delete(hostWebContentsId);
+      return true;
+    }
+    hostStateByWebContentsId.set(
+      hostWebContentsId,
+      buildInternalHostHubState(entries, readEnabledOption(rawOptions)),
+    );
+    return true;
+  };
+
+  const listAllPartitionsForHost = (hostWebContentsId: number): string[] => {
+    const partitions = new Set<string>([PERSONA_WEBVIEW_PARTITION]);
+    const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+    if (hostState) {
+      for (const entry of hostState.entries) {
+        partitions.add(entry.partition);
+      }
+    }
+    for (const binding of guestBindingByWebContentsId.values()) {
+      if (binding.hostWebContentsId === hostWebContentsId) {
+        partitions.add(binding.partition);
+      }
+    }
+    for (const otherState of hostStateByWebContentsId.values()) {
+      for (const entry of otherState.entries) {
+        partitions.add(entry.partition);
+      }
+    }
+    for (const binding of guestBindingByWebContentsId.values()) {
+      partitions.add(binding.partition);
+    }
+    const persistedPartitions = options?.listPersistedPartitions?.() ?? [];
+    for (const partition of persistedPartitions) {
+      if (isPersonaClearablePartition(partition)) {
+        partitions.add(partition);
+      }
+    }
+    return Array.from(partitions);
+  };
+
+  return {
+    setHostHubEntries(hostWebContentsId, rawEntries, rawOptions) {
+      const normalizedEntries = normalizePersonaHubEntries(rawEntries);
+      if (normalizedEntries === null) {
+        return false;
+      }
+      return setEntriesForHost(hostWebContentsId, normalizedEntries, rawOptions);
+    },
+
+    setHostHubUrls(hostWebContentsId, rawHubUrls, rawOptions) {
+      if (rawHubUrls === null || rawHubUrls === undefined) {
+        hostStateByWebContentsId.delete(hostWebContentsId);
+        return true;
+      }
+      if (
+        Array.isArray(rawHubUrls) &&
+        rawHubUrls.length > 0 &&
+        typeof rawHubUrls[0] === "object" &&
+        rawHubUrls[0] !== null
+      ) {
+        const normalizedEntries = normalizePersonaHubEntries(rawHubUrls);
+        if (normalizedEntries === null) {
+          return false;
+        }
+        return setEntriesForHost(hostWebContentsId, normalizedEntries, rawOptions);
+      }
+      const normalizedUrls = normalizePersonaHubUrlList(rawHubUrls);
+      if (normalizedUrls === null) {
+        return false;
+      }
+      if (normalizedUrls.length === 0) {
+        hostStateByWebContentsId.delete(hostWebContentsId);
+        return true;
+      }
+      // Fail closed for unpartitioned multi-Hub lists: multiple Hubs must declare distinct partitions.
+      if (normalizedUrls.length > 1) {
+        return false;
+      }
+      return setEntriesForHost(
+        hostWebContentsId,
+        [{ partition: PERSONA_WEBVIEW_PARTITION, hubUrl: normalizedUrls[0] }],
+        rawOptions,
+      );
+    },
+
+    setHostHubUrl(hostWebContentsId, rawHubUrl, rawOptions) {
+      if (rawHubUrl === null || rawHubUrl === undefined || rawHubUrl === "") {
+        hostStateByWebContentsId.delete(hostWebContentsId);
+        return true;
+      }
+      if (typeof rawHubUrl !== "string") {
+        return false;
+      }
+      const normalized = normalizePersonaHubUrl(rawHubUrl);
+      if (!normalized) {
+        return false;
+      }
+      return setEntriesForHost(
+        hostWebContentsId,
+        [{ partition: PERSONA_WEBVIEW_PARTITION, hubUrl: normalized.url }],
+        rawOptions,
+      );
+    },
+
+    getHostHubState(hostWebContentsId) {
+      const state = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!state) {
+        return null;
+      }
+      return {
+        enabled: state.enabled,
+        entries: state.entries,
+        hubUrls: state.hubUrls,
+      };
+    },
+
+    resolveHealthCheckTarget(hostWebContentsId, rawTargetHubUrl) {
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState || hostState.hubUrls.length === 0) {
+        return {
+          ok: false,
+          code: "not_configured",
+          error: "Persona Hub URL is not registered",
+        };
+      }
+      if (rawTargetHubUrl === undefined || rawTargetHubUrl === null || rawTargetHubUrl === "") {
+        return { ok: true, hubUrl: hostState.hubUrls[0] };
+      }
+      if (typeof rawTargetHubUrl !== "string") {
+        return { ok: false, code: "invalid_url", error: "Invalid Persona Hub URL" };
+      }
+      const normalized = normalizePersonaHubUrl(rawTargetHubUrl);
+      if (!normalized) {
+        return { ok: false, code: "invalid_url", error: "Invalid Persona Hub URL" };
+      }
+      if (!hostState.hubUrls.includes(normalized.url)) {
+        return {
+          ok: false,
+          code: "not_configured",
+          error: "Persona Hub URL is not registered",
+        };
+      }
+      return { ok: true, hubUrl: normalized.url };
+    },
+
+    resolveClearSessionTarget(hostWebContentsId, rawTarget) {
+      if (rawTarget === undefined || rawTarget === null || rawTarget === "") {
+        return {
+          ok: true,
+          mode: "all",
+          partitions: listAllPartitionsForHost(hostWebContentsId),
+        };
+      }
+
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (typeof rawTarget === "object" && !Array.isArray(rawTarget)) {
+        return resolvePartitionObjectClearTarget(
+          hostState,
+          rawTarget as { partition?: unknown; hubUrl?: unknown },
+          () => listAllPartitionsForHost(hostWebContentsId),
+        );
+      }
+      return resolveHubUrlClearTarget(hostState, rawTarget);
+    },
+
+    authorizeWebviewAttach(hostWebContentsId, params) {
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState?.enabled || !isPersonaWebviewPartition(params.partition)) {
+        return null;
+      }
+      const matchedHubUrl = matchPersonaWebviewAttachHubUrl(params, hostState.entries);
+      if (!matchedHubUrl) {
+        return null;
+      }
+      return {
+        partition: params.partition,
+        hubUrl: matchedHubUrl,
+      };
+    },
+
+    bindAttachedGuestBySession({
+      hostWebContentsId,
+      guestWebContentsId,
+      guestSession,
+      resolvePartitionSession,
+    }) {
+      const hostState = hostStateByWebContentsId.get(hostWebContentsId);
+      if (!hostState?.enabled) {
+        return null;
+      }
+      for (const entry of hostState.entries) {
+        if (resolvePartitionSession(entry.partition) === guestSession) {
+          guestBindingByWebContentsId.set(guestWebContentsId, {
+            hostWebContentsId,
+            partition: entry.partition,
+            hubUrl: entry.hubUrl,
+          });
+          return {
+            partition: entry.partition,
+            hubUrl: entry.hubUrl,
+          };
+        }
+      }
+      return null;
+    },
+
+    getGuestAuthorizedHubUrl(guestWebContentsId) {
+      const binding = guestBindingByWebContentsId.get(guestWebContentsId);
+      if (!binding) {
+        return "";
+      }
+      const hostState = hostStateByWebContentsId.get(binding.hostWebContentsId);
+      if (!hostState?.enabled) {
+        return "";
+      }
+      const registeredForPartition = hostState.entriesByPartition.get(binding.partition);
+      if (!registeredForPartition) {
+        return "";
+      }
+      return resolveAuthorizedPinnedPersonaHubUrl(binding.hubUrl, [registeredForPartition]) ?? "";
+    },
+
+    getGuestPinnedHubUrl(guestWebContentsId) {
+      return guestBindingByWebContentsId.get(guestWebContentsId)?.hubUrl ?? null;
+    },
+
+    getGuestPartition(guestWebContentsId) {
+      return guestBindingByWebContentsId.get(guestWebContentsId)?.partition ?? null;
+    },
+
+    isOriginAuthorizedForPartition(partition, origin) {
+      if (!isPersonaWebviewPartition(partition)) {
+        return false;
+      }
+      const normalizedOrigin = normalizePersonaHubUrl(origin)?.origin;
+      if (!normalizedOrigin) {
+        return false;
+      }
+      for (const hostState of hostStateByWebContentsId.values()) {
+        if (!hostState.enabled) {
+          continue;
+        }
+        const registeredUrl = hostState.entriesByPartition.get(partition);
+        if (!registeredUrl) {
+          continue;
+        }
+        const normalizedHub = normalizePersonaHubUrl(registeredUrl);
+        if (normalizedHub && normalizedHub.origin === normalizedOrigin) {
+          return true;
+        }
+      }
+      return false;
+    },
+
+    removeGuest(guestWebContentsId) {
+      guestBindingByWebContentsId.delete(guestWebContentsId);
+    },
+
+    removeHost(hostWebContentsId) {
+      hostStateByWebContentsId.delete(hostWebContentsId);
+      for (const [guestId, binding] of guestBindingByWebContentsId.entries()) {
+        if (binding.hostWebContentsId === hostWebContentsId) {
+          guestBindingByWebContentsId.delete(guestId);
+        }
+      }
+    },
+  };
+}
+
+const configuredPersonaSessions = new WeakSet<object>();
+
+export interface PersonaSessionSecurityDeps {
+  partition: string;
+  getAuthorizedHubUrlForWebContents(webContentsId: number): string;
+  isOriginAuthorizedForPartition(partition: string, origin: string): boolean;
+}
+
+function isStrictAuthorizedHubOriginUrl(
+  candidateUrl: string | undefined | null,
+  authorizedHubUrl: string | undefined | null,
+): boolean {
+  const normalizedCandidate = normalizePersonaHubUrl(candidateUrl);
+  const normalizedHub = normalizePersonaHubUrl(authorizedHubUrl);
+  return Boolean(
+    normalizedCandidate && normalizedHub && normalizedCandidate.origin === normalizedHub.origin,
+  );
+}
+
+/**
+ * Applies fail-closed permission policies to an isolated Persona partition session (`persist:persona`
+ * or `persist:persona-<id>`). Idempotent per Electron `Session` instance so every Hub partition
+ * enforces identical security boundaries.
+ */
+export function configurePersonaWebviewSession(
+  personaSession: PersonaWebviewSession,
+  deps: PersonaSessionSecurityDeps,
+): void {
+  if (configuredPersonaSessions.has(personaSession)) {
+    return;
+  }
+  configuredPersonaSessions.add(personaSession);
+
+  personaSession.setPermissionRequestHandler?.((webContents, permission, callback, details) => {
+    if (!PERSONA_ALLOWED_SESSION_PERMISSIONS.has(permission)) {
+      callback(false);
+      return;
+    }
+    const guestId = webContents?.id;
+    if (typeof guestId !== "number" || !Number.isInteger(guestId)) {
+      callback(false);
+      return;
+    }
+    const authorizedHubUrl = deps.getAuthorizedHubUrlForWebContents(guestId);
+    const requestingUrl = details?.requestingUrl || webContents?.getURL?.() || "";
+    callback(isStrictAuthorizedHubOriginUrl(requestingUrl, authorizedHubUrl));
+  });
+
+  personaSession.setPermissionCheckHandler?.((webContents, permission, requestingOrigin) => {
+    if (!PERSONA_ALLOWED_SESSION_PERMISSIONS.has(permission)) {
+      return false;
+    }
+    const guestId = webContents?.id;
+    if (typeof guestId === "number" && Number.isInteger(guestId)) {
+      const authorizedHubUrl = deps.getAuthorizedHubUrlForWebContents(guestId);
+      return isStrictAuthorizedHubOriginUrl(requestingOrigin, authorizedHubUrl);
+    }
+    return deps.isOriginAuthorizedForPartition(deps.partition, requestingOrigin);
+  });
 }
 
 export interface PersonaWebviewContentsLike extends PersonaWebviewGuest {
@@ -411,6 +989,7 @@ export interface PersonaNavigationEvent {
 
 export interface PersonaGuardableWebContents {
   getURL(): string;
+  stop?: () => void;
   on(event: "will-navigate", listener: (event: PersonaNavigationEvent, url?: string) => void): void;
   on(
     event: "will-frame-navigate",
@@ -431,32 +1010,83 @@ export interface PersonaNavigationGuardDeps {
 
 export function getPersonaWebviewSession(
   sessions: PersonaWebviewSessionsLike,
+  partition: string = PERSONA_WEBVIEW_PARTITION,
+  options?: { allowLegacyDiskCase?: boolean },
 ): PersonaWebviewSession {
-  return sessions.fromPartition(PERSONA_WEBVIEW_PARTITION);
+  const valid = options?.allowLegacyDiskCase
+    ? isPersonaClearablePartition(partition)
+    : isPersonaWebviewPartition(partition);
+  if (!valid) {
+    throw new Error("Invalid Persona partition");
+  }
+  return sessions.fromPartition(partition);
 }
 
 export function listPersonaWebviewGuests(input: {
-  personaSession: object;
+  personaSession?: object;
+  personaSessions?: Iterable<object>;
   webContents: PersonaWebviewContentsLike[];
 }): PersonaWebviewGuest[] {
+  const sessionSet = new Set<object>();
+  if (input.personaSession) {
+    sessionSet.add(input.personaSession);
+  }
+  if (input.personaSessions) {
+    for (const s of input.personaSessions) {
+      sessionSet.add(s);
+    }
+  }
+  if (sessionSet.size === 0) {
+    return [];
+  }
   return input.webContents.filter(
     (contents) =>
       !contents.isDestroyed() &&
       (contents.getType() === "webview" || contents.getType() === "window") &&
-      contents.session === input.personaSession,
+      sessionSet.has(contents.session),
   );
 }
 
+export const PERSONA_SESSION_CLEAR_BATCH_SIZE = 16;
+
+function normalizeSessionClearBatchSize(batchSize: number | undefined): number {
+  if (typeof batchSize !== "number" || !Number.isFinite(batchSize)) {
+    return PERSONA_SESSION_CLEAR_BATCH_SIZE;
+  }
+  return Math.max(1, Math.floor(batchSize));
+}
+
+/**
+ * Clears storage, HTTP cache, and auth cache strictly for the specified isolated Persona
+ * partition session(s) in bounded batches and reloads ONLY the guest webviews attached to those
+ * session(s).
+ */
 export async function clearPersonaWebviewSession(input: {
-  personaSession: PersonaWebviewSession;
+  personaSession?: PersonaWebviewSession;
+  personaSessions?: readonly PersonaWebviewSession[];
+  batchSize?: number;
   listGuests(): PersonaWebviewGuest[];
   logReloadError(guestId: number, error: unknown): void;
 }): Promise<void> {
-  await Promise.all([
-    input.personaSession.clearStorageData({ storages: [...PERSONA_STORAGE_TYPES] }),
-    input.personaSession.clearCache(),
-    input.personaSession.clearAuthCache(),
-  ]);
+  const sessions = Array.from(
+    new Set([
+      ...(input.personaSession ? [input.personaSession] : []),
+      ...(input.personaSessions ?? []),
+    ]),
+  );
+
+  // Batch session clears to avoid unbounded concurrency spikes when sweeping many residual partitions.
+  const batchSize = normalizeSessionClearBatchSize(input.batchSize);
+  for (let start = 0; start < sessions.length; start += batchSize) {
+    const batch = sessions.slice(start, start + batchSize);
+    await Promise.all(
+      batch.flatMap((personaSession) => [
+        personaSession.clearStorageData({ storages: [...PERSONA_STORAGE_TYPES] }),
+        personaSession.clearCache(),
+        personaSession.clearAuthCache(),
+      ]),
+    );
+  }
 
   for (const guest of input.listGuests()) {
     if (guest.isDestroyed()) {
@@ -467,6 +1097,23 @@ export async function clearPersonaWebviewSession(input: {
     } catch (error) {
       input.logReloadError(guest.id, error);
     }
+  }
+}
+
+/**
+ * Applies fail-closed navigation and popup denial guards to an unauthorized or unknown-partition
+ * attached guest WebContents and stops any in-progress load.
+ */
+export function installPersonaWebviewFailClosedGuards(contents: PersonaGuardableWebContents): void {
+  registerPersonaWebviewNavigationGuards(contents, {
+    getConfiguredHubUrl: () => "",
+    onOpenSession: () => undefined,
+    openExternalUrl: () => undefined,
+  });
+  try {
+    contents.stop?.();
+  } catch {
+    // Ignore if guest is already stopped or destroyed.
   }
 }
 

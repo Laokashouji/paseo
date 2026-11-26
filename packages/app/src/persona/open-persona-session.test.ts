@@ -8,7 +8,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { daemonConfigQueryKey } from "@/data/daemon-config";
 import { providersSnapshotQueryKey } from "@/data/providers-snapshot";
 import { queryClient as appQueryClient } from "@/data/query-client";
-import { DEFAULT_OPEN_IN_SIDE_PANE_PREFERENCES } from "@/hooks/use-settings/storage";
+import {
+  APP_SETTINGS_QUERY_KEY,
+  DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_OPEN_IN_SIDE_PANE_PREFERENCES,
+} from "@/hooks/use-settings/storage";
+import { normalizePersonaEmbedSettings } from "./settings";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import {
   useSessionStore,
@@ -1596,5 +1601,148 @@ describe("createAppOpenPersonaSessionDeps production providerRoots L3 lookup", (
       panel: null,
     });
     expect(mappedHarness.navigateToAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates machineServerMap lookup strictly by hubId when multiple Persona Hubs share a machine_id", async () => {
+    const sharedClaudeSessionId = "11111111-2222-4333-8444-555555555555";
+    const wsA = {
+      id: "wks_1111111111111111",
+      workspaceDirectory: "/repo/hub-a",
+    } as WorkspaceDescriptor;
+    const wsB = {
+      id: "wks_2222222222222222",
+      workspaceDirectory: "/repo/hub-b",
+    } as WorkspaceDescriptor;
+    const agentA = makeAgent({
+      id: "ag_hub_a",
+      serverId: "srv_a",
+      workspaceId: wsA.id,
+      persistence: { provider: "claude", sessionId: sharedClaudeSessionId },
+    });
+    const agentB = makeAgent({
+      id: "ag_hub_b",
+      serverId: "srv_b",
+      workspaceId: wsB.id,
+      persistence: { provider: "claude", sessionId: sharedClaudeSessionId },
+    });
+
+    appQueryClient.setQueryData(APP_SETTINGS_QUERY_KEY, {
+      ...DEFAULT_CLIENT_SETTINGS,
+      persona: normalizePersonaEmbedSettings({
+        enabled: true,
+        hubs: [
+          {
+            id: "hub-a",
+            name: "Work Hub",
+            hubUrl: "http://10.0.0.1:18660",
+            machineServerMap: { "shared-machine": "srv_a" },
+          },
+          {
+            id: "hub-b",
+            name: "Home Hub",
+            hubUrl: "http://127.0.0.1:18661",
+            machineServerMap: { "shared-machine": "srv_b" },
+          },
+        ],
+        activeHubId: "hub-a",
+      }),
+    });
+
+    useSessionStore.setState({
+      sessions: {
+        srv_a: makeSession("srv_a", {
+          serverInfo: { serverId: "srv_a", hostname: "work-box", version: "0.17.535" },
+          workspaces: new Map([[wsA.id, wsA]]),
+          agents: new Map([[agentA.id, agentA]]),
+        }),
+        srv_b: makeSession("srv_b", {
+          serverInfo: { serverId: "srv_b", hostname: "home-box", version: "0.17.535" },
+          workspaces: new Map([[wsB.id, wsB]]),
+          agents: new Map([[agentB.id, agentB]]),
+        }),
+      },
+    });
+    setupRuntimeHosts([
+      { serverId: "srv_a", label: "Work DevBox", status: "online" },
+      { serverId: "srv_b", label: "Home Mac", status: "online" },
+    ]);
+
+    const depsHubA = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+      hubId: "hub-a",
+    });
+    const depsHubB = createAppOpenPersonaSessionDeps({
+      toast: noopToast,
+      isCompact: false,
+      hubId: "hub-b",
+    });
+
+    const resA = await openPersonaSession(
+      { machineId: "shared-machine", sessionId: sharedClaudeSessionId, source: "link-click" },
+      depsHubA,
+    );
+    const resB = await openPersonaSession(
+      { machineId: "shared-machine", sessionId: sharedClaudeSessionId, source: "link-click" },
+      depsHubB,
+    );
+
+    expect(resA.handled).toBe(true);
+    expect(resA.resolution).toMatchObject({
+      kind: "agent",
+      serverId: "srv_a",
+      agentId: "ag_hub_a",
+    });
+    expect(resB.handled).toBe(true);
+    expect(resB.resolution).toMatchObject({
+      kind: "agent",
+      serverId: "srv_b",
+      agentId: "ag_hub_b",
+    });
+
+    // P1-2 regression: when Hub A has an explicit machineServerMap pointing to srv_a,
+    // and srv_a is missing from hosts & sessions while srv_b holds the exact same sessionId,
+    // openPersonaSession MUST abort auto-jump, prompt to reconfigure mapping, and NEVER jump to srv_b.
+    useSessionStore.setState({
+      sessions: {
+        srv_b: makeSession("srv_b", {
+          serverInfo: { serverId: "srv_b", hostname: "shared-machine", version: "0.17.535" },
+          workspaces: new Map([[wsB.id, wsB]]),
+          agents: new Map([[agentB.id, agentB]]),
+        }),
+      },
+    });
+    setupRuntimeHosts([{ serverId: "srv_b", label: "shared-machine", status: "online" }]);
+
+    const showUnmappedMachineToast = vi.fn();
+    const navigateToAgent = vi.fn();
+    const navigateToWorkspace = vi.fn();
+    const navigateToRoute = vi.fn();
+    const staleMapRes = await openPersonaSession(
+      { machineId: "shared-machine", sessionId: sharedClaudeSessionId, source: "link-click" },
+      {
+        ...depsHubA,
+        showUnmappedMachineToast,
+        navigateToAgent,
+        navigateToWorkspace,
+        navigateToRoute,
+      },
+    );
+    expect(staleMapRes.handled).toBe(false);
+    expect(staleMapRes.resolution).toEqual({
+      kind: "unresolved",
+      reason: "unmapped_machine",
+      machineId: "shared-machine",
+      sessionId: sharedClaudeSessionId,
+      resolvedServerId: null,
+    });
+    expect(navigateToAgent).not.toHaveBeenCalled();
+    expect(navigateToWorkspace).not.toHaveBeenCalled();
+    expect(navigateToRoute).not.toHaveBeenCalled();
+    expect(showUnmappedMachineToast).toHaveBeenCalledTimes(1);
+    expect(showUnmappedMachineToast).toHaveBeenCalledWith(
+      expect.objectContaining({ machineId: "shared-machine" }),
+    );
+    appQueryClient.removeQueries({ queryKey: APP_SETTINGS_QUERY_KEY });
   });
 });
