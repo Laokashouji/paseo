@@ -40,6 +40,8 @@ export interface BackgroundTurnRequest {
   }>;
   /** Re-enqueue this item when preempted by a foreground user message (default: true). */
   requeueOnPreempt?: boolean;
+  /** Whether a foreground user message may cancel/preempt this background turn (default: true). */
+  preemptible?: boolean;
   onDispatched?: () => Promise<void> | void;
   onCompleted?: (outcome: { silent: boolean; assistantText: string }) => Promise<void> | void;
 }
@@ -68,6 +70,12 @@ export interface MainChatTurnQueueDependencies {
   }) => void;
 }
 
+export interface PreemptForForegroundResult {
+  preempted: boolean;
+  /** Set when a non-preemptible background turn (such as compaction) is running and must settle first. */
+  waitingForBackground?: Promise<void>;
+}
+
 export interface MainChatTurnQueue {
   start(): void;
   stop(): void;
@@ -75,9 +83,10 @@ export interface MainChatTurnQueue {
   enqueueBackground(request: BackgroundTurnRequest): Promise<EnqueueBackgroundResult>;
   beginForegroundDispatch(mainAgentId: string): () => void;
   abortForegroundDispatch(mainAgentId: string): void;
-  preemptForForegroundUser(mainAgentId: string): Promise<{ preempted: boolean }>;
+  preemptForForegroundUser(mainAgentId: string): Promise<PreemptForForegroundResult>;
   isForegroundActive(mainAgentId: string): boolean;
   isBackgroundBusy(mainAgentId: string): boolean;
+  isCompacting(mainAgentId: string): boolean;
   getQueuedCount(mainAgentId: string): number;
   getIdleDurationMs(mainAgentId: string): number;
   getLastActivityAtMs(mainAgentId: string): number;
@@ -102,8 +111,11 @@ interface ActiveTurnState {
   hadUserFacingCardTool: boolean;
   assistantTexts: string[];
   isRecoveryTurn: boolean;
+  isCompacting: boolean;
   userPromptEpoch: number;
   streamObserved: boolean;
+  settled: Promise<void> | null;
+  resolveSettled: (() => void) | null;
 }
 
 interface PerMainAgentState {
@@ -155,6 +167,11 @@ function combineAssistantTexts(texts: readonly string[]): string {
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+function isNonPreemptibleBackgroundTurn(active: ActiveTurnState | null): boolean {
+  if (!active || active.kind !== "background") return false;
+  return active.request?.preemptible === false || active.request?.trigger === "idle_precompact";
 }
 
 export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): MainChatTurnQueue {
@@ -388,8 +405,11 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       hadUserFacingCardTool: false,
       assistantTexts: [],
       isRecoveryTurn: true,
+      isCompacting: false,
       userPromptEpoch,
       streamObserved: false,
+      settled: null,
+      resolveSettled: null,
     };
     state.pendingRecoveryActivityId = activityId;
     state.activeTurn = recoveryTurn;
@@ -450,6 +470,10 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
   ): Promise<EnqueueBackgroundResult> {
     const { request, activityId } = item;
     const abortController = new AbortController();
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
     const turn: ActiveTurnState = {
       kind: "background",
       startedAtMs: getNowMs(),
@@ -461,8 +485,11 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       hadUserFacingCardTool: false,
       assistantTexts: [],
       isRecoveryTurn: false,
+      isCompacting: request.trigger === "idle_precompact",
       userPromptEpoch: state.userPromptEpoch,
       streamObserved: false,
+      settled,
+      resolveSettled,
     };
     state.activeTurn = turn;
     state.lastActivityAtMs = getNowMs();
@@ -492,6 +519,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
         state.activeTurn = null;
         state.lastIdleAtMs = getNowMs();
       }
+      resolveSettled();
     }
     scheduleDrain(mainAgentId);
     return { status: "dispatched", activityId };
@@ -534,6 +562,13 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       return null;
     }
 
+    let resolveSettled: (() => void) | null = null;
+    const settled =
+      request.preemptible === false
+        ? new Promise<void>((resolve) => {
+            resolveSettled = resolve;
+          })
+        : null;
     const turn: ActiveTurnState = {
       kind: "background",
       startedAtMs: getNowMs(),
@@ -545,8 +580,11 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       hadUserFacingCardTool: false,
       assistantTexts: [],
       isRecoveryTurn: false,
+      isCompacting: request.trigger === "idle_precompact",
       userPromptEpoch: state.userPromptEpoch,
       streamObserved: false,
+      settled,
+      resolveSettled,
     };
     state.activeTurn = turn;
     state.lastActivityAtMs = getNowMs();
@@ -579,6 +617,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
         state.activeTurn = null;
         state.lastIdleAtMs = getNowMs();
         await finalizeCompletedBackgroundTurn(mainAgentId, turn);
+        turn.resolveSettled?.();
         scheduleDrain(mainAgentId);
       }
       return { status: "dispatched", activityId };
@@ -587,6 +626,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
         state.activeTurn = null;
         state.lastIdleAtMs = getNowMs();
       }
+      turn.resolveSettled?.();
       if (!turn.preemptedByUser) {
         deps.logger.warn(
           { err: error, mainAgentId, trigger: request.trigger },
@@ -650,8 +690,11 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       hadUserFacingCardTool: false,
       assistantTexts: [],
       isRecoveryTurn: isRecovery,
+      isCompacting: false,
       userPromptEpoch: state.userPromptEpoch,
       streamObserved: true,
+      settled: null,
+      resolveSettled: null,
     };
   }
 
@@ -666,8 +709,17 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     now: number,
   ): void {
     state.lastActivityAtMs = now;
-    if (item.type === "compaction" && item.status === "completed") {
-      deps.onCompactionObserved?.(mainAgentId);
+    if (item.type === "compaction") {
+      if (state.activeTurn) {
+        if (item.status === "loading") {
+          state.activeTurn.isCompacting = true;
+        } else {
+          state.activeTurn.isCompacting = false;
+        }
+      }
+      if (item.status === "completed") {
+        deps.onCompactionObserved?.(mainAgentId);
+      }
     }
     if (!state.activeTurn) return;
     state.activeTurn.streamObserved = true;
@@ -704,6 +756,10 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
         ...(detail ? { detail } : {}),
       });
     }
+    // customExecute 的 settled 由 executeCustomBackgroundItem 的 finally 统一释放，避免过早唤醒等待者。
+    if (finished && !finished.request?.customExecute) {
+      finished.resolveSettled?.();
+    }
     scheduleDrain(mainAgentId);
   }
 
@@ -735,6 +791,9 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     }
     if (finished.kind === "background") {
       void finalizeCompletedBackgroundTurn(mainAgentId, finished).finally(() => {
+        if (!finished.request?.customExecute) {
+          finished.resolveSettled?.();
+        }
         scheduleDrain(mainAgentId);
       });
       return;
@@ -800,6 +859,7 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
     if (!state) return;
     clearDrainTimer(state);
     state.activeTurn?.abortController?.abort();
+    state.activeTurn?.resolveSettled?.();
     stateByAgent.delete(mainAgentId);
   }
 
@@ -907,6 +967,14 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
         return { preempted: false };
       }
 
+      if (isNonPreemptibleBackgroundTurn(active)) {
+        // 上下文压缩等不可抢占的后台轮次不能被强行取消，让用户消息等待其自然结束再接续发送。
+        return {
+          preempted: false,
+          ...(active.settled ? { waitingForBackground: active.settled } : {}),
+        };
+      }
+
       // Hold a brief claim window while the preempted background turn cancels and the user's
       // foreground turn starts, preventing the re-queued item from racing ahead.
       state.expectingForegroundTurnUntilMs = now + FOREGROUND_CLAIM_WINDOW_MS;
@@ -970,6 +1038,12 @@ export function createMainChatTurnQueue(deps: MainChatTurnQueueDependencies): Ma
       const state = stateByAgent.get(mainAgentId);
       if (!state) return false;
       return state.activeTurn?.kind === "background";
+    },
+
+    isCompacting(mainAgentId) {
+      const state = stateByAgent.get(mainAgentId);
+      if (!state?.activeTurn) return false;
+      return state.activeTurn.isCompacting || isNonPreemptibleBackgroundTurn(state.activeTurn);
     },
 
     getQueuedCount(mainAgentId) {

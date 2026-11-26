@@ -9073,15 +9073,26 @@ export class Session {
         const releaseForeground = this.mainChatService?.beginForegroundUserSend(agentId) ?? null;
         try {
           const effectivePrompt = this.mainChatService
-            ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt)
+            ? await this.mainChatService.prepareUserPromptForMainChat(agentId, prompt, {
+                onDeferredForCompaction: () => {
+                  if (deliveryStatus !== "queued") {
+                    deliveryStatus = "queued";
+                    queued();
+                  }
+                },
+              })
             : prompt;
+          // 前台手动 /compact 或引擎自动压缩进行中时，一律走 steer 排队等待压缩完成，避免 interrupt 打断压缩。
+          const effectiveActiveTurnBehavior = this.mainChatService?.isCompacting(agentId)
+            ? "steer"
+            : (msg.activeTurnBehavior ?? "interrupt");
           const result = await sendPromptToAgent({
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             agentId,
             prompt: effectivePrompt,
             messageId: msg.messageId,
-            activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+            activeTurnBehavior: effectiveActiveTurnBehavior,
             sessionMode: msg.sessionMode,
             clearPendingPermissions: true,
             beforeDispatch,
@@ -9092,7 +9103,7 @@ export class Session {
               this.agentManager,
               agentId,
               result.started,
-              this.delivery.requestSignal,
+              deliveryStatus === "queued" ? undefined : this.delivery.requestSignal,
             );
           }
         } catch (error) {
