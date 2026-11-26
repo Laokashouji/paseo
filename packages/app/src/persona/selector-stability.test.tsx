@@ -19,7 +19,11 @@ import { useMainChatSettingsStore } from "@/main-chat/settings-store";
 import { PersonaSettingsSection } from "@/screens/settings/persona/persona-section";
 import { useSessionStore, type Agent, type SessionState } from "@/stores/session-store";
 import { PersonaHeroRow } from "./hero-row";
-import { DEFAULT_PERSONA_EMBED_SETTINGS, type PersonaEmbedSettings } from "./settings";
+import {
+  DEFAULT_PERSONA_EMBED_SETTINGS,
+  normalizePersonaEmbedSettings,
+  type PersonaEmbedSettings,
+} from "./settings";
 import { usePersonaEmbedSettings } from "./use-persona-settings";
 
 const mockHosts = [
@@ -177,10 +181,10 @@ function makeQueryClient(personaPatch: Partial<PersonaEmbedSettings>): QueryClie
   });
   const settings: AppSettings = {
     ...DEFAULT_CLIENT_SETTINGS,
-    persona: {
+    persona: normalizePersonaEmbedSettings({
       ...DEFAULT_PERSONA_EMBED_SETTINGS,
       ...personaPatch,
-    },
+    }),
   };
   qc.setQueryData(APP_SETTINGS_QUERY_KEY, settings);
   return qc;
@@ -490,6 +494,49 @@ describe("Persona embed React selector stability and mutual exclusion", () => {
       expect(personaEmbedLocales[locale].webFallback.title).not.toBe(
         personaEmbedLocales.en.webFallback.title,
       );
+      const identicalCount = enKeys.filter((key) => localeFlat[key] === enFlat[key]).length;
+      expect(identicalCount).toBeLessThan(Math.ceil(enKeys.length * 0.1));
     }
+  });
+
+  it("keeps multi-Hub expanded PersonaHeroRow render count flat across unrelated session.agents updates", () => {
+    const queryClient = makeQueryClient({
+      enabled: true,
+      hubs: [
+        { id: "hub-a", name: "Work Hub", hubUrl: "http://10.37.217.3:18660", machineServerMap: {} },
+        { id: "hub-b", name: "Home Hub", hubUrl: "http://127.0.0.1:18661", machineServerMap: {} },
+      ],
+      activeHubId: "hub-a",
+      splitEnabled: true,
+      secondaryHubId: "hub-b",
+      sidebarExpanded: true,
+    });
+
+    let renders = 0;
+    function TrackedHero() {
+      renders += 1;
+      return <PersonaHeroRow />;
+    }
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <ToastApiProvider api={noopToastApi}>
+          <KeyboardActionDispatcherProvider>
+            <TrackedHero />
+          </KeyboardActionDispatcherProvider>
+        </ToastApiProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(view.queryByTestId("sidebar-persona-hub-list")).not.toBeNull();
+    expect(view.queryByTestId("sidebar-persona-split-badge")).not.toBeNull();
+    const initialRenders = renders;
+
+    act(() => {
+      pushUnrelatedAgents(6);
+    });
+
+    expect(renders).toBe(initialRenders);
+    expect(hasSnapshotLoopError(consoleErrorSpy.mock.calls)).toBe(false);
   });
 });
